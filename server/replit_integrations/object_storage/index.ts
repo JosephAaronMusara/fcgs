@@ -1,0 +1,1 @@
+export { registerObjectStorageRoutes } from "./routes";

@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 dist/
 .env
 .env.*
@@ -6,4 +6,4 @@ dist/
 .DS_Store
 .vscode/
 .idea/
-object_storage/
+/object_storage/
