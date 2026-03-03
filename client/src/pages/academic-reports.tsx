@@ -1,0 +1,2780 @@
+import { useState, useMemo, useEffect } from "react";
+import { createPortal } from "react-dom";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { useAuth } from "@/lib/auth";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  FileText,
+  Download,
+  Send,
+  Search,
+  ArrowUp,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  School,
+  Loader2,
+  BarChart3,
+  Users,
+  AlertTriangle,
+  Trophy,
+  ChevronDown,
+  Eye,
+  Layers,
+  MessageSquare,
+} from "lucide-react";
+import type {
+  Exam,
+  Class,
+  Subject,
+  Stream,
+  Grade,
+  ReportComment,
+  AssessmentType,
+} from "@shared/schema";
+import { COMMENT_GRADE_SCALE, COMMENT_GRADE_OPTIONS } from "@shared/schema";
+
+type ViewMode = "hub" | "class-level" | "report-cards";
+
+interface StreamStat {
+  streamId: number;
+  streamName: string;
+  classes: { id: number; name: string }[];
+  progressPct: number | null;
+  avgPct: number | null;
+  classCount: number;
+  studentCount: number;
+}
+
+interface SubjectProgress {
+  subjectId: number;
+  subjectName: string;
+  totalStudents: number;
+  markedCount: number;
+  progressPct: number;
+  avgPct: number | null;
+}
+
+interface ClassProgressData {
+  classId: number;
+  className: string;
+  totalStudents: number;
+  subjects: SubjectProgress[];
+}
+
+interface MissingMarkSubject {
+  subjectId: number;
+  subjectName: string;
+  totalStudents: number;
+  missingCount: number;
+  missingStudents: { id: number; name: string; admissionNo: string }[];
+}
+
+interface MeritRow {
+  studentName: string;
+  admissionNo: string;
+  cells: Record<number, number | null>;
+  total: number;
+  avg: number;
+  subjectsWithMarks: number;
+  position: string;
+}
+
+interface MeritData {
+  subjects: { id: number; name: string }[];
+  rows: MeritRow[];
+  totalStudents: number;
+}
+
+interface AnalyticsData {
+  overallAvg: number;
+  completion: number;
+  enteredCells: number;
+  expectedCells: number;
+  gradeCounts: Record<string, number>;
+  subjectSummary: {
+    subjectId: number;
+    subjectName: string;
+    avg: number;
+    completion: number;
+    passRate: number;
+    gradeCounts: Record<string, number>;
+  }[];
+  totalStudents: number;
+  passMark: number;
+}
+
+interface StreamMeritData {
+  subjects: string[];
+  rows: {
+    studentName: string;
+    admissionNo: string;
+    total: string;
+    avg: string;
+    position: string;
+    subjectMarks: string[];
+  }[];
+  totalStudents: number;
+}
+
+interface StreamAnalyticsData {
+  rows: {
+    subjectId: number;
+    subjectName: string;
+    avg: number;
+    passed: number;
+    failed: number;
+    passRate: number;
+    gradeCounts: Record<string, number>;
+  }[];
+}
+
+interface ReportSubject {
+  subjectId: number;
+  subjectName: string;
+  mark: string;
+  dev: string;
+  classAvg: string;
+  grade: string;
+  rank: string;
+  comment: string;
+  teacher: string;
+  gradePoints: number;
+}
+
+interface ReportStudent {
+  student: {
+    id: number;
+    admissionNo: string;
+    firstName: string;
+    lastName: string;
+    gender: string;
+    photo: string | null;
+  };
+  subjects: ReportSubject[];
+  summary: {
+    totalMark: string;
+    avgMark: string;
+    subjectsPassed: string;
+    points: string;
+    overallPosition: string;
+    classSize: number;
+    averagePercentage: number | null;
+    totalSubjects: number;
+  };
+  chartSubjectLabels: string[];
+  chartStudentMarks: number[];
+  chartClassAvgs: (number | null)[];
+  chartOvertimeLabels: string[];
+  chartOvertimeAvgs: number[];
+  principalComment?: string;
+  classTeacherComment?: string;
+}
+
+interface ReportCardData {
+  school: {
+    id: number;
+    name: string;
+    logo: string | null;
+    stamp: string | null;
+    address: string | null;
+    phone: string | null;
+    email: string | null;
+    principalName: string | null;
+    principalPhone: string | null;
+    currentAcademicYear: string | null;
+    currentTerm: string | null;
+    examinationBoard: string | null;
+  };
+  class: Class;
+  exam: Exam;
+  subjects: Subject[];
+  reportCards: ReportStudent[];
+}
+
+function DevCell({ dev }: { dev: string }) {
+  if (dev === "0" || dev === "0%") {
+    return (
+      <span className="text-blue-700 dark:text-blue-400 font-semibold">
+        <ArrowRight className="w-3 h-3 inline" />
+      </span>
+    );
+  }
+  if (dev.startsWith("-")) {
+    return (
+      <span className="text-red-600 dark:text-red-400 font-semibold whitespace-nowrap">
+        <TrendingDown className="w-3 h-3 inline" /> {dev.replace("-", "")}
+      </span>
+    );
+  }
+  return (
+    <span className="text-green-600 dark:text-green-400 font-semibold whitespace-nowrap">
+      <TrendingUp className="w-3 h-3 inline" />{" "}
+      {dev.replace("+", "").replace("NEW", "NEW")}
+    </span>
+  );
+}
+
+function ReportCardSlip({
+  data,
+  studentReport,
+  onSendIndividual,
+  sendingId,
+}: {
+  data: ReportCardData;
+  studentReport: ReportStudent;
+  onSendIndividual: (studentId: number) => void;
+  sendingId: number | null;
+}) {
+  const { student, subjects, summary } = studentReport;
+  const { school } = data;
+  const name = `${student.firstName} ${student.lastName}`;
+
+  return (
+    <div
+      className="report-slip bg-white dark:bg-gray-900 rounded-lg mb-8 shadow-lg p-2 print:shadow-none print:rounded-none print:mb-0 print:p-0"
+      style={{ pageBreakInside: "avoid", pageBreakAfter: "always" }}
+    >
+      <div
+        className="report-slip-inner border border-gray-300 dark:border-gray-600 p-3 relative overflow-hidden flex flex-col"
+        style={{ fontSize: "12px", minHeight: "calc(297mm - 10mm - 16px)" }}
+      >
+        {school.logo && (
+          <img
+            src={school.logo}
+            alt=""
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] opacity-[0.08] pointer-events-none z-0"
+            aria-hidden="true"
+          />
+        )}
+
+        <div className="relative z-10">
+          <div className="grid grid-cols-[150px_1fr_150px] items-center gap-3">
+            <div className="text-left">
+              {school.logo ? (
+                <img
+                  src={school.logo}
+                  alt="School logo"
+                  className="w-[91px] h-[91px] object-contain"
+                  data-testid="img-school-logo"
+                />
+              ) : (
+                <div className="w-[91px] h-[91px] border border-gray-400 rounded-lg flex items-center justify-center">
+                  <School className="w-10 h-10 text-gray-400" />
+                </div>
+              )}
+            </div>
+
+            <div className="text-center">
+              <div
+                className="text-sm font-bold text-gray-900 dark:text-gray-100"
+                data-testid="text-school-name"
+              >
+                {school.name}
+              </div>
+              {school.phone && (
+                <div className="text-[11px] mt-0.5 text-gray-700 dark:text-gray-300">
+                  <strong>Call Centre:</strong> {school.phone}
+                </div>
+              )}
+              {school.email && (
+                <div className="text-[11px] mt-0.5 text-gray-700 dark:text-gray-300">
+                  <strong>Email:</strong> {school.email}
+                </div>
+              )}
+              {school.address && (
+                <div className="text-[11px] mt-0.5 text-gray-700 dark:text-gray-300">
+                  <strong>Address:</strong> {school.address}
+                </div>
+              )}
+            </div>
+
+            <div className="text-right">
+              {student.photo ? (
+                <img
+                  src={student.photo}
+                  alt="Student photo"
+                  className="w-[91px] h-[91px] rounded-lg border border-gray-400 object-cover inline-block"
+                  data-testid={`img-student-photo-${student.id}`}
+                />
+              ) : (
+                <div className="w-[91px] h-[91px] rounded-lg border border-gray-400 inline-flex items-center justify-center text-[10px] text-gray-500">
+                  PHOTO
+                </div>
+              )}
+            </div>
+          </div>
+
+          <hr
+            className="border-none border-t border-dashed border-gray-400 my-2"
+            style={{ borderTop: "1px dashed #999" }}
+          />
+
+          <div className="font-bold mb-2 text-[18px] uppercase">
+            Academic Results Slip for
+          </div>
+          <div className="mb-1 w-full text-[15.5px] flex justify-between flex-wrap gap-1">
+            <span>
+              <strong>Name:</strong> {name}
+              &nbsp;&nbsp;
+              <span className="text-gray-500 text-[13px]">
+                (Reg No: {student.admissionNo})
+              </span>
+            </span>
+            <span>
+              <strong>Class:</strong> {data.class.className}
+            </span>
+          </div>
+
+          <div className="h-3" />
+
+          <div className="flex gap-3 mb-2 flex-wrap">
+            <div className="flex-1 min-w-[45%] pt-0">
+              <div className="mb-0.5 text-center font-extrabold">
+                <strong>Exam:</strong> {data.exam.examName}
+              </div>
+              <table
+                className="w-full border-collapse text-[11px] mt-1.5"
+                data-testid="table-summary"
+              >
+                <thead>
+                  <tr>
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                      Total Marks
+                    </th>
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                      Average Mark
+                    </th>
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                      Subject Passed
+                    </th>
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                      Points
+                    </th>
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                      Overall Position
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="bg-gray-100/75 dark:bg-gray-800/75">
+                    <td
+                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      data-testid="text-total-marks"
+                    >
+                      {summary.totalMark}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      data-testid="text-avg-mark"
+                    >
+                      {summary.avgMark}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      data-testid="text-subjects-passed"
+                    >
+                      {summary.subjectsPassed}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      data-testid="text-points"
+                    >
+                      {summary.points}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      data-testid="text-position"
+                    >
+                      {summary.overallPosition || "–"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <table
+            className="w-full border-collapse mt-1.5 text-[11px]"
+            data-testid={`table-subjects-${student.id}`}
+          >
+            <thead>
+              <tr>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                  Subject
+                </th>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                  Mark
+                </th>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                  Dev.
+                </th>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                  Class Avg
+                </th>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                  Grade
+                </th>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                  Rank
+                </th>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                  Comment
+                </th>
+                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                  Teacher
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {subjects.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={8}
+                    className="border border-gray-300 dark:border-gray-600 px-1.5 py-2.5 text-center text-gray-500"
+                  >
+                    No marks found for this student under this exam.
+                  </td>
+                </tr>
+              ) : (
+                subjects.map((subj) => (
+                  <tr key={subj.subjectId}>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left">
+                      {subj.subjectName}
+                    </td>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                      {subj.mark}
+                    </td>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                      <DevCell dev={subj.dev} />
+                    </td>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                      {subj.classAvg}
+                    </td>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                      {subj.grade}
+                    </td>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                      {subj.rank}
+                    </td>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left">
+                      {subj.comment}
+                    </td>
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left">
+                      {subj.teacher}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+
+          <div className="mt-1.5 text-[11px] flex flex-wrap gap-4 justify-center">
+            <span className="text-green-600 dark:text-green-400">
+              <TrendingUp className="w-3 h-3 inline" /> Positive Performance
+            </span>
+            <span className="text-red-600 dark:text-red-400">
+              <TrendingDown className="w-3 h-3 inline" /> Negative Performance
+            </span>
+            <span className="text-blue-700 dark:text-blue-400">
+              <ArrowRight className="w-3 h-3 inline" /> Constant Performance
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5 mt-2.5">
+            <div
+              className="border border-gray-300 dark:border-gray-600 rounded-sm p-1.5"
+              style={{ background: "rgba(0,0,0,0.04)" }}
+            >
+              <div className="text-[11px] font-semibold mb-1 text-center">
+                Subject Performance vs Class
+              </div>
+              <div className="flex flex-col overflow-hidden">
+                <div className="flex" style={{ height: "160px" }}>
+                  <div
+                    className="flex flex-col justify-between py-0.5 pr-0.5 flex-shrink-0"
+                    style={{ width: "22px" }}
+                  >
+                    {[100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0].map((v) => (
+                      <span
+                        key={v}
+                        className="text-[5px] text-gray-400 text-right leading-none"
+                      >
+                        {v}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex-1 relative border-l border-gray-300 dark:border-gray-600 border-b">
+                    {studentReport.chartSubjectLabels.length > 0 ? (
+                      (() => {
+                        const count = studentReport.chartSubjectLabels.length;
+                        const slots = Math.max(count, 10);
+                        const gap = 2;
+                        return (
+                          <>
+                            <div
+                              className="absolute inset-0 flex items-end justify-start"
+                              style={{
+                                gap: `${gap}px`,
+                                padding: "0 2px 0 2px",
+                              }}
+                            >
+                              {studentReport.chartSubjectLabels.map(
+                                (label, i) => {
+                                  const studentMark =
+                                    studentReport.chartStudentMarks[i] || 0;
+                                  const barH = Math.max(studentMark, 0);
+                                  const barWidth = `calc((100% - ${(slots - 1) * gap + 4}px) / ${slots})`;
+                                  return (
+                                    <div
+                                      key={i}
+                                      className="flex flex-col items-center justify-end h-full flex-shrink-0"
+                                      style={{ width: barWidth }}
+                                      title={`${label}: ${studentMark}%`}
+                                    >
+                                      <div
+                                        className="w-full rounded-t-sm relative"
+                                        style={{
+                                          height: `${barH}%`,
+                                          background:
+                                            "linear-gradient(180deg, #7CB9F7 0%, #5B9FE8 100%)",
+                                        }}
+                                      >
+                                        <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-[6px] font-semibold text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                                          {studentMark}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                },
+                              )}
+                            </div>
+                            {studentReport.chartClassAvgs.some(
+                              (v) => v !== null,
+                            ) && (
+                              <svg
+                                className="absolute inset-0 z-10 pointer-events-none overflow-visible"
+                                preserveAspectRatio="xMinYMin meet"
+                                viewBox={`0 0 1000 1000`}
+                              >
+                                <polyline
+                                  fill="none"
+                                  stroke="#4CAF50"
+                                  strokeWidth="6"
+                                  strokeLinejoin="round"
+                                  strokeLinecap="round"
+                                  points={studentReport.chartClassAvgs
+                                    .map((avg, i) => {
+                                      if (avg === null) return null;
+                                      const slotW = 1000 / slots;
+                                      const x = i * slotW + slotW / 2;
+                                      const y = 1000 - (avg / 100) * 1000;
+                                      return `${x},${y}`;
+                                    })
+                                    .filter(Boolean)
+                                    .join(" ")}
+                                />
+                                {studentReport.chartClassAvgs.map((avg, i) => {
+                                  if (avg === null) return null;
+                                  const slotW = 1000 / slots;
+                                  const x = i * slotW + slotW / 2;
+                                  const y = 1000 - (avg / 100) * 1000;
+                                  return (
+                                    <circle
+                                      key={i}
+                                      cx={x}
+                                      cy={y}
+                                      r="10"
+                                      fill="#4CAF50"
+                                      stroke="#fff"
+                                      strokeWidth="4"
+                                    />
+                                  );
+                                })}
+                              </svg>
+                            )}
+                          </>
+                        );
+                      })()
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-[10px]">
+                        No data
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div
+                style={{
+                  marginLeft: "22px",
+                  height: "55px",
+                  position: "relative",
+                  overflow: "visible",
+                }}
+              >
+                <div
+                  className="flex justify-start"
+                  style={{
+                    gap: "2px",
+                    padding: "0 2px",
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {(() => {
+                    const count = studentReport.chartSubjectLabels.length;
+                    const slots = Math.max(count, 10);
+                    const barWidth = `calc((100% - ${(slots - 1) * 2 + 4}px) / ${slots})`;
+                    return studentReport.chartSubjectLabels.map((label, i) => (
+                      <div
+                        key={i}
+                        className="flex-shrink-0"
+                        style={{
+                          width: barWidth,
+                          height: "55px",
+                          position: "relative",
+                          overflow: "visible",
+                        }}
+                      >
+                        <div
+                          className="text-[5.5px] leading-[1.2] text-gray-500"
+                          style={{
+                            position: "absolute",
+                            top: "8px",
+                            left: "50%",
+                            transform: "rotate(-90deg) translateX(-100%)",
+                            transformOrigin: "top left",
+                            textAlign: "right" as const,
+                            width: "50px",
+                            whiteSpace: "normal",
+                            wordBreak: "break-word",
+                            overflow: "hidden",
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical" as const,
+                          }}
+                        >
+                          {label}
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+              <div className="flex gap-3 mt-1 text-[8px] justify-center">
+                <span className="flex items-center gap-1">
+                  <span
+                    className="w-2 h-2 inline-block rounded-sm"
+                    style={{
+                      background: "linear-gradient(180deg, #7CB9F7, #5B9FE8)",
+                    }}
+                  />{" "}
+                  Student
+                </span>
+                <span className="flex items-center gap-1">
+                  <span
+                    className="w-4 h-0.5 inline-block rounded"
+                    style={{ background: "#4CAF50" }}
+                  />
+                  <span
+                    className="w-1.5 h-1.5 inline-block rounded-full"
+                    style={{ background: "#4CAF50" }}
+                  />{" "}
+                  Class Avg
+                </span>
+              </div>
+            </div>
+
+            <div
+              className="border border-gray-300 dark:border-gray-600 rounded-sm p-1.5"
+              style={{ background: "rgba(0,0,0,0.04)" }}
+            >
+              <div className="text-[11px] font-semibold mb-1 text-center">
+                Term Average Trend
+              </div>
+              <div className="flex flex-col overflow-hidden">
+                <div className="flex" style={{ height: "160px" }}>
+                  <div
+                    className="flex flex-col justify-between py-0.5 pr-0.5 flex-shrink-0"
+                    style={{ width: "22px" }}
+                  >
+                    {[100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0].map((v) => (
+                      <span
+                        key={v}
+                        className="text-[5px] text-gray-400 text-right leading-none"
+                      >
+                        {v}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex-1 relative border-l border-gray-300 dark:border-gray-600 border-b">
+                    {(() => {
+                      const labels = studentReport.chartOvertimeLabels || [];
+                      const avgs = studentReport.chartOvertimeAvgs || [];
+                      const count = labels.length;
+                      if (count === 0)
+                        return (
+                          <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-[10px]">
+                            No data
+                          </div>
+                        );
+                      const slots = Math.max(count, 10);
+                      const gap = 2;
+                      return (
+                        <div
+                          className="absolute inset-0 flex items-end justify-start"
+                          style={{ gap: `${gap}px`, padding: "0 2px 0 2px" }}
+                        >
+                          {labels.map((label, i) => {
+                            const avg = avgs[i] || 0;
+                            const barH = Math.max(avg, 0);
+                            const barWidth = `calc((100% - ${(slots - 1) * gap + 4}px) / ${slots})`;
+                            return (
+                              <div
+                                key={i}
+                                className="flex flex-col items-center justify-end h-full flex-shrink-0"
+                                style={{ width: barWidth }}
+                                title={`${label}: ${avg}%`}
+                              >
+                                <div
+                                  className="w-full rounded-t-sm relative"
+                                  style={{
+                                    height: `${barH}%`,
+                                    background:
+                                      "linear-gradient(180deg, #A8B5C8 0%, #8D9BB0 100%)",
+                                  }}
+                                >
+                                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-[6px] font-semibold text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                                    {avg}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+              <div
+                style={{
+                  marginLeft: "22px",
+                  height: "55px",
+                  position: "relative",
+                  overflow: "visible",
+                }}
+              >
+                <div
+                  className="flex justify-start"
+                  style={{
+                    gap: "2px",
+                    padding: "0 2px",
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {(() => {
+                    const labels = studentReport.chartOvertimeLabels || [];
+                    const count = labels.length;
+                    const slots = Math.max(count, 10);
+                    const barWidth = `calc((100% - ${(slots - 1) * 2 + 4}px) / ${slots})`;
+                    return labels.map((label, i) => (
+                      <div
+                        key={i}
+                        className="flex-shrink-0"
+                        style={{
+                          width: barWidth,
+                          height: "55px",
+                          position: "relative",
+                          overflow: "visible",
+                        }}
+                      >
+                        <div
+                          className="text-[5.5px] leading-[1.2] text-gray-500"
+                          style={{
+                            position: "absolute",
+                            top: "8px",
+                            left: "50%",
+                            transform: "rotate(-90deg) translateX(-100%)",
+                            transformOrigin: "top left",
+                            textAlign: "right" as const,
+                            width: "50px",
+                            whiteSpace: "normal",
+                            wordBreak: "break-word",
+                            overflow: "hidden",
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical" as const,
+                          }}
+                        >
+                          {label}
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+              <div className="flex gap-3 mt-1 text-[8px] justify-center">
+                <span className="flex items-center gap-1">
+                  <span
+                    className="w-2 h-2 inline-block rounded-sm"
+                    style={{
+                      background: "linear-gradient(180deg, #A8B5C8, #8D9BB0)",
+                    }}
+                  />{" "}
+                  Term Average
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-2.5 text-[11px]">
+            <p className="my-0.5">
+              <strong>Class Teacher's comment:</strong>{" "}
+              {studentReport.classTeacherComment || ""}
+            </p>
+            <p className="my-0.5">
+              <strong>Head/Principal's comment:</strong>{" "}
+              {studentReport.principalComment || ""}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-[0.85fr_1.7fr_0.85fr] gap-4 mt-auto pt-3 text-[11px] items-stretch">
+            <div className="flex flex-col justify-start">
+              {school.stamp ? (
+                <div className="border border-gray-300 dark:border-gray-600 p-2 min-h-[120px] flex items-center justify-center">
+                  <img
+                    src={school.stamp}
+                    alt="School Stamp & Principal's Signature"
+                    className="max-w-[168px] max-h-[110px] w-auto h-auto block"
+                    data-testid="img-stamp"
+                  />
+                </div>
+              ) : (
+                <div className="border border-gray-300 dark:border-gray-600 p-2 min-h-[120px] flex items-center justify-center text-[10px] text-gray-500">
+                  Stamp/Signature not set in School Settings.
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col justify-start pt-2 min-h-[120px]">
+              <strong>School Principal</strong>
+              {school.principalName && <div>{school.principalName}</div>}
+              {school.principalPhone && (
+                <div>Mobile: {school.principalPhone}</div>
+              )}
+              {school.phone && <div>Call Centre: {school.phone}</div>}
+              {school.email && <div>Email: {school.email}</div>}
+            </div>
+
+            <div className="flex flex-col items-end justify-center min-h-[120px] gap-1.5">
+              <img
+                className="w-[120px] h-[120px] object-contain"
+                alt="QR Code"
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent("https://www.firstchoicegroup.co.zw")}`}
+                data-testid="img-qr-code"
+              />
+              <div className="text-[9px] text-gray-600 dark:text-gray-400 text-center w-[120px] leading-tight">
+                www.firstchoicegroup.co.zw
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 mt-2 print:hidden flex-wrap">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            const originalTitle = document.title;
+            const studentName =
+              `${studentReport.student.firstName}_${studentReport.student.lastName}`.replace(
+                /\s+/g,
+                "_",
+              );
+            const examLabel =
+              data.exam?.examName?.replace(/\s+/g, "_") || "Exam";
+            const classLabel =
+              data.class?.className?.replace(/\s+/g, "_") || "Class";
+            document.title = `Report_Card_${studentName}_${classLabel}_${examLabel}`;
+            window.print();
+            document.title = originalTitle;
+          }}
+          data-testid={`button-download-${student.id}`}
+        >
+          <Download className="w-4 h-4 mr-1" />
+          Download
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onSendIndividual(student.id)}
+          disabled={sendingId === student.id}
+          data-testid={`button-send-${student.id}`}
+        >
+          {sendingId === student.id ? (
+            <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+          ) : (
+            <Send className="w-4 h-4 mr-1" />
+          )}
+          Send Individual Report Card
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ProgressBadge({ pct }: { pct: number | null }) {
+  if (pct === null) return <span className="text-muted-foreground">–</span>;
+  const cls = pct >= 80 ? "qc-pct-circle-ok" : pct >= 40 ? "qc-pct-circle-mid" : "qc-pct-circle-bad";
+  return (
+    <span className={`qc-pct-circle ${cls}`} data-testid="pill-progress">
+      {pct}%
+    </span>
+  );
+}
+
+function MissingMarksDialog({
+  open,
+  onOpenChange,
+  examId,
+  classId,
+  className: classLabel,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  examId: number;
+  classId: number;
+  className: string;
+}) {
+  const { data, isLoading } = useQuery<MissingMarkSubject[]>({
+    queryKey: ["/api/report-hub/missing-marks", examId, classId],
+    enabled: open && !!examId && !!classId,
+  });
+
+  const missingOnly = (data || []).filter((s) => s.missingCount > 0);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{classLabel} — Missing Marks</DialogTitle>
+          <DialogDescription>
+            Students who have not been marked, grouped by subject
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="space-y-3">
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-16 w-full" />
+            ))}
+          </div>
+        ) : missingOnly.length === 0 ? (
+          <div className="py-8 text-center text-muted-foreground">
+            <AlertTriangle className="w-10 h-10 mx-auto mb-2 opacity-50" />
+            <p>No missing marks found — all subjects are complete.</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {missingOnly.map((sub) => (
+              <Card key={sub.subjectId}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                    <span
+                      className="font-semibold"
+                      data-testid={`text-missing-subject-${sub.subjectId}`}
+                    >
+                      {sub.subjectName}
+                    </span>
+                    <span className="text-sm text-red-600 dark:text-red-400 font-medium">
+                      {sub.missingCount}/{sub.totalStudents} missing
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {sub.missingStudents.map((s) => (
+                      <div key={s.id} className="text-sm p-2 border rounded-md">
+                        {s.name}
+                        {s.admissionNo && (
+                          <span className="text-muted-foreground ml-1">
+                            ({s.admissionNo})
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ClassMeritDialog({
+  open,
+  onOpenChange,
+  examId,
+  classId,
+  className: classLabel,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  examId: number;
+  classId: number;
+  className: string;
+}) {
+  const { data, isLoading } = useQuery<MeritData>({
+    queryKey: ["/api/report-hub/class-merit", examId, classId],
+    enabled: open && !!examId && !!classId,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{classLabel} — Merit List</DialogTitle>
+          <DialogDescription>
+            Sorted by average (missing marks count as 0)
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3, 4].map((i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
+          </div>
+        ) : !data || data.rows.length === 0 ? (
+          <div className="py-8 text-center text-muted-foreground">
+            <Users className="w-10 h-10 mx-auto mb-2 opacity-50" />
+            <p>No merit data available yet.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table
+              className="w-full text-sm border-collapse"
+              data-testid="table-merit-list"
+            >
+              <thead>
+                <tr className="border-b">
+                  <th className="text-left p-2 font-semibold">Student</th>
+                  {data.subjects.map((s) => (
+                    <th key={s.id} className="text-center p-2 font-semibold">
+                      {s.name}
+                    </th>
+                  ))}
+                  <th className="text-center p-2 font-semibold">Total</th>
+                  <th className="text-center p-2 font-semibold">Average</th>
+                  <th className="text-center p-2 font-semibold">Pos</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.map((row, idx) => (
+                  <tr key={idx} className="border-b hover-elevate">
+                    <td className="p-2">
+                      <div className="font-medium">{row.studentName}</div>
+                      {row.admissionNo && (
+                        <div className="text-xs text-muted-foreground">
+                          {row.admissionNo}
+                        </div>
+                      )}
+                    </td>
+                    {data.subjects.map((s) => (
+                      <td key={s.id} className="text-center p-2">
+                        {row.cells[s.id] !== null &&
+                        row.cells[s.id] !== undefined
+                          ? `${Math.round(row.cells[s.id]!)}%`
+                          : "–"}
+                      </td>
+                    ))}
+                    <td className="text-center p-2">{row.total}</td>
+                    <td className="text-center p-2 font-semibold">
+                      {Math.round(row.avg)}%
+                    </td>
+                    <td className="text-center p-2">{row.position}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ClassAnalyticsDialog({
+  open,
+  onOpenChange,
+  examId,
+  classId,
+  className: classLabel,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  examId: number;
+  classId: number;
+  className: string;
+}) {
+  const { data, isLoading } = useQuery<AnalyticsData>({
+    queryKey: ["/api/report-hub/class-analytics", examId, classId],
+    enabled: open && !!examId && !!classId,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{classLabel} — Analytics</DialogTitle>
+          <DialogDescription>
+            Grade distribution and subject performance summary
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="space-y-3">
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-12 w-full" />
+            ))}
+          </div>
+        ) : !data ? (
+          <div className="py-8 text-center text-muted-foreground">
+            No data available.
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <Card>
+                <CardContent className="p-3 text-center">
+                  <div className="text-2xl font-bold">{data.overallAvg}%</div>
+                  <div className="text-xs text-muted-foreground">
+                    Overall Average
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="p-3 text-center">
+                  <div className="text-2xl font-bold">{data.completion}%</div>
+                  <div className="text-xs text-muted-foreground">
+                    Completion
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="p-3 text-center">
+                  <div className="text-2xl font-bold">{data.enteredCells}</div>
+                  <div className="text-xs text-muted-foreground">
+                    Marks Entered
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="p-3 text-center">
+                  <div className="text-2xl font-bold">{data.totalStudents}</div>
+                  <div className="text-xs text-muted-foreground">Students</div>
+                </CardContent>
+              </Card>
+            </div>
+
+            {Object.keys(data.gradeCounts).length > 0 && (
+              <div>
+                <h4 className="font-semibold mb-2">Grade Distribution</h4>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(data.gradeCounts)
+                    .sort((a, b) => a[0].localeCompare(b[0]))
+                    .map(([grade, count]) => (
+                      <div
+                        key={grade}
+                        className="border rounded-md px-3 py-1.5 text-sm"
+                      >
+                        <span className="font-semibold">{grade}</span>: {count}
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {data.subjectSummary.length > 0 && (
+              <div>
+                <h4 className="font-semibold mb-2">Subject Summary</h4>
+                <div className="overflow-x-auto">
+                  <table
+                    className="w-full text-sm border-collapse"
+                    data-testid="table-analytics-subjects"
+                  >
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left p-2">Subject</th>
+                        <th className="text-center p-2">Avg</th>
+                        <th className="text-center p-2">Completion</th>
+                        <th className="text-center p-2">Pass Rate</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.subjectSummary.map((s) => (
+                        <tr key={s.subjectId} className="border-b">
+                          <td className="p-2">{s.subjectName}</td>
+                          <td className="text-center p-2 font-semibold">
+                            {s.avg}%
+                          </td>
+                          <td className="text-center p-2">{s.completion}%</td>
+                          <td className="text-center p-2">{s.passRate}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function StreamMeritDialog({
+  open,
+  onOpenChange,
+  examId,
+  streamId,
+  streamName,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  examId: number;
+  streamId: number;
+  streamName: string;
+}) {
+  const { data, isLoading } = useQuery<StreamMeritData>({
+    queryKey: ["/api/report-hub/stream-merit", examId, streamId],
+    enabled: open && !!examId && !!streamId,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{streamName} — Stream Merit List</DialogTitle>
+          <DialogDescription>
+            Top students across all classes in this stream
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
+          </div>
+        ) : !data || data.rows.length === 0 ? (
+          <div className="py-8 text-center text-muted-foreground">
+            <Trophy className="w-10 h-10 mx-auto mb-2 opacity-50" />
+            <p>No merit data available.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table
+              className="w-full text-sm border-collapse"
+              data-testid="table-stream-merit"
+            >
+              <thead>
+                <tr className="border-b">
+                  <th className="text-left p-2 font-semibold">Student</th>
+                  {data.subjects.map((s, i) => (
+                    <th key={i} className="text-center p-2 font-semibold">
+                      {s}
+                    </th>
+                  ))}
+                  <th className="text-center p-2 font-semibold">Total</th>
+                  <th className="text-center p-2 font-semibold">Average</th>
+                  <th className="text-center p-2 font-semibold">Pos</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.map((row, idx) => (
+                  <tr key={idx} className="border-b">
+                    <td className="p-2">
+                      <div className="font-medium">{row.studentName}</div>
+                      {row.admissionNo && (
+                        <div className="text-xs text-muted-foreground">
+                          {row.admissionNo}
+                        </div>
+                      )}
+                    </td>
+                    {row.subjectMarks.map((val, i) => (
+                      <td key={i} className="text-center p-2">
+                        {val}
+                      </td>
+                    ))}
+                    <td className="text-center p-2">{row.total}</td>
+                    <td className="text-center p-2 font-semibold">{row.avg}</td>
+                    <td className="text-center p-2">{row.position}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function StreamAnalyticsDialog({
+  open,
+  onOpenChange,
+  examId,
+  streamId,
+  streamName,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  examId: number;
+  streamId: number;
+  streamName: string;
+}) {
+  const { data, isLoading } = useQuery<StreamAnalyticsData>({
+    queryKey: ["/api/report-hub/stream-analytics", examId, streamId],
+    enabled: open && !!examId && !!streamId,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{streamName} — Stream Analytics</DialogTitle>
+          <DialogDescription>
+            Subject grade breakdown and pass rates across the stream
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
+          </div>
+        ) : !data || data.rows.length === 0 ? (
+          <div className="py-8 text-center text-muted-foreground">
+            <BarChart3 className="w-10 h-10 mx-auto mb-2 opacity-50" />
+            <p>No analytics data available.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table
+              className="w-full text-sm border-collapse"
+              data-testid="table-stream-analytics"
+            >
+              <thead>
+                <tr className="border-b">
+                  <th className="text-left p-2 font-semibold">Subject</th>
+                  <th className="text-center p-2 font-semibold">Avg</th>
+                  <th className="text-center p-2 font-semibold">Passed</th>
+                  <th className="text-center p-2 font-semibold">Failed</th>
+                  <th className="text-center p-2 font-semibold">Pass Rate</th>
+                  {["A*", "A", "B", "C", "D", "E", "F"].map((g) => (
+                    <th key={g} className="text-center p-2 font-semibold">
+                      {g}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.map((row) => (
+                  <tr key={row.subjectId} className="border-b">
+                    <td className="p-2">{row.subjectName}</td>
+                    <td className="text-center p-2 font-semibold">
+                      {row.avg}%
+                    </td>
+                    <td className="text-center p-2 text-green-600 dark:text-green-400">
+                      {row.passed}
+                    </td>
+                    <td className="text-center p-2 text-red-600 dark:text-red-400">
+                      {row.failed}
+                    </td>
+                    <td className="text-center p-2">{row.passRate}%</td>
+                    {["A*", "A", "B", "C", "D", "E", "F"].map((g) => (
+                      <td key={g} className="text-center p-2">
+                        {row.gradeCounts[g] || 0}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ExamStreamTable({
+  exam,
+  onNavigateClassLevel,
+  onNavigateReports,
+  onOpenStreamModal,
+}: {
+  exam: Exam;
+  onNavigateClassLevel: (
+    examId: string,
+    examName: string,
+    streamId: number,
+    streamName: string,
+  ) => void;
+  onNavigateReports: (
+    examId: string,
+    classId: string,
+    className: string,
+  ) => void;
+  onOpenStreamModal: (
+    examId: number,
+    streamId: number,
+    streamName: string,
+    modal: "merit" | "analytics",
+  ) => void;
+}) {
+  const { data: streamStats, isLoading } = useQuery<StreamStat[]>({
+    queryKey: ["/api/report-hub/stream-stats", String(exam.id)],
+  });
+
+  if (isLoading) {
+    return (
+      <div className="mb-8">
+        <h3
+          className="text-center font-semibold text-sm uppercase mb-3 text-foreground"
+          data-testid={`text-exam-title-${exam.id}`}
+        >
+          {exam.examName}
+        </h3>
+        <Card>
+          <CardContent className="p-4">
+            <Skeleton className="h-40 w-full" />
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const activeStats = (streamStats || []).filter((s) => s.classCount > 0);
+
+  if (activeStats.length === 0) return null;
+
+  return (
+    <div className="mb-8" data-testid={`section-exam-${exam.id}`}>
+      <h3
+        className="text-center font-semibold text-sm uppercase mb-3 text-foreground"
+        data-testid={`text-exam-title-${exam.id}`}
+      >
+        {exam.examName}
+      </h3>
+      <div
+        className="overflow-hidden"
+        style={{ border: "1.5px solid rgba(27, 42, 92, 0.25)", borderRadius: "14px" }}
+      >
+          <div className="overflow-visible">
+            <table
+              className="w-full text-sm"
+              style={{ borderCollapse: "separate", borderSpacing: 0 }}
+              data-testid={`table-stream-hub-${exam.id}`}
+            >
+              <thead>
+                <tr className="border-b" style={{ backgroundColor: "rgba(27, 42, 92, 0.1)" }}>
+                  <th className="text-left p-3 font-semibold">Stream</th>
+                  <th className="text-center p-3 font-semibold">Progress</th>
+                  <th className="text-center p-3 font-semibold">Avg Mark</th>
+                  <th className="text-right p-3 font-semibold">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeStats.map((stat) => {
+                  const hasData =
+                    stat.progressPct !== null && stat.progressPct > 0;
+                  const avgLabel =
+                    stat.avgPct !== null ? `${stat.avgPct}%` : "–";
+
+                  return (
+                    <tr
+                      key={stat.streamId}
+                      className="border-b"
+                      data-testid={`row-stream-${exam.id}-${stat.streamId}`}
+                    >
+                      <td className="p-3">
+                        <div className="font-medium">{stat.streamName}</div>
+                      </td>
+                      <td className="text-center p-3">
+                        <ProgressBadge pct={stat.progressPct} />
+                      </td>
+                      <td className="text-center p-3">
+                        <span className={`font-semibold ${
+                          stat.avgPct === null
+                            ? "text-muted-foreground"
+                            : stat.avgPct >= 80
+                              ? "text-green-600 dark:text-green-400"
+                              : stat.avgPct >= 40
+                                ? "text-amber-600 dark:text-amber-400"
+                                : "text-red-600 dark:text-red-400"
+                        }`}>
+                          {avgLabel}
+                        </span>
+                      </td>
+                      <td className="text-right p-3">
+                        {hasData ? (
+                          <div className="flex items-center justify-end gap-2 flex-wrap">
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  data-testid={`button-options-${exam.id}-${stat.streamId}`}
+                                >
+                                  Options{" "}
+                                  <ChevronDown className="w-3 h-3 ml-1" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent
+                                align="end"
+                                className="min-w-[200px]"
+                              >
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    onNavigateClassLevel(
+                                      String(exam.id),
+                                      exam.examName,
+                                      stat.streamId,
+                                      stat.streamName,
+                                    )
+                                  }
+                                  data-testid={`button-class-level-${exam.id}-${stat.streamId}`}
+                                >
+                                  <Eye className="w-4 h-4 mr-2" /> View at Class
+                                  Level
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    onOpenStreamModal(
+                                      exam.id,
+                                      stat.streamId,
+                                      stat.streamName,
+                                      "merit",
+                                    )
+                                  }
+                                  data-testid={`button-stream-merit-${exam.id}-${stat.streamId}`}
+                                >
+                                  <Trophy className="w-4 h-4 mr-2" /> Stream
+                                  Merit List
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    onOpenStreamModal(
+                                      exam.id,
+                                      stat.streamId,
+                                      stat.streamName,
+                                      "analytics",
+                                    )
+                                  }
+                                  data-testid={`button-stream-analytics-${exam.id}-${stat.streamId}`}
+                                >
+                                  <BarChart3 className="w-4 h-4 mr-2" /> Stream
+                                  Analytics
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="text-white border-[#1b2a5c] no-default-hover-elevate"
+                                  style={{ backgroundColor: "#1b2a5c" }}
+                                  data-testid={`button-reports-${exam.id}-${stat.streamId}`}
+                                >
+                                  <FileText className="w-4 h-4 mr-1" />
+                                  Reports{" "}
+                                  <ChevronDown className="w-3 h-3 ml-1" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent
+                                align="end"
+                                className="min-w-[180px]"
+                              >
+                                {stat.classes.length === 0 ? (
+                                  <DropdownMenuItem disabled>
+                                    No classes found
+                                  </DropdownMenuItem>
+                                ) : (
+                                  stat.classes.map((cls) => (
+                                    <DropdownMenuItem
+                                      key={cls.id}
+                                      onClick={() =>
+                                        onNavigateReports(
+                                          String(exam.id),
+                                          String(cls.id),
+                                          cls.name,
+                                        )
+                                      }
+                                      data-testid={`button-report-class-${exam.id}-${cls.id}`}
+                                    >
+                                      {cls.name}
+                                    </DropdownMenuItem>
+                                  ))
+                                )}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        ) : null}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+      </div>
+    </div>
+  );
+}
+
+export default function AcademicReportsPage() {
+  const { currentSchoolId } = useAuth();
+  const { toast } = useToast();
+
+  const [viewMode, setViewMode] = useState<ViewMode>("hub");
+  const [selectedExamId, setSelectedExamId] = useState<string>("");
+  const [selectedExamName, setSelectedExamName] = useState<string>("");
+  const [selectedClassId, setSelectedClassId] = useState<string>("");
+  const [selectedClassName, setSelectedClassName] = useState<string>("");
+  const [selectedStreamId, setSelectedStreamId] = useState<number | null>(null);
+  const [selectedStreamName, setSelectedStreamName] = useState<string>("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sendingId, setSendingId] = useState<number | null>(null);
+  const [sendingAll, setSendingAll] = useState(false);
+
+  const [missingMarksOpen, setMissingMarksOpen] = useState(false);
+  const [meritOpen, setMeritOpen] = useState(false);
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
+  const [streamMeritOpen, setStreamMeritOpen] = useState(false);
+  const [streamAnalyticsOpen, setStreamAnalyticsOpen] = useState(false);
+  const [principalCommentsOpen, setPrincipalCommentsOpen] = useState(false);
+  const [classTeacherCommentsOpen, setClassTeacherCommentsOpen] =
+    useState(false);
+  const [modalExamId, setModalExamId] = useState(0);
+  const [modalClassId, setModalClassId] = useState(0);
+  const [modalClassName, setModalClassName] = useState("");
+  const [modalStreamId, setModalStreamId] = useState(0);
+  const [modalStreamName, setModalStreamName] = useState("");
+
+  const { data: assessmentTypes = [], isLoading: atLoading } = useQuery<
+    AssessmentType[]
+  >({
+    queryKey: ["/api/assessment-types"],
+    enabled: !!currentSchoolId,
+  });
+
+  const { data: exams = [], isLoading: examsLoading } = useQuery<Exam[]>({
+    queryKey: ["/api/report-cards/exams"],
+    enabled: !!currentSchoolId,
+  });
+
+  const { data: classes = [] } = useQuery<Class[]>({
+    queryKey: ["/api/classes"],
+    enabled: !!currentSchoolId,
+  });
+
+  const { data: reportCardData, isLoading: reportLoading } =
+    useQuery<ReportCardData>({
+      queryKey: ["/api/report-cards", selectedExamId, "class", selectedClassId],
+      enabled:
+        viewMode === "report-cards" && !!selectedExamId && !!selectedClassId,
+    });
+
+  const filteredStudents = useMemo(() => {
+    if (!reportCardData) return [];
+    if (!searchTerm.trim()) return reportCardData.reportCards;
+    const term = searchTerm.toLowerCase();
+    return reportCardData.reportCards.filter((rc) => {
+      const name =
+        `${rc.student.firstName} ${rc.student.lastName}`.toLowerCase();
+      const adm = (rc.student.admissionNo || "").toLowerCase();
+      return name.includes(term) || adm.includes(term);
+    });
+  }, [reportCardData, searchTerm]);
+
+  const handleSendAll = async () => {
+    if (!reportCardData || filteredStudents.length === 0) return;
+    if (
+      !confirm(
+        "Send report cards to ALL parents for the currently loaded report cards?",
+      )
+    )
+      return;
+
+    setSendingAll(true);
+    try {
+      const res = await apiRequest("POST", "/api/report-cards/send-all", {
+        examId: parseInt(selectedExamId),
+        classId: parseInt(selectedClassId),
+      });
+      const result = await res.json();
+      toast({
+        title: "Report Cards Sent",
+        description: result.message || "Sent successfully",
+      });
+    } catch (err: any) {
+      toast({
+        title: "Error",
+        description: err.message || "Failed to send report cards",
+        variant: "destructive",
+      });
+    } finally {
+      setSendingAll(false);
+    }
+  };
+
+  const handleSendIndividual = async (studentId: number) => {
+    if (!confirm("Send this student's report card to all linked parents?"))
+      return;
+
+    setSendingId(studentId);
+    try {
+      const res = await apiRequest("POST", "/api/report-cards/send-one", {
+        examId: parseInt(selectedExamId),
+        classId: parseInt(selectedClassId),
+        studentId,
+      });
+      const result = await res.json();
+      toast({
+        title: "Report Card Sent",
+        description: result.message || "Sent successfully",
+      });
+    } catch (err: any) {
+      toast({
+        title: "Error",
+        description: err.message || "Failed to send report card",
+        variant: "destructive",
+      });
+    } finally {
+      setSendingId(null);
+    }
+  };
+
+  const navigateToClassLevel = (
+    examId: string,
+    examName: string,
+    streamId: number,
+    streamName: string,
+  ) => {
+    setSelectedExamId(examId);
+    setSelectedExamName(examName);
+    setSelectedStreamId(streamId);
+    setSelectedStreamName(streamName);
+    setViewMode("class-level");
+  };
+
+  const navigateToReports = (
+    examId: string,
+    classId: string,
+    className: string,
+  ) => {
+    setSelectedExamId(examId);
+    setSelectedClassId(classId);
+    setSelectedClassName(className);
+    const exam = exams.find((e) => String(e.id) === examId);
+    setSelectedExamName(exam?.examName || "");
+    setSearchTerm("");
+    setViewMode("report-cards");
+  };
+
+  const goBackToHub = () => {
+    setViewMode("hub");
+    setSelectedClassId("");
+    setSelectedClassName("");
+    setSelectedStreamId(null);
+    setSelectedStreamName("");
+    setSearchTerm("");
+  };
+
+  const goBackToClassLevel = () => {
+    setViewMode("class-level");
+    setSearchTerm("");
+  };
+
+  const openClassModal = (
+    examId: number,
+    classId: number,
+    className: string,
+    modal: "missing" | "merit" | "analytics",
+  ) => {
+    setModalExamId(examId);
+    setModalClassId(classId);
+    setModalClassName(className);
+    if (modal === "missing") setMissingMarksOpen(true);
+    if (modal === "merit") setMeritOpen(true);
+    if (modal === "analytics") setAnalyticsOpen(true);
+  };
+
+  const openStreamModal = (
+    examId: number,
+    streamId: number,
+    streamName: string,
+    modal: "merit" | "analytics",
+  ) => {
+    setModalExamId(examId);
+    setModalStreamId(streamId);
+    setModalStreamName(streamName);
+    if (modal === "merit") setStreamMeritOpen(true);
+    if (modal === "analytics") setStreamAnalyticsOpen(true);
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <style>{`
+        @media print {
+          body > *:not(#report-print-portal) { display: none !important; }
+          #report-print-portal { display: block !important; position: static !important; }
+          .print-hide-for-print { display: none !important; }
+          @page { size: A4; margin: 5mm; }
+          .report-slip { box-shadow: none !important; border-radius: 0 !important; margin-bottom: 0 !important; page-break-after: always; background: white !important; color: black !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip th { background: #6b7280 !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip tbody tr[class*="bg-gray-100"] { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip tbody tr[class*="bg-gray-100"] td { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; }
+          .report-slip-inner { border: 1px solid #ccc !important; }
+          .report-slip [class*="text-green"] { color: #16a34a !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip [class*="text-red"] { color: #dc2626 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip [class*="text-amber"] { color: #d97706 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip [class*="text-blue"] { color: #2563eb !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip [class*="text-gray"] { color: #6b7280 !important; }
+          .report-slip tr[style*="rgba(27, 42, 92"] { background: rgba(27, 42, 92, 0.1) !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip [class*="bg-green-600"] { background: #16a34a !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip svg polyline, .report-slip svg line, .report-slip svg circle { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip [style*="linear-gradient"] { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip div[style*="background"] { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+        @media screen {
+          .print-only { display: none; }
+          #report-print-portal { position: absolute; left: -9999px; top: 0; width: 210mm; }
+        }
+      `}</style>
+      <div className="print-hide-for-print p-6 max-w-[1100px] mx-auto">
+        {viewMode === "hub" && (
+          <>
+            <div className="flex items-center justify-between gap-4 flex-wrap mb-6">
+              <div className="flex items-center gap-3">
+                <FileText className="h-8 w-8" style={{ color: "#1b2a5c" }} />
+                <div>
+                  <h1 className="text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }} data-testid="text-hub-title">Academic Reports</h1>
+                  <p className="text-muted-foreground">View and manage student academic performance reports</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 flex-wrap">
+                <Button
+                  variant="outline"
+                  onClick={() => setPrincipalCommentsOpen(true)}
+                  data-testid="button-principal-comments"
+                >
+                  <MessageSquare className="w-4 h-4 mr-1.5" />
+                  Principal's Comments
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setClassTeacherCommentsOpen(true)}
+                  data-testid="button-class-teacher-comments"
+                >
+                  <MessageSquare className="w-4 h-4 mr-1.5" />
+                  Class Teacher's Comments
+                </Button>
+              </div>
+            </div>
+
+            <ReportCommentsModal
+              open={principalCommentsOpen}
+              onOpenChange={setPrincipalCommentsOpen}
+              commentType="principal"
+              title="Head/Principal's Comments"
+            />
+            <ReportCommentsModal
+              open={classTeacherCommentsOpen}
+              onOpenChange={setClassTeacherCommentsOpen}
+              commentType="class_teacher"
+              title="Class Teacher's Comments"
+            />
+
+            {examsLoading || atLoading ? (
+              <div className="space-y-8">
+                {[1, 2, 3].map((i) => (
+                  <div key={i}>
+                    <Skeleton className="h-6 w-48 mx-auto mb-3" />
+                    <Card>
+                      <CardContent className="p-4">
+                        <Skeleton className="h-40 w-full" />
+                      </CardContent>
+                    </Card>
+                  </div>
+                ))}
+              </div>
+            ) : assessmentTypes.length === 0 ? (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <FileText className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+                  <h3 className="font-semibold text-lg mb-2">
+                    No Assessment Types Found
+                  </h3>
+                  <p className="text-muted-foreground">
+                    Create assessment types in the Assessments Manager to see
+                    reports here.
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              (() => {
+                const examsByType = new Map<number, Exam[]>();
+                const unassigned: Exam[] = [];
+                exams.forEach((exam) => {
+                  if (exam.assessmentTypeId) {
+                    const list = examsByType.get(exam.assessmentTypeId) || [];
+                    list.push(exam);
+                    examsByType.set(exam.assessmentTypeId, list);
+                  } else {
+                    unassigned.push(exam);
+                  }
+                });
+
+                const defaultTab =
+                  assessmentTypes[0]?.id?.toString() || "unassigned";
+
+                return (
+                  <Tabs defaultValue={defaultTab} className="w-full">
+                    <TabsList
+                      className="flex flex-wrap h-auto gap-1 w-full justify-start"
+                      data-testid="tabs-assessment-types"
+                    >
+                      {assessmentTypes.map((at) => (
+                        <TabsTrigger
+                          key={at.id}
+                          value={at.id.toString()}
+                          data-testid={`tab-at-${at.id}`}
+                        >
+                          {at.name}
+                          {(examsByType.get(at.id) || []).length > 0 && (
+                            <span className="ml-1.5 text-xs text-muted-foreground">
+                              ({(examsByType.get(at.id) || []).length})
+                            </span>
+                          )}
+                        </TabsTrigger>
+                      ))}
+                      {unassigned.length > 0 && (
+                        <TabsTrigger
+                          value="unassigned"
+                          data-testid="tab-at-unassigned"
+                        >
+                          Other
+                          <span className="ml-1.5 text-xs text-muted-foreground">
+                            ({unassigned.length})
+                          </span>
+                        </TabsTrigger>
+                      )}
+                    </TabsList>
+
+                    {assessmentTypes.map((at) => {
+                      const typeExams = examsByType.get(at.id) || [];
+                      return (
+                        <TabsContent
+                          key={at.id}
+                          value={at.id.toString()}
+                          data-testid={`tab-content-at-${at.id}`}
+                        >
+                          {typeExams.length === 0 ? (
+                            <Card>
+                              <CardContent className="py-12 text-center">
+                                <FileText className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+                                <h3 className="font-semibold text-lg mb-2">
+                                  No Exams Yet
+                                </h3>
+                                <p className="text-muted-foreground">
+                                  No exams have been created under {at.name}.
+                                  Create exams in the Assessments Manager and
+                                  assign them to this assessment type.
+                                </p>
+                              </CardContent>
+                            </Card>
+                          ) : (
+                            <div>
+                              {typeExams.map((exam) => (
+                                <ExamStreamTable
+                                  key={exam.id}
+                                  exam={exam}
+                                  onNavigateClassLevel={navigateToClassLevel}
+                                  onNavigateReports={navigateToReports}
+                                  onOpenStreamModal={openStreamModal}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </TabsContent>
+                      );
+                    })}
+
+                    {unassigned.length > 0 && (
+                      <TabsContent
+                        value="unassigned"
+                        data-testid="tab-content-at-unassigned"
+                      >
+                        <div>
+                          {unassigned.map((exam) => (
+                            <ExamStreamTable
+                              key={exam.id}
+                              exam={exam}
+                              onNavigateClassLevel={navigateToClassLevel}
+                              onNavigateReports={navigateToReports}
+                              onOpenStreamModal={openStreamModal}
+                            />
+                          ))}
+                        </div>
+                      </TabsContent>
+                    )}
+                  </Tabs>
+                );
+              })()
+            )}
+          </>
+        )}
+
+        {viewMode === "class-level" && (
+          <>
+            <div className="flex items-center gap-3 mb-4 flex-wrap">
+              <Button
+                variant="outline"
+                onClick={goBackToHub}
+                data-testid="button-back-to-hub"
+              >
+                <ArrowLeft className="w-4 h-4 mr-2" /> Back to Hub
+              </Button>
+              <div>
+                <h2 className="text-lg font-semibold">
+                  {selectedStreamName} — Class Level
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {selectedExamName}
+                </p>
+              </div>
+            </div>
+
+            {(() => {
+              const streamClasses = classes.filter(
+                (c) => c.streamId === selectedStreamId,
+              );
+              if (streamClasses.length === 0) {
+                return (
+                  <Card>
+                    <CardContent className="py-12 text-center">
+                      <Layers className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+                      <p className="text-muted-foreground">
+                        No classes found in this stream.
+                      </p>
+                    </CardContent>
+                  </Card>
+                );
+              }
+
+              return (
+                <div className="space-y-6">
+                  {streamClasses.map((cls) => (
+                    <ClassLevelBlock
+                      key={cls.id}
+                      examId={selectedExamId}
+                      examName={selectedExamName}
+                      classId={cls.id}
+                      className={cls.className}
+                      onReports={() =>
+                        navigateToReports(
+                          selectedExamId,
+                          String(cls.id),
+                          cls.className,
+                        )
+                      }
+                      onMissingMarks={() =>
+                        openClassModal(
+                          parseInt(selectedExamId),
+                          cls.id,
+                          cls.className,
+                          "missing",
+                        )
+                      }
+                      onMerit={() =>
+                        openClassModal(
+                          parseInt(selectedExamId),
+                          cls.id,
+                          cls.className,
+                          "merit",
+                        )
+                      }
+                      onAnalytics={() =>
+                        openClassModal(
+                          parseInt(selectedExamId),
+                          cls.id,
+                          cls.className,
+                          "analytics",
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+              );
+            })()}
+          </>
+        )}
+
+        {viewMode === "report-cards" && (
+          <>
+            <div className="flex items-center gap-3 mb-4 flex-wrap">
+              <Button
+                variant="outline"
+                onClick={selectedStreamId ? goBackToClassLevel : goBackToHub}
+                data-testid="button-back-from-reports"
+              >
+                <ArrowLeft className="w-4 h-4 mr-2" /> Back
+              </Button>
+              <div>
+                <h2 className="text-lg font-semibold">
+                  {selectedClassName} — Report Cards
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {selectedExamName}
+                </p>
+              </div>
+            </div>
+
+            {reportLoading ? (
+              <div className="space-y-4">
+                {[1, 2, 3].map((i) => (
+                  <Card key={i}>
+                    <CardContent className="p-4">
+                      <div className="flex items-center gap-4">
+                        <Skeleton className="h-12 w-12 rounded-full" />
+                        <div className="flex-1">
+                          <Skeleton className="h-5 w-40 mb-2" />
+                          <Skeleton className="h-4 w-24" />
+                        </div>
+                        <Skeleton className="h-10 w-20" />
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            ) : reportCardData && reportCardData.reportCards.length > 0 ? (
+              <>
+                <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
+                  <div className="flex-1 max-w-[360px]">
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                      <Input
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        placeholder="Search student by name or admission number..."
+                        className="pl-9"
+                        data-testid="input-search-student"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        const originalTitle = document.title;
+                        const examLabel =
+                          selectedExamName?.replace(/\s+/g, "_") || "Exam";
+                        const classLabel =
+                          selectedClassName?.replace(/\s+/g, "_") || "Class";
+                        document.title = `Report_Cards_${classLabel}_${examLabel}`;
+                        window.print();
+                        document.title = originalTitle;
+                      }}
+                      data-testid="button-download-all"
+                    >
+                      <Download className="w-4 h-4 mr-2" />
+                      Download All
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={handleSendAll}
+                      disabled={sendingAll}
+                      data-testid="button-send-all"
+                    >
+                      {sendingAll ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <Send className="w-4 h-4 mr-2" />
+                      )}
+                      Send All Report Cards
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-4 text-xs mb-4 text-muted-foreground">
+                  <span>
+                    <strong>Exam:</strong> {reportCardData.exam.examName}
+                  </span>
+                  <span>
+                    <strong>Class:</strong> {reportCardData.class.className}
+                  </span>
+                  <span>
+                    <strong>Students:</strong> {filteredStudents.length}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <FileText className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+                  <h3
+                    className="font-semibold text-lg mb-2"
+                    data-testid="text-no-reports"
+                  >
+                    No Report Cards Available
+                  </h3>
+                  <p className="text-muted-foreground">
+                    No marks have been entered for this exam and class
+                    combination.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+          </>
+        )}
+      </div>
+      {viewMode === "report-cards" &&
+        reportCardData &&
+        filteredStudents.length > 0 && (
+          <>
+            <div className="print-hide-for-print">
+              {filteredStudents.map((rc) => (
+                <ReportCardSlip
+                  key={rc.student.id}
+                  data={reportCardData}
+                  studentReport={rc}
+                  onSendIndividual={handleSendIndividual}
+                  sendingId={sendingId}
+                />
+              ))}
+            </div>
+            {createPortal(
+              <div id="report-print-portal">
+                {filteredStudents.map((rc) => (
+                  <ReportCardSlip
+                    key={`print-${rc.student.id}`}
+                    data={reportCardData}
+                    studentReport={rc}
+                    onSendIndividual={handleSendIndividual}
+                    sendingId={sendingId}
+                  />
+                ))}
+              </div>,
+              document.body
+            )}
+          </>
+        )}
+      <MissingMarksDialog
+        open={missingMarksOpen}
+        onOpenChange={setMissingMarksOpen}
+        examId={modalExamId}
+        classId={modalClassId}
+        className={modalClassName}
+      />
+      <ClassMeritDialog
+        open={meritOpen}
+        onOpenChange={setMeritOpen}
+        examId={modalExamId}
+        classId={modalClassId}
+        className={modalClassName}
+      />
+      <ClassAnalyticsDialog
+        open={analyticsOpen}
+        onOpenChange={setAnalyticsOpen}
+        examId={modalExamId}
+        classId={modalClassId}
+        className={modalClassName}
+      />
+      <StreamMeritDialog
+        open={streamMeritOpen}
+        onOpenChange={setStreamMeritOpen}
+        examId={modalExamId}
+        streamId={modalStreamId}
+        streamName={modalStreamName}
+      />
+      <StreamAnalyticsDialog
+        open={streamAnalyticsOpen}
+        onOpenChange={setStreamAnalyticsOpen}
+        examId={modalExamId}
+        streamId={modalStreamId}
+        streamName={modalStreamName}
+      />
+    </div>
+  );
+}
+
+function ClassLevelBlock({
+  examId,
+  examName,
+  classId,
+  className: classLabel,
+  onReports,
+  onMissingMarks,
+  onMerit,
+  onAnalytics,
+}: {
+  examId: string;
+  examName: string;
+  classId: number;
+  className: string;
+  onReports: () => void;
+  onMissingMarks: () => void;
+  onMerit: () => void;
+  onAnalytics: () => void;
+}) {
+  const { data, isLoading } = useQuery<ClassProgressData>({
+    queryKey: ["/api/report-hub/class-progress", examId, classId],
+    enabled: !!examId && !!classId,
+  });
+
+  return (
+    <Card data-testid={`card-class-${classId}`}>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <CardTitle className="text-base">
+            {classLabel} — {examName}
+          </CardTitle>
+          <div className="flex gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onMissingMarks}
+              data-testid={`button-missing-${classId}`}
+            >
+              <AlertTriangle className="w-4 h-4 mr-1" /> Missing Marks
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onMerit}
+              data-testid={`button-merit-${classId}`}
+            >
+              <Trophy className="w-4 h-4 mr-1" /> Merit List
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onAnalytics}
+              data-testid={`button-analytics-${classId}`}
+            >
+              <BarChart3 className="w-4 h-4 mr-1" /> Analytics
+            </Button>
+            <Button
+              size="sm"
+              onClick={onReports}
+              data-testid={`button-reports-${classId}`}
+            >
+              <FileText className="w-4 h-4 mr-1" /> Reports
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-8 w-full" />
+            ))}
+          </div>
+        ) : !data || data.subjects.length === 0 ? (
+          <div className="py-4 text-center text-muted-foreground text-sm">
+            No assessments/subjects found for this class in the selected exam
+            yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table
+              className="w-full text-sm"
+              data-testid={`table-class-progress-${classId}`}
+            >
+              <thead>
+                <tr className="border-b bg-muted/30">
+                  <th className="text-left p-2 font-semibold">Subject</th>
+                  <th className="text-center p-2 font-semibold">Progress</th>
+                  <th className="text-center p-2 font-semibold">Avg Mark</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.subjects.map((sub: any) => (
+                  <tr key={sub.subjectId} className="border-b">
+                    <td className="p-2">
+                      <div>{sub.subjectName}</div>
+                      <div className="text-xs text-muted-foreground">
+                        Students: {sub.totalStudents}
+                      </div>
+                    </td>
+                    <td className="text-center p-2">
+                      <ProgressBadge pct={sub.progressPct} />
+                    </td>
+                    <td className="text-center p-2">
+                      {sub.avgPct !== null ? `${sub.avgPct}%` : "–"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReportCommentsModal({
+  open,
+  onOpenChange,
+  commentType,
+  title,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  commentType: "principal" | "class_teacher";
+  title: string;
+}) {
+  const { toast } = useToast();
+  const [commentText, setCommentText] = useState("");
+  const [selectedGrade, setSelectedGrade] = useState("");
+  const [classId, setClassId] = useState("");
+  const isClassTeacher = commentType === "class_teacher";
+
+  const gradeRankMap: Record<string, number> = {
+    "A*": 0,
+    A: 1,
+    B: 2,
+    C: 3,
+    D: 4,
+    E: 5,
+    F: 6,
+    G: 7,
+    U: 8,
+  };
+
+  const { data: comments, isLoading } = useQuery<ReportComment[]>({
+    queryKey: [`/api/report-comments?commentType=${commentType}`],
+    enabled: open,
+  });
+
+  const { data: classesData } = useQuery<any>({
+    queryKey: ["/api/classes"],
+    enabled: isClassTeacher && open,
+  });
+  const allClasses: any[] = Array.isArray(classesData)
+    ? classesData
+    : ((classesData as any)?.items ?? []);
+
+  const classMap = useMemo(() => {
+    const m: Record<number, string> = {};
+    allClasses.forEach((c: any) => {
+      m[c.id] = c.className;
+    });
+    return m;
+  }, [allClasses]);
+
+  const sortedComments = useMemo(() => {
+    if (!comments) return [];
+    return [...comments].sort((a, b) => {
+      const ra = gradeRankMap[a.commentGrade] ?? 999;
+      const rb = gradeRankMap[b.commentGrade] ?? 999;
+      return ra - rb;
+    });
+  }, [comments]);
+
+  const createMutation = useMutation({
+    mutationFn: async (data: {
+      commentGrade: string;
+      commentText: string;
+      commentType: string;
+      classId?: number;
+    }) => {
+      const res = await apiRequest("POST", "/api/report-comments", data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: [`/api/report-comments?commentType=${commentType}`],
+      });
+      setCommentText("");
+      setSelectedGrade("");
+      setClassId("");
+      toast({ title: "Success", description: "Comment saved" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/report-comments/${id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: [`/api/report-comments?commentType=${commentType}`],
+      });
+      toast({ title: "Success", description: "Comment deleted" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleSave = () => {
+    if (!selectedGrade) {
+      toast({
+        title: "Error",
+        description: "Select a grade",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!commentText.trim()) {
+      toast({
+        title: "Error",
+        description: "Enter a comment",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (isClassTeacher && !classId) {
+      toast({
+        title: "Error",
+        description: "Select a class",
+        variant: "destructive",
+      });
+      return;
+    }
+    createMutation.mutate({
+      commentGrade: selectedGrade,
+      commentText: commentText.trim(),
+      commentType,
+      ...(isClassTeacher && classId ? { classId: parseInt(classId) } : {}),
+    });
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle data-testid="text-report-comments-title">
+            {title}
+          </DialogTitle>
+          <DialogDescription className="text-xs text-muted-foreground">
+            Comments are matched to students based on their average mark:{" "}
+            {COMMENT_GRADE_SCALE.map(
+              (g) => `${g.grade}: ${g.min}–${g.max}%`,
+            ).join(", ")}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto">
+          {isLoading ? (
+            <div className="space-y-2">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          ) : sortedComments.length === 0 ? (
+            <p className="text-center text-muted-foreground py-8">
+              No comments yet. Add one below.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className={isClassTeacher ? "w-[40%]" : "w-[55%]"}>
+                    Comment
+                  </TableHead>
+                  {isClassTeacher && (
+                    <TableHead className="text-center">Class</TableHead>
+                  )}
+                  <TableHead className="text-center">Grade</TableHead>
+                  <TableHead className="text-center">Range</TableHead>
+                  <TableHead className="text-center">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedComments.map((c, idx) => {
+                  const scaleEntry = COMMENT_GRADE_SCALE.find(
+                    (g) => g.grade === c.commentGrade,
+                  );
+                  return (
+                    <TableRow
+                      key={c.id}
+                      className={idx % 2 === 0 ? "bg-muted/30" : ""}
+                    >
+                      <TableCell
+                        className="text-sm"
+                        data-testid={`text-report-comment-${c.id}`}
+                      >
+                        {c.commentText}
+                      </TableCell>
+                      {isClassTeacher && (
+                        <TableCell
+                          className="text-center text-sm"
+                          data-testid={`text-report-comment-class-${c.id}`}
+                        >
+                          {c.classId ? classMap[c.classId] || "—" : "—"}
+                        </TableCell>
+                      )}
+                      <TableCell
+                        className="text-center font-medium"
+                        data-testid={`text-report-comment-grade-${c.id}`}
+                      >
+                        {c.commentGrade}
+                      </TableCell>
+                      <TableCell className="text-center text-xs text-muted-foreground">
+                        {scaleEntry
+                          ? `${scaleEntry.min}–${scaleEntry.max}%`
+                          : "—"}
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-destructive border-destructive"
+                          onClick={() => deleteMutation.mutate(c.id)}
+                          disabled={deleteMutation.isPending}
+                          data-testid={`button-delete-report-comment-${c.id}`}
+                        >
+                          Delete
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+
+        <div className="border-t pt-4 space-y-3">
+          <Textarea
+            placeholder="Enter the comment"
+            value={commentText}
+            onChange={(e) => setCommentText(e.target.value)}
+            className="resize-none"
+            rows={2}
+            data-testid="textarea-report-comment"
+          />
+          <div className="flex items-center gap-3 flex-wrap">
+            {isClassTeacher && (
+              <Select value={classId} onValueChange={setClassId}>
+                <SelectTrigger
+                  className="w-[200px]"
+                  data-testid="select-report-comment-class"
+                >
+                  <SelectValue placeholder="Please select classes" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(allClasses || []).map((c: any) => (
+                    <SelectItem key={c.id} value={c.id.toString()}>
+                      {c.className}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <Select value={selectedGrade} onValueChange={setSelectedGrade}>
+              <SelectTrigger
+                className="w-[160px]"
+                data-testid="select-report-comment-grade"
+              >
+                <SelectValue placeholder="Grade" />
+              </SelectTrigger>
+              <SelectContent>
+                {COMMENT_GRADE_SCALE.map((g) => (
+                  <SelectItem key={g.grade} value={g.grade}>
+                    {g.grade} ({g.min}–{g.max}%)
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                data-testid="button-cancel-report-comment"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSave}
+                disabled={createMutation.isPending}
+                data-testid="button-submit-report-comment"
+              >
+                {createMutation.isPending ? "Saving..." : "Submit"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
