@@ -1,0 +1,13 @@
+﻿services:
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: fcgs_local
+      POSTGRES_USER: fcgs_admin
+      POSTGRES_PASSWORD: fcgs_local_pw_change_me
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
