@@ -173,6 +173,18 @@ const PERMISSIONS_DATA = [
   { code: "transport.create", name: "Create Transport Routes", description: "Add new transport routes", category: "Transport" },
   { code: "transport.edit", name: "Edit Transport Routes", description: "Modify transport routes", category: "Transport" },
   { code: "transport.delete", name: "Delete Transport Routes", description: "Remove transport routes", category: "Transport" },
+
+  // Calendar
+  { code: "calendar.view", name: "View Calendar", description: "View calendar events", category: "Calendar" },
+  { code: "calendar.create.personal", name: "Create Personal Events", description: "Create personal calendar events", category: "Calendar" },
+  { code: "calendar.create.class", name: "Create Class Events", description: "Create class calendar events", category: "Calendar" },
+  { code: "calendar.create.school", name: "Create School Events", description: "Create school calendar events", category: "Calendar" },
+  { code: "calendar.create.org", name: "Create Org Events", description: "Create organization calendar events", category: "Calendar" },
+  { code: "calendar.edit.own", name: "Edit Own Events", description: "Edit events you created", category: "Calendar" },
+  { code: "calendar.edit.scope", name: "Edit Scoped Events", description: "Edit events in your scope (school/org)", category: "Calendar" },
+  { code: "calendar.delete.own", name: "Delete Own Events", description: "Delete events you created", category: "Calendar" },
+  { code: "calendar.delete.scope", name: "Delete Scoped Events", description: "Delete events in your scope (school/org)", category: "Calendar" },
+  { code: "calendar.manage.reminders", name: "Manage Reminders", description: "Create and manage event reminders", category: "Calendar" },
 ];
 
 const ACCESS_GROUPS_DATA = [
@@ -214,6 +226,12 @@ const ACCESS_GROUPS_DATA = [
       "hostels.view",
       "record_of_marks.view", "record_of_marks.export",
       "transport.view",
+	"calendar.view",
+	"calendar.create.personal",
+	"calendar.create.class",
+	"calendar.edit.own",
+	"calendar.delete.own",
+	"calendar.manage.reminders",
     ],
   },
   {
@@ -256,6 +274,12 @@ const ACCESS_GROUPS_DATA = [
       "hostels.view",
       "record_of_marks.view", "record_of_marks.export",
       "transport.view",
+	"calendar.view",
+	"calendar.create.personal",
+	"calendar.create.class",
+	"calendar.edit.own",
+	"calendar.delete.own",
+	"calendar.manage.reminders",
     ],
   },
   {
@@ -272,6 +296,7 @@ const ACCESS_GROUPS_DATA = [
       "settings.view",
       "newsletters.view",
       "communication.view",
+	"calendar.view",
     ],
   },
   {
@@ -292,6 +317,7 @@ const ACCESS_GROUPS_DATA = [
       "communication.view", "communication.send",
       "reports.view",
       "transport.view",
+	"calendar.view",
     ],
   },
   {

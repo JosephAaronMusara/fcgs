@@ -4,12 +4,47 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 export const userRoleEnum = pgEnum("user_role", ["org_admin", "school_admin", "teacher", "quality_control_officer", "assistant_teacher", "librarian", "student", "parent"]);
+
 export const genderEnum = pgEnum("gender", ["male", "female"]);
+
 export const subjectTypeEnum = pgEnum("subject_type", ["ZIMSEC", "Cambridge", "HEXCO"]);
+
 export const attendanceStatusEnum = pgEnum("attendance_status", ["present", "absent", "sick", "fees", "suspended", "absconding", "excused", "late"]);
+
 export const staffStatusEnum = pgEnum("staff_status", ["active", "inactive"]);
+
 export const studentStatusEnum = pgEnum("student_status", ["active", "inactive", "transferred", "graduated"]);
+
 export const hostelStatusEnum = pgEnum("hostel_status", ["present", "absent", "leave", "sick"]);
+
+export const calendarScopeEnum = pgEnum("calendar_scope", [
+  "personal",
+  "class",
+  "school",
+  "org",
+]);
+
+export const calendarReminderChannelEnum = pgEnum(
+  "calendar_reminder_channel",
+  ["in_app", "email", "sms"],
+);
+
+export const calendarAttendeeStatusEnum = pgEnum(
+  "calendar_attendee_status",
+  ["invited", "accepted", "declined"],
+);
+
+export const scheduledJobTypeEnum = pgEnum("scheduled_job_type", [
+  "calendar_reminder",
+]);
+
+export const scheduledJobStatusEnum = pgEnum("scheduled_job_status", [
+  "pending",
+  "processing",
+  "sent",
+  "failed",
+  "dead",
+]);
 
 export const organizations = pgTable("organizations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -903,6 +938,126 @@ export const assessmentMarkPapers = pgTable("assessment_mark_papers", {
   assessmentPaperId: integer("assessment_paper_id").references(() => assessmentPapers.id).notNull(),
   markObtained: decimal("mark_obtained", { precision: 5, scale: 2 }),
 });
+
+// =====================
+// Calendar (Phase 1)
+// =====================
+
+export const calendarEvents = pgTable("calendar_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+  // personal | class | school | org
+  scope: calendarScopeEnum("scope").notNull(),
+
+  organizationId: integer("organization_id").references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  classId: integer("class_id").references(() => classes.id),
+
+  // personal events owned by a user (staff/parent/student)
+  ownerUserId: integer("owner_user_id").references(() => users.id),
+
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+
+  title: text("title").notNull(),
+  description: text("description"),
+  location: text("location"),
+
+  startAt: timestamp("start_at").notNull(),
+  endAt: timestamp("end_at").notNull(),
+  allDay: boolean("all_day").default(false),
+
+  timezone: text("timezone").default("Africa/Harare"),
+
+  // Audience toggles for viewers (parents/students are view-only)
+  includeStudents: boolean("include_students").default(false),
+  includeParents: boolean("include_parents").default(false),
+
+  // Recurrence (RRULE + exceptions)
+  rrule: text("rrule"),
+  recurrenceUntil: timestamp("recurrence_until"),
+  exdates: jsonb("exdates").$type<string[]>(), // ISO strings (UTC)
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const calendarEventReminders = pgTable("calendar_event_reminders", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
+
+  minutesBefore: integer("minutes_before").notNull(), // 1440, 60, 15, etc.
+  channel: calendarReminderChannelEnum("channel").notNull(), // in_app|email|sms
+  enabled: boolean("enabled").default(true),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const calendarEventAttendees = pgTable("calendar_event_attendees", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  status: calendarAttendeeStatusEnum("status").default("invited"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Generic scheduler table (Option A)
+export const scheduledJobs = pgTable("scheduled_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+
+  jobType: scheduledJobTypeEnum("job_type").notNull(), // calendar_reminder
+  status: scheduledJobStatusEnum("status").notNull().default("pending"),
+
+  runAt: timestamp("run_at").notNull(),
+  payload: jsonb("payload").notNull(), // eventId, reminderId, audience, etc.
+
+  attempts: integer("attempts").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
+  lastError: text("last_error"),
+
+  lockedAt: timestamp("locked_at"),
+  lockedBy: text("locked_by"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Insert schemas + types
+export const insertCalendarEventSchema = createInsertSchema(calendarEvents).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertCalendarEvent = z.infer<typeof insertCalendarEventSchema>;
+export type CalendarEvent = typeof calendarEvents.$inferSelect;
+
+export const insertCalendarEventReminderSchema =
+  createInsertSchema(calendarEventReminders).omit({
+    id: true,
+    createdAt: true,
+  });
+export type InsertCalendarEventReminder = z.infer<
+  typeof insertCalendarEventReminderSchema
+>;
+export type CalendarEventReminder = typeof calendarEventReminders.$inferSelect;
+
+export const insertCalendarEventAttendeeSchema =
+  createInsertSchema(calendarEventAttendees).omit({
+    id: true,
+    createdAt: true,
+  });
+export type InsertCalendarEventAttendee = z.infer<
+  typeof insertCalendarEventAttendeeSchema
+>;
+export type CalendarEventAttendee = typeof calendarEventAttendees.$inferSelect;
+
+export const insertScheduledJobSchema = createInsertSchema(scheduledJobs).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  lockedAt: true,
+});
+export type InsertScheduledJob = z.infer<typeof insertScheduledJobSchema>;
+export type ScheduledJob = typeof scheduledJobs.$inferSelect;
 
 export const notifications = pgTable("notifications", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
