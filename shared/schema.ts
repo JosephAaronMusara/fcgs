@@ -969,7 +969,7 @@ export const calendarEvents = pgTable("calendar_events", {
   timezone: text("timezone").default("Africa/Harare"),
 
   // Audience toggles for viewers (parents/students are view-only)
-  includeStudents: boolean("include_students").default(false),
+  includeStudents: boolean("include_students").default(true),
   includeParents: boolean("include_parents").default(false),
 
   // Recurrence (RRULE + exceptions)
@@ -997,6 +997,20 @@ export const calendarEventAttendees = pgTable("calendar_event_attendees", {
   eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
   userId: integer("user_id").references(() => users.id).notNull(),
   status: calendarAttendeeStatusEnum("status").default("invited"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const calendarEventClasses = pgTable("calendar_event_classes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
+  classId: integer("class_id").references(() => classes.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const calendarEventStaffViewers = pgTable("calendar_event_staff_viewers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
+  staffId: integer("staff_id").references(() => staff.id).notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
