@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -1000,19 +1000,37 @@ export const calendarEventAttendees = pgTable("calendar_event_attendees", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const calendarEventClasses = pgTable("calendar_event_classes", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
-  classId: integer("class_id").references(() => classes.id).notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
-});
+export const calendarEventClasses = pgTable(
+  "calendar_event_classes",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
+    classId: integer("class_id").references(() => classes.id).notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => ({
+    uniqEventClass: uniqueIndex("calendar_event_classes_event_class_unique").on(
+      t.eventId,
+      t.classId,
+    ),
+  }),
+);
 
-export const calendarEventStaffViewers = pgTable("calendar_event_staff_viewers", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
-  staffId: integer("staff_id").references(() => staff.id).notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
-});
+export const calendarEventStaffViewers = pgTable(
+  "calendar_event_staff_viewers",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    eventId: integer("event_id").references(() => calendarEvents.id).notNull(),
+    staffId: integer("staff_id").references(() => staff.id).notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => ({
+    uniqEventStaff: uniqueIndex("calendar_event_staff_viewers_event_staff_unique").on(
+      t.eventId,
+      t.staffId,
+    ),
+  }),
+);
 
 // Generic scheduler table (Option A)
 export const scheduledJobs = pgTable("scheduled_jobs", {
