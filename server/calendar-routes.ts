@@ -81,9 +81,10 @@ export function registerCalendarRoutes(app: Express) {
             -- personal events you own
             (e.scope = 'personal' AND e.owner_user_id = ${user.id})
             OR
-            -- class events: class teacher or selected staff viewer
-            (e.scope = 'class' AND (
-              c.class_teacher_id = ${staffRow.id}
+            -- class events: creator OR class teacher OR selected staff viewer
+            (e.scope = 'class' AND e.school_id = ${staffRow.schoolId} AND (
+              e.created_by_user_id = ${user.id}
+              OR c.class_teacher_id = ${staffRow.id}
               OR sv.staff_id = ${staffRow.id}
             ))
             OR
@@ -212,10 +213,9 @@ export function registerCalendarRoutes(app: Express) {
       return res.status(400).json({ message: "All selected classes must belong to the same school" });
     }
 
-    // Enforce class teacher only (must be teacher of ALL selected classes)
-    const notOwned = classRows.filter((c) => c.classTeacherId !== staffRow.id);
-    if (notOwned.length > 0) {
-      return res.status(403).json({ message: "Only the class teacher can create class events for those classes" });
+    // Any staff can create class events for any class in THEIR school
+    if (staffRow.schoolId !== schoolId) {
+      return res.status(403).json({ message: "You can only create class events for your own school" });
     }
 
     // Get organization_id from school
