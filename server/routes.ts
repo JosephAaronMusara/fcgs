@@ -8,6 +8,7 @@ import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, sql } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
+import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { generateReportCardPdf, type ReportCardPdfData } from "./pdf-report-card";
 import { z } from "zod";
@@ -184,6 +185,7 @@ export async function registerRoutes(
 
   setupAuth(app);
   registerObjectStorageRoutes(app);
+  registerCalendarRoutes(app);
 
   const readOnlyExemptPaths = [
     "/api/auth/login",

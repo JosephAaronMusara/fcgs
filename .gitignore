@@ -7,3 +7,7 @@ dist/
 .vscode/
 .idea/
 /object_storage/
+# Local dev / curl test files (do not commit)
+cookies.txt
+login.json
+event.json
