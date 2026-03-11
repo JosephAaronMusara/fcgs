@@ -11,3 +11,4 @@ dist/
 cookies.txt
 login.json
 event.json
+.local/
