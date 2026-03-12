@@ -1932,9 +1932,30 @@ export class DatabaseStorage implements IStorage {
     return result.map(r => r.permission);
   }
 
-  async addPermissionToAccessGroup(data: InsertAccessGroupPermission): Promise<AccessGroupPermission> {
-    const [newMapping] = await db.insert(accessGroupPermissions).values(data).returning();
-    return newMapping;
+  async addPermissionToAccessGroup(
+    data: InsertAccessGroupPermission,
+  ): Promise<AccessGroupPermission> {
+    const { accessGroupId, permissionId } = data;
+
+    const [inserted] = await db
+      .insert(accessGroupPermissions)
+      .values({ accessGroupId, permissionId })
+      .onConflictDoNothing()
+      .returning();
+
+    if (inserted) return inserted;
+
+    const [existing] = await db
+      .select()
+      .from(accessGroupPermissions)
+      .where(
+        and(
+          eq(accessGroupPermissions.accessGroupId, accessGroupId),
+          eq(accessGroupPermissions.permissionId, permissionId),
+        ),
+      );
+
+    return existing!;
   }
 
   async removePermissionFromAccessGroup(accessGroupId: number, permissionId: number): Promise<boolean> {
@@ -1966,19 +1987,30 @@ export class DatabaseStorage implements IStorage {
     return result.map(r => r.group);
   }
 
-  async addUserToAccessGroup(data: InsertUserAccessGroup): Promise<UserAccessGroup> {
-    const [newMapping] = await db.insert(userAccessGroups).values(data).returning();
-    return newMapping;
-  }
+  async addUserToAccessGroup(
+    data: InsertUserAccessGroup,
+  ): Promise<UserAccessGroup> {
+    const { userId, accessGroupId } = data;
 
-  async removeUserFromAccessGroup(userId: number, accessGroupId: number): Promise<boolean> {
-    await db.delete(userAccessGroups).where(
-      and(
-        eq(userAccessGroups.userId, userId),
-        eq(userAccessGroups.accessGroupId, accessGroupId)
-      )
-    );
-    return true;
+    const [inserted] = await db
+      .insert(userAccessGroups)
+      .values({ userId, accessGroupId })
+      .onConflictDoNothing()
+      .returning();
+
+    if (inserted) return inserted;
+
+    const [existing] = await db
+      .select()
+      .from(userAccessGroups)
+      .where(
+        and(
+          eq(userAccessGroups.userId, userId),
+          eq(userAccessGroups.accessGroupId, accessGroupId),
+        ),
+      );
+
+    return existing!;
   }
 
   // User Permission Overrides
