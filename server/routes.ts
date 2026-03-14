@@ -70,6 +70,56 @@ function generateResetToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
 
+
+function mapStaffRoleToUserRole(staffRole: string | null | undefined): User["role"] {
+  switch (staffRole) {
+    case "teacher":
+      return "teacher";
+    case "assistant_teacher":
+      return "assistant_teacher";
+    case "librarian":
+      return "librarian";
+    case "quality_control_officer":
+      return "quality_control_officer";
+    default:
+      return "school_admin";
+  }
+}
+
+function getDefaultAccessGroupNamesForUser(role: User["role"], staffRole?: string | null): string[] {
+  if (role === "org_admin") return ["Org HQ"];
+  if (role === "student") return [];
+  if (role === "parent") return [];
+
+  switch (staffRole || role) {
+    case "teacher":
+      return ["Teacher"];
+    case "assistant_teacher":
+      return ["Assistant Teacher"];
+    case "librarian":
+      return ["Librarian"];
+    case "quality_control_officer":
+      return ["Quality Control Officer"];
+    case "accountant":
+      return ["Accountant"];
+    default:
+      return [role === "school_admin" ? "School Admin" : "Teacher"];
+  }
+}
+
+async function assignDefaultAccessGroupsToUser(userId: number, role: User["role"], staffRole?: string | null): Promise<void> {
+  const groupNames = getDefaultAccessGroupNamesForUser(role, staffRole);
+  if (!groupNames.length) return;
+
+  const accessGroups = await storage.getAllAccessGroups();
+  for (const groupName of groupNames) {
+    const group = accessGroups.find(currentGroup => currentGroup.name === groupName);
+    if (group) {
+      await storage.addUserToAccessGroup({ userId, accessGroupId: group.id });
+    }
+  }
+}
+
 async function validateUserUniqueness(username: string, email?: string | null, phone?: string | null, excludeUserId?: number): Promise<string | null> {
   const existingByUsername = await storage.getUserByUsername(username);
   if (existingByUsername && existingByUsername.id !== excludeUserId) return "Username already exists";
@@ -698,6 +748,7 @@ export async function registerRoutes(
         passwordToSend = password;
       }
 
+      const userRole = mapStaffRoleToUserRole(staffMember.role);
       const newUser = await storage.createUser({
         username,
         password: hashedPassword,
@@ -705,11 +756,12 @@ export async function registerRoutes(
         firstName: staffMember.firstName,
         lastName: staffMember.lastName,
         phone: staffMember.phone || undefined,
-        role: staffMember.role === "librarian" ? "librarian" : (staffMember.role === "teacher" || staffMember.role === "assistant_teacher" ? "teacher" : "school_admin"),
+        role: userRole,
         schoolId: staffMember.schoolId || undefined,
         isActive: true,
         ...tokenData,
       });
+      await assignDefaultAccessGroupsToUser(newUser.id, userRole, staffMember.role);
       await storage.updateStaff(staffId, { userId: newUser.id });
 
       const name = `${staffMember.firstName} ${staffMember.lastName}`;
@@ -2168,7 +2220,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/grades", requireAuth, requireRole("school_admin", "org_admin", "teacher", "quality_control"), async (req, res, next) => {
+  app.post("/api/grades", requireAuth, requireRole("school_admin", "org_admin", "teacher", "quality_control_officer"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) {
@@ -2182,7 +2234,7 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/grades/:id", requireAuth, requireRole("school_admin", "org_admin", "teacher", "quality_control"), async (req, res, next) => {
+  app.put("/api/grades/:id", requireAuth, requireRole("school_admin", "org_admin", "teacher", "quality_control_officer"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       const grade = await storage.getGrade(parseInt(req.params.id));
@@ -4726,8 +4778,12 @@ export async function registerRoutes(
   });
 
   // Permissions routes
-  app.get("/api/permissions", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.get("/api/permissions", requireAuth, async (req, res, next) => {
     try {
+      const currentUser = req.user as User;
+      if (!(await canViewAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const perms = await storage.getAllPermissions();
       res.json(perms);
     } catch (error) {
@@ -4765,18 +4821,27 @@ export async function registerRoutes(
   });
 
   // Access Groups routes
-  app.get("/api/access-groups", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.get("/api/access-groups", requireAuth, async (req, res, next) => {
     try {
-      const groups = await storage.getAllAccessGroups();
+      const currentUser = req.user as User;
+      if (!(await canViewAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      const groups = await getVisibleAccessGroupsForUser(currentUser);
       res.json(groups);
     } catch (error) {
       next(error);
     }
   });
 
-  app.get("/api/access-groups/:id", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.get("/api/access-groups/:id", requireAuth, async (req, res, next) => {
     try {
-      const group = await storage.getAccessGroup(parseInt(req.params.id));
+      const currentUser = req.user as User;
+      if (!(await canViewAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      const visibleGroups = await getVisibleAccessGroupsForUser(currentUser);
+      const group = visibleGroups.find(g => g.id === parseInt(req.params.id));
       if (!group) return res.status(404).json({ message: "Access group not found" });
       res.json(group);
     } catch (error) {
@@ -4784,9 +4849,16 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/access-groups/:id/permissions", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.get("/api/access-groups/:id/permissions", requireAuth, async (req, res, next) => {
     try {
-      const perms = await storage.getAccessGroupPermissions(parseInt(req.params.id));
+      const currentUser = req.user as User;
+      if (!(await canViewAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      const visibleGroups = await getVisibleAccessGroupsForUser(currentUser);
+      const group = visibleGroups.find(g => g.id === parseInt(req.params.id));
+      if (!group) return res.status(404).json({ message: "Access group not found" });
+      const perms = await storage.getAccessGroupPermissions(group.id);
       res.json(perms);
     } catch (error) {
       next(error);
@@ -4901,49 +4973,98 @@ export async function registerRoutes(
   });
 
   // Helper function to check tenant-scoped access
-  async function checkTenantAccess(currentUser: User, targetUserId: number): Promise<{ allowed: boolean; error?: string }> {
+  async function checkTenantAccess(currentUser: User, targetUserId: number): Promise<{ allowed: boolean; error?: string; targetUser?: User }> {
     const targetUser = await storage.getUser(targetUserId);
     if (!targetUser) {
       return { allowed: false, error: "User not found" };
     }
-    
+
     if (currentUser.role === 'org_admin') {
       if (targetUser.organizationId !== currentUser.organizationId) {
         return { allowed: false, error: "Access denied - user not in your organization" };
       }
-    } else if (currentUser.role === 'school_admin') {
+    } else if (currentUser.schoolId) {
       if (targetUser.schoolId !== currentUser.schoolId) {
         return { allowed: false, error: "Access denied - user not in your school" };
       }
     }
-    return { allowed: true };
+    return { allowed: true, targetUser };
+  }
+
+  const SCHOOL_ASSIGNABLE_ACCESS_GROUP_NAMES = new Set([
+    "Teacher",
+    "Assistant Teacher",
+    "Quality Control Officer",
+    "Librarian",
+    "Accountant",
+  ]);
+
+  async function canViewAccessRights(currentUser: User): Promise<boolean> {
+    if (currentUser.role === 'org_admin') return true;
+    return (
+      await storage.userHasPermission(currentUser.id, 'access_groups.view') ||
+      await storage.userHasPermission(currentUser.id, 'users.manage_permissions')
+    );
+  }
+
+  async function canManageAccessRights(currentUser: User): Promise<boolean> {
+    if (currentUser.role === 'org_admin') return true;
+    return await storage.userHasPermission(currentUser.id, 'users.manage_permissions');
+  }
+
+  async function getVisibleAccessGroupsForUser(currentUser: User) {
+    const groups = await storage.getAllAccessGroups();
+    if (currentUser.role === 'org_admin') return groups;
+    return groups.filter(group => SCHOOL_ASSIGNABLE_ACCESS_GROUP_NAMES.has(group.name));
+  }
+
+  async function getAssignableAccessGroupForUser(currentUser: User, accessGroupId: number) {
+    const group = await storage.getAccessGroup(accessGroupId);
+    if (!group) return { allowed: false as const, error: 'Access group not found' };
+    if (currentUser.role === 'org_admin') return { allowed: true as const, group };
+    if (!SCHOOL_ASSIGNABLE_ACCESS_GROUP_NAMES.has(group.name)) {
+      return { allowed: false as const, error: 'That access group is reserved for organization administrators' };
+    }
+    return { allowed: true as const, group };
   }
 
   // User Access Groups routes
-  app.get("/api/users/:userId/access-groups", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.get("/api/users/:userId/access-groups", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canViewAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      const groups = await storage.getUserAccessGroups(targetUserId);
+      const visibleGroups = await getVisibleAccessGroupsForUser(currentUser);
+      const visibleIds = new Set(visibleGroups.map(g => g.id));
+      const groups = (await storage.getUserAccessGroups(targetUserId)).filter(group => visibleIds.has(group.id));
       res.json(groups);
     } catch (error) {
       next(error);
     }
   });
 
-  app.post("/api/users/:userId/access-groups", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.post("/api/users/:userId/access-groups", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canManageAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
       const { accessGroupId } = req.body as { accessGroupId: number };
+      const allowedGroup = await getAssignableAccessGroupForUser(currentUser, accessGroupId);
+      if (!allowedGroup.allowed) {
+        return res.status(403).json({ message: allowedGroup.error });
+      }
       const mapping = await storage.addUserToAccessGroup({
         userId: targetUserId,
         accessGroupId
@@ -4954,15 +5075,23 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/users/:userId/access-groups/:groupId", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.delete("/api/users/:userId/access-groups/:groupId", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canManageAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      await storage.removeUserFromAccessGroup(targetUserId, parseInt(req.params.groupId));
+      const groupId = parseInt(req.params.groupId);
+      const allowedGroup = await getAssignableAccessGroupForUser(currentUser, groupId);
+      if (!allowedGroup.allowed) {
+        return res.status(403).json({ message: allowedGroup.error });
+      }
+      await storage.removeUserFromAccessGroup(targetUserId, groupId);
       res.json({ success: true });
     } catch (error) {
       next(error);
@@ -4970,9 +5099,12 @@ export async function registerRoutes(
   });
 
   // User Permission Overrides routes
-  app.get("/api/users/:userId/permissions", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.get("/api/users/:userId/permissions", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canViewAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
@@ -4985,9 +5117,12 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/users/:userId/permission-overrides", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.get("/api/users/:userId/permission-overrides", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canViewAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
@@ -5000,9 +5135,12 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/users/:userId/permission-overrides", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.post("/api/users/:userId/permission-overrides", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canManageAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
@@ -5020,9 +5158,12 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/users/:userId/permission-overrides/:permissionId", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.delete("/api/users/:userId/permission-overrides/:permissionId", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canManageAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
@@ -5035,9 +5176,12 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/users/:userId/permission-overrides", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
+  app.delete("/api/users/:userId/permission-overrides", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (!(await canManageAccessRights(currentUser))) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       const targetUserId = parseInt(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
@@ -5062,22 +5206,14 @@ export async function registerRoutes(
     try {
       const requestedUserId = parseInt(req.params.userId);
       const currentUser = req.user as User;
-      
-      // Allow checking own permissions
+
       if (currentUser.id !== requestedUserId) {
-        // Check if admin with proper tenant scope
-        if (currentUser.role === 'org_admin') {
-          const targetUser = await storage.getUser(requestedUserId);
-          if (!targetUser || targetUser.organizationId !== currentUser.organizationId) {
-            return res.status(403).json({ message: "Access denied - user not in your organization" });
-          }
-        } else if (currentUser.role === 'school_admin') {
-          const targetUser = await storage.getUser(requestedUserId);
-          if (!targetUser || targetUser.schoolId !== currentUser.schoolId) {
-            return res.status(403).json({ message: "Access denied - user not in your school" });
-          }
-        } else {
+        if (!(await canViewAccessRights(currentUser))) {
           return res.status(403).json({ message: "Access denied" });
+        }
+        const access = await checkTenantAccess(currentUser, requestedUserId);
+        if (!access.allowed) {
+          return res.status(403).json({ message: access.error });
         }
       }
       

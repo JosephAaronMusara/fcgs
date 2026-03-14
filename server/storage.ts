@@ -1932,30 +1932,9 @@ export class DatabaseStorage implements IStorage {
     return result.map(r => r.permission);
   }
 
-  async addPermissionToAccessGroup(
-    data: InsertAccessGroupPermission,
-  ): Promise<AccessGroupPermission> {
-    const { accessGroupId, permissionId } = data;
-
-    const [inserted] = await db
-      .insert(accessGroupPermissions)
-      .values({ accessGroupId, permissionId })
-      .onConflictDoNothing()
-      .returning();
-
-    if (inserted) return inserted;
-
-    const [existing] = await db
-      .select()
-      .from(accessGroupPermissions)
-      .where(
-        and(
-          eq(accessGroupPermissions.accessGroupId, accessGroupId),
-          eq(accessGroupPermissions.permissionId, permissionId),
-        ),
-      );
-
-    return existing!;
+  async addPermissionToAccessGroup(data: InsertAccessGroupPermission): Promise<AccessGroupPermission> {
+    const [newMapping] = await db.insert(accessGroupPermissions).values(data).returning();
+    return newMapping;
   }
 
   async removePermissionFromAccessGroup(accessGroupId: number, permissionId: number): Promise<boolean> {
@@ -1987,30 +1966,30 @@ export class DatabaseStorage implements IStorage {
     return result.map(r => r.group);
   }
 
-  async addUserToAccessGroup(
-    data: InsertUserAccessGroup,
-  ): Promise<UserAccessGroup> {
-    const { userId, accessGroupId } = data;
+  async addUserToAccessGroup(data: InsertUserAccessGroup): Promise<UserAccessGroup> {
+    const existing = await db.select().from(userAccessGroups).where(
+      and(
+        eq(userAccessGroups.userId, data.userId),
+        eq(userAccessGroups.accessGroupId, data.accessGroupId)
+      )
+    );
 
-    const [inserted] = await db
-      .insert(userAccessGroups)
-      .values({ userId, accessGroupId })
-      .onConflictDoNothing()
-      .returning();
+    if (existing[0]) {
+      return existing[0];
+    }
 
-    if (inserted) return inserted;
+    const [newMapping] = await db.insert(userAccessGroups).values(data).returning();
+    return newMapping;
+  }
 
-    const [existing] = await db
-      .select()
-      .from(userAccessGroups)
-      .where(
-        and(
-          eq(userAccessGroups.userId, userId),
-          eq(userAccessGroups.accessGroupId, accessGroupId),
-        ),
-      );
-
-    return existing!;
+  async removeUserFromAccessGroup(userId: number, accessGroupId: number): Promise<boolean> {
+    await db.delete(userAccessGroups).where(
+      and(
+        eq(userAccessGroups.userId, userId),
+        eq(userAccessGroups.accessGroupId, accessGroupId)
+      )
+    );
+    return true;
   }
 
   // User Permission Overrides
@@ -2046,21 +2025,26 @@ export class DatabaseStorage implements IStorage {
 
   // Get effective permissions for a user
   async getUserEffectivePermissions(userId: number): Promise<{ permission: Permission; granted: boolean }[]> {
-    const allPerms = await this.getAllPermissions();
-    const userGroups = await this.getUserAccessGroups(userId);
-    const overrides = await this.getUserPermissionOverrides(userId);
-    
+    const [allPerms, userGroups, overrides] = await Promise.all([
+      this.getAllPermissions(),
+      this.getUserAccessGroups(userId),
+      this.getUserPermissionOverrides(userId),
+    ]);
+
+    const groupPermissions = await Promise.all(
+      userGroups.map(group => this.getAccessGroupPermissions(group.id))
+    );
+
     const groupPermissionIds = new Set<number>();
-    for (const group of userGroups) {
-      const groupPerms = await this.getAccessGroupPermissions(group.id);
-      groupPerms.forEach(p => groupPermissionIds.add(p.id));
+    for (const permissionsForGroup of groupPermissions) {
+      permissionsForGroup.forEach(permission => groupPermissionIds.add(permission.id));
     }
-    
+
     const overrideMap = new Map<number, boolean>();
     for (const override of overrides) {
       overrideMap.set(override.permissionId, override.granted);
     }
-    
+
     return allPerms.map(permission => {
       let granted = groupPermissionIds.has(permission.id);
       if (overrideMap.has(permission.id)) {
@@ -2071,30 +2055,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async userHasPermission(userId: number, permissionCode: string): Promise<boolean> {
-    const user = await this.getUser(userId);
-    if (!user) return false;
-    
-    if (user.role === 'org_admin') return true;
-    
     const permission = await this.getPermissionByCode(permissionCode);
     if (!permission) return false;
-    
-    const userGroups = await this.getUserAccessGroups(userId);
-    for (const group of userGroups) {
-      const groupPerms = await this.getAccessGroupPermissions(group.id);
-      if (groupPerms.some(p => p.id === permission.id)) {
-        const overrides = await this.getUserPermissionOverrides(userId);
-        const override = overrides.find(o => o.permissionId === permission.id);
-        if (override) return override.granted;
-        return true;
-      }
-    }
-    
-    const overrides = await this.getUserPermissionOverrides(userId);
-    const override = overrides.find(o => o.permissionId === permission.id);
-    if (override) return override.granted;
-    
-    return false;
+
+    const effectivePermissions = await this.getUserEffectivePermissions(userId);
+    const matchingPermission = effectivePermissions.find(({ permission: currentPermission }) => currentPermission.id === permission.id);
+    return matchingPermission?.granted === true;
   }
 
   async globalSearch(query: string): Promise<{

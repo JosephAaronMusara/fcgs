@@ -36,6 +36,7 @@ import MyChildrenPage from "@/pages/my-children";
 import SchoolSettingsPage from "@/pages/school-settings";
 import LibraryPage from "@/pages/library";
 import TimetablePage from "@/pages/timetable";
+import CalendarPage from "@/pages/calendar";
 import LogbookPage from "@/pages/logbook";
 import POSPage from "@/pages/pos";
 import NewslettersPage from "@/pages/newsletters";
@@ -62,15 +63,68 @@ import Staff360Page from "@/pages/staff-360";
 import KundAiPage from "@/pages/kundai";
 import NotFound from "@/pages/not-found";
 
+
+type RoutePermissionRule = {
+  pattern: RegExp;
+  permissions?: string[];
+  allowRoles?: string[];
+};
+
+const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
+  { pattern: /^\/dashboard$/, permissions: ["dashboard.view"] },
+  { pattern: /^\/student-360$/, permissions: ["students.view"] },
+  { pattern: /^\/staff-360$/, permissions: ["staff.view"] },
+  { pattern: /^\/staff$/, permissions: ["staff.view"] },
+  { pattern: /^\/students$/, permissions: ["students.view"] },
+  { pattern: /^\/parents$/, permissions: ["parents.view"] },
+  { pattern: /^\/classes$/, permissions: ["classes.view"] },
+  { pattern: /^\/subjects$/, permissions: ["subjects.view"] },
+  { pattern: /^\/grades$/, permissions: ["grades.view"] },
+  { pattern: /^\/assessments$/, permissions: ["assessments.view"] },
+  { pattern: /^\/marks-entry$/, permissions: ["marks.view", "marks.create"] },
+  { pattern: /^\/academic-reports$/, permissions: ["reports.view"] },
+  { pattern: /^\/qc-reports(\/.*)?$/, permissions: ["qc_reports.view"] },
+  { pattern: /^\/attendance$/, permissions: ["attendance.view"] },
+  { pattern: /^\/fees$/, permissions: ["fees.view"], allowRoles: ["parent"] },
+  { pattern: /^\/clinic$/, permissions: ["clinic.view"] },
+  { pattern: /^\/discipline$/, permissions: ["discipline.view"] },
+  { pattern: /^\/marks$/, permissions: ["marks.view"] },
+  { pattern: /^\/record-of-marks$/, permissions: ["record_of_marks.view"] },
+  { pattern: /^\/kundai$/, permissions: ["dashboard.view"] },
+  { pattern: /^\/settings$/, permissions: ["settings.view"] },
+  { pattern: /^\/library$/, permissions: ["library.view"] },
+  { pattern: /^\/calendar$/, permissions: ["calendar.view"] },
+  { pattern: /^\/timetable$/, permissions: ["timetable.view"] },
+  { pattern: /^\/logbook$/, permissions: ["logbook.view"] },
+  { pattern: /^\/pos$/, permissions: ["pos.view"] },
+  { pattern: /^\/newsletters$/, permissions: ["newsletters.view"] },
+  { pattern: /^\/schemes$/, permissions: ["schemes.view"] },
+  { pattern: /^\/hostel$/, permissions: ["hostel.view"] },
+  { pattern: /^\/hostels$/, permissions: ["hostels.view"] },
+  { pattern: /^\/applications$/, permissions: ["applications.view"] },
+  { pattern: /^\/messages$/, permissions: ["communication.view"] },
+  { pattern: /^\/my-classes$/, allowRoles: ["student"] },
+  { pattern: /^\/my-attendance$/, allowRoles: ["student"] },
+  { pattern: /^\/my-grades$/, allowRoles: ["student"] },
+  { pattern: /^\/my-profile$/, allowRoles: ["student", "parent"] },
+  { pattern: /^\/my-notifications$/, allowRoles: ["student", "parent"] },
+  { pattern: /^\/my-newsletters$/, allowRoles: ["student", "parent"] },
+  { pattern: /^\/children$/, allowRoles: ["parent"] },
+  { pattern: /^\/children-attendance$/, allowRoles: ["parent"] },
+  { pattern: /^\/children-reports$/, allowRoles: ["parent"] },
+];
+
+function getPermissionRuleForPath(path: string): RoutePermissionRule | undefined {
+  return ROUTE_PERMISSION_RULES.find(rule => rule.pattern.test(path));
+}
+
 function ProtectedRoute({ 
-  component: Component, 
-  allowedRoles 
+  component: Component 
 }: { 
   component: React.ComponentType;
-  allowedRoles?: string[];
 }) {
-  const { user, isLoading, isInSchoolContext } = useAuth();
-  const [, setLocation] = useLocation();
+  const { user, isLoading, isInSchoolContext, hasAnyPermission } = useAuth();
+  const [location, setLocation] = useLocation();
 
   const shouldRedirectLogin = !isLoading && !user;
   const shouldRedirectReset = !isLoading && user?.mustResetPassword;
@@ -98,7 +152,10 @@ function ProtectedRoute({
     return null;
   }
 
-  if (allowedRoles && !allowedRoles.includes(user.role)) {
+  const permissionRule = getPermissionRuleForPath(location);
+  const roleAllowed = permissionRule?.allowRoles ? permissionRule.allowRoles.includes(user.role) : false;
+  const permissionAllowed = permissionRule?.permissions?.length ? hasAnyPermission(...permissionRule.permissions) : true;
+  if ((permissionRule && !roleAllowed && !permissionAllowed) || !permissionRule) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
@@ -642,47 +699,48 @@ function AuthenticatedRoutes() {
     <AppLayout>
       <Switch>
         <Route path="/dashboard" component={() => <ProtectedRoute component={Dashboard} />} />
-        <Route path="/student-360" component={() => <ProtectedRoute component={Student360Page} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/staff-360" component={() => <ProtectedRoute component={Staff360Page} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/staff" component={() => <ProtectedRoute component={StaffPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/students" component={() => <ProtectedRoute component={StudentsPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/parents" component={() => <ProtectedRoute component={ParentsPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/classes" component={() => <ProtectedRoute component={ClassesPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/subjects" component={() => <ProtectedRoute component={SubjectsPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/grades" component={() => <ProtectedRoute component={GradesPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/assessments" component={() => <ProtectedRoute component={AssessmentsPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/marks-entry" component={() => <ProtectedRoute component={MarksEntryPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/academic-reports" component={() => <ProtectedRoute component={AcademicReportsPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/qc-reports" component={() => <ProtectedRoute component={QCReportsPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/qc-reports/class/:classId" component={() => <ProtectedRoute component={QCReportsClassPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/qc-reports/student/:studentId" component={() => <ProtectedRoute component={QCReportsStudentPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/attendance" component={() => <ProtectedRoute component={AttendancePage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/fees" component={() => <ProtectedRoute component={FeesPage} allowedRoles={["school_admin", "org_admin", "parent"]} />} />
-        <Route path="/clinic" component={() => <ProtectedRoute component={ClinicPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/discipline" component={() => <ProtectedRoute component={DisciplinePage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/marks" component={() => <ProtectedRoute component={MarksPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/record-of-marks" component={() => <ProtectedRoute component={RecordOfMarksPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/kundai" component={() => <ProtectedRoute component={KundAiPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/children" component={() => <ProtectedRoute component={MyChildrenPage} allowedRoles={["parent"]} />} />
-        <Route path="/settings" component={() => <ProtectedRoute component={SchoolSettingsPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/library" component={() => <ProtectedRoute component={LibraryPage} allowedRoles={["school_admin", "org_admin", "teacher", "student", "parent"]} />} />
-        <Route path="/timetable" component={() => <ProtectedRoute component={TimetablePage} allowedRoles={["school_admin", "org_admin", "teacher", "student"]} />} />
-        <Route path="/logbook" component={() => <ProtectedRoute component={LogbookPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/pos" component={() => <ProtectedRoute component={POSPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/newsletters" component={() => <ProtectedRoute component={NewslettersPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/schemes" component={() => <ProtectedRoute component={SchemesPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/hostel" component={() => <ProtectedRoute component={HostelPage} allowedRoles={["school_admin", "org_admin", "teacher"]} />} />
-        <Route path="/hostels" component={() => <ProtectedRoute component={HostelsPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/applications" component={() => <ProtectedRoute component={ApplicationsPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/messages" component={() => <ProtectedRoute component={MessagesPage} allowedRoles={["school_admin", "org_admin"]} />} />
-        <Route path="/my-classes" component={() => <ProtectedRoute component={MyClassesPage} allowedRoles={["student"]} />} />
-        <Route path="/my-attendance" component={() => <ProtectedRoute component={MyAttendancePage} allowedRoles={["student"]} />} />
-        <Route path="/my-grades" component={() => <ProtectedRoute component={MyGradesPage} allowedRoles={["student"]} />} />
-        <Route path="/my-profile" component={() => <ProtectedRoute component={MyProfilePage} allowedRoles={["student", "parent"]} />} />
-        <Route path="/my-notifications" component={() => <ProtectedRoute component={MyNotificationsPage} allowedRoles={["student", "parent"]} />} />
-        <Route path="/my-newsletters" component={() => <ProtectedRoute component={MyNewslettersPage} allowedRoles={["student", "parent"]} />} />
-        <Route path="/children-attendance" component={() => <ProtectedRoute component={ChildrenAttendancePage} allowedRoles={["parent"]} />} />
-        <Route path="/children-reports" component={() => <ProtectedRoute component={ChildrenReportsPage} allowedRoles={["parent"]} />} />
+        <Route path="/student-360" component={() => <ProtectedRoute component={Student360Page} />} />
+        <Route path="/staff-360" component={() => <ProtectedRoute component={Staff360Page} />} />
+        <Route path="/staff" component={() => <ProtectedRoute component={StaffPage} />} />
+        <Route path="/students" component={() => <ProtectedRoute component={StudentsPage} />} />
+        <Route path="/parents" component={() => <ProtectedRoute component={ParentsPage} />} />
+        <Route path="/classes" component={() => <ProtectedRoute component={ClassesPage} />} />
+        <Route path="/subjects" component={() => <ProtectedRoute component={SubjectsPage} />} />
+        <Route path="/grades" component={() => <ProtectedRoute component={GradesPage} />} />
+        <Route path="/assessments" component={() => <ProtectedRoute component={AssessmentsPage} />} />
+        <Route path="/marks-entry" component={() => <ProtectedRoute component={MarksEntryPage} />} />
+        <Route path="/academic-reports" component={() => <ProtectedRoute component={AcademicReportsPage} />} />
+        <Route path="/qc-reports" component={() => <ProtectedRoute component={QCReportsPage} />} />
+        <Route path="/qc-reports/class/:classId" component={() => <ProtectedRoute component={QCReportsClassPage} />} />
+        <Route path="/qc-reports/student/:studentId" component={() => <ProtectedRoute component={QCReportsStudentPage} />} />
+        <Route path="/attendance" component={() => <ProtectedRoute component={AttendancePage} />} />
+        <Route path="/fees" component={() => <ProtectedRoute component={FeesPage} />} />
+        <Route path="/clinic" component={() => <ProtectedRoute component={ClinicPage} />} />
+        <Route path="/discipline" component={() => <ProtectedRoute component={DisciplinePage} />} />
+        <Route path="/marks" component={() => <ProtectedRoute component={MarksPage} />} />
+        <Route path="/record-of-marks" component={() => <ProtectedRoute component={RecordOfMarksPage} />} />
+        <Route path="/kundai" component={() => <ProtectedRoute component={KundAiPage} />} />
+        <Route path="/children" component={() => <ProtectedRoute component={MyChildrenPage} />} />
+        <Route path="/settings" component={() => <ProtectedRoute component={SchoolSettingsPage} />} />
+        <Route path="/library" component={() => <ProtectedRoute component={LibraryPage} />} />
+        <Route path="/calendar" component={() => <ProtectedRoute component={CalendarPage} />} />
+        <Route path="/timetable" component={() => <ProtectedRoute component={TimetablePage} />} />
+        <Route path="/logbook" component={() => <ProtectedRoute component={LogbookPage} />} />
+        <Route path="/pos" component={() => <ProtectedRoute component={POSPage} />} />
+        <Route path="/newsletters" component={() => <ProtectedRoute component={NewslettersPage} />} />
+        <Route path="/schemes" component={() => <ProtectedRoute component={SchemesPage} />} />
+        <Route path="/hostel" component={() => <ProtectedRoute component={HostelPage} />} />
+        <Route path="/hostels" component={() => <ProtectedRoute component={HostelsPage} />} />
+        <Route path="/applications" component={() => <ProtectedRoute component={ApplicationsPage} />} />
+        <Route path="/messages" component={() => <ProtectedRoute component={MessagesPage} />} />
+        <Route path="/my-classes" component={() => <ProtectedRoute component={MyClassesPage} />} />
+        <Route path="/my-attendance" component={() => <ProtectedRoute component={MyAttendancePage} />} />
+        <Route path="/my-grades" component={() => <ProtectedRoute component={MyGradesPage} />} />
+        <Route path="/my-profile" component={() => <ProtectedRoute component={MyProfilePage} />} />
+        <Route path="/my-notifications" component={() => <ProtectedRoute component={MyNotificationsPage} />} />
+        <Route path="/my-newsletters" component={() => <ProtectedRoute component={MyNewslettersPage} />} />
+        <Route path="/children-attendance" component={() => <ProtectedRoute component={ChildrenAttendancePage} />} />
+        <Route path="/children-reports" component={() => <ProtectedRoute component={ChildrenReportsPage} />} />
         <Route component={NotFound} />
       </Switch>
     </AppLayout>

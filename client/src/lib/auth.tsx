@@ -11,7 +11,7 @@ interface User {
   id: number;
   username: string;
   email: string | null;
-  role: "org_admin" | "school_admin" | "teacher" | "student" | "parent";
+  role: "org_admin" | "school_admin" | "teacher" | "quality_control_officer" | "assistant_teacher" | "librarian" | "student" | "parent";
   firstName: string | null;
   lastName: string | null;
   phone: string | null;
@@ -19,6 +19,7 @@ interface User {
   organizationId: number | null;
   mustResetPassword?: boolean;
   schoolTermination?: SchoolTermination | null;
+  effectivePermissions?: string[];
 }
 
 interface AuthContextType {
@@ -28,6 +29,9 @@ interface AuthContextType {
   setCurrentSchoolId: (id: number | null) => void;
   isInSchoolContext: boolean;
   schoolTermination: SchoolTermination | null;
+  permissions: string[];
+  hasPermission: (permission: string) => boolean;
+  hasAnyPermission: (...permissions: string[]) => boolean;
   login: (username: string, password: string, loginRole?: string) => Promise<void>;
   logout: () => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
@@ -125,6 +129,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const isInSchoolContext = user?.role === "org_admin" ? currentSchoolId !== null : true;
 
   const schoolTermination = user?.schoolTermination ?? null;
+  const permissions = user?.effectivePermissions ?? [];
+  const hasPermission = (permission: string) => permissions.includes(permission);
+  const hasAnyPermission = (...permissionCodes: string[]) => permissionCodes.some(permission => permissions.includes(permission));
 
   return (
     <AuthContext.Provider value={{ 
@@ -134,6 +141,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setCurrentSchoolId,
       isInSchoolContext,
       schoolTermination,
+      permissions,
+      hasPermission,
+      hasAnyPermission,
       login, 
       logout, 
       register,

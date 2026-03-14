@@ -669,13 +669,17 @@ export const accessGroupPermissions = pgTable("access_group_permissions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   accessGroupId: integer("access_group_id").references(() => accessGroups.id).notNull(),
   permissionId: integer("permission_id").references(() => permissions.id).notNull(),
-});
+}, (table) => ({
+  accessGroupPermissionUniqueIdx: uniqueIndex("access_group_permissions_group_permission_uidx").on(table.accessGroupId, table.permissionId),
+}));
 
 export const userAccessGroups = pgTable("user_access_groups", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   userId: integer("user_id").references(() => users.id).notNull(),
   accessGroupId: integer("access_group_id").references(() => accessGroups.id).notNull(),
-});
+}, (table) => ({
+  userAccessGroupUniqueIdx: uniqueIndex("user_access_groups_user_group_uidx").on(table.userId, table.accessGroupId),
+}));
 
 export const userPermissionOverrides = pgTable("user_permission_overrides", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -683,7 +687,9 @@ export const userPermissionOverrides = pgTable("user_permission_overrides", {
   permissionId: integer("permission_id").references(() => permissions.id).notNull(),
   granted: boolean("granted").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  userPermissionOverrideUniqueIdx: uniqueIndex("user_permission_overrides_user_permission_uidx").on(table.userId, table.permissionId),
+}));
 
 export const userSchoolAccess = pgTable("user_school_access", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),

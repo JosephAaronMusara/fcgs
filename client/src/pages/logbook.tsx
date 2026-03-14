@@ -78,8 +78,8 @@ interface StaffGridData {
 
 export default function LogbookPage() {
   const { toast } = useToast();
-  const { user } = useAuth();
-  const isAdmin = user?.role === "org_admin" || user?.role === "school_admin";
+  const { user, hasAnyPermission } = useAuth();
+  const isAdmin = hasAnyPermission("staff.view") || hasAnyPermission("activity_logs.view");
   const [activeTab, setActiveTab] = useState("attendance");
 
   const [dateFrom, setDateFrom] = useState(() => {

@@ -512,7 +512,7 @@ export async function createBroadcastNotifications(params: {
 
     let targetUsers = schoolUsers;
     if (params.targetAudience === "staff") {
-      targetUsers = schoolUsers.filter(u => u.role === "school_admin" || u.role === "teacher");
+      targetUsers = schoolUsers.filter(u => !["student", "parent"].includes(u.role));
     } else if (params.targetAudience === "students") {
       targetUsers = schoolUsers.filter(u => u.role === "student");
     } else if (params.targetAudience === "parents") {

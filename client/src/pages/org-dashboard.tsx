@@ -1,6 +1,7 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
+import CalendarPage from "@/pages/calendar";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useUpload } from "@/hooks/use-upload";
@@ -159,9 +160,10 @@ function getCountdown(terminationAt: string | Date | null): string {
 }
 
 export default function OrgDashboard() {
-  const { user, logout, enterSchool, setCurrentSchoolId } = useAuth();
+  const { user, logout, enterSchool, setCurrentSchoolId, hasPermission, hasAnyPermission } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const [isAddSchoolOpen, setIsAddSchoolOpen] = useState(false);
   const [isAddUserOpen, setIsAddUserOpen] = useState(false);
   const [schoolToDelete, setSchoolToDelete] = useState<SchoolType | null>(null);
@@ -181,6 +183,7 @@ export default function OrgDashboard() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isManageAccountOpen, setIsManageAccountOpen] = useState(false);
   const [isOrgSettingsOpen, setIsOrgSettingsOpen] = useState(false);
+  const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const currentYear = new Date().getFullYear();
   const [orgAcademicYear, setOrgAcademicYear] = useState<number>(currentYear);
   const [orgTerm, setOrgTerm] = useState<string>("term1");
@@ -933,6 +936,17 @@ export default function OrgDashboard() {
                 </div>
               </SheetContent>
             </Sheet>
+            {hasPermission("calendar.view") && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setIsCalendarOpen(true)}
+                data-testid="button-open-hq-calendar"
+                title="Open Calendar"
+              >
+                <Calendar className="h-5 w-5" />
+              </Button>
+            )}
             <Button 
               variant="ghost" 
               size="icon" 
@@ -1659,7 +1673,7 @@ export default function OrgDashboard() {
                   Access Rights
                 </h3>
                 <p className="text-sm text-muted-foreground mb-3">
-                  Org HQ users have all permissions by default. Uncheck to remove specific permissions.
+                  Configure school access and explicit permission overrides for this Org HQ user. Access groups and overrides now determine what they can do.
                 </p>
                 <div className="space-y-2 border rounded-lg p-3">
                   {Object.entries(permissionsByCategory).map(([category, perms]) => (
@@ -1865,6 +1879,23 @@ export default function OrgDashboard() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={isCalendarOpen} onOpenChange={setIsCalendarOpen}>
+        <DialogContent className="max-w-[95vw] w-[95vw] max-h-[92vh] p-0 flex flex-col">
+          <DialogHeader className="px-6 pt-6 pb-0">
+            <DialogTitle className="flex items-center gap-2">
+              <Calendar className="h-5 w-5" />
+              Calendar
+            </DialogTitle>
+            <DialogDescription>
+              View and manage organization calendar events without leaving HQ.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto px-6 pb-6 pt-4">
+            <CalendarPage />
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isOrgSettingsOpen} onOpenChange={(open) => {
         setIsOrgSettingsOpen(open);
         if (!open) {
@@ -1897,10 +1928,12 @@ export default function OrgDashboard() {
                 <SlidersHorizontal className="h-4 w-4 mr-1" />
                 Features
               </TabsTrigger>
+              {canManageAccessRights && (
               <TabsTrigger value="access-rights" data-testid="tab-org-access-rights">
                 <Shield className="h-4 w-4 mr-1" />
                 Access Rights
               </TabsTrigger>
+              )}
               <TabsTrigger value="activity-logs" data-testid="tab-org-activity-logs">
                 <ClipboardList className="h-4 w-4 mr-1" />
                 Activity Logs
@@ -2321,9 +2354,11 @@ export default function OrgDashboard() {
                 )}
               </div>
             </TabsContent>
+            {canManageAccessRights && (
             <TabsContent value="access-rights" className="flex-1 overflow-y-auto mt-4">
               <AccessRightsSection />
             </TabsContent>
+            )}
             <TabsContent value="activity-logs" className="flex-1 overflow-y-auto mt-4">
               <OrgActivityLogsSection schools={schools} />
             </TabsContent>
@@ -2833,6 +2868,8 @@ function OrgActivityLogsSection({ schools }: { schools: SchoolType[] }) {
 
 function AccessRightsSection() {
   const { toast } = useToast();
+  const { hasAnyPermission } = useAuth();
+  const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const [selectedGroup, setSelectedGroup] = useState<AccessGroup | null>(null);
   const [isManageGroupsOpen, setIsManageGroupsOpen] = useState(false);
   const [isManageRolesOpen, setIsManageRolesOpen] = useState(false);
@@ -2850,15 +2887,17 @@ function AccessRightsSection() {
 
   const { data: accessGroups = [], isLoading: groupsLoading } = useQuery<AccessGroup[]>({
     queryKey: ["/api/access-groups"],
+    enabled: canManageAccessRights,
   });
 
   const { data: permissions = [], isLoading: permissionsLoading } = useQuery<Permission[]>({
     queryKey: ["/api/permissions"],
+    enabled: canManageAccessRights,
   });
 
   const { data: groupPermissions = [] } = useQuery<Permission[]>({
     queryKey: ["/api/access-groups", selectedGroup?.id, "permissions"],
-    enabled: !!selectedGroup,
+    enabled: canManageAccessRights && !!selectedGroup,
   });
 
   const { data: staffRolesList = [], isLoading: rolesLoading } = useQuery<StaffRole[]>({
@@ -3025,7 +3064,7 @@ function AccessRightsSection() {
 
   const { isLoading: groupPermissionsLoading } = useQuery<Permission[]>({
     queryKey: ["/api/access-groups", selectedGroup?.id, "permissions"],
-    enabled: !!selectedGroup,
+    enabled: canManageAccessRights && !!selectedGroup,
   });
 
   const permissionsByCategory = permissions.reduce((acc, perm) => {

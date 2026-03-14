@@ -1,7 +1,6 @@
 import type { Express, Request } from "express";
 import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
-import { storage } from "./storage";
 import {
   calendarEvents,
   calendarEventAttendees,
@@ -15,6 +14,7 @@ import {
   parents,
 } from "../shared/schema";
 import { requireAuth } from "./auth";
+import { storage } from "./storage";
 
 type AuthedUser = {
   id: number;
@@ -30,7 +30,6 @@ function getUser(req: Request): AuthedUser | null {
 }
 
 function isStaffLikeRole(role?: string) {
-  // In this app: staff-like = anything that's not student/parent (includes org_admin/school_admin/teacher/etc)
   return role !== "student" && role !== "parent";
 }
 
@@ -73,7 +72,12 @@ async function getEventClassIds(eventId: number): Promise<number[]> {
 
 async function isClassTeacherOfAny(staffId: number, classIds: number[]) {
   if (!classIds.length) return false;
+  const rows = await db
+    .select({ id: classes.id })
+    .from(classes)
+    .where(inArray(classes.id, classIds));
 
+  // We need to check teacher per class; easiest is SQL:
   const result = await db.execute(sql`
     SELECT 1
     FROM classes
@@ -85,15 +89,39 @@ async function isClassTeacherOfAny(staffId: number, classIds: number[]) {
   return ((result as any).rows ?? []).length > 0;
 }
 
+
+async function hasCalendarPermission(userId: number, permissionCode: string) {
+  return storage.userHasPermission(userId, permissionCode);
+}
+
+async function canCreateCalendarScope(userId: number, scope: string) {
+  const permissionMap: Record<string, string> = {
+    personal: "calendar.create.personal",
+    class: "calendar.create.class",
+    school: "calendar.create.school",
+    org: "calendar.create.org",
+  };
+  const permission = permissionMap[scope];
+  return permission ? hasCalendarPermission(userId, permission) : false;
+}
+
+async function canEditCalendarEvent(userId: number, scope: string, isOwnerLike: boolean, isScopedManager: boolean) {
+  if (isOwnerLike && await hasCalendarPermission(userId, "calendar.edit.own")) return true;
+  if (isScopedManager && await hasCalendarPermission(userId, "calendar.edit.scope")) return true;
+  return false;
+}
+
+async function canDeleteCalendarEvent(userId: number, scope: string, isOwnerLike: boolean, isScopedManager: boolean) {
+  if (isOwnerLike && await hasCalendarPermission(userId, "calendar.delete.own")) return true;
+  if (isScopedManager && await hasCalendarPermission(userId, "calendar.delete.scope")) return true;
+  return false;
+}
+
 function parseDateOrNull(v: any): Date | null {
   if (!v) return null;
   const d = new Date(String(v));
   if (isNaN(d.getTime())) return null;
   return d;
-}
-
-async function requirePerm(userId: number, code: string): Promise<boolean> {
-  return await storage.userHasPermission(userId, code);
 }
 
 export function registerCalendarRoutes(app: Express) {
@@ -104,10 +132,6 @@ export function registerCalendarRoutes(app: Express) {
   app.get("/api/calendar/events", requireAuth, async (req, res) => {
     const user = getUser(req);
     if (!user?.id) return res.status(401).json({ message: "Authentication required" });
-
-    // RBAC: must have calendar.view (applies to staff/student/parent if you want them using calendar)
-    const canView = await requirePerm(user.id, "calendar.view");
-    if (!canView) return res.status(403).json({ message: "Missing permission: calendar.view" });
 
     const from = parseDateOrNull(req.query.from);
     const to = parseDateOrNull(req.query.to);
@@ -128,7 +152,8 @@ export function registerCalendarRoutes(app: Express) {
     if (isStaffLikeRole(user.role) && !studentRow && !parentRow) {
       const schoolIdCtx = staffRow?.schoolId ?? user.schoolId ?? null;
       const orgIdCtx =
-        user.organizationId ?? (schoolIdCtx ? await getOrganizationIdBySchoolId(schoolIdCtx) : null);
+        user.organizationId ??
+        (schoolIdCtx ? await getOrganizationIdBySchoolId(schoolIdCtx) : null);
 
       const staffIdCtx = staffRow?.id ?? null;
 
@@ -137,6 +162,10 @@ export function registerCalendarRoutes(app: Express) {
 
       const staffIsClassTeacher = staffIdCtx ? sql`c.class_teacher_id = ${staffIdCtx}` : sql`false`;
       const staffIsViewer = staffIdCtx ? sql`sv.staff_id = ${staffIdCtx}` : sql`false`;
+
+      // Admins: can see all class events in their school (useful for oversight)
+      const adminCanSeeAllClassInSchool =
+        user.role === "school_admin" || user.role === "org_admin" ? sql`true` : sql`false`;
 
       const result = await db.execute(sql`
         SELECT
@@ -152,9 +181,10 @@ export function registerCalendarRoutes(app: Express) {
             -- personal events you own
             (e.scope = 'personal' AND e.owner_user_id = ${user.id})
             OR
-            -- class events: creator OR class teacher OR selected staff viewer (in same school)
+            -- class events:
             (e.scope = 'class' AND ${schoolFilter} AND (
               e.created_by_user_id = ${user.id}
+              OR ${adminCanSeeAllClassInSchool}
               OR ${staffIsClassTeacher}
               OR ${staffIsViewer}
             ))
@@ -189,16 +219,16 @@ export function registerCalendarRoutes(app: Express) {
         LEFT JOIN calendar_event_classes ec ON ec.event_id = e.id
         WHERE e.start_at < ${to} AND e.end_at > ${from}
           AND (
-            -- personal (kept for completeness)
+            -- personal (kept for completeness; students don't create in our rules)
             (e.scope = 'personal' AND e.owner_user_id = ${user.id})
             OR
             -- class events visible to students in their class
             (e.scope = 'class' AND e.include_students = true AND ec.class_id = ${studentRow.classId})
             OR
-            -- school events visible to all students in school (only if includeStudents)
+            -- school events visible to all students in school
             (e.scope = 'school' AND e.school_id = ${studentRow.schoolId} AND e.include_students = true)
             OR
-            -- org events visible to students (only if includeStudents)
+            -- org events visible to students (default ON)
             (e.scope = 'org' AND ${orgFilter} AND e.include_students = true)
           )
         GROUP BY e.id
@@ -260,7 +290,7 @@ export function registerCalendarRoutes(app: Express) {
             -- school events where parents explicitly included
             (e.scope = 'school' AND e.include_parents = true AND e.school_id = ANY(${schoolIdsSql}))
             OR
-            -- org events where parents explicitly included
+            -- org events where parents explicitly included (checkbox)
             (e.scope = 'org' AND e.include_parents = true AND e.organization_id = ANY(${orgIdsSql}))
           )
         GROUP BY e.id
@@ -287,6 +317,9 @@ export function registerCalendarRoutes(app: Express) {
 
     if (!isStaffLikeRole(user.role)) {
       return res.status(403).json({ message: "Only staff can create events" });
+    }
+    if (!(await hasCalendarPermission(user.id, "calendar.view"))) {
+      return res.status(403).json({ message: "You do not have calendar access" });
     }
 
     const staffRow = await getStaffRowByUserId(user.id);
@@ -324,28 +357,13 @@ export function registerCalendarRoutes(app: Express) {
     const incStudents = includeStudents !== false; // default true
     const incParents = !!includeParents; // default false
 
-    // RBAC: check create permission based on scope
-    const createPermByScope: Record<string, string> = {
-      personal: "calendar.create.personal",
-      class: "calendar.create.class",
-      school: "calendar.create.school",
-      org: "calendar.create.org",
-    };
-
-    const requiredCreatePerm = createPermByScope[scope];
-    if (!requiredCreatePerm) {
-      return res.status(400).json({ message: "Unsupported scope. Use personal|class|school|org" });
-    }
-
-    const canCreate = await requirePerm(user.id, requiredCreatePerm);
-    if (!canCreate) {
-      return res.status(403).json({ message: `Missing permission: ${requiredCreatePerm}` });
-    }
-
     // ----------------------------
     // CLASS EVENT (multi-class)
     // ----------------------------
     if (scope === "class") {
+      if (!(await canCreateCalendarScope(user.id, "class"))) {
+        return res.status(403).json({ message: "You do not have permission to create class events" });
+      }
       if (!Array.isArray(classIds) || classIds.length === 0) {
         return res.status(400).json({ message: "classIds[] is required for scope=class" });
       }
@@ -369,7 +387,7 @@ export function registerCalendarRoutes(app: Express) {
         return res.status(400).json({ message: "All selected classes must belong to the same school" });
       }
 
-      // Staff can only create class events for their own school
+      // Any staff can create class events for any class in THEIR school
       if (!schoolIdCtx || schoolIdCtx !== schoolId) {
         return res.status(403).json({ message: "You can only create class events for your own school" });
       }
@@ -412,7 +430,7 @@ export function registerCalendarRoutes(app: Express) {
             allDay: !!allDay,
             timezone: tz,
             includeStudents: incStudents, // default true
-            includeParents: incParents, // default false unless checked
+            includeParents: incParents,   // default false unless checked
           })
           .returning();
 
@@ -438,9 +456,14 @@ export function registerCalendarRoutes(app: Express) {
 
     // ----------------------------
     // SCHOOL EVENT
-    // - permission-based via calendar.create.school
+    // - created by school_admin/org_admin (safe default)
+    // - visible to staff + students (includeStudents default ON)
+    // - parents only if includeParents checked
     // ----------------------------
     if (scope === "school") {
+      if (!(await canCreateCalendarScope(user.id, "school"))) {
+        return res.status(403).json({ message: "You do not have permission to create school events" });
+      }
       if (!schoolIdCtx) {
         return res.status(400).json({ message: "No school context for this user" });
       }
@@ -464,7 +487,7 @@ export function registerCalendarRoutes(app: Express) {
           allDay: !!allDay,
           timezone: tz,
           includeStudents: incStudents, // default true
-          includeParents: incParents, // checkbox controls parent visibility
+          includeParents: incParents,   // checkbox controls parent visibility
         })
         .returning();
 
@@ -473,12 +496,17 @@ export function registerCalendarRoutes(app: Express) {
 
     // ----------------------------
     // ORG / HQ EVENT
-    // - permission-based via calendar.create.org
+    // - created by org_admin
+    // - visible to staff in org
+    // - students if includeStudents true
+    // - parents only if includeParents checked
     // ----------------------------
     if (scope === "org") {
-      const orgId =
-        user.organizationId ?? (schoolIdCtx ? await getOrganizationIdBySchoolId(schoolIdCtx) : null);
+      if (!(await canCreateCalendarScope(user.id, "org"))) {
+        return res.status(403).json({ message: "You do not have permission to create organization events" });
+      }
 
+      const orgId = user.organizationId ?? (schoolIdCtx ? await getOrganizationIdBySchoolId(schoolIdCtx) : null);
       if (!orgId) {
         return res.status(400).json({ message: "No organization context for this user" });
       }
@@ -500,7 +528,7 @@ export function registerCalendarRoutes(app: Express) {
           allDay: !!allDay,
           timezone: tz,
           includeStudents: incStudents, // default true
-          includeParents: incParents, // optional checkbox
+          includeParents: incParents,   // optional checkbox
         })
         .returning();
 
@@ -511,8 +539,16 @@ export function registerCalendarRoutes(app: Express) {
     // PERSONAL EVENT (staff only)
     // ----------------------------
     if (scope === "personal") {
+      if (!isStaffLikeRole(user.role)) {
+        return res.status(403).json({ message: "Only staff can create personal events" });
+      }
+      if (!(await canCreateCalendarScope(user.id, "personal"))) {
+        return res.status(403).json({ message: "You do not have permission to create personal events" });
+      }
+
       const orgId =
-        user.organizationId ?? (schoolIdCtx ? await getOrganizationIdBySchoolId(schoolIdCtx) : null);
+        user.organizationId ??
+        (schoolIdCtx ? await getOrganizationIdBySchoolId(schoolIdCtx) : null);
 
       const [created] = await db
         .insert(calendarEvents)
@@ -552,6 +588,9 @@ export function registerCalendarRoutes(app: Express) {
     if (!isStaffLikeRole(user.role)) {
       return res.status(403).json({ message: "Only staff can edit events" });
     }
+    if (!(await hasCalendarPermission(user.id, "calendar.view"))) {
+      return res.status(403).json({ message: "You do not have calendar access" });
+    }
 
     const eventId = Number(req.params.id);
     if (!eventId || isNaN(eventId)) return res.status(400).json({ message: "Invalid event id" });
@@ -564,61 +603,31 @@ export function registerCalendarRoutes(app: Express) {
     const [ev] = await db.select().from(calendarEvents).where(eq(calendarEvents.id, eventId));
     if (!ev) return res.status(404).json({ message: "Event not found" });
 
-    const canEditOwn = await requirePerm(user.id, "calendar.edit.own");
-    const canEditScope = await requirePerm(user.id, "calendar.edit.scope");
-
-    if (!canEditOwn && !canEditScope) {
-      return res.status(403).json({ message: "Missing permission: calendar.edit.own / calendar.edit.scope" });
-    }
-
-    // Authorization basics
+    // Authorization
     const isCreator = ev.createdByUserId === user.id;
     const isOwner = ev.ownerUserId === user.id;
 
-    // Determine event scope context
-    const eventOrgId =
-      ev.organizationId ?? (ev.schoolId ? await getOrganizationIdBySchoolId(ev.schoolId) : null);
-
-    const sameSchool = schoolIdCtx && ev.schoolId && schoolIdCtx === ev.schoolId;
-    const sameOrg = orgIdCtx && eventOrgId && orgIdCtx === eventOrgId;
-
+    const isSchoolAdmin = user.role === "school_admin";
     const isOrgAdmin = user.role === "org_admin";
 
-    // Optional: class teacher can be considered "scoped" only if they also have edit.scope
+    const sameSchool = schoolIdCtx && ev.schoolId && schoolIdCtx === ev.schoolId;
+    const sameOrg = orgIdCtx && ev.organizationId && orgIdCtx === ev.organizationId;
+
     let isClassTeacher = false;
     if (ev.scope === "class" && staffRow?.id) {
       const classIds = await getEventClassIds(eventId);
       isClassTeacher = await isClassTeacherOfAny(staffRow.id, classIds);
     }
 
-    // Permission-based decision:
-    // - personal: only owner + calendar.edit.own
-    // - non-personal:
-    //    * if creator/owner -> calendar.edit.own OR calendar.edit.scope
-    //    * if not creator -> calendar.edit.scope AND within scope
-    let allowed = false;
+    const ownerLike = ev.scope === "personal" ? isOwner : isCreator || isOwner || isClassTeacher;
+    const scopedManager =
+      ev.scope === "org"
+        ? !!sameOrg
+        : ev.scope === "school" || ev.scope === "class"
+          ? !!sameSchool || !!sameOrg
+          : false;
 
-    if (ev.scope === "personal") {
-      allowed = isOwner && canEditOwn;
-    } else if (isCreator || isOwner) {
-      allowed = canEditOwn || canEditScope;
-    } else {
-      // scoped edit: requires calendar.edit.scope and scope match
-      if (canEditScope) {
-        if (isOrgAdmin) {
-          allowed = !!sameOrg;
-        } else {
-          // school-scoped users (school_admin, teachers with scope perms, etc.)
-          allowed = !!sameSchool;
-        }
-      }
-    }
-
-    // (Optional) If you want class teachers to be able to edit non-owned class events,
-    // you can enable this rule (still requires edit.scope):
-    if (!allowed && ev.scope === "class" && isClassTeacher && canEditScope) {
-      allowed = isOrgAdmin ? !!sameOrg : !!sameSchool;
-    }
+    const allowed = await canEditCalendarEvent(user.id, ev.scope, ownerLike, scopedManager);
 
     if (!allowed) return res.status(403).json({ message: "Not allowed to edit this event" });
 
@@ -689,6 +698,7 @@ export function registerCalendarRoutes(app: Express) {
       newViewerIds = staffViewerIds.map((x: any) => Number(x)).filter((n: number) => !isNaN(n));
 
       if (newViewerIds.length > 0) {
+        // Must have a school context to validate viewers
         const schoolId = ev.schoolId ?? newSchoolIdForClassEvent;
         if (!schoolId) return res.status(400).json({ message: "Missing schoolId for class event" });
 
@@ -720,11 +730,9 @@ export function registerCalendarRoutes(app: Express) {
     if (includeStudents !== undefined) patch.includeStudents = includeStudents !== false;
     if (includeParents !== undefined) patch.includeParents = !!includeParents;
 
-    // Extra safety: prevent editing out-of-scope org/school if someone somehow got permission
-    if (!isOrgAdmin) {
-      if ((ev.scope === "school" || ev.scope === "class") && ev.schoolId && schoolIdCtx && ev.schoolId !== schoolIdCtx) {
-        return res.status(403).json({ message: "You can only edit school/class events for your school" });
-      }
+    // If scope is org/school, enforce same org/school context on edit (extra safety)
+    if (ev.scope === "school" && ev.schoolId && schoolIdCtx && ev.schoolId !== schoolIdCtx && !(isOrgAdmin && sameOrg)) {
+      return res.status(403).json({ message: "You can only edit school events for your school" });
     }
     if (ev.scope === "org" && ev.organizationId && orgIdCtx && ev.organizationId !== orgIdCtx) {
       return res.status(403).json({ message: "You can only edit org events in your organization" });
@@ -778,6 +786,9 @@ export function registerCalendarRoutes(app: Express) {
     if (!isStaffLikeRole(user.role)) {
       return res.status(403).json({ message: "Only staff can delete events" });
     }
+    if (!(await hasCalendarPermission(user.id, "calendar.view"))) {
+      return res.status(403).json({ message: "You do not have calendar access" });
+    }
 
     const eventId = Number(req.params.id);
     if (!eventId || isNaN(eventId)) return res.status(400).json({ message: "Invalid event id" });
@@ -790,24 +801,15 @@ export function registerCalendarRoutes(app: Express) {
     const [ev] = await db.select().from(calendarEvents).where(eq(calendarEvents.id, eventId));
     if (!ev) return res.status(404).json({ message: "Event not found" });
 
-    const canDeleteOwn = await requirePerm(user.id, "calendar.delete.own");
-    const canDeleteScope = await requirePerm(user.id, "calendar.delete.scope");
-
-    if (!canDeleteOwn && !canDeleteScope) {
-      return res.status(403).json({ message: "Missing permission: calendar.delete.own / calendar.delete.scope" });
-    }
-
-    // Authorization basics
+    // Authorization
     const isCreator = ev.createdByUserId === user.id;
     const isOwner = ev.ownerUserId === user.id;
 
-    const eventOrgId =
-      ev.organizationId ?? (ev.schoolId ? await getOrganizationIdBySchoolId(ev.schoolId) : null);
+    const isSchoolAdmin = user.role === "school_admin";
+    const isOrgAdmin = user.role === "org_admin";
 
     const sameSchool = schoolIdCtx && ev.schoolId && schoolIdCtx === ev.schoolId;
-    const sameOrg = orgIdCtx && eventOrgId && orgIdCtx === eventOrgId;
-
-    const isOrgAdmin = user.role === "org_admin";
+    const sameOrg = orgIdCtx && ev.organizationId && orgIdCtx === ev.organizationId;
 
     let isClassTeacher = false;
     if (ev.scope === "class" && staffRow?.id) {
@@ -815,31 +817,15 @@ export function registerCalendarRoutes(app: Express) {
       isClassTeacher = await isClassTeacherOfAny(staffRow.id, classIds);
     }
 
-    // Permission-based decision:
-    // - personal: only owner + delete.own
-    // - non-personal:
-    //    * if creator/owner -> delete.own OR delete.scope
-    //    * if not creator -> delete.scope AND within scope
-    let allowed = false;
+    const ownerLike = ev.scope === "personal" ? isOwner : isCreator || isOwner || isClassTeacher;
+    const scopedManager =
+      ev.scope === "org"
+        ? !!sameOrg
+        : ev.scope === "school" || ev.scope === "class"
+          ? !!sameSchool || !!sameOrg
+          : false;
 
-    if (ev.scope === "personal") {
-      allowed = isOwner && canDeleteOwn;
-    } else if (isCreator || isOwner) {
-      allowed = canDeleteOwn || canDeleteScope;
-    } else {
-      if (canDeleteScope) {
-        if (isOrgAdmin) {
-          allowed = !!sameOrg;
-        } else {
-          allowed = !!sameSchool;
-        }
-      }
-    }
-
-    // Optional: class teacher delete (still requires delete.scope)
-    if (!allowed && ev.scope === "class" && isClassTeacher && canDeleteScope) {
-      allowed = isOrgAdmin ? !!sameOrg : !!sameSchool;
-    }
+    const allowed = await canDeleteCalendarEvent(user.id, ev.scope, ownerLike, scopedManager);
 
     if (!allowed) return res.status(403).json({ message: "Not allowed to delete this event" });
 

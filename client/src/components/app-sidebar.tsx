@@ -59,6 +59,7 @@ type MenuItem = {
   url: string;
   icon: React.ComponentType<{ className?: string }>;
   featureKey?: string;
+  requiredPermissions?: string[];
   comingSoon?: boolean;
   badge?: string;
 };
@@ -72,23 +73,24 @@ const adminMenuGroups: MenuGroup[] = [
   {
     label: "Operations",
     items: [
-      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
-      { title: "Applications", url: "/applications", icon: FileText },
+      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
+      { title: "Calendar", url: "/calendar", icon: Calendar, requiredPermissions: ["calendar.view"] },
+      { title: "Applications", url: "/applications", icon: FileText, requiredPermissions: ["applications.view"] },
       { title: "Transport", url: "#", icon: Bus, comingSoon: true, featureKey: "enableTransport" },
     ],
   },
   {
     label: "Human Resources",
     items: [
-      { title: "School Staff", url: "/staff", icon: Users },
+      { title: "School Staff", url: "/staff", icon: Users, requiredPermissions: ["staff.view"] },
       { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
-      { title: "Staff Attendance", url: "/logbook", icon: Clock, featureKey: "enableELogbook", badge: "In Production" },
+      { title: "Staff Attendance", url: "/logbook", icon: Clock, featureKey: "enableELogbook", requiredPermissions: ["logbook.view"], badge: "In Production" },
     ],
   },
   {
     label: "Accounting & Finance",
     items: [
-      { title: "Student Payments", url: "/fees", icon: DollarSign, featureKey: "enableFinance" },
+      { title: "Student Payments", url: "/fees", icon: DollarSign, featureKey: "enableFinance", requiredPermissions: ["fees.view"] },
       { title: "Parents With Arrears", url: "#", icon: Banknote, featureKey: "enableFinance", comingSoon: true },
       { title: "School Expenses", url: "#", icon: Receipt, featureKey: "enableFinance", comingSoon: true },
       { title: "School Incomes", url: "#", icon: TrendingUp, featureKey: "enableFinance", comingSoon: true },
@@ -99,8 +101,8 @@ const adminMenuGroups: MenuGroup[] = [
   {
     label: "Library & E-Learning",
     items: [
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
-      { title: "kundAi", url: "/kundai", icon: Bot, badge: "In Production" },
+      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
+      { title: "kundAi", url: "/kundai", icon: Bot, requiredPermissions: ["dashboard.view"], badge: "In Production" },
       { title: "Discussion Forum", url: "#", icon: MessageSquare, comingSoon: true },
       { title: "Learning Materials", url: "#", icon: BookMarked, comingSoon: true },
     ],
@@ -108,34 +110,34 @@ const adminMenuGroups: MenuGroup[] = [
   {
     label: "Student",
     items: [
-      { title: "Student Records", url: "/students", icon: GraduationCap },
-      { title: "Parent Records", url: "/parents", icon: UserCheck },
-      { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck },
-      { title: "Hostel Attendance Register", url: "/hostel", icon: Building, featureKey: "enableHostel", badge: "In Production" },
-      { title: "Clinic Records", url: "/clinic", icon: Stethoscope, featureKey: "enableHostel" },
-      { title: "Disciplinary Reports", url: "/discipline", icon: Shield },
-      { title: "Academic Reports", url: "/academic-reports", icon: FileText },
-      { title: "Quality Control Reports", url: "/qc-reports", icon: ClipboardList },
+      { title: "Student Records", url: "/students", icon: GraduationCap, requiredPermissions: ["students.view"] },
+      { title: "Parent Records", url: "/parents", icon: UserCheck, requiredPermissions: ["parents.view"] },
+      { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view"] },
+      { title: "Hostel Attendance Register", url: "/hostel", icon: Building, featureKey: "enableHostel", requiredPermissions: ["hostel.view"], badge: "In Production" },
+      { title: "Clinic Records", url: "/clinic", icon: Stethoscope, featureKey: "enableHostel", requiredPermissions: ["clinic.view"] },
+      { title: "Disciplinary Reports", url: "/discipline", icon: Shield, requiredPermissions: ["discipline.view"] },
+      { title: "Academic Reports", url: "/academic-reports", icon: FileText, requiredPermissions: ["reports.view"] },
+      { title: "Quality Control Reports", url: "/qc-reports", icon: ClipboardList, requiredPermissions: ["qc_reports.view"] },
     ],
   },
   {
     label: "Academics",
     items: [
-      { title: "Subjects", url: "/subjects", icon: BookOpen },
-      { title: "Grading System", url: "/grades", icon: FileText },
-      { title: "Assessments Manager", url: "/assessments", icon: ClipboardList },
-      { title: "Marks Entry", url: "/marks-entry", icon: FileText },
-      { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, badge: "In Production" },
+      { title: "Subjects", url: "/subjects", icon: BookOpen, requiredPermissions: ["subjects.view"] },
+      { title: "Grading System", url: "/grades", icon: FileText, requiredPermissions: ["grades.view"] },
+      { title: "Assessments Manager", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
+      { title: "Marks Entry", url: "/marks-entry", icon: FileText, requiredPermissions: ["marks.view", "marks.create"] },
+      { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"], badge: "In Production" },
     ],
   },
   {
     label: "Our School",
     items: [
-      { title: "Newsletters", url: "/newsletters", icon: FileText },
-      { title: "Messages History", url: "/messages", icon: Mail },
-      { title: "Classrooms", url: "/classes", icon: School },
-      { title: "Boarding Hostels", url: "/hostels", icon: Building, featureKey: "enableHostel", badge: "In Production" },
-      { title: "School Configuration", url: "/settings", icon: Settings },
+      { title: "Newsletters", url: "/newsletters", icon: FileText, requiredPermissions: ["newsletters.view"] },
+      { title: "Messages History", url: "/messages", icon: Mail, requiredPermissions: ["communication.view"] },
+      { title: "Classrooms", url: "/classes", icon: School, requiredPermissions: ["classes.view"] },
+      { title: "Boarding Hostels", url: "/hostels", icon: Building, featureKey: "enableHostel", requiredPermissions: ["hostels.view"], badge: "In Production" },
+      { title: "School Configuration", url: "/settings", icon: Settings, requiredPermissions: ["settings.view"] },
     ],
   },
 ];
@@ -144,43 +146,43 @@ const teacherMenuGroups: MenuGroup[] = [
   {
     label: "",
     items: [
-      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
     ],
   },
   {
     label: "Human Resources",
     items: [
       { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
-      { title: "Staff Attendance", url: "/logbook", icon: Clock, featureKey: "enableELogbook", badge: "In Production" },
+      { title: "Staff Attendance", url: "/logbook", icon: Clock, featureKey: "enableELogbook", requiredPermissions: ["logbook.view"], badge: "In Production" },
     ],
   },
   {
     label: "Library & E-Learning",
     items: [
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
+      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
     ],
   },
   {
     label: "Student",
     items: [
-      { title: "Student Records", url: "/students", icon: GraduationCap },
-      { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck },
-      { title: "Academic Reports", url: "/academic-reports", icon: FileText },
+      { title: "Student Records", url: "/students", icon: GraduationCap, requiredPermissions: ["students.view"] },
+      { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view"] },
+      { title: "Academic Reports", url: "/academic-reports", icon: FileText, requiredPermissions: ["reports.view"] },
     ],
   },
   {
     label: "Academics",
     items: [
-      { title: "Subjects", url: "/subjects", icon: BookOpen },
-      { title: "Assessments Manager", url: "/assessments", icon: ClipboardList },
-      { title: "Marks Entry", url: "/marks-entry", icon: FileText },
-      { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, badge: "In Production" },
+      { title: "Subjects", url: "/subjects", icon: BookOpen, requiredPermissions: ["subjects.view"] },
+      { title: "Assessments Manager", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
+      { title: "Marks Entry", url: "/marks-entry", icon: FileText, requiredPermissions: ["marks.view", "marks.create"] },
+      { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"], badge: "In Production" },
     ],
   },
   {
     label: "Our School",
     items: [
-      { title: "Classrooms", url: "/classes", icon: School },
+      { title: "Classrooms", url: "/classes", icon: School, requiredPermissions: ["classes.view"] },
     ],
   },
 ];
@@ -189,7 +191,7 @@ const studentMenuGroups: MenuGroup[] = [
   {
     label: "",
     items: [
-      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
     ],
   },
   {
@@ -198,7 +200,7 @@ const studentMenuGroups: MenuGroup[] = [
       { title: "My Classes", url: "/my-classes", icon: School },
       { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
       { title: "Learning Materials", url: "#", icon: BookMarked, comingSoon: true },
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
+      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
       { title: "AI Study Helper", url: "#", icon: Bot, comingSoon: true },
     ],
   },
@@ -243,7 +245,7 @@ const parentMenuGroups: MenuGroup[] = [
   {
     label: "",
     items: [
-      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
     ],
   },
   {
@@ -276,7 +278,7 @@ const parentMenuGroups: MenuGroup[] = [
   {
     label: "Learning Support",
     items: [
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
+      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
       { title: "AI Assistant", url: "#", icon: Bot, comingSoon: true },
     ],
   },
@@ -292,7 +294,7 @@ const parentMenuGroups: MenuGroup[] = [
 
 export function AppSidebar() {
   const [location] = useLocation();
-  const { user, logout, currentSchoolId } = useAuth();
+  const { user, logout, currentSchoolId, hasAnyPermission } = useAuth();
 
   const { data: schools } = useQuery<SchoolType[]>({
     queryKey: ["/api/schools"],
@@ -307,6 +309,9 @@ export function AppSidebar() {
       case "school_admin":
         return adminMenuGroups;
       case "teacher":
+      case "assistant_teacher":
+      case "quality_control_officer":
+      case "librarian":
         return teacherMenuGroups;
       case "student":
         return studentMenuGroups;
@@ -322,6 +327,9 @@ export function AppSidebar() {
   const filteredGroups = allGroups.map(group => ({
     ...group,
     items: group.items.filter(item => {
+      if (item.requiredPermissions?.length && !hasAnyPermission(...item.requiredPermissions)) {
+        return false;
+      }
       if (!item.featureKey) return true;
       if (!currentSchool) return true;
       return (currentSchool as Record<string, unknown>)[item.featureKey] === true;
@@ -336,6 +344,12 @@ export function AppSidebar() {
         return "School Admin";
       case "teacher":
         return "Teacher";
+      case "assistant_teacher":
+        return "Assistant Teacher";
+      case "quality_control_officer":
+        return "Quality Control Officer";
+      case "librarian":
+        return "Librarian";
       case "student":
         return "Student";
       case "parent":

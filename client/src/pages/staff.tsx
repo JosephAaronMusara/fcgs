@@ -25,7 +25,9 @@ import { SortableTableHead } from "@/components/sortable-table-head";
 
 export default function StaffPage() {
   const { toast } = useToast();
-  const { currentSchoolId } = useAuth();
+  const { currentSchoolId, hasAnyPermission } = useAuth();
+  const canViewAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
+  const canManageAccessRights = hasAnyPermission("access_groups.manage", "users.manage_permissions");
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
@@ -56,6 +58,7 @@ export default function StaffPage() {
 
   const { data: accessGroups } = useQuery<Array<{ id: number; name: string }>>({
     queryKey: ["/api/access-groups"],
+    enabled: canViewAccessRights,
   });
 
   const { data: staffRolesList } = useQuery<Array<{ name: string; label: string }>>({
@@ -520,14 +523,16 @@ export default function StaffPage() {
                           Hostels
                         </Button>
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setAccessRightsStaff(s)}
-                          data-testid={`button-access-rights-${s.id}`}
-                        >
-                          Access Rights
-                        </Button>
+                        {canViewAccessRights && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setAccessRightsStaff(s)}
+                            data-testid={`button-access-rights-${s.id}`}
+                          >
+                            Access Rights
+                          </Button>
+                        )}
 
                         <Button
                           variant="ghost"
@@ -591,23 +596,26 @@ export default function StaffPage() {
       </Dialog>
 
       {/* Access Rights Dialog */}
-      <Dialog open={accessRightsStaff !== null} onOpenChange={(open) => !open && setAccessRightsStaff(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-          <DialogHeader>
-            <DialogTitle>Access Rights - {accessRightsStaff?.firstName} {accessRightsStaff?.lastName}</DialogTitle>
-            <DialogDescription>
-              Modify individual permissions beyond the assigned access group. Changes override group defaults.
-            </DialogDescription>
-          </DialogHeader>
-          {accessRightsStaff && (
-            <AccessRightsPanel 
-              staff={accessRightsStaff} 
-              accessGroups={accessGroups}
-              onClose={() => setAccessRightsStaff(null)} 
-            />
-          )}
-        </DialogContent>
-      </Dialog>
+      {canViewAccessRights && (
+        <Dialog open={accessRightsStaff !== null} onOpenChange={(open) => !open && setAccessRightsStaff(null)}>
+          <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+            <DialogHeader>
+              <DialogTitle>Access Rights - {accessRightsStaff?.firstName} {accessRightsStaff?.lastName}</DialogTitle>
+              <DialogDescription>
+                {canManageAccessRights ? "Modify individual permissions beyond the assigned access group. Changes override group defaults." : "View assigned access groups and effective permissions for this staff member."}
+              </DialogDescription>
+            </DialogHeader>
+            {accessRightsStaff && (
+              <AccessRightsPanel 
+                staff={accessRightsStaff} 
+                accessGroups={accessGroups}
+                canManage={canManageAccessRights}
+                onClose={() => setAccessRightsStaff(null)} 
+              />
+            )}
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
@@ -1282,10 +1290,12 @@ function UserAccountModal({
 function AccessRightsPanel({
   staff,
   accessGroups,
+  canManage,
   onClose,
 }: {
   staff: Staff;
   accessGroups?: Array<{ id: number; name: string }>;
+  canManage: boolean;
   onClose: () => void;
 }) {
   const { toast } = useToast();
@@ -1447,11 +1457,12 @@ function AccessRightsPanel({
           variant="outline"
           size="sm"
           onClick={() => {
+            if (!canManage) return;
             if (confirm("Reset all custom access rights to group defaults? This will remove all individual permission overrides.")) {
               resetAllMutation.mutate();
             }
           }}
-          disabled={overrideCount === 0 || resetAllMutation.isPending}
+          disabled={!canManage || overrideCount === 0 || resetAllMutation.isPending}
           data-testid="button-reset-to-default"
         >
           <RotateCcw className="h-4 w-4 mr-1" />
@@ -1491,8 +1502,8 @@ function AccessRightsPanel({
               <Badge
                 key={permission.id}
                 variant={granted ? "default" : "outline"}
-                className={`cursor-pointer select-none gap-1 ${hasOverride ? "ring-1 ring-primary/50" : ""}`}
-                onClick={() => handleToggle(permission.id, granted)}
+                className={`${canManage ? "cursor-pointer" : "cursor-default opacity-80"} select-none gap-1 ${hasOverride ? "ring-1 ring-primary/50" : ""}`}
+                onClick={() => canManage && handleToggle(permission.id, granted)}
                 data-testid={`permission-chip-${permission.id}`}
                 title={permission.description || permission.name}
               >
