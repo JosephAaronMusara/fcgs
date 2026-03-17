@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations } from "@shared/schema";
+import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, userAccessGroups, userPermissionOverrides } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, sql } from "drizzle-orm";
@@ -70,6 +70,33 @@ function generateResetToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
 
+async function normalizeLegacyOrgHqUser(userId: number, organizationId: number | null | undefined) {
+  const targetUser = await storage.getUser(userId);
+  if (!targetUser || targetUser.role !== "org_admin") return;
+
+  const orgHqGroup = await storage.getAccessGroupByName("Org HQ");
+  if (!orgHqGroup) return;
+
+  const currentGroups = await storage.getUserAccessGroups(userId);
+  const hasOrgHqGroup = currentGroups.some(group => group.id === orgHqGroup.id);
+
+  if (!hasOrgHqGroup) {
+    await storage.addUserToAccessGroup({ userId, accessGroupId: orgHqGroup.id });
+    await db.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, userId));
+
+    const scopeCondition = organizationId
+      ? eq(schoolsTable.organizationId, organizationId)
+      : sql`1=1`;
+    const existingSchools = await db.select({ id: schoolsTable.id }).from(schoolsTable).where(scopeCondition);
+
+    await db.delete(userSchoolAccess).where(eq(userSchoolAccess.userId, userId));
+    if (existingSchools.length > 0) {
+      await db.insert(userSchoolAccess)
+        .values(existingSchools.map((school) => ({ userId, schoolId: school.id })))
+        .onConflictDoNothing();
+    }
+  }
+}
 
 function mapStaffRoleToUserRole(staffRole: string | null | undefined): User["role"] {
   switch (staffRole) {
@@ -392,6 +419,11 @@ export async function registerRoutes(
   app.get("/api/users/:id/schools", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
       const userId = parseInt(req.params.id);
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      await normalizeLegacyOrgHqUser(userId, targetUser.organizationId);
       const schoolAccess = await storage.getUserSchoolAccess(userId);
       res.json(schoolAccess);
     } catch (error) {
@@ -407,7 +439,22 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: "Invalid request body", errors: parsed.error.errors });
       }
-      await storage.updateUserPermissions(userId, parsed.data.schoolIds, parsed.data.permissionIds);
+
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      if (targetUser.role === "org_admin") {
+        await normalizeLegacyOrgHqUser(userId, targetUser.organizationId);
+      }
+
+      await db.delete(userSchoolAccess).where(eq(userSchoolAccess.userId, userId));
+      if (parsed.data.schoolIds.length > 0) {
+        await db.insert(userSchoolAccess).values(parsed.data.schoolIds.map(schoolId => ({ userId, schoolId })));
+      }
+
+      await storage.updateUserPermissionOverridesFromSelection(userId, parsed.data.permissionIds);
       res.json({ success: true });
     } catch (error) {
       next(error);
@@ -3171,11 +3218,28 @@ export async function registerRoutes(
   app.post("/api/schools", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      const existingOrgSchools = currentUser.organizationId
+        ? await db.select({ id: schoolsTable.id }).from(schoolsTable).where(eq(schoolsTable.organizationId, currentUser.organizationId))
+        : await db.select({ id: schoolsTable.id }).from(schoolsTable);
+      const existingSchoolIds = existingOrgSchools.map(s => s.id);
+
       const data = insertSchoolSchema.parse({
         ...req.body,
         organizationId: currentUser.organizationId,
       });
       const newSchool = await storage.createSchool(data);
+
+      const orgUsers = await db.select({ id: users.id }).from(users).where(and(eq(users.role, "org_admin"), currentUser.organizationId ? eq(users.organizationId, currentUser.organizationId) : sql`1=1`));
+      for (const orgUser of orgUsers) {
+        const accessIds = await storage.getUserSchoolAccess(orgUser.id);
+        const hasAllCurrentSchools = existingSchoolIds.length === 0
+          ? accessIds.length === 0
+          : existingSchoolIds.every(id => accessIds.includes(id));
+        if (hasAllCurrentSchools) {
+          await db.insert(userSchoolAccess).values({ userId: orgUser.id, schoolId: newSchool.id }).onConflictDoNothing();
+        }
+      }
+
       logActivity(req, { action: "create", category: "schools", description: `Created school: ${newSchool.name}`, targetType: "school", targetId: newSchool.id, targetName: newSchool.name, schoolId: newSchool.id });
       res.status(201).json(newSchool);
     } catch (error) {
@@ -4897,14 +4961,16 @@ export async function registerRoutes(
 
   app.delete("/api/access-groups/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const group = await storage.getAccessGroup(parseInt(req.params.id));
+      const groupId = parseInt(req.params.id);
+      const group = await storage.getAccessGroup(groupId);
       if (!group) {
         return res.status(404).json({ message: "Access group not found" });
       }
-      if (group.isSystemDefault) {
-        return res.status(403).json({ message: "Cannot delete system default access groups" });
+      const [{ count: assignmentCount }] = await db.select({ count: sql<number>`count(*)::int` }).from(userAccessGroups).where(eq(userAccessGroups.accessGroupId, groupId));
+      if ((assignmentCount || 0) > 0) {
+        return res.status(400).json({ message: "This access group cannot be deleted because users are assigned to it." });
       }
-      await storage.deleteAccessGroup(parseInt(req.params.id));
+      await storage.deleteAccessGroup(groupId);
       res.json({ success: true });
     } catch (error) {
       next(error);
@@ -4962,8 +5028,9 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Role not found" });
       }
-      if (existing.isSystemDefault) {
-        return res.status(403).json({ message: "Cannot delete system default roles" });
+      const usageCount = (await storage.getAllStaff()).filter((member) => member.role === existing.name).length;
+      if (usageCount > 0) {
+        return res.status(400).json({ message: "This role cannot be deleted because staff members are assigned to it." });
       }
       await db.delete(staffRoles).where(eq(staffRoles.id, id));
       res.json({ success: true });
@@ -5110,8 +5177,13 @@ export async function registerRoutes(
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      const effectivePerms = await storage.getUserEffectivePermissions(targetUserId);
-      res.json(effectivePerms);
+      const targetUser = await storage.getUser(targetUserId);
+      if (!targetUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      await normalizeLegacyOrgHqUser(targetUserId, targetUser.organizationId);
+      const permissionStates = await storage.getUserPermissionStates(targetUserId);
+      res.json(permissionStates);
     } catch (error) {
       next(error);
     }
@@ -5206,14 +5278,22 @@ export async function registerRoutes(
     try {
       const requestedUserId = parseInt(req.params.userId);
       const currentUser = req.user as User;
-
+      
+      // Allow checking own permissions
       if (currentUser.id !== requestedUserId) {
-        if (!(await canViewAccessRights(currentUser))) {
+        // Check if admin with proper tenant scope
+        if (currentUser.role === 'org_admin') {
+          const targetUser = await storage.getUser(requestedUserId);
+          if (!targetUser || targetUser.organizationId !== currentUser.organizationId) {
+            return res.status(403).json({ message: "Access denied - user not in your organization" });
+          }
+        } else if (currentUser.role === 'school_admin') {
+          const targetUser = await storage.getUser(requestedUserId);
+          if (!targetUser || targetUser.schoolId !== currentUser.schoolId) {
+            return res.status(403).json({ message: "Access denied - user not in your school" });
+          }
+        } else {
           return res.status(403).json({ message: "Access denied" });
-        }
-        const access = await checkTenantAccess(currentUser, requestedUserId);
-        if (!access.allowed) {
-          return res.status(403).json({ message: access.error });
         }
       }
       

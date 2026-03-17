@@ -374,13 +374,16 @@ export function setupAuth(app: Express): void {
 
       if (role === "org_admin") {
         try {
+          const allSchools = await storage.getAllSchools();
+          const allSchoolIds = allSchools.map(s => s.id);
+          await storage.updateUserPermissions(user.id, allSchoolIds, []);
           const accessGroups = await storage.getAllAccessGroups();
           const orgHqGroup = accessGroups.find(g => g.name === "Org HQ");
           if (orgHqGroup) {
             await storage.addUserToAccessGroup({ userId: user.id, accessGroupId: orgHqGroup.id });
           }
         } catch (e) {
-          console.error("Error assigning Org HQ access group to new org_admin:", e);
+          console.error("Error assigning Org HQ baseline for new org_admin:", e);
         }
       }
 

@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { initializeCommunication } from "./communication";
 import { storage } from "./storage";
+import { ensureRbacBaseline } from "./rbac-bootstrap";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -106,6 +107,7 @@ app.use((req, res, next) => {
 
 (async () => {
   initializeCommunication();
+  await ensureRbacBaseline();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

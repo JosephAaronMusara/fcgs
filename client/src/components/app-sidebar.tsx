@@ -32,7 +32,6 @@ import {
   Settings,
   Library,
   ShoppingCart,
-  FileSpreadsheet,
   Building,
   MessageSquare,
   Bot,
@@ -58,8 +57,8 @@ type MenuItem = {
   title: string;
   url: string;
   icon: React.ComponentType<{ className?: string }>;
-  featureKey?: string;
   requiredPermissions?: string[];
+  featureKey?: string;
   comingSoon?: boolean;
   badge?: string;
 };
@@ -69,42 +68,42 @@ type MenuGroup = {
   items: MenuItem[];
 };
 
-const adminMenuGroups: MenuGroup[] = [
+const staffMenuGroups: MenuGroup[] = [
   {
     label: "Operations",
     items: [
       { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
       { title: "Calendar", url: "/calendar", icon: Calendar, requiredPermissions: ["calendar.view"] },
       { title: "Applications", url: "/applications", icon: FileText, requiredPermissions: ["applications.view"] },
-      { title: "Transport", url: "#", icon: Bus, comingSoon: true, featureKey: "enableTransport" },
+      { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport", comingSoon: true },
     ],
   },
   {
     label: "Human Resources",
     items: [
       { title: "School Staff", url: "/staff", icon: Users, requiredPermissions: ["staff.view"] },
-      { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
-      { title: "Staff Attendance", url: "/logbook", icon: Clock, featureKey: "enableELogbook", requiredPermissions: ["logbook.view"], badge: "In Production" },
+      { title: "Timetable", url: "/timetable", icon: Calendar, requiredPermissions: ["timetable.view"], comingSoon: true },
+      { title: "Staff Attendance", url: "/logbook", icon: Clock, requiredPermissions: ["logbook.view"], featureKey: "enableELogbook", badge: "In Production" },
     ],
   },
   {
     label: "Accounting & Finance",
     items: [
-      { title: "Student Payments", url: "/fees", icon: DollarSign, featureKey: "enableFinance", requiredPermissions: ["fees.view"] },
-      { title: "Parents With Arrears", url: "#", icon: Banknote, featureKey: "enableFinance", comingSoon: true },
-      { title: "School Expenses", url: "#", icon: Receipt, featureKey: "enableFinance", comingSoon: true },
-      { title: "School Incomes", url: "#", icon: TrendingUp, featureKey: "enableFinance", comingSoon: true },
-      { title: "Products", url: "#", icon: ShoppingCart, featureKey: "enableFinance", comingSoon: true },
-      { title: "Financial Statements", url: "#", icon: BarChart3, featureKey: "enableFinance", comingSoon: true },
+      { title: "Student Payments", url: "/fees", icon: DollarSign, requiredPermissions: ["fees.view"], featureKey: "enableFinance" },
+      { title: "Parents With Arrears", url: "/arrears", icon: Banknote, requiredPermissions: ["arrears.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "School Expenses", url: "/school-expenses", icon: Receipt, requiredPermissions: ["school_expenses.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "School Incomes", url: "/school-incomes", icon: TrendingUp, requiredPermissions: ["school_incomes.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "Products", url: "/products", icon: ShoppingCart, requiredPermissions: ["products.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "Financial Statements", url: "/financial-statements", icon: BarChart3, requiredPermissions: ["financial_statements.view"], featureKey: "enableFinance", comingSoon: true },
     ],
   },
   {
     label: "Library & E-Learning",
     items: [
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
-      { title: "kundAi", url: "/kundai", icon: Bot, requiredPermissions: ["dashboard.view"], badge: "In Production" },
-      { title: "Discussion Forum", url: "#", icon: MessageSquare, comingSoon: true },
-      { title: "Learning Materials", url: "#", icon: BookMarked, comingSoon: true },
+      { title: "Library", url: "/library", icon: Library, requiredPermissions: ["library.view"], featureKey: "enableELibrary", badge: "In Production" },
+      { title: "kundAi", url: "/kundai", icon: Bot, requiredPermissions: ["kundai.view"], badge: "In Production" },
+      { title: "Discussion Forum", url: "/discussion-forum", icon: MessageSquare, requiredPermissions: ["discussion_forum.view"], comingSoon: true },
+      { title: "Learning Materials", url: "/learning-materials", icon: BookMarked, requiredPermissions: ["learning_materials.view"], comingSoon: true },
     ],
   },
   {
@@ -113,8 +112,8 @@ const adminMenuGroups: MenuGroup[] = [
       { title: "Student Records", url: "/students", icon: GraduationCap, requiredPermissions: ["students.view"] },
       { title: "Parent Records", url: "/parents", icon: UserCheck, requiredPermissions: ["parents.view"] },
       { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view"] },
-      { title: "Hostel Attendance Register", url: "/hostel", icon: Building, featureKey: "enableHostel", requiredPermissions: ["hostel.view"], badge: "In Production" },
-      { title: "Clinic Records", url: "/clinic", icon: Stethoscope, featureKey: "enableHostel", requiredPermissions: ["clinic.view"] },
+      { title: "Hostel Attendance Register", url: "/hostel", icon: Building, requiredPermissions: ["hostel.view"], featureKey: "enableHostel", badge: "In Production" },
+      { title: "Clinic Records", url: "/clinic", icon: Stethoscope, requiredPermissions: ["clinic.view"], featureKey: "enableHostel" },
       { title: "Disciplinary Reports", url: "/discipline", icon: Shield, requiredPermissions: ["discipline.view"] },
       { title: "Academic Reports", url: "/academic-reports", icon: FileText, requiredPermissions: ["reports.view"] },
       { title: "Quality Control Reports", url: "/qc-reports", icon: ClipboardList, requiredPermissions: ["qc_reports.view"] },
@@ -136,53 +135,8 @@ const adminMenuGroups: MenuGroup[] = [
       { title: "Newsletters", url: "/newsletters", icon: FileText, requiredPermissions: ["newsletters.view"] },
       { title: "Messages History", url: "/messages", icon: Mail, requiredPermissions: ["communication.view"] },
       { title: "Classrooms", url: "/classes", icon: School, requiredPermissions: ["classes.view"] },
-      { title: "Boarding Hostels", url: "/hostels", icon: Building, featureKey: "enableHostel", requiredPermissions: ["hostels.view"], badge: "In Production" },
+      { title: "Boarding Hostels", url: "/hostels", icon: Building, requiredPermissions: ["hostels.view"], featureKey: "enableHostel", badge: "In Production" },
       { title: "School Configuration", url: "/settings", icon: Settings, requiredPermissions: ["settings.view"] },
-    ],
-  },
-];
-
-const teacherMenuGroups: MenuGroup[] = [
-  {
-    label: "",
-    items: [
-      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
-    ],
-  },
-  {
-    label: "Human Resources",
-    items: [
-      { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
-      { title: "Staff Attendance", url: "/logbook", icon: Clock, featureKey: "enableELogbook", requiredPermissions: ["logbook.view"], badge: "In Production" },
-    ],
-  },
-  {
-    label: "Library & E-Learning",
-    items: [
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
-    ],
-  },
-  {
-    label: "Student",
-    items: [
-      { title: "Student Records", url: "/students", icon: GraduationCap, requiredPermissions: ["students.view"] },
-      { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view"] },
-      { title: "Academic Reports", url: "/academic-reports", icon: FileText, requiredPermissions: ["reports.view"] },
-    ],
-  },
-  {
-    label: "Academics",
-    items: [
-      { title: "Subjects", url: "/subjects", icon: BookOpen, requiredPermissions: ["subjects.view"] },
-      { title: "Assessments Manager", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
-      { title: "Marks Entry", url: "/marks-entry", icon: FileText, requiredPermissions: ["marks.view", "marks.create"] },
-      { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"], badge: "In Production" },
-    ],
-  },
-  {
-    label: "Our School",
-    items: [
-      { title: "Classrooms", url: "/classes", icon: School, requiredPermissions: ["classes.view"] },
     ],
   },
 ];
@@ -191,7 +145,7 @@ const studentMenuGroups: MenuGroup[] = [
   {
     label: "",
     items: [
-      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
+      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
     ],
   },
   {
@@ -200,7 +154,7 @@ const studentMenuGroups: MenuGroup[] = [
       { title: "My Classes", url: "/my-classes", icon: School },
       { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
       { title: "Learning Materials", url: "#", icon: BookMarked, comingSoon: true },
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
+      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
       { title: "AI Study Helper", url: "#", icon: Bot, comingSoon: true },
     ],
   },
@@ -245,7 +199,7 @@ const parentMenuGroups: MenuGroup[] = [
   {
     label: "",
     items: [
-      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
+      { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
     ],
   },
   {
@@ -278,7 +232,7 @@ const parentMenuGroups: MenuGroup[] = [
   {
     label: "Learning Support",
     items: [
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", requiredPermissions: ["library.view"], badge: "In Production" },
+      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
       { title: "AI Assistant", url: "#", icon: Bot, comingSoon: true },
     ],
   },
@@ -305,34 +259,28 @@ export function AppSidebar() {
 
   const getMenuGroups = (): MenuGroup[] => {
     switch (user?.role) {
-      case "org_admin":
-      case "school_admin":
-        return adminMenuGroups;
-      case "teacher":
-      case "assistant_teacher":
-      case "quality_control_officer":
-      case "librarian":
-        return teacherMenuGroups;
       case "student":
         return studentMenuGroups;
       case "parent":
         return parentMenuGroups;
       default:
-        return adminMenuGroups;
+        return staffMenuGroups;
     }
   };
 
   const allGroups = getMenuGroups();
+  const applyPermissionFilter = user?.role !== "student" && user?.role !== "parent";
 
   const filteredGroups = allGroups.map(group => ({
     ...group,
     items: group.items.filter(item => {
-      if (item.requiredPermissions?.length && !hasAnyPermission(...item.requiredPermissions)) {
+      if (item.featureKey && currentSchool && (currentSchool as Record<string, unknown>)[item.featureKey] !== true) {
         return false;
       }
-      if (!item.featureKey) return true;
-      if (!currentSchool) return true;
-      return (currentSchool as Record<string, unknown>)[item.featureKey] === true;
+      if (applyPermissionFilter && item.requiredPermissions?.length) {
+        return hasAnyPermission(...item.requiredPermissions);
+      }
+      return true;
     }),
   })).filter(group => group.items.length > 0);
 
@@ -357,6 +305,12 @@ export function AppSidebar() {
       default:
         return "User";
     }
+  };
+
+  const getBadgeClass = (badge?: string, comingSoon?: boolean) => {
+    if (comingSoon) return "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-400";
+    if (badge === "In Production") return "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400";
+    return "";
   };
 
   return (
@@ -386,30 +340,17 @@ export function AppSidebar() {
               <SidebarMenu>
                 {group.items.map((item) => (
                   <SidebarMenuItem key={item.title}>
-                    {item.comingSoon ? (
-                      <SidebarMenuButton
-                        className="cursor-default opacity-60"
-                        data-testid={`nav-${item.title.toLowerCase().replace(/\s+/g, '-')}`}
-                      >
+                    <SidebarMenuButton asChild isActive={location === item.url}>
+                      <Link href={item.url} data-testid={`nav-${item.title.toLowerCase().replace(/\s+/g, '-')}`}>
                         <item.icon className="w-4 h-4" />
                         <span className="flex-1">{item.title}</span>
-                        <Badge variant="secondary" className="text-[9px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-400">
-                          Coming Soon
-                        </Badge>
-                      </SidebarMenuButton>
-                    ) : (
-                      <SidebarMenuButton asChild isActive={location === item.url}>
-                        <Link href={item.url} data-testid={`nav-${item.title.toLowerCase().replace(/\s+/g, '-')}`}>
-                          <item.icon className="w-4 h-4" />
-                          <span className="flex-1">{item.title}</span>
-                          {item.badge && (
-                            <Badge variant="secondary" className={`text-[9px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate ${item.badge === "In Production" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400" : item.badge === "Coming Soon" ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-400" : ""}`}>
-                              {item.badge}
-                            </Badge>
-                          )}
-                        </Link>
-                      </SidebarMenuButton>
-                    )}
+                        {(item.comingSoon || item.badge) && (
+                          <Badge variant="secondary" className={`text-[9px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate ${getBadgeClass(item.badge, item.comingSoon)}`}>
+                            {item.comingSoon ? "Coming Soon" : item.badge}
+                          </Badge>
+                        )}
+                      </Link>
+                    </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>
@@ -431,13 +372,7 @@ export function AppSidebar() {
             <p className="text-xs text-sidebar-foreground/70">{getRoleLabel()}</p>
           </div>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start"
-          onClick={() => logout()}
-          data-testid="button-logout"
-        >
+        <Button variant="ghost" size="sm" className="w-full justify-start" onClick={() => logout()} data-testid="button-logout">
           <LogOut className="w-4 h-4 mr-2" />
           Sign Out
         </Button>

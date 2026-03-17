@@ -72,6 +72,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Bell, Calendar, Save, ClipboardList, Download, ArrowLeft, ArrowRight, Tag, ChevronLeft, FileText, SlidersHorizontal } from "lucide-react";
 
 type OrgUser = User & { schoolAccess?: number[]; permissionOverrides?: { permissionId: number; granted: boolean }[] };
+type UserPermissionState = { permission: Permission; granted: boolean; groupGranted: boolean; overrideGranted: boolean | null; source: "group" | "granted_override" | "denied_override" | "none" };
 
 type SearchResults = {
   staff: Array<Staff & { schoolName: string }>;
@@ -160,10 +161,9 @@ function getCountdown(terminationAt: string | Date | null): string {
 }
 
 export default function OrgDashboard() {
-  const { user, logout, enterSchool, setCurrentSchoolId, hasPermission, hasAnyPermission } = useAuth();
+  const { user, logout, enterSchool, setCurrentSchoolId, hasPermission } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const [isAddSchoolOpen, setIsAddSchoolOpen] = useState(false);
   const [isAddUserOpen, setIsAddUserOpen] = useState(false);
   const [schoolToDelete, setSchoolToDelete] = useState<SchoolType | null>(null);
@@ -245,15 +245,9 @@ export default function OrgDashboard() {
     enabled: !!selectedUser,
   });
 
-  const { data: userPermissions = [] } = useQuery<number[]>({
+  const { data: userPermissionStates = [] } = useQuery<UserPermissionState[]>({
     queryKey: [`/api/users/${selectedUser?.id}/permissions`],
     enabled: !!selectedUser,
-    select: (data: any) => {
-      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object' && data[0].permission) {
-        return data.filter((p: any) => p.granted).map((p: any) => p.permission.id);
-      }
-      return data;
-    },
   });
 
   const { data: orgBranding } = useQuery<{ name: string; logo: string | null; motto: string | null; stamp: string | null; address: string | null; phone: string | null; email: string | null }>({
@@ -524,11 +518,14 @@ export default function OrgDashboard() {
   });
 
   useEffect(() => {
-    if (selectedUser && isPermissionsOpen) {
-      setSelectedSchools(userSchoolAccess);
-      setSelectedPermissions(userPermissions);
+    if (selectedUser && isPermissionsOpen && !isEditingPermissions) {
+      const initialSchoolIds = userSchoolAccess.length > 0
+        ? userSchoolAccess
+        : schools.map((school) => school.id);
+      setSelectedSchools(initialSchoolIds);
+      setSelectedPermissions(userPermissionStates.filter((state) => state.granted).map((state) => state.permission.id));
     }
-  }, [selectedUser, userSchoolAccess, userPermissions, isPermissionsOpen]);
+  }, [selectedUser, userSchoolAccess, userPermissionStates, schools, isPermissionsOpen, isEditingPermissions]);
 
   const createSchool = useMutation({
     mutationFn: async (data: Partial<SchoolType>) => {
@@ -802,6 +799,21 @@ export default function OrgDashboard() {
     acc[perm.category].push(perm);
     return acc;
   }, {} as Record<string, Permission[]>);
+
+  const userPermissionStateMap = new Map(userPermissionStates.map((state) => [state.permission.id, state]));
+
+  const getPermissionDisplayState = (permissionId: number) => {
+    const state = userPermissionStateMap.get(permissionId);
+    const selected = selectedPermissions.includes(permissionId);
+    const groupGranted = state?.groupGranted === true;
+
+    if (selected && groupGranted) return { checked: true, label: "Group", className: "bg-[#13294B] text-white border-transparent" };
+    if (selected && !groupGranted) return { checked: true, label: "Granted Override", className: "bg-[#13294B] text-white border-transparent" };
+    if (!selected && groupGranted) return { checked: false, label: "Denied Override", className: "bg-[#7A1E2C] text-white border-transparent" };
+    return { checked: false, label: null, className: "" };
+  };
+
+  const allSchoolsEnabled = schools.length > 0 && selectedSchools.length === schools.length;
 
   if (schoolsLoading || usersLoading) {
     return (
@@ -1632,7 +1644,7 @@ export default function OrgDashboard() {
               Permissions for {selectedUser?.firstName || selectedUser?.username}
             </DialogTitle>
             <DialogDescription>
-              Configure school access and permissions for this Org HQ user
+              Configure school access scope and permission overrides for this Org HQ user
             </DialogDescription>
           </DialogHeader>
           
@@ -1641,12 +1653,16 @@ export default function OrgDashboard() {
               <div>
                 <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
                   <Building2 className="h-4 w-4" />
-                  Schools Access
+                  School Access Scope
                 </h3>
                 <p className="text-sm text-muted-foreground mb-3">
-                  Select which schools this user can access.
+                  Org HQ users normally have access to all schools. Deselect schools here only when you want to restrict this specific user.
                 </p>
                 <div className="space-y-2 border rounded-lg p-3">
+                  <div className="mb-3 flex items-center justify-between rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                    <span>{allSchoolsEnabled ? "All current schools enabled" : `${selectedSchools.length} of ${schools.length} schools enabled`}</span>
+                    {allSchoolsEnabled && <Badge variant="secondary">All Enabled</Badge>}
+                  </div>
                   {schools.map((school) => (
                     <div key={school.id} className="flex items-center gap-2">
                       <Checkbox
@@ -1670,10 +1686,10 @@ export default function OrgDashboard() {
               <div>
                 <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
                   <Shield className="h-4 w-4" />
-                  Access Rights
+                  Permission Overrides
                 </h3>
                 <p className="text-sm text-muted-foreground mb-3">
-                  Configure school access and explicit permission overrides for this Org HQ user. Access groups and overrides now determine what they can do.
+                  This checklist shows the Org HQ access-group defaults plus any per-user overrides. Uncheck to create a denied override, or check to create a granted override where needed.
                 </p>
                 <div className="space-y-2 border rounded-lg p-3">
                   {Object.entries(permissionsByCategory).map(([category, perms]) => (
@@ -1723,6 +1739,11 @@ export default function OrgDashboard() {
                               >
                                 {perm.name}
                               </label>
+                              {getPermissionDisplayState(perm.id).label && (
+                                <Badge className={getPermissionDisplayState(perm.id).className}>
+                                  {getPermissionDisplayState(perm.id).label}
+                                </Badge>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -1737,7 +1758,14 @@ export default function OrgDashboard() {
           <DialogFooter>
             {isEditingPermissions ? (
               <>
-                <Button type="button" variant="outline" onClick={() => setIsEditingPermissions(false)}>
+                <Button type="button" variant="outline" onClick={() => {
+                  setIsEditingPermissions(false);
+                  const resetSchoolIds = userSchoolAccess.length > 0
+                    ? userSchoolAccess
+                    : schools.map((school) => school.id);
+                  setSelectedSchools(resetSchoolIds);
+                  setSelectedPermissions(userPermissionStates.filter((state) => state.granted).map((state) => state.permission.id));
+                }}>
                   Cancel
                 </Button>
                 <Button 
@@ -1745,7 +1773,7 @@ export default function OrgDashboard() {
                   disabled={updateUserPermissions.isPending}
                   data-testid="button-save-permissions"
                 >
-                  Save Permissions
+                  Save Changes
                 </Button>
               </>
             ) : (
@@ -1928,12 +1956,10 @@ export default function OrgDashboard() {
                 <SlidersHorizontal className="h-4 w-4 mr-1" />
                 Features
               </TabsTrigger>
-              {canManageAccessRights && (
               <TabsTrigger value="access-rights" data-testid="tab-org-access-rights">
                 <Shield className="h-4 w-4 mr-1" />
                 Access Rights
               </TabsTrigger>
-              )}
               <TabsTrigger value="activity-logs" data-testid="tab-org-activity-logs">
                 <ClipboardList className="h-4 w-4 mr-1" />
                 Activity Logs
@@ -2354,11 +2380,9 @@ export default function OrgDashboard() {
                 )}
               </div>
             </TabsContent>
-            {canManageAccessRights && (
             <TabsContent value="access-rights" className="flex-1 overflow-y-auto mt-4">
               <AccessRightsSection />
             </TabsContent>
-            )}
             <TabsContent value="activity-logs" className="flex-1 overflow-y-auto mt-4">
               <OrgActivityLogsSection schools={schools} />
             </TabsContent>
@@ -2868,8 +2892,6 @@ function OrgActivityLogsSection({ schools }: { schools: SchoolType[] }) {
 
 function AccessRightsSection() {
   const { toast } = useToast();
-  const { hasAnyPermission } = useAuth();
-  const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const [selectedGroup, setSelectedGroup] = useState<AccessGroup | null>(null);
   const [isManageGroupsOpen, setIsManageGroupsOpen] = useState(false);
   const [isManageRolesOpen, setIsManageRolesOpen] = useState(false);
@@ -2887,17 +2909,15 @@ function AccessRightsSection() {
 
   const { data: accessGroups = [], isLoading: groupsLoading } = useQuery<AccessGroup[]>({
     queryKey: ["/api/access-groups"],
-    enabled: canManageAccessRights,
   });
 
   const { data: permissions = [], isLoading: permissionsLoading } = useQuery<Permission[]>({
     queryKey: ["/api/permissions"],
-    enabled: canManageAccessRights,
   });
 
   const { data: groupPermissions = [] } = useQuery<Permission[]>({
     queryKey: ["/api/access-groups", selectedGroup?.id, "permissions"],
-    enabled: canManageAccessRights && !!selectedGroup,
+    enabled: !!selectedGroup,
   });
 
   const { data: staffRolesList = [], isLoading: rolesLoading } = useQuery<StaffRole[]>({
@@ -2928,8 +2948,9 @@ function AccessRightsSection() {
       setEditingGroupId(null);
       toast({ title: "Access group updated successfully" });
     },
-    onError: () => {
-      toast({ title: "Failed to update access group", variant: "destructive" });
+    onError: async (error: any) => {
+      const message = error?.message || "Failed to update access group";
+      toast({ title: message, variant: "destructive" });
     },
   });
 
@@ -2957,8 +2978,9 @@ function AccessRightsSection() {
       setEditingRoleId(null);
       toast({ title: "Role updated successfully" });
     },
-    onError: () => {
-      toast({ title: "Failed to update role", variant: "destructive" });
+    onError: async (error: any) => {
+      const message = error?.message || "Failed to update role";
+      toast({ title: message, variant: "destructive" });
     },
   });
 
@@ -2970,8 +2992,9 @@ function AccessRightsSection() {
       queryClient.invalidateQueries({ queryKey: ["/api/staff-roles"] });
       toast({ title: "Role deleted successfully" });
     },
-    onError: () => {
-      toast({ title: "Failed to delete role", variant: "destructive" });
+    onError: async (error: any) => {
+      const message = error?.message || "Failed to delete role";
+      toast({ title: message, variant: "destructive" });
     },
   });
 
@@ -3004,8 +3027,9 @@ function AccessRightsSection() {
       setSelectedGroup(null);
       toast({ title: "Access group deleted successfully" });
     },
-    onError: () => {
-      toast({ title: "Failed to delete access group", variant: "destructive" });
+    onError: async (error: any) => {
+      const message = error?.message || "Failed to delete access group";
+      toast({ title: message, variant: "destructive" });
     },
   });
 
@@ -3064,7 +3088,7 @@ function AccessRightsSection() {
 
   const { isLoading: groupPermissionsLoading } = useQuery<Permission[]>({
     queryKey: ["/api/access-groups", selectedGroup?.id, "permissions"],
-    enabled: canManageAccessRights && !!selectedGroup,
+    enabled: !!selectedGroup,
   });
 
   const permissionsByCategory = permissions.reduce((acc, perm) => {
@@ -3121,7 +3145,7 @@ function AccessRightsSection() {
                   <div>
                     <div className="font-medium flex items-center gap-2">
                       {group.name}
-                      {group.isSystemDefault && (
+                      {group.isSystemDefault && ["School Admin", "Org HQ"].includes(group.name) && (
                         <Badge variant="secondary" className="text-xs">
                           <Lock className="h-3 w-3 mr-1" />
                           System
@@ -3147,7 +3171,7 @@ function AccessRightsSection() {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Manage Access Groups</DialogTitle>
-            <DialogDescription>Add, rename, or remove custom access groups</DialogDescription>
+            <DialogDescription>Add, edit, or remove access groups</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 max-h-[400px] overflow-y-auto">
             {accessGroups.map((group) => (
@@ -3158,6 +3182,7 @@ function AccessRightsSection() {
                       value={editGroupName}
                       onChange={(e) => setEditGroupName(e.target.value)}
                       className="flex-1"
+                      disabled={group.isSystemDefault}
                       data-testid="input-edit-group-name"
                     />
                     <Button size="icon" variant="ghost" onClick={() => { updateGroup.mutate({ id: group.id, name: editGroupName }); }} disabled={!editGroupName || updateGroup.isPending} data-testid="button-save-edit-group">
@@ -3172,15 +3197,14 @@ function AccessRightsSection() {
                     <div className="flex items-center gap-2">
                       <Users className="h-4 w-4 text-muted-foreground" />
                       <span className="font-medium">{group.name}</span>
-                      {group.isSystemDefault && (
+                      {group.isSystemDefault && ["School Admin", "Org HQ"].includes(group.name) && (
                         <Badge variant="secondary" className="text-xs">
                           <Lock className="h-3 w-3 mr-1" />
                           System
                         </Badge>
                       )}
                     </div>
-                    {!group.isSystemDefault && (
-                      <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1">
                         <Button size="icon" variant="ghost" onClick={() => { setEditingGroupId(group.id); setEditGroupName(group.name); }} data-testid={`button-edit-group-${group.id}`}>
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -3188,7 +3212,6 @@ function AccessRightsSection() {
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
-                    )}
                   </>
                 )}
               </div>
@@ -3229,7 +3252,7 @@ function AccessRightsSection() {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Manage Staff Roles</DialogTitle>
-            <DialogDescription>Add, rename, or remove staff roles used across all schools</DialogDescription>
+            <DialogDescription>Add, edit, or remove staff roles used across all schools</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 max-h-[400px] overflow-y-auto">
             {staffRolesList.map((role) => (
@@ -3257,15 +3280,14 @@ function AccessRightsSection() {
                         <span className="font-medium">{role.label}</span>
                         {role.description && <p className="text-xs text-muted-foreground">{role.description}</p>}
                       </div>
-                      {role.isSystemDefault && (
+                      {role.isSystemDefault && ["School Admin", "Org HQ"].includes(role.label) && (
                         <Badge variant="secondary" className="text-xs">
                           <Lock className="h-3 w-3 mr-1" />
                           System
                         </Badge>
                       )}
                     </div>
-                    {!role.isSystemDefault && (
-                      <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1">
                         <Button size="icon" variant="ghost" onClick={() => { setEditingRoleId(role.id); setEditRoleLabel(role.label); }} data-testid={`button-edit-role-${role.id}`}>
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -3273,7 +3295,6 @@ function AccessRightsSection() {
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
-                    )}
                   </>
                 )}
               </div>
@@ -3426,7 +3447,7 @@ function AccessRightsSection() {
                     data-testid="button-save-permissions"
                   >
                     <Save className="h-4 w-4 mr-2" />
-                    Save Permissions
+                    Save Changes
                   </Button>
                 </div>
               )}

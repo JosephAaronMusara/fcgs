@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { CreateAccountForm } from "@/components/create-account-form";
@@ -26,8 +26,7 @@ import { SortableTableHead } from "@/components/sortable-table-head";
 export default function StaffPage() {
   const { toast } = useToast();
   const { currentSchoolId, hasAnyPermission } = useAuth();
-  const canViewAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
-  const canManageAccessRights = hasAnyPermission("access_groups.manage", "users.manage_permissions");
+  const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
@@ -58,7 +57,7 @@ export default function StaffPage() {
 
   const { data: accessGroups } = useQuery<Array<{ id: number; name: string }>>({
     queryKey: ["/api/access-groups"],
-    enabled: canViewAccessRights,
+    enabled: canManageAccessRights,
   });
 
   const { data: staffRolesList } = useQuery<Array<{ name: string; label: string }>>({
@@ -523,7 +522,7 @@ export default function StaffPage() {
                           Hostels
                         </Button>
 
-                        {canViewAccessRights && (
+                        {canManageAccessRights && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -596,20 +595,19 @@ export default function StaffPage() {
       </Dialog>
 
       {/* Access Rights Dialog */}
-      {canViewAccessRights && (
+      {canManageAccessRights && (
         <Dialog open={accessRightsStaff !== null} onOpenChange={(open) => !open && setAccessRightsStaff(null)}>
           <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
             <DialogHeader>
               <DialogTitle>Access Rights - {accessRightsStaff?.firstName} {accessRightsStaff?.lastName}</DialogTitle>
               <DialogDescription>
-                {canManageAccessRights ? "Modify individual permissions beyond the assigned access group. Changes override group defaults." : "View assigned access groups and effective permissions for this staff member."}
+                Modify individual permissions beyond the assigned access group. Changes override group defaults.
               </DialogDescription>
             </DialogHeader>
             {accessRightsStaff && (
               <AccessRightsPanel 
                 staff={accessRightsStaff} 
                 accessGroups={accessGroups}
-                canManage={canManageAccessRights}
                 onClose={() => setAccessRightsStaff(null)} 
               />
             )}
@@ -1290,12 +1288,10 @@ function UserAccountModal({
 function AccessRightsPanel({
   staff,
   accessGroups,
-  canManage,
   onClose,
 }: {
   staff: Staff;
   accessGroups?: Array<{ id: number; name: string }>;
-  canManage: boolean;
   onClose: () => void;
 }) {
   const { toast } = useToast();
@@ -1349,7 +1345,22 @@ function AccessRightsPanel({
     enabled: !!userData?.id,
   });
 
-  const overrideMap = new Map(overrides.map(o => [o.permissionId, o.granted]));
+  const { data: groupPermissionIds = [] } = useQuery<number[]>({
+    queryKey: ["/api/users", userData?.id, "group-permission-ids", userGroups.map(g => g.id).join(",")],
+    queryFn: async () => {
+      const responses = await Promise.all(
+        userGroups.map(async (group) => {
+          const res = await schoolFetch(`/api/access-groups/${group.id}/permissions`);
+          if (!res.ok) throw new Error("Failed to fetch group permissions");
+          return res.json() as Promise<Permission[]>;
+        })
+      );
+      return Array.from(new Set(responses.flat().map(permission => permission.id)));
+    },
+    enabled: !!userData?.id && userGroups.length > 0,
+  });
+
+  const overrideMap = useMemo(() => new Map(overrides.map(o => [o.permissionId, o.granted])), [overrides]);
 
   const togglePermissionMutation = useMutation({
     mutationFn: async ({ permissionId, granted }: { permissionId: number; granted: boolean }) => {
@@ -1415,11 +1426,30 @@ function AccessRightsPanel({
   const categories = Array.from(new Set(allPermissions.map(p => p.category))).sort();
 
   const effectiveMap = new Map(effectivePermissions.map(ep => [ep.permission.id, ep.granted]));
+  const groupPermissionSet = new Set(groupPermissionIds);
 
-  const allPermsWithStatus = allPermissions.map(p => ({
-    permission: p,
-    granted: effectiveMap.get(p.id) ?? false,
-  }));
+  const allPermsWithStatus = allPermissions.map(permission => {
+    const override = overrideMap.get(permission.id);
+    const grantedByGroup = groupPermissionSet.has(permission.id);
+    const granted = effectiveMap.get(permission.id) ?? false;
+
+    let source: "group" | "granted_override" | "denied_override" | "none" = "none";
+    if (override === true) {
+      source = "granted_override";
+    } else if (override === false) {
+      source = "denied_override";
+    } else if (grantedByGroup) {
+      source = "group";
+    }
+
+    return {
+      permission,
+      granted,
+      grantedByGroup,
+      override,
+      source,
+    };
+  });
 
   const filteredPerms = allPermsWithStatus.filter(ep => {
     if (categoryFilter !== "all" && ep.permission.category !== categoryFilter) return false;
@@ -1432,11 +1462,40 @@ function AccessRightsPanel({
     return a.permission.name.localeCompare(b.permission.name);
   });
 
+  const getStateChip = (source: "group" | "granted_override" | "denied_override" | "none") => {
+    if (source === "group") {
+      return <span className="rounded-full border border-[#082058]/25 bg-[#082058]/12 px-1.5 py-0.5 text-[10px] font-medium text-[#082058]">Group</span>;
+    }
+    if (source === "granted_override") {
+      return <span className="rounded-full border border-[#082058]/25 bg-[#082058]/12 px-1.5 py-0.5 text-[10px] font-medium text-[#082058]">Granted Override</span>;
+    }
+    if (source === "denied_override") {
+      return <span className="rounded-full border border-[#A82028]/25 bg-[#A82028]/12 px-1.5 py-0.5 text-[10px] font-medium text-[#A82028]">Denied Override</span>;
+    }
+    return null;
+  };
+
   const groupName = userGroups.length > 0 ? userGroups.map(g => g.name).join(", ") : "None";
   const overrideCount = overrides.length;
 
-  const handleToggle = (permissionId: number, currentlyGranted: boolean) => {
-    togglePermissionMutation.mutate({ permissionId, granted: !currentlyGranted });
+  const handleToggle = (
+    permissionId: number,
+    currentlyGranted: boolean,
+    grantedByGroup: boolean,
+    override: boolean | undefined,
+  ) => {
+    const nextGranted = !currentlyGranted;
+
+    if (override !== undefined) {
+      if (nextGranted === grantedByGroup) {
+        removeOverrideMutation.mutate(permissionId);
+        return;
+      }
+      togglePermissionMutation.mutate({ permissionId, granted: nextGranted });
+      return;
+    }
+
+    togglePermissionMutation.mutate({ permissionId, granted: nextGranted });
   };
 
   return (
@@ -1457,12 +1516,11 @@ function AccessRightsPanel({
           variant="outline"
           size="sm"
           onClick={() => {
-            if (!canManage) return;
             if (confirm("Reset all custom access rights to group defaults? This will remove all individual permission overrides.")) {
               resetAllMutation.mutate();
             }
           }}
-          disabled={!canManage || overrideCount === 0 || resetAllMutation.isPending}
+          disabled={overrideCount === 0 || resetAllMutation.isPending}
           data-testid="button-reset-to-default"
         >
           <RotateCcw className="h-4 w-4 mr-1" />
@@ -1496,20 +1554,27 @@ function AccessRightsPanel({
 
       <div className="flex-1 overflow-y-auto pr-1">
         <div className="flex flex-wrap gap-1.5">
-          {sortedPerms.map(({ permission, granted }) => {
-            const hasOverride = overrideMap.has(permission.id);
+          {sortedPerms.map(({ permission, granted, grantedByGroup, override, source }) => {
+            const deniedOverride = source === "denied_override";
+            const clickableClass = granted
+              ? "bg-primary text-primary-foreground hover:bg-primary/90"
+              : deniedOverride
+                ? "border-[#A82028]/40 text-[#A82028] hover:bg-[#A82028]/5"
+                : "hover:bg-muted";
+
             return (
               <Badge
                 key={permission.id}
                 variant={granted ? "default" : "outline"}
-                className={`${canManage ? "cursor-pointer" : "cursor-default opacity-80"} select-none gap-1 ${hasOverride ? "ring-1 ring-primary/50" : ""}`}
-                onClick={() => canManage && handleToggle(permission.id, granted)}
+                className={`cursor-pointer select-none gap-2 px-2 py-1 ${clickableClass}`}
+                onClick={() => handleToggle(permission.id, granted, grantedByGroup, override)}
                 data-testid={`permission-chip-${permission.id}`}
                 title={permission.description || permission.name}
               >
                 {granted && <Check className="h-3 w-3" />}
-                {permission.name}
-                {hasOverride && <span className="text-[10px] opacity-70">(custom)</span>}
+                {!granted && deniedOverride && <X className="h-3 w-3" />}
+                <span>{permission.name}</span>
+                {getStateChip(source)}
               </Badge>
             );
           })}

@@ -532,7 +532,7 @@ export default function CalendarPage() {
 
       return Array.isArray(body) ? body : [];
     },
-    enabled: isCreateOpen && (scope === "class" || scope === "org"),
+    enabled: isCreateOpen || !!viewingEvent || scope === "class" || scope === "org",
   });
 
   const { data: classes = [], isLoading: classesLoading } = useQuery<ClassRow[]>({
@@ -555,6 +555,25 @@ export default function CalendarPage() {
       return Array.isArray(body) ? body : [];
     },
     enabled: isCreateOpen && scope === "class" && !!selectedSchoolId,
+  });
+
+  const { data: viewingSchoolClasses = [] } = useQuery<ClassRow[]>({
+    queryKey: ["/api/classes", "viewing-school", getEventSchoolId(viewingEvent)],
+    queryFn: async () => {
+      const schoolId = getEventSchoolId(viewingEvent);
+      const response = await fetch("/api/classes", {
+        credentials: "include",
+        headers: schoolId ? { "X-School-Id": String(schoolId) } : {},
+      });
+      const body = await response.json().catch(() => []);
+
+      if (!response.ok) {
+        throw new Error(body?.message || "Failed to load event classes");
+      }
+
+      return Array.isArray(body) ? body : [];
+    },
+    enabled: !!viewingEvent && getEventClassIds(viewingEvent).length > 0 && !!getEventSchoolId(viewingEvent),
   });
 
   const { data: staff = [], isLoading: staffLoading } = useQuery<StaffRow[]>({
@@ -863,6 +882,16 @@ export default function CalendarPage() {
     [schools, selectedOrgSchoolIds]
   );
 
+  const viewingEventClassObjects = useMemo(() => {
+    if (!viewingEvent) return [];
+
+    const classIds = getEventClassIds(viewingEvent);
+    if (classIds.length === 0) return [];
+
+    const sourceClasses = viewingSchoolClasses.length > 0 ? viewingSchoolClasses : classes;
+    return sourceClasses.filter((item) => classIds.includes(item.id));
+  }, [viewingEvent, viewingSchoolClasses, classes]);
+
   useEffect(() => {
     setSelectedClassIds([]);
     setSelectedStaffViewerIds([]);
@@ -993,6 +1022,24 @@ export default function CalendarPage() {
       if (!eventDate) return false;
       return isSameDay(eventDate, date);
     });
+  }
+
+  function resolveSchoolText(event: any) {
+    const schoolId = getEventSchoolId(event);
+    if (schoolId == null) return null;
+    const school = schools.find((s) => s.id === schoolId);
+    return school ? schoolLabel(school) : `School ID: ${schoolId}`;
+  }
+
+  function resolveAgendaClassText(event: any) {
+    const classIds = getEventClassIds(event);
+    if (classIds.length === 0) return null;
+
+    if (viewingEvent?.id === event.id && viewingEventClassObjects.length > 0) {
+      return `Classes: ${viewingEventClassObjects.map(classLabel).join(", ")}`;
+    }
+
+    return `Class IDs: ${classIds.join(", ")}`;
   }
 
   const visibleClasses = useMemo(() => {
@@ -1298,6 +1345,8 @@ export default function CalendarPage() {
                 <div className="space-y-3 mt-3">
                   {eventsForDate(selectedDate).map((event: any) => {
                     const meta = getScopeMeta(event.scope);
+                    const schoolText = resolveSchoolText(event);
+                    const classText = resolveAgendaClassText(event);
 
                     return (
                       <div
@@ -1341,19 +1390,17 @@ export default function CalendarPage() {
                                 <span>{formatAudienceText(event)}</span>
                               </div>
 
-                              {getEventSchoolId(event) != null && (
+                              {schoolText && (
                                 <div className="flex items-center gap-2">
                                   <Building2 className="h-3.5 w-3.5" />
-                                  <span>School ID: {getEventSchoolId(event)}</span>
+                                  <span>{schoolText}</span>
                                 </div>
                               )}
 
-                              {getEventClassIds(event).length > 0 && (
+                              {classText && (
                                 <div className="flex items-center gap-2">
                                   <Layers3 className="h-3.5 w-3.5" />
-                                  <span>
-                                    Class IDs: {getEventClassIds(event).join(", ")}
-                                  </span>
+                                  <span>{classText}</span>
                                 </div>
                               )}
                             </div>
@@ -1543,11 +1590,19 @@ export default function CalendarPage() {
                       <div>
                         <p className="font-medium">Class Links</p>
                         <div className="flex flex-wrap gap-2 mt-1">
-                          {getEventClassIds(viewingEvent).map((id) => (
-                            <Badge key={id} variant="secondary">
-                              Class ID: {id}
-                            </Badge>
-                          ))}
+                          {viewingEventClassObjects.length > 0 ? (
+                            viewingEventClassObjects.map((item) => (
+                              <Badge key={item.id} variant="secondary">
+                                {classLabel(item)}
+                              </Badge>
+                            ))
+                          ) : (
+                            getEventClassIds(viewingEvent).map((id) => (
+                              <Badge key={id} variant="secondary">
+                                Class ID: {id}
+                              </Badge>
+                            ))
+                          )}
                         </div>
                       </div>
                     </div>
@@ -2270,7 +2325,7 @@ export default function CalendarPage() {
                       Class IDs: {editClassIds.length > 0 ? editClassIds.join(", ") : "None"}
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      Extra staff viewers: {" "}
+                      Extra staff viewers:{" "}
                       {editStaffViewerIds.length > 0
                         ? editStaffViewerIds.join(", ")
                         : "None"}
@@ -2310,7 +2365,7 @@ export default function CalendarPage() {
           <DialogHeader>
             <DialogTitle>Delete Event</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete {" "}
+              Are you sure you want to delete{" "}
               <strong>{eventToDelete?.title || "this event"}</strong>?
             </DialogDescription>
           </DialogHeader>

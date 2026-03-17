@@ -61,6 +61,14 @@ import ChildrenReportsPage from "@/pages/children-reports";
 import Student360Page from "@/pages/student-360";
 import Staff360Page from "@/pages/staff-360";
 import KundAiPage from "@/pages/kundai";
+import TransportPage from "@/pages/transport";
+import ArrearsPage from "@/pages/arrears";
+import SchoolExpensesPage from "@/pages/school-expenses";
+import SchoolIncomesPage from "@/pages/school-incomes";
+import ProductsPage from "@/pages/products";
+import FinancialStatementsPage from "@/pages/financial-statements";
+import DiscussionForumPage from "@/pages/discussion-forum";
+import LearningMaterialsPage from "@/pages/learning-materials";
 import NotFound from "@/pages/not-found";
 
 
@@ -90,7 +98,15 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/discipline$/, permissions: ["discipline.view"] },
   { pattern: /^\/marks$/, permissions: ["marks.view"] },
   { pattern: /^\/record-of-marks$/, permissions: ["record_of_marks.view"] },
-  { pattern: /^\/kundai$/, permissions: ["dashboard.view"] },
+  { pattern: /^\/kundai$/, permissions: ["kundai.view"] },
+  { pattern: /^\/transport$/, permissions: ["transport.view"] },
+  { pattern: /^\/arrears$/, permissions: ["arrears.view"] },
+  { pattern: /^\/school-expenses$/, permissions: ["school_expenses.view"] },
+  { pattern: /^\/school-incomes$/, permissions: ["school_incomes.view"] },
+  { pattern: /^\/products$/, permissions: ["products.view"] },
+  { pattern: /^\/financial-statements$/, permissions: ["financial_statements.view"] },
+  { pattern: /^\/discussion-forum$/, permissions: ["discussion_forum.view"] },
+  { pattern: /^\/learning-materials$/, permissions: ["learning_materials.view"] },
   { pattern: /^\/settings$/, permissions: ["settings.view"] },
   { pattern: /^\/library$/, permissions: ["library.view"] },
   { pattern: /^\/calendar$/, permissions: ["calendar.view"] },
@@ -720,6 +736,14 @@ function AuthenticatedRoutes() {
         <Route path="/marks" component={() => <ProtectedRoute component={MarksPage} />} />
         <Route path="/record-of-marks" component={() => <ProtectedRoute component={RecordOfMarksPage} />} />
         <Route path="/kundai" component={() => <ProtectedRoute component={KundAiPage} />} />
+        <Route path="/transport" component={() => <ProtectedRoute component={TransportPage} />} />
+        <Route path="/arrears" component={() => <ProtectedRoute component={ArrearsPage} />} />
+        <Route path="/school-expenses" component={() => <ProtectedRoute component={SchoolExpensesPage} />} />
+        <Route path="/school-incomes" component={() => <ProtectedRoute component={SchoolIncomesPage} />} />
+        <Route path="/products" component={() => <ProtectedRoute component={ProductsPage} />} />
+        <Route path="/financial-statements" component={() => <ProtectedRoute component={FinancialStatementsPage} />} />
+        <Route path="/discussion-forum" component={() => <ProtectedRoute component={DiscussionForumPage} />} />
+        <Route path="/learning-materials" component={() => <ProtectedRoute component={LearningMaterialsPage} />} />
         <Route path="/children" component={() => <ProtectedRoute component={MyChildrenPage} />} />
         <Route path="/settings" component={() => <ProtectedRoute component={SchoolSettingsPage} />} />
         <Route path="/library" component={() => <ProtectedRoute component={LibraryPage} />} />

@@ -77,6 +77,8 @@ export interface IStorage {
   getUserSchoolAccess(userId: number): Promise<number[]>;
   getUserPermissions(userId: number): Promise<number[]>;
   updateUserPermissions(userId: number, schoolIds: number[], permissionIds: number[]): Promise<void>;
+  getUserPermissionStates(userId: number): Promise<{ permission: Permission; granted: boolean; groupGranted: boolean; overrideGranted: boolean | null; source: "group" | "granted_override" | "denied_override" | "none" }[]>;
+  updateUserPermissionOverridesFromSelection(userId: number, selectedPermissionIds: number[]): Promise<void>;
 
   getAllStaff(): Promise<Staff[]>;
   getStaffBySchool(schoolId: number): Promise<Staff[]>;
@@ -514,12 +516,7 @@ export class DatabaseStorage implements IStorage {
     if (schoolIds.length > 0) {
       await db.insert(userSchoolAccess).values(schoolIds.map(schoolId => ({ userId, schoolId })));
     }
-    await db.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, userId));
-    if (permissionIds.length > 0) {
-      await db.insert(userPermissionOverrides).values(
-        permissionIds.map(permissionId => ({ userId, permissionId, granted: true }))
-      );
-    }
+    await this.updateUserPermissionOverridesFromSelection(userId, permissionIds);
   }
 
   async getAllStaff(): Promise<Staff[]> {
@@ -2024,7 +2021,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Get effective permissions for a user
-  async getUserEffectivePermissions(userId: number): Promise<{ permission: Permission; granted: boolean }[]> {
+  async getUserPermissionStates(userId: number): Promise<{ permission: Permission; granted: boolean; groupGranted: boolean; overrideGranted: boolean | null; source: "group" | "granted_override" | "denied_override" | "none" }[]> {
     const [allPerms, userGroups, overrides] = await Promise.all([
       this.getAllPermissions(),
       this.getUserAccessGroups(userId),
@@ -2046,12 +2043,55 @@ export class DatabaseStorage implements IStorage {
     }
 
     return allPerms.map(permission => {
-      let granted = groupPermissionIds.has(permission.id);
-      if (overrideMap.has(permission.id)) {
-        granted = overrideMap.get(permission.id)!;
-      }
-      return { permission, granted };
+      const groupGranted = groupPermissionIds.has(permission.id);
+      const overrideGranted = overrideMap.has(permission.id) ? overrideMap.get(permission.id)! : null;
+      const granted = overrideGranted !== null ? overrideGranted : groupGranted;
+      let source: "group" | "granted_override" | "denied_override" | "none" = "none";
+      if (overrideGranted === true) source = "granted_override";
+      else if (overrideGranted === false) source = "denied_override";
+      else if (groupGranted) source = "group";
+      return { permission, granted, groupGranted, overrideGranted, source };
     });
+  }
+
+  async updateUserPermissionOverridesFromSelection(userId: number, selectedPermissionIds: number[]): Promise<void> {
+    const [userGroups, allPerms] = await Promise.all([
+      this.getUserAccessGroups(userId),
+      this.getAllPermissions(),
+    ]);
+
+    const groupPermissions = await Promise.all(userGroups.map(group => this.getAccessGroupPermissions(group.id)));
+    const groupPermissionIds = new Set<number>();
+    for (const permissionsForGroup of groupPermissions) {
+      permissionsForGroup.forEach(permission => groupPermissionIds.add(permission.id));
+    }
+
+    const selectedSet = new Set(selectedPermissionIds);
+
+    await db.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, userId));
+
+    const overridesToInsert: { userId: number; permissionId: number; granted: boolean }[] = [];
+
+    for (const permission of allPerms) {
+      const baseline = groupPermissionIds.has(permission.id);
+      const selected = selectedSet.has(permission.id);
+      if (baseline !== selected) {
+        overridesToInsert.push({
+          userId,
+          permissionId: permission.id,
+          granted: selected,
+        });
+      }
+    }
+
+    if (overridesToInsert.length > 0) {
+      await db.insert(userPermissionOverrides).values(overridesToInsert);
+    }
+  }
+
+  async getUserEffectivePermissions(userId: number): Promise<{ permission: Permission; granted: boolean }[]> {
+    const states = await this.getUserPermissionStates(userId);
+    return states.map(({ permission, granted }) => ({ permission, granted }));
   }
 
   async userHasPermission(userId: number, permissionCode: string): Promise<boolean> {
