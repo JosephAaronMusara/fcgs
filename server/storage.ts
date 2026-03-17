@@ -62,6 +62,9 @@ import {
   type Notification, type InsertNotification,
   notifications,
   activityLogs,
+  calendarEvents,
+  calendarEventAttendees,
+  qcReports,
   type ActivityLog, type InsertActivityLog,
 } from "@shared/schema";
 
@@ -352,6 +355,9 @@ export interface IStorage {
   setAccessGroupPermissions(accessGroupId: number, permissionIds: number[]): Promise<void>;
 
   // User Access Groups
+  ensureUserBaselineAccessGroups(userId: number): Promise<void>;
+  normalizeUserBaselineAccess(userId: number): Promise<void>;
+  normalizeAllUserBaselineAccessGroups(): Promise<void>;
   getUserAccessGroups(userId: number): Promise<AccessGroup[]>;
   addUserToAccessGroup(data: InsertUserAccessGroup): Promise<UserAccessGroup>;
   removeUserFromAccessGroup(userId: number, accessGroupId: number): Promise<boolean>;
@@ -496,7 +502,28 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteUser(id: number): Promise<boolean> {
-    await db.delete(users).where(eq(users.id, id));
+    await db.transaction(async (tx) => {
+      await tx.delete(userSchoolAccess).where(eq(userSchoolAccess.userId, id));
+      await tx.delete(userAccessGroups).where(eq(userAccessGroups.userId, id));
+      await tx.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, id));
+
+      await tx.update(staff).set({ userId: null }).where(eq(staff.userId, id));
+      await tx.update(parents).set({ userId: null }).where(eq(parents.userId, id));
+      await tx.update(students).set({ userId: null }).where(eq(students.userId, id));
+
+      await tx.update(schools).set({ terminationByUserId: null }).where(eq(schools.terminationByUserId, id));
+      await tx.update(communicationLogs).set({ sentBy: null }).where(eq(communicationLogs.sentBy, id));
+      await tx.update(calendarEvents).set({ ownerUserId: null }).where(eq(calendarEvents.ownerUserId, id));
+      await tx.update(calendarEvents).set({ createdByUserId: null }).where(eq(calendarEvents.createdByUserId, id));
+      await tx.delete(calendarEventAttendees).where(eq(calendarEventAttendees.userId, id));
+      await tx.update(notifications).set({ userId: null }).where(eq(notifications.userId, id));
+      await tx.update(notifications).set({ actorUserId: null }).where(eq(notifications.actorUserId, id));
+      await tx.update(activityLogs).set({ userId: null }).where(eq(activityLogs.userId, id));
+      await tx.update(qcReports).set({ createdBy: null }).where(eq(qcReports.createdBy, id));
+
+      await tx.delete(users).where(eq(users.id, id));
+    });
+
     return true;
   }
 
@@ -1954,7 +1981,147 @@ export class DatabaseStorage implements IStorage {
   }
 
   // User Access Groups
+  private normalizeRoleKey(value: string | null | undefined): string | null {
+    if (!value) return null;
+    return value.trim().toLowerCase().replace(/\s+/g, "_");
+  }
+
+  private async resolveBaselineAccessGroupForUser(userId: number, user: User): Promise<AccessGroup | undefined> {
+    let targetGroup: AccessGroup | undefined;
+    const [staffMember] = await db.select().from(staff).where(eq(staff.userId, userId));
+
+    if (staffMember?.accessGroupId) {
+      targetGroup = await this.getAccessGroup(staffMember.accessGroupId);
+    }
+
+    if (!targetGroup) {
+      const normalizedStaffRole = this.normalizeRoleKey(staffMember?.role);
+      const roleToGroupName: Record<string, string> = {
+        teacher: "Teacher",
+        assistant_teacher: "Assistant Teacher",
+        assistantteacher: "Assistant Teacher",
+        librarian: "Librarian",
+        quality_control_officer: "Quality Control Officer",
+        quality_control: "Quality Control Officer",
+        qualitycontrol: "Quality Control Officer",
+        qc: "Quality Control Officer",
+        quality: "Quality Control Officer",
+        quality_assurance: "Quality Control Officer",
+        accountant: "Accountant",
+        accounts: "Accountant",
+        bursar: "Accountant",
+        administrator: "School Admin",
+        admin: "School Admin",
+        school_admin: "School Admin",
+        schooladmin: "School Admin",
+        deputy_head: "School Admin",
+        deputyhead: "School Admin",
+        head: "School Admin",
+        headmaster: "School Admin",
+        headmistress: "School Admin",
+      };
+      if (normalizedStaffRole && roleToGroupName[normalizedStaffRole]) {
+        targetGroup = await this.getAccessGroupByName(roleToGroupName[normalizedStaffRole]);
+      }
+    }
+
+    if (!targetGroup) {
+      const userRoleToGroupName: Partial<Record<User["role"], string>> = {
+        school_admin: "School Admin",
+        teacher: "Teacher",
+        assistant_teacher: "Assistant Teacher",
+        librarian: "Librarian",
+        quality_control_officer: "Quality Control Officer",
+      };
+      const mappedName = userRoleToGroupName[user.role];
+      if (mappedName) {
+        targetGroup = await this.getAccessGroupByName(mappedName);
+      }
+    }
+
+    return targetGroup;
+  }
+
+  async ensureUserBaselineAccessGroups(userId: number): Promise<void> {
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    if (!user) return;
+
+    const existingMappings = await db.select().from(userAccessGroups).where(eq(userAccessGroups.userId, userId));
+    const existingGroups = await db
+      .select({ group: accessGroups })
+      .from(userAccessGroups)
+      .innerJoin(accessGroups, eq(userAccessGroups.accessGroupId, accessGroups.id))
+      .where(eq(userAccessGroups.userId, userId));
+    const currentGroupIds = new Set(existingGroups.map(({ group }) => group.id));
+
+    if (user.role === "org_admin") {
+      const orgHqGroup = await this.getAccessGroupByName("Org HQ");
+      if (!orgHqGroup) return;
+
+      if (!currentGroupIds.has(orgHqGroup.id)) {
+        await this.addUserToAccessGroup({ userId, accessGroupId: orgHqGroup.id });
+      }
+
+      const explicitSchoolAccess = await db.select().from(userSchoolAccess).where(eq(userSchoolAccess.userId, userId));
+      if (explicitSchoolAccess.length === 0) {
+        const allSchools = user.organizationId
+          ? await db.select({ id: schools.id }).from(schools).where(eq(schools.organizationId, user.organizationId))
+          : await db.select({ id: schools.id }).from(schools);
+
+        if (allSchools.length > 0) {
+          await db.insert(userSchoolAccess).values(allSchools.map((school) => ({ userId, schoolId: school.id })));
+        }
+      }
+      return;
+    }
+
+    const targetGroup = await this.resolveBaselineAccessGroupForUser(userId, user);
+    if (!targetGroup) return;
+
+    if (!currentGroupIds.has(targetGroup.id)) {
+      await this.addUserToAccessGroup({ userId, accessGroupId: targetGroup.id });
+      return;
+    }
+
+    if (existingMappings.length === 0) {
+      await this.addUserToAccessGroup({ userId, accessGroupId: targetGroup.id });
+    }
+  }
+
+  async normalizeAllUserBaselineAccessGroups(): Promise<void> {
+    const allUsers = await db.select({ id: users.id }).from(users);
+    for (const user of allUsers) {
+      await this.ensureUserBaselineAccessGroups(user.id);
+    }
+  }
+
+  async normalizeUserBaselineAccess(userId: number): Promise<void> {
+    await this.ensureUserBaselineAccessGroups(userId);
+
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    if (!user || user.role !== "org_admin") return;
+
+    const orgHqGroup = await this.getAccessGroupByName("Org HQ");
+    if (!orgHqGroup) return;
+
+    const groups = await this.getUserAccessGroups(userId);
+    if (!groups.some((g) => g.id === orgHqGroup.id)) return;
+
+    const baselinePermissions = await this.getAccessGroupPermissions(orgHqGroup.id);
+    if (baselinePermissions.length === 0) return;
+
+    const baselineIds = new Set(baselinePermissions.map((p) => p.id));
+    const overrides = await this.getUserPermissionOverrides(userId);
+    const falseOverrides = overrides.filter((o) => baselineIds.has(o.permissionId) && o.granted === false);
+    const trueOverrides = overrides.filter((o) => o.granted === true);
+
+    if (falseOverrides.length === baselineIds.size && trueOverrides.length === 0) {
+      await db.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, userId));
+    }
+  }
+
   async getUserAccessGroups(userId: number): Promise<AccessGroup[]> {
+    await this.ensureUserBaselineAccessGroups(userId);
     const result = await db
       .select({ group: accessGroups })
       .from(userAccessGroups)

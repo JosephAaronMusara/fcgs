@@ -58,7 +58,7 @@ import {
   Phone,
   Archive,
 } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import type { School as SchoolType, User, Permission, Staff, Student, Parent, Notification, Organization, ActivityLog, AssessmentType, Exam, AccessGroup, StaffRole } from "@shared/schema";
 import {
@@ -174,6 +174,7 @@ export default function OrgDashboard() {
   const [selectedUser, setSelectedUser] = useState<OrgUser | null>(null);
   const [selectedSchools, setSelectedSchools] = useState<number[]>([]);
   const [selectedPermissions, setSelectedPermissions] = useState<number[]>([]);
+  const permissionDraftInitializedForUserRef = useRef<number | null>(null);
   const [expandedCategories, setExpandedCategories] = useState<string[]>([]);
   const [isEditingPermissions, setIsEditingPermissions] = useState(false);
   const [editFirstName, setEditFirstName] = useState("");
@@ -240,12 +241,12 @@ export default function OrgDashboard() {
     queryKey: ["/api/permissions"],
   });
 
-  const { data: userSchoolAccess = [] } = useQuery<number[]>({
+  const { data: userSchoolAccess = [], isLoading: userSchoolAccessLoading } = useQuery<number[]>({
     queryKey: [`/api/users/${selectedUser?.id}/schools`],
     enabled: !!selectedUser,
   });
 
-  const { data: userPermissionStates = [] } = useQuery<UserPermissionState[]>({
+  const { data: userPermissionStates = [], isLoading: userPermissionStatesLoading } = useQuery<UserPermissionState[]>({
     queryKey: [`/api/users/${selectedUser?.id}/permissions`],
     enabled: !!selectedUser,
   });
@@ -518,14 +519,27 @@ export default function OrgDashboard() {
   });
 
   useEffect(() => {
-    if (selectedUser && isPermissionsOpen && !isEditingPermissions) {
-      const initialSchoolIds = userSchoolAccess.length > 0
-        ? userSchoolAccess
-        : schools.map((school) => school.id);
-      setSelectedSchools(initialSchoolIds);
-      setSelectedPermissions(userPermissionStates.filter((state) => state.granted).map((state) => state.permission.id));
+    if (!selectedUser || !isPermissionsOpen) {
+      permissionDraftInitializedForUserRef.current = null;
+      return;
     }
-  }, [selectedUser, userSchoolAccess, userPermissionStates, schools, isPermissionsOpen, isEditingPermissions]);
+
+    if (userSchoolAccessLoading || userPermissionStatesLoading) {
+      return;
+    }
+
+    if (permissionDraftInitializedForUserRef.current === selectedUser.id) {
+      return;
+    }
+
+    const initialSchoolIds = userSchoolAccess.length > 0
+      ? userSchoolAccess
+      : schools.map((school) => school.id);
+
+    setSelectedSchools(initialSchoolIds);
+    setSelectedPermissions(userPermissionStates.filter((state) => state.granted).map((state) => state.permission.id));
+    permissionDraftInitializedForUserRef.current = selectedUser.id;
+  }, [selectedUser, userSchoolAccess, userPermissionStates, schools, isPermissionsOpen, userSchoolAccessLoading, userPermissionStatesLoading]);
 
   const createSchool = useMutation({
     mutationFn: async (data: Partial<SchoolType>) => {
@@ -628,12 +642,18 @@ export default function OrgDashboard() {
         queryClient.invalidateQueries({ queryKey: [`/api/users/${selectedUser.id}/schools`] });
         queryClient.invalidateQueries({ queryKey: [`/api/users/${selectedUser.id}/permissions`] });
       }
+      permissionDraftInitializedForUserRef.current = null;
       setIsPermissionsOpen(false);
       setSelectedUser(null);
       toast({ title: "Permissions updated successfully" });
     },
-    onError: () => {
-      toast({ title: "Failed to update permissions", variant: "destructive" });
+    onError: async (error: any) => {
+      let message = "Failed to update permissions";
+      try {
+        const body = await error?.response?.json?.();
+        if (body?.message) message = body.message;
+      } catch {}
+      toast({ title: message, variant: "destructive" });
     },
   });
 
@@ -733,7 +753,9 @@ export default function OrgDashboard() {
   };
 
   const handleOpenPermissions = (orgUser: OrgUser) => {
+    permissionDraftInitializedForUserRef.current = null;
     setSelectedUser(orgUser);
+    setIsEditingPermissions(false);
     setIsPermissionsOpen(true);
   };
 
@@ -749,6 +771,10 @@ export default function OrgDashboard() {
       schoolIds: selectedSchools,
       permissionIds: selectedPermissions,
     });
+  };
+
+  const handleResetPermissionOverrides = () => {
+    setSelectedPermissions(userPermissionStates.filter((state) => state.groupGranted).map((state) => state.permission.id));
   };
 
   const toggleSchool = (schoolId: number) => {
@@ -814,6 +840,7 @@ export default function OrgDashboard() {
   };
 
   const allSchoolsEnabled = schools.length > 0 && selectedSchools.length === schools.length;
+  const permissionsModalLoading = !!selectedUser && (userSchoolAccessLoading || userPermissionStatesLoading);
 
   if (schoolsLoading || usersLoading) {
     return (
@@ -1621,7 +1648,7 @@ export default function OrgDashboard() {
                 data-testid="input-edit-email" 
               />
             </div>
-            <DialogFooter>
+            <DialogFooter className="pr-4">
               <Button type="button" variant="outline" onClick={() => setIsEditUserOpen(false)}>
                 Cancel
               </Button>
@@ -1635,13 +1662,16 @@ export default function OrgDashboard() {
 
       <Dialog open={isPermissionsOpen} onOpenChange={(open) => {
         setIsPermissionsOpen(open);
-        if (!open) setIsEditingPermissions(false);
+        if (!open) {
+          setIsEditingPermissions(false);
+          permissionDraftInitializedForUserRef.current = null;
+        }
       }}>
         <DialogContent className="max-w-2xl max-h-[90vh]">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Shield className="h-5 w-5" />
-              Permissions for {selectedUser?.firstName || selectedUser?.username}
+              Access Rights for {selectedUser?.firstName || selectedUser?.username}
             </DialogTitle>
             <DialogDescription>
               Configure school access scope and permission overrides for this Org HQ user
@@ -1684,13 +1714,31 @@ export default function OrgDashboard() {
               </div>
 
               <div>
-                <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                  <Shield className="h-4 w-4" />
-                  Permission Overrides
-                </h3>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <Shield className="h-4 w-4" />
+                    Access Rights
+                  </h3>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleResetPermissionOverrides}
+                    disabled={!isEditingPermissions || permissionsModalLoading}
+                    data-testid="button-reset-hq-permissions"
+                  >
+                    <RotateCcw className="h-4 w-4 mr-1" />
+                    Reset to Group Default
+                  </Button>
+                </div>
                 <p className="text-sm text-muted-foreground mb-3">
                   This checklist shows the Org HQ access-group defaults plus any per-user overrides. Uncheck to create a denied override, or check to create a granted override where needed.
                 </p>
+                {permissionsModalLoading ? (
+                  <div className="space-y-2 border rounded-lg p-6 text-sm text-muted-foreground">
+                    Loading access rights...
+                  </div>
+                ) : (
                 <div className="space-y-2 border rounded-lg p-3">
                   {Object.entries(permissionsByCategory).map(([category, perms]) => (
                     <div key={category} className="border-b last:border-b-0 pb-2 last:pb-0">
@@ -1751,26 +1799,20 @@ export default function OrgDashboard() {
                     </div>
                   ))}
                 </div>
+                )}
               </div>
             </div>
           </ScrollArea>
 
-          <DialogFooter>
+          <DialogFooter className="pr-4">
             {isEditingPermissions ? (
               <>
-                <Button type="button" variant="outline" onClick={() => {
-                  setIsEditingPermissions(false);
-                  const resetSchoolIds = userSchoolAccess.length > 0
-                    ? userSchoolAccess
-                    : schools.map((school) => school.id);
-                  setSelectedSchools(resetSchoolIds);
-                  setSelectedPermissions(userPermissionStates.filter((state) => state.granted).map((state) => state.permission.id));
-                }}>
+                <Button type="button" variant="outline" onClick={() => setIsEditingPermissions(false)}>
                   Cancel
                 </Button>
                 <Button 
                   onClick={handleSavePermissions}
-                  disabled={updateUserPermissions.isPending}
+                  disabled={updateUserPermissions.isPending || permissionsModalLoading}
                   data-testid="button-save-permissions"
                 >
                   Save Changes
@@ -1780,8 +1822,9 @@ export default function OrgDashboard() {
               <Button 
                 onClick={() => setIsEditingPermissions(true)}
                 data-testid="button-edit-permissions"
+                disabled={permissionsModalLoading}
               >
-                Edit Permissions
+                {permissionsModalLoading ? "Loading..." : "Edit Permissions"}
               </Button>
             )}
           </DialogFooter>
@@ -2948,9 +2991,8 @@ function AccessRightsSection() {
       setEditingGroupId(null);
       toast({ title: "Access group updated successfully" });
     },
-    onError: async (error: any) => {
-      const message = error?.message || "Failed to update access group";
-      toast({ title: message, variant: "destructive" });
+    onError: () => {
+      toast({ title: "Failed to update access group", variant: "destructive" });
     },
   });
 
@@ -2978,9 +3020,8 @@ function AccessRightsSection() {
       setEditingRoleId(null);
       toast({ title: "Role updated successfully" });
     },
-    onError: async (error: any) => {
-      const message = error?.message || "Failed to update role";
-      toast({ title: message, variant: "destructive" });
+    onError: () => {
+      toast({ title: "Failed to update role", variant: "destructive" });
     },
   });
 
@@ -2993,7 +3034,11 @@ function AccessRightsSection() {
       toast({ title: "Role deleted successfully" });
     },
     onError: async (error: any) => {
-      const message = error?.message || "Failed to delete role";
+      let message = "Failed to delete role";
+      try {
+        const body = await error?.response?.json?.();
+        if (body?.message) message = body.message;
+      } catch {}
       toast({ title: message, variant: "destructive" });
     },
   });
@@ -3028,7 +3073,11 @@ function AccessRightsSection() {
       toast({ title: "Access group deleted successfully" });
     },
     onError: async (error: any) => {
-      const message = error?.message || "Failed to delete access group";
+      let message = "Failed to delete access group";
+      try {
+        const body = await error?.response?.json?.();
+        if (body?.message) message = body.message;
+      } catch {}
       toast({ title: message, variant: "destructive" });
     },
   });
@@ -3171,7 +3220,7 @@ function AccessRightsSection() {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Manage Access Groups</DialogTitle>
-            <DialogDescription>Add, edit, or remove access groups</DialogDescription>
+            <DialogDescription>Add, rename, or remove custom access groups</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 max-h-[400px] overflow-y-auto">
             {accessGroups.map((group) => (
@@ -3182,7 +3231,6 @@ function AccessRightsSection() {
                       value={editGroupName}
                       onChange={(e) => setEditGroupName(e.target.value)}
                       className="flex-1"
-                      disabled={group.isSystemDefault}
                       data-testid="input-edit-group-name"
                     />
                     <Button size="icon" variant="ghost" onClick={() => { updateGroup.mutate({ id: group.id, name: editGroupName }); }} disabled={!editGroupName || updateGroup.isPending} data-testid="button-save-edit-group">
@@ -3205,13 +3253,13 @@ function AccessRightsSection() {
                       )}
                     </div>
                     <div className="flex items-center gap-1">
-                        <Button size="icon" variant="ghost" onClick={() => { setEditingGroupId(group.id); setEditGroupName(group.name); }} data-testid={`button-edit-group-${group.id}`}>
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button size="icon" variant="ghost" onClick={() => { if (confirm("Are you sure you want to delete this access group?")) { deleteGroup.mutate(group.id); } }} data-testid={`button-delete-group-${group.id}`}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
+                      <Button size="icon" variant="ghost" onClick={() => { setEditingGroupId(group.id); setEditGroupName(group.name); }} data-testid={`button-edit-group-${group.id}`}>
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button size="icon" variant="ghost" onClick={() => { if (confirm("Are you sure you want to delete this access group?")) { deleteGroup.mutate(group.id); } }} data-testid={`button-delete-group-${group.id}`}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </>
                 )}
               </div>
@@ -3252,7 +3300,7 @@ function AccessRightsSection() {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Manage Staff Roles</DialogTitle>
-            <DialogDescription>Add, edit, or remove staff roles used across all schools</DialogDescription>
+            <DialogDescription>Add, rename, or remove staff roles used across all schools</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 max-h-[400px] overflow-y-auto">
             {staffRolesList.map((role) => (
@@ -3288,13 +3336,13 @@ function AccessRightsSection() {
                       )}
                     </div>
                     <div className="flex items-center gap-1">
-                        <Button size="icon" variant="ghost" onClick={() => { setEditingRoleId(role.id); setEditRoleLabel(role.label); }} data-testid={`button-edit-role-${role.id}`}>
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button size="icon" variant="ghost" onClick={() => { if (confirm("Are you sure you want to delete this role?")) { deleteRole.mutate(role.id); } }} data-testid={`button-delete-role-${role.id}`}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
+                      <Button size="icon" variant="ghost" onClick={() => { setEditingRoleId(role.id); setEditRoleLabel(role.label); }} data-testid={`button-edit-role-${role.id}`}>
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button size="icon" variant="ghost" onClick={() => { if (confirm("Are you sure you want to delete this role?")) { deleteRole.mutate(role.id); } }} data-testid={`button-delete-role-${role.id}`}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </>
                 )}
               </div>

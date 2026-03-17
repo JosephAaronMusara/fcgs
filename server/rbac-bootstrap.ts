@@ -2,6 +2,7 @@ import { db } from "./db";
 import { RBAC_PERMISSIONS_DATA } from "./rbac-config";
 import { permissions, userPermissionOverrides, users } from "@shared/schema";
 import { eq, inArray } from "drizzle-orm";
+import { storage } from "./storage";
 
 async function ensurePermissionsCatalog() {
   for (const permission of RBAC_PERMISSIONS_DATA) {
@@ -65,4 +66,5 @@ async function cleanupLegacyBlanketAdminOverrides() {
 export async function ensureRbacBaseline() {
   await ensurePermissionsCatalog();
   await cleanupLegacyBlanketAdminOverrides();
+  await storage.normalizeAllUserBaselineAccessGroups();
 }

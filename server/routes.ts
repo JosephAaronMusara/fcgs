@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, userAccessGroups, userPermissionOverrides } from "@shared/schema";
+import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, sql } from "drizzle-orm";
@@ -70,33 +70,6 @@ function generateResetToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
 
-async function normalizeLegacyOrgHqUser(userId: number, organizationId: number | null | undefined) {
-  const targetUser = await storage.getUser(userId);
-  if (!targetUser || targetUser.role !== "org_admin") return;
-
-  const orgHqGroup = await storage.getAccessGroupByName("Org HQ");
-  if (!orgHqGroup) return;
-
-  const currentGroups = await storage.getUserAccessGroups(userId);
-  const hasOrgHqGroup = currentGroups.some(group => group.id === orgHqGroup.id);
-
-  if (!hasOrgHqGroup) {
-    await storage.addUserToAccessGroup({ userId, accessGroupId: orgHqGroup.id });
-    await db.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, userId));
-
-    const scopeCondition = organizationId
-      ? eq(schoolsTable.organizationId, organizationId)
-      : sql`1=1`;
-    const existingSchools = await db.select({ id: schoolsTable.id }).from(schoolsTable).where(scopeCondition);
-
-    await db.delete(userSchoolAccess).where(eq(userSchoolAccess.userId, userId));
-    if (existingSchools.length > 0) {
-      await db.insert(userSchoolAccess)
-        .values(existingSchools.map((school) => ({ userId, schoolId: school.id })))
-        .onConflictDoNothing();
-    }
-  }
-}
 
 function mapStaffRoleToUserRole(staffRole: string | null | undefined): User["role"] {
   switch (staffRole) {
@@ -418,12 +391,13 @@ export async function registerRoutes(
 
   app.get("/api/users/:id/schools", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
+      const currentUser = req.user as User;
       const userId = parseInt(req.params.id);
-      const targetUser = await storage.getUser(userId);
-      if (!targetUser) {
-        return res.status(404).json({ message: "User not found" });
+      const access = await checkTenantAccess(currentUser, userId, { repairLegacyOrgAdmin: true });
+      if (!access.allowed) {
+        return res.status(403).json({ message: access.error });
       }
-      await normalizeLegacyOrgHqUser(userId, targetUser.organizationId);
+      await storage.normalizeUserBaselineAccess(userId);
       const schoolAccess = await storage.getUserSchoolAccess(userId);
       res.json(schoolAccess);
     } catch (error) {
@@ -434,19 +408,33 @@ export async function registerRoutes(
 
   app.put("/api/users/:id/permissions", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
+      const currentUser = req.user as User;
       const userId = parseInt(req.params.id);
       const parsed = updateUserPermissionsSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ message: "Invalid request body", errors: parsed.error.errors });
       }
 
-      const targetUser = await storage.getUser(userId);
+      const access = await checkTenantAccess(currentUser, userId, { repairLegacyOrgAdmin: true });
+      if (!access.allowed) {
+        return res.status(403).json({ message: access.error });
+      }
+
+      const targetUser = access.targetUser;
       if (!targetUser) {
         return res.status(404).json({ message: "User not found" });
       }
 
+      await storage.normalizeUserBaselineAccess(userId);
+
       if (targetUser.role === "org_admin") {
-        await normalizeLegacyOrgHqUser(userId, targetUser.organizationId);
+        const orgHqGroup = await storage.getAccessGroupByName("Org HQ");
+        if (orgHqGroup) {
+          const currentGroups = await storage.getUserAccessGroups(userId);
+          if (!currentGroups.some(group => group.id === orgHqGroup.id)) {
+            await storage.addUserToAccessGroup({ userId, accessGroupId: orgHqGroup.id });
+          }
+        }
       }
 
       await db.delete(userSchoolAccess).where(eq(userSchoolAccess.userId, userId));
@@ -4966,8 +4954,9 @@ export async function registerRoutes(
       if (!group) {
         return res.status(404).json({ message: "Access group not found" });
       }
-      const [{ count: assignmentCount }] = await db.select({ count: sql<number>`count(*)::int` }).from(userAccessGroups).where(eq(userAccessGroups.accessGroupId, groupId));
-      if ((assignmentCount || 0) > 0) {
+      const assignedUsers = await db.select({ count: sql<number>`count(*)` }).from(userAccessGroups).where(eq(userAccessGroups.accessGroupId, groupId));
+      const usageCount = Number(assignedUsers[0]?.count ?? 0);
+      if (usageCount > 0) {
         return res.status(400).json({ message: "This access group cannot be deleted because users are assigned to it." });
       }
       await storage.deleteAccessGroup(groupId);
@@ -5028,7 +5017,8 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Role not found" });
       }
-      const usageCount = (await storage.getAllStaff()).filter((member) => member.role === existing.name).length;
+      const assignedStaff = await db.select({ count: sql<number>`count(*)` }).from(staff).where(eq(staff.role, existing.name));
+      const usageCount = Number(assignedStaff[0]?.count ?? 0);
       if (usageCount > 0) {
         return res.status(400).json({ message: "This role cannot be deleted because staff members are assigned to it." });
       }
@@ -5040,14 +5030,42 @@ export async function registerRoutes(
   });
 
   // Helper function to check tenant-scoped access
-  async function checkTenantAccess(currentUser: User, targetUserId: number): Promise<{ allowed: boolean; error?: string; targetUser?: User }> {
-    const targetUser = await storage.getUser(targetUserId);
+  async function checkTenantAccess(
+    currentUser: User,
+    targetUserId: number,
+    options?: { repairLegacyOrgAdmin?: boolean }
+  ): Promise<{ allowed: boolean; error?: string; targetUser?: User }> {
+    let targetUser = await storage.getUser(targetUserId);
     if (!targetUser) {
       return { allowed: false, error: "User not found" };
     }
 
+    if (
+      options?.repairLegacyOrgAdmin &&
+      currentUser.role === 'org_admin' &&
+      !!currentUser.organizationId &&
+      targetUser.role === 'org_admin' &&
+      !targetUser.organizationId
+    ) {
+      const repaired = await storage.updateUser(targetUserId, { organizationId: currentUser.organizationId });
+      if (repaired) {
+        targetUser = repaired;
+      }
+    }
+
     if (currentUser.role === 'org_admin') {
-      if (targetUser.organizationId !== currentUser.organizationId) {
+      if (!currentUser.organizationId) {
+        return { allowed: true, targetUser };
+      }
+
+      let targetOrganizationId = targetUser.organizationId ?? null;
+
+      if (!targetOrganizationId && targetUser.schoolId) {
+        const targetSchool = await storage.getSchool(targetUser.schoolId);
+        targetOrganizationId = targetSchool?.organizationId ?? null;
+      }
+
+      if (targetOrganizationId !== currentUser.organizationId) {
         return { allowed: false, error: "Access denied - user not in your organization" };
       }
     } else if (currentUser.schoolId) {
@@ -5103,10 +5121,11 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Access denied" });
       }
       const targetUserId = parseInt(req.params.userId);
-      const access = await checkTenantAccess(currentUser, targetUserId);
+      const access = await checkTenantAccess(currentUser, targetUserId, { repairLegacyOrgAdmin: true });
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
+      await storage.normalizeUserBaselineAccess(targetUserId);
       const visibleGroups = await getVisibleAccessGroupsForUser(currentUser);
       const visibleIds = new Set(visibleGroups.map(g => g.id));
       const groups = (await storage.getUserAccessGroups(targetUserId)).filter(group => visibleIds.has(group.id));
@@ -5173,15 +5192,11 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Access denied" });
       }
       const targetUserId = parseInt(req.params.userId);
-      const access = await checkTenantAccess(currentUser, targetUserId);
+      const access = await checkTenantAccess(currentUser, targetUserId, { repairLegacyOrgAdmin: true });
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      const targetUser = await storage.getUser(targetUserId);
-      if (!targetUser) {
-        return res.status(404).json({ message: "User not found" });
-      }
-      await normalizeLegacyOrgHqUser(targetUserId, targetUser.organizationId);
+      await storage.normalizeUserBaselineAccess(targetUserId);
       const permissionStates = await storage.getUserPermissionStates(targetUserId);
       res.json(permissionStates);
     } catch (error) {
@@ -5196,10 +5211,11 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Access denied" });
       }
       const targetUserId = parseInt(req.params.userId);
-      const access = await checkTenantAccess(currentUser, targetUserId);
+      const access = await checkTenantAccess(currentUser, targetUserId, { repairLegacyOrgAdmin: true });
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
+      await storage.normalizeUserBaselineAccess(targetUserId);
       const overrides = await storage.getUserPermissionOverrides(targetUserId);
       res.json(overrides);
     } catch (error) {
