@@ -14,7 +14,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Plus, Search, Pencil, Trash2, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, RotateCcw, X, Menu, MessageSquare, ClipboardList } from "lucide-react";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
-import type { Assessment, Subject, Class as ClassType, AssessmentType, Exam, School, Grade, AssessmentComment } from "@shared/schema";
+import type { Assessment, Subject, Class as ClassType, AssessmentType, Exam, Grade, AssessmentComment } from "@shared/schema";
 
 interface AssessmentPaper {
   id?: number;
@@ -48,10 +48,6 @@ export default function AssessmentsPage() {
     }, 300);
     return () => clearTimeout(timer);
   }, [search]);
-
-  const { data: school } = useQuery<School>({
-    queryKey: ["/api/schools/current"],
-  });
 
   const { data: classes } = useQuery<ClassType[]>({
     queryKey: ["/api/classes"],
@@ -367,7 +363,6 @@ export default function AssessmentsPage() {
         subjects={subjects || []}
         assessmentTypes={assessmentTypes || []}
         exams={exams || []}
-        schoolId={school?.id}
         onSubmit={(data) => {
           if (editingAssessment) {
             updateMutation.mutate({ id: editingAssessment.id, data });
@@ -387,7 +382,6 @@ export default function AssessmentsPage() {
         subjects={subjects || []}
         classes={classes || []}
         grades={grades || []}
-        schoolId={school?.id}
       />
     </div>
   );
@@ -401,7 +395,6 @@ interface AssessmentDialogProps {
   subjects: Subject[];
   assessmentTypes: AssessmentType[];
   exams: Exam[];
-  schoolId?: number;
   onSubmit: (data: any) => void;
   isSubmitting: boolean;
 }
@@ -414,7 +407,6 @@ function AssessmentDialog({
   subjects,
   assessmentTypes,
   exams,
-  schoolId,
   onSubmit,
   isSubmitting,
 }: AssessmentDialogProps) {
@@ -499,8 +491,7 @@ function AssessmentDialog({
       assessmentDate: assessmentDate || null,
       dueDate: dueDate || null,
       examId: parseInt(examId),
-      schoolId,
-      papers: papers.map(p => ({
+          papers: papers.map(p => ({
         paperName: p.paperName,
         paperMarks: p.paperMarks,
         paperWeightPct: p.paperWeightPct,
@@ -729,7 +720,6 @@ interface CommentsDialogProps {
   subjects: Subject[];
   classes: ClassType[];
   grades: Grade[];
-  schoolId?: number;
 }
 
 function MultiSelectPicker({ label, options, selected, onChange, testId }: {
@@ -809,7 +799,7 @@ function MultiSelectPicker({ label, options, selected, onChange, testId }: {
   );
 }
 
-function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grades, schoolId }: CommentsDialogProps) {
+function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grades }: CommentsDialogProps) {
   const { toast } = useToast();
   const [commentText, setCommentText] = useState("");
   const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
@@ -930,8 +920,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
           classIds: selectedClassIds,
           subjectIds: selectedSubjectIds,
           gradeId: parseInt(gradeId),
-          schoolId,
-          commentText: commentText.trim(),
+                  commentText: commentText.trim(),
         });
       }
     } catch (err: any) {
@@ -946,8 +935,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
       missingPairs,
       gradeId: pendingGradeId,
       commentText: pendingText,
-      schoolId,
-    });
+        });
   };
 
   const toggleDuplicate = (id: number) => {

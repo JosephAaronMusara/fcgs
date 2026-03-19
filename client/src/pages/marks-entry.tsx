@@ -14,7 +14,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { Save, AlertCircle, CheckCircle2, User, BookOpen, ClipboardList, Download, Upload, FileSpreadsheet, AlertTriangle, Loader2, FileText } from "lucide-react";
 import * as XLSX from "xlsx";
-import type { Assessment, Subject, Class as ClassType, Student, Grade, School, AssessmentComment } from "@shared/schema";
+import type { Assessment, Subject, Class as ClassType, Student, Grade, AssessmentComment } from "@shared/schema";
 
 interface AssessmentPaper {
   id: number;
@@ -78,12 +78,7 @@ export default function MarksEntryPage() {
   const savingStudents = useRef<Set<number>>(new Set());
   const marksDataRef = useRef<MarksEntryData | null>(null);
   const selectedAssessmentIdRef = useRef<string>("");
-  const schoolIdRef = useRef<number | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const { data: school } = useQuery<School>({
-    queryKey: ["/api/schools/current"],
-  });
 
   const { data: classes } = useQuery<ClassType[]>({
     queryKey: ["/api/classes"],
@@ -211,10 +206,6 @@ export default function MarksEntryPage() {
   }, [selectedAssessmentId]);
 
   useEffect(() => {
-    schoolIdRef.current = school?.id;
-  }, [school?.id]);
-
-  useEffect(() => {
     return () => {
       for (const timer of Object.values(autoSaveTimers.current)) {
         clearTimeout(timer);
@@ -298,7 +289,6 @@ export default function MarksEntryPage() {
     const studentMark = currentMarks[studentId];
     const currentMarksData = marksDataRef.current;
     const currentAssessmentId = selectedAssessmentIdRef.current;
-    const currentSchoolId = schoolIdRef.current;
     
     if (!studentMark || !studentMark.isDirty || !currentMarksData || !currentAssessmentId) return;
     if (savingStudents.current.has(studentId)) return;
@@ -318,9 +308,6 @@ export default function MarksEntryPage() {
     saveMutationRef.current.mutate({
       assessmentId: parseInt(currentAssessmentId),
       studentId,
-      classId: currentMarksData.assessment.classId,
-      subjectId: currentMarksData.assessment.subjectId,
-      schoolId: currentSchoolId,
       paperMarks,
       attStatus: studentMark.attStatus,
       commentSource: studentMark.commentSource,

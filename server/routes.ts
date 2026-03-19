@@ -1,4 +1,4 @@
-import type { Express, Request } from "express";
+import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requireRole } from "./auth";
 import { storage } from "./storage";
@@ -214,15 +214,173 @@ async function getSystemUrl(schoolId?: number | null): Promise<string> {
 
 function getSchoolContext(req: Request): number | null {
   const currentUser = req.user as User;
-  
-  if (currentUser.role === 'org_admin') {
+
+  if (currentUser.role === "org_admin") {
     // Org admin can switch between schools using header
-    const headerSchoolId = req.headers['x-school-id'] as string;
+    const headerSchoolId = req.headers["x-school-id"] as string;
     return headerSchoolId ? parseInt(headerSchoolId, 10) : null;
   }
-  
+
   // School-level users always use their assigned school
   return currentUser.schoolId;
+}
+
+async function requireSchoolScope(req: Request, res: Response): Promise<number | null> {
+  const schoolId = getSchoolContext(req);
+  if (!schoolId || Number.isNaN(schoolId)) {
+    res.status(400).json({ message: "No school context" });
+    return null;
+  }
+  return schoolId;
+}
+
+async function ensureClassInSchool(classId: number, schoolId: number, res: Response) {
+  const classInfo = await storage.getClass(classId);
+  if (!classInfo || classInfo.schoolId !== schoolId) {
+    res.status(403).json({ message: "Class not in school context" });
+    return null;
+  }
+  return classInfo;
+}
+
+async function ensureSubjectInSchool(subjectId: number, schoolId: number, res: Response) {
+  const subjectInfo = await storage.getSubject(subjectId);
+  if (!subjectInfo || subjectInfo.schoolId !== schoolId) {
+    res.status(403).json({ message: "Subject not in school context" });
+    return null;
+  }
+  return subjectInfo;
+}
+
+async function ensureGradeInSchool(gradeId: number, schoolId: number, res: Response) {
+  const grade = await storage.getGrade(gradeId);
+  if (!grade || grade.schoolId !== schoolId) {
+    res.status(403).json({ message: "Grade not in school context" });
+    return null;
+  }
+  return grade;
+}
+
+async function ensureStudentInSchool(studentId: number, schoolId: number, res: Response) {
+  const student = await storage.getStudent(studentId);
+  if (!student || student.schoolId !== schoolId) {
+    res.status(403).json({ message: "Student not in school context" });
+    return null;
+  }
+  return student;
+}
+
+async function ensureExamInSchool(examId: number, schoolId: number, res: Response) {
+  const exam = await storage.getExam(examId);
+  if (!exam || (exam.schoolId !== null && exam.schoolId !== schoolId)) {
+    res.status(403).json({ message: "Exam not in school context" });
+    return null;
+  }
+  return exam;
+}
+
+async function ensureAssessmentTypeInSchool(assessmentTypeId: number, schoolId: number, res: Response) {
+  const assessmentType = await storage.getAssessmentType(assessmentTypeId);
+  if (!assessmentType || (assessmentType.schoolId !== null && assessmentType.schoolId !== schoolId)) {
+    res.status(403).json({ message: "Assessment type not in school context" });
+    return null;
+  }
+  return assessmentType;
+}
+
+async function getScopedAssessmentOrRespond(req: Request, res: Response, assessmentId: number) {
+  const schoolId = await requireSchoolScope(req, res);
+  if (!schoolId) return null;
+
+  const assessment = await storage.getAssessment(assessmentId);
+  if (!assessment) {
+    res.status(404).json({ message: "Assessment not found" });
+    return null;
+  }
+
+  if (assessment.schoolId !== schoolId) {
+    res.status(403).json({ message: "Assessment not in school context" });
+    return null;
+  }
+
+  return { schoolId, assessment };
+}
+
+async function validateAssessmentPayloadForSchool(
+  schoolId: number,
+  assessmentData: Record<string, any>,
+  res: Response,
+  existingAssessment?: { classId: number | null; subjectId: number | null; examId?: number | null; assessmentTypeId?: number | null } | null,
+) {
+  const classId = assessmentData.classId ?? existingAssessment?.classId;
+  const subjectId = assessmentData.subjectId ?? existingAssessment?.subjectId;
+  const examId = assessmentData.examId !== undefined ? assessmentData.examId : existingAssessment?.examId;
+  const assessmentTypeId = assessmentData.assessmentTypeId !== undefined
+    ? assessmentData.assessmentTypeId
+    : existingAssessment?.assessmentTypeId;
+
+  if (!classId) {
+    res.status(400).json({ message: "classId is required" });
+    return null;
+  }
+  if (!subjectId) {
+    res.status(400).json({ message: "subjectId is required" });
+    return null;
+  }
+
+  const classInfo = await ensureClassInSchool(Number(classId), schoolId, res);
+  if (!classInfo) return null;
+
+  const subjectInfo = await ensureSubjectInSchool(Number(subjectId), schoolId, res);
+  if (!subjectInfo) return null;
+
+  if (examId !== null && examId !== undefined && examId !== "") {
+    const exam = await ensureExamInSchool(Number(examId), schoolId, res);
+    if (!exam) return null;
+  }
+
+  if (assessmentTypeId !== null && assessmentTypeId !== undefined && assessmentTypeId !== "") {
+    const assessmentType = await ensureAssessmentTypeInSchool(Number(assessmentTypeId), schoolId, res);
+    if (!assessmentType) return null;
+  }
+
+  return { classInfo, subjectInfo };
+}
+
+async function getScopedAssessmentCommentOrRespond(req: Request, res: Response, id: number) {
+  const schoolId = await requireSchoolScope(req, res);
+  if (!schoolId) return null;
+
+  const comment = await storage.getAssessmentComment(id);
+  if (!comment) {
+    res.status(404).json({ message: "Comment not found" });
+    return null;
+  }
+
+  if (comment.schoolId !== schoolId) {
+    res.status(403).json({ message: "Comment not in school context" });
+    return null;
+  }
+
+  return { schoolId, comment };
+}
+
+async function getScopedAssessmentMarkOrRespond(req: Request, res: Response, id: number) {
+  const schoolId = await requireSchoolScope(req, res);
+  if (!schoolId) return null;
+
+  const mark = await storage.getAssessmentMark(id);
+  if (!mark) {
+    res.status(404).json({ message: "Mark not found" });
+    return null;
+  }
+
+  if (mark.schoolId !== schoolId) {
+    res.status(403).json({ message: "Mark not in school context" });
+    return null;
+  }
+
+  return { schoolId, mark };
 }
 
 export async function registerRoutes(
@@ -2317,12 +2475,21 @@ export async function registerRoutes(
 
   app.get("/api/assessments/by-class/:classId", requireAuth, async (req, res, next) => {
     try {
-      const assessmentList = await storage.getAssessmentsByClass(parseInt(req.params.classId));
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const classId = parseInt(req.params.classId);
+      const classInfo = await ensureClassInSchool(classId, schoolId, res);
+      if (!classInfo) return;
+
+      const assessmentList = await storage.getAssessmentsByClass(classId);
       const assessmentsWithPapers = await Promise.all(
-        assessmentList.map(async (assessment) => {
-          const papers = await storage.getAssessmentPapers(assessment.id);
-          return { ...assessment, papers };
-        })
+        assessmentList
+          .filter((assessment) => assessment.schoolId === schoolId)
+          .map(async (assessment) => {
+            const papers = await storage.getAssessmentPapers(assessment.id);
+            return { ...assessment, papers };
+          })
       );
       res.json(assessmentsWithPapers);
     } catch (error) {
@@ -2333,7 +2500,10 @@ export async function registerRoutes(
 
   app.delete("/api/assessments/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      await storage.deleteAssessment(parseInt(req.params.id));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.id));
+      if (!scoped) return;
+
+      await storage.deleteAssessment(scoped.assessment.id);
       res.json({ message: "Assessment deleted successfully" });
     } catch (error) {
       next(error);
@@ -2342,7 +2512,10 @@ export async function registerRoutes(
 
   app.get("/api/marks/by-assessment/:assessmentId", requireAuth, async (req, res, next) => {
     try {
-      const markList = await storage.getMarksByAssessment(parseInt(req.params.assessmentId));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      if (!scoped) return;
+
+      const markList = await storage.getMarksByAssessment(scoped.assessment.id);
       res.json(markList);
     } catch (error) {
       next(error);
@@ -2351,7 +2524,14 @@ export async function registerRoutes(
 
   app.get("/api/marks/by-student/:studentId", requireAuth, async (req, res, next) => {
     try {
-      const markList = await storage.getMarksByStudent(parseInt(req.params.studentId));
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const studentId = parseInt(req.params.studentId);
+      const student = await ensureStudentInSchool(studentId, schoolId, res);
+      if (!student) return;
+
+      const markList = await storage.getMarksByStudent(student.id);
       res.json(markList);
     } catch (error) {
       next(error);
@@ -2360,7 +2540,21 @@ export async function registerRoutes(
 
   app.post("/api/marks", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
     try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
       const data = insertMarkSchema.parse(req.body);
+      const assessment = await storage.getAssessment(data.assessmentId);
+      if (!assessment || assessment.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Assessment not in school context" });
+      }
+
+      const student = await ensureStudentInSchool(data.studentId, schoolId, res);
+      if (!student) return;
+      if (student.classId !== assessment.classId) {
+        return res.status(400).json({ message: "Student does not belong to the assessment class" });
+      }
+
       const newMark = await storage.createMark(data);
       res.status(201).json(newMark);
     } catch (error) {
@@ -2370,7 +2564,23 @@ export async function registerRoutes(
 
   app.post("/api/marks/bulk", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
     try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
       const marksData = req.body.marks.map((m: any) => insertMarkSchema.parse(m));
+      for (const mark of marksData) {
+        const assessment = await storage.getAssessment(mark.assessmentId);
+        if (!assessment || assessment.schoolId !== schoolId) {
+          return res.status(403).json({ message: "Assessment not in school context" });
+        }
+
+        const student = await ensureStudentInSchool(mark.studentId, schoolId, res);
+        if (!student) return;
+        if (student.classId !== assessment.classId) {
+          return res.status(400).json({ message: "Student does not belong to the assessment class" });
+        }
+      }
+
       const newMarks = await storage.bulkCreateMarks(marksData);
       res.status(201).json(newMarks);
     } catch (error) {
@@ -5639,8 +5849,8 @@ export async function registerRoutes(
       }
 
       const subjectInfo = await storage.getSubject(subjectId);
-      if (!subjectInfo) {
-        return res.status(400).json({ message: "Subject not found" });
+      if (!subjectInfo || subjectInfo.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Subject not in school context" });
       }
 
       const school = await storage.getSchool(schoolId);
@@ -5769,8 +5979,10 @@ export async function registerRoutes(
   // Assessment Papers
   app.get("/api/assessments/:assessmentId/papers", requireAuth, async (req, res, next) => {
     try {
-      const assessmentId = parseInt(req.params.assessmentId);
-      const papers = await storage.getAssessmentPapers(assessmentId);
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      if (!scoped) return;
+
+      const papers = await storage.getAssessmentPapers(scoped.assessment.id);
       res.json(papers);
     } catch (error) {
       next(error);
@@ -5779,10 +5991,12 @@ export async function registerRoutes(
 
   app.put("/api/assessments/:assessmentId/papers", requireAuth, async (req, res, next) => {
     try {
-      const assessmentId = parseInt(req.params.assessmentId);
-      const papers = req.body.papers || [];
-      const papersWithAssessmentId = papers.map((p: any) => ({ ...p, assessmentId }));
-      const result = await storage.setAssessmentPapers(assessmentId, papersWithAssessmentId);
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      if (!scoped) return;
+
+      const papers = Array.isArray(req.body.papers) ? req.body.papers : [];
+      const papersWithAssessmentId = papers.map((p: any, i: number) => ({ ...p, assessmentId: scoped.assessment.id, sortOrder: i }));
+      const result = await storage.setAssessmentPapers(scoped.assessment.id, papersWithAssessmentId);
       res.json(result);
     } catch (error) {
       next(error);
@@ -5792,10 +6006,21 @@ export async function registerRoutes(
   // Assessment Comments - enriched list with class/subject/grade names, sorted Class→Subject→Grade
   app.get("/api/assessment-comments", requireAuth, async (req, res, next) => {
     try {
-      const currentUser = req.user as User;
-      const schoolId = req.query.schoolId ? Number(req.query.schoolId) : currentUser.schoolId || undefined;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
       const classId = req.query.classId ? Number(req.query.classId) : undefined;
       const subjectId = req.query.subjectId ? Number(req.query.subjectId) : undefined;
+
+      if (classId) {
+        const classInfo = await ensureClassInSchool(classId, schoolId, res);
+        if (!classInfo) return;
+      }
+      if (subjectId) {
+        const subjectInfo = await ensureSubjectInSchool(subjectId, schoolId, res);
+        if (!subjectInfo) return;
+      }
+
       const comments = await storage.getAssessmentComments(schoolId, classId, subjectId);
 
       const gradeRankMap: Record<string, number> = { 'A*': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'U': 6 };
@@ -5833,22 +6058,34 @@ export async function registerRoutes(
   // Bulk create comments (multi class × multi subject × single grade)
   app.post("/api/assessment-comments", requireAuth, async (req, res, next) => {
     try {
-      const { classIds, subjectIds, gradeId, schoolId, commentText } = req.body;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const { classIds, subjectIds, gradeId, commentText } = req.body;
       if (!Array.isArray(classIds) || !classIds.length) return res.status(400).json({ message: "At least one class required" });
       if (!Array.isArray(subjectIds) || !subjectIds.length) return res.status(400).json({ message: "At least one subject required" });
       if (!gradeId) return res.status(400).json({ message: "Grade is required" });
       if (!commentText?.trim()) return res.status(400).json({ message: "Comment text is required" });
 
+      const grade = await ensureGradeInSchool(Number(gradeId), schoolId, res);
+      if (!grade) return;
+
       let created = 0;
       for (const cid of classIds) {
+        const classInfo = await ensureClassInSchool(Number(cid), schoolId, res);
+        if (!classInfo) return;
+
         for (const sid of subjectIds) {
-          const existing = await storage.findAssessmentComment(cid, sid, gradeId);
+          const subjectInfo = await ensureSubjectInSchool(Number(sid), schoolId, res);
+          if (!subjectInfo) return;
+
+          const existing = await storage.findAssessmentComment(Number(cid), Number(sid), Number(grade.id));
           if (existing) continue;
           await storage.createAssessmentComment({
             schoolId,
-            classId: cid,
-            subjectId: sid,
-            gradeId,
+            classId: Number(cid),
+            subjectId: Number(sid),
+            gradeId: Number(grade.id),
             commentText: commentText.trim(),
           });
           created++;
@@ -5864,41 +6101,46 @@ export async function registerRoutes(
   // Pre-check duplicates before bulk create
   app.post("/api/assessment-comments/check-duplicates", requireAuth, async (req, res, next) => {
     try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
       const { classIds, subjectIds, gradeId } = req.body;
       if (!Array.isArray(classIds) || !Array.isArray(subjectIds) || !gradeId) {
         return res.status(400).json({ message: "classIds, subjectIds and gradeId are required" });
       }
 
-      const currentUser = req.user as User;
-      const schoolId = currentUser.schoolId || undefined;
-      const allGrades = schoolId ? await storage.getGradesBySchool(schoolId) : [];
-      const grade = allGrades.find(g => g.id === gradeId);
+      const grade = await ensureGradeInSchool(Number(gradeId), schoolId, res);
+      if (!grade) return;
 
       const duplicates: any[] = [];
       const missingPairs: any[] = [];
 
       for (const cid of classIds) {
+        const cls = await ensureClassInSchool(Number(cid), schoolId, res);
+        if (!cls) return;
+
         for (const sid of subjectIds) {
-          const existing = await storage.findAssessmentComment(cid, sid, gradeId);
-          const cls = await storage.getClass(cid);
-          const subject = await storage.getSubject(sid);
+          const subject = await ensureSubjectInSchool(Number(sid), schoolId, res);
+          if (!subject) return;
+
+          const existing = await storage.findAssessmentComment(Number(cid), Number(sid), Number(gradeId));
 
           if (existing) {
             duplicates.push({
               id: existing.id,
-              classId: cid,
-              subjectId: sid,
-              className: cls?.className || "",
-              subjectName: subject?.name || "",
-              gradeName: grade?.gradeName || "",
+              classId: Number(cid),
+              subjectId: Number(sid),
+              className: cls.className || "",
+              subjectName: subject.name || "",
+              gradeName: grade.gradeName || "",
               commentText: existing.commentText,
             });
           } else {
             missingPairs.push({
-              classId: cid,
-              subjectId: sid,
-              className: cls?.className || "",
-              subjectName: subject?.name || "",
+              classId: Number(cid),
+              subjectId: Number(sid),
+              className: cls.className || "",
+              subjectName: subject.name || "",
             });
           }
         }
@@ -5919,16 +6161,24 @@ export async function registerRoutes(
   // Overwrite selected duplicates + create missing pairs
   app.post("/api/assessment-comments/overwrite-and-create", requireAuth, async (req, res, next) => {
     try {
-      const { overwriteIds, missingPairs, gradeId, commentText, schoolId } = req.body;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const { overwriteIds, missingPairs, gradeId, commentText } = req.body;
       if (!gradeId) return res.status(400).json({ message: "Grade required" });
       if (!commentText?.trim()) return res.status(400).json({ message: "Comment text required" });
+
+      const grade = await ensureGradeInSchool(Number(gradeId), schoolId, res);
+      if (!grade) return;
 
       let overwritten = 0;
       if (Array.isArray(overwriteIds)) {
         for (const id of overwriteIds) {
-          const existing = await storage.getAssessmentComment(id);
-          if (existing && existing.gradeId === gradeId) {
-            await storage.updateAssessmentComment(id, { commentText: commentText.trim() });
+          const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, Number(id));
+          if (!scopedComment) return;
+
+          if (scopedComment.comment.gradeId === Number(grade.id)) {
+            await storage.updateAssessmentComment(scopedComment.comment.id, { commentText: commentText.trim() });
             overwritten++;
           }
         }
@@ -5937,13 +6187,19 @@ export async function registerRoutes(
       let created = 0;
       if (Array.isArray(missingPairs)) {
         for (const pair of missingPairs) {
-          const existing = await storage.findAssessmentComment(pair.classId, pair.subjectId, gradeId);
+          const classInfo = await ensureClassInSchool(Number(pair.classId), schoolId, res);
+          if (!classInfo) return;
+
+          const subjectInfo = await ensureSubjectInSchool(Number(pair.subjectId), schoolId, res);
+          if (!subjectInfo) return;
+
+          const existing = await storage.findAssessmentComment(Number(pair.classId), Number(pair.subjectId), Number(grade.id));
           if (existing) continue;
           await storage.createAssessmentComment({
             schoolId,
-            classId: pair.classId,
-            subjectId: pair.subjectId,
-            gradeId,
+            classId: Number(pair.classId),
+            subjectId: Number(pair.subjectId),
+            gradeId: Number(grade.id),
             commentText: commentText.trim(),
           });
           created++;
@@ -5959,10 +6215,12 @@ export async function registerRoutes(
   // Update a single comment's text
   app.put("/api/assessment-comments/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, parseInt(req.params.id));
+      if (!scopedComment) return;
+
       const { commentText } = req.body;
       if (!commentText?.trim()) return res.status(400).json({ message: "Comment text is required" });
-      const updated = await storage.updateAssessmentComment(id, { commentText: commentText.trim() });
+      const updated = await storage.updateAssessmentComment(scopedComment.comment.id, { commentText: commentText.trim() });
       if (!updated) return res.status(404).json({ message: "Comment not found" });
       res.json(updated);
     } catch (error) {
@@ -5972,8 +6230,10 @@ export async function registerRoutes(
 
   app.delete("/api/assessment-comments/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
-      await storage.deleteAssessmentComment(id);
+      const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, parseInt(req.params.id));
+      if (!scopedComment) return;
+
+      await storage.deleteAssessmentComment(scopedComment.comment.id);
       res.status(204).send();
     } catch (error) {
       next(error);
@@ -6039,45 +6299,50 @@ export async function registerRoutes(
   // Enhanced Assessments with Papers
   app.get("/api/assessments", requireAuth, async (req, res, next) => {
     try {
-      const currentUser = req.user as User;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
       const classId = req.query.classId ? Number(req.query.classId) : undefined;
       const subjectId = req.query.subjectId ? Number(req.query.subjectId) : undefined;
       const search = req.query.search as string | undefined;
-      const schoolId = currentUser.schoolId || undefined;
-      
+
+      if (classId) {
+        const classInfo = await ensureClassInSchool(classId, schoolId, res);
+        if (!classInfo) return;
+      }
+      if (subjectId) {
+        const subjectInfo = await ensureSubjectInSchool(subjectId, schoolId, res);
+        if (!subjectInfo) return;
+      }
+
       let assessmentList;
       if (classId) {
         assessmentList = await storage.getAssessmentsByClass(classId);
       } else {
         assessmentList = await storage.getAllAssessments();
       }
-      
-      // Filter by school
-      if (schoolId) {
-        assessmentList = assessmentList.filter(a => a.schoolId === schoolId);
-      }
-      
-      // Filter by subject
+
+      assessmentList = assessmentList.filter((a) => a.schoolId === schoolId);
+
       if (subjectId) {
-        assessmentList = assessmentList.filter(a => a.subjectId === subjectId);
+        assessmentList = assessmentList.filter((a) => a.subjectId === subjectId);
       }
-      
-      // Filter by search
+
       if (search) {
         const lowerSearch = search.toLowerCase();
-        assessmentList = assessmentList.filter(a => 
-          a.name?.toLowerCase().includes(lowerSearch) || 
+        assessmentList = assessmentList.filter((a) =>
+          a.name?.toLowerCase().includes(lowerSearch) ||
           a.topic?.toLowerCase().includes(lowerSearch)
         );
       }
-      
+
       const withPapers = await Promise.all(
         assessmentList.map(async (a) => {
           const papers = await storage.getAssessmentPapers(a.id);
           return { ...a, papers };
         })
       );
-      
+
       res.json(withPapers);
     } catch (error) {
       next(error);
@@ -6086,27 +6351,36 @@ export async function registerRoutes(
 
   app.post("/api/assessments", requireAuth, async (req, res, next) => {
     try {
-      const { papers, ...assessmentData } = req.body;
-      
-      if (!papers || papers.length < 1) {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const { papers, schoolId: _ignoredSchoolId, ...assessmentData } = req.body;
+
+      if (!Array.isArray(papers) || papers.length < 1) {
         return res.status(400).json({ message: "At least one paper is required" });
       }
-      
+
+      const validatedRefs = await validateAssessmentPayloadForSchool(schoolId, assessmentData, res);
+      if (!validatedRefs) return;
+
       const assessmentWithName = {
         ...assessmentData,
+        schoolId,
+        classId: Number(assessmentData.classId),
+        subjectId: Number(assessmentData.subjectId),
+        assessmentTypeId: assessmentData.assessmentTypeId ? Number(assessmentData.assessmentTypeId) : null,
+        examId: assessmentData.examId ? Number(assessmentData.examId) : null,
         name: assessmentData.name || assessmentData.topic || "Assessment",
       };
       const assessment = await storage.createAssessment(assessmentWithName);
-      
-      if (papers && papers.length > 0) {
-        const papersWithAssessmentId = papers.map((p: any, i: number) => ({
-          ...p,
-          assessmentId: assessment.id,
-          sortOrder: i,
-        }));
-        await storage.setAssessmentPapers(assessment.id, papersWithAssessmentId);
-      }
-      
+
+      const papersWithAssessmentId = papers.map((p: any, i: number) => ({
+        ...p,
+        assessmentId: assessment.id,
+        sortOrder: i,
+      }));
+      await storage.setAssessmentPapers(assessment.id, papersWithAssessmentId);
+
       const savedPapers = await storage.getAssessmentPapers(assessment.id);
       res.status(201).json({ ...assessment, papers: savedPapers });
     } catch (error) {
@@ -6116,30 +6390,48 @@ export async function registerRoutes(
 
   app.put("/api/assessments/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
-      const { papers, ...assessmentData } = req.body;
-      
-      if (papers !== undefined && papers.length < 1) {
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.id));
+      if (!scoped) return;
+
+      const { papers, schoolId: _ignoredSchoolId, ...assessmentData } = req.body;
+
+      if (papers !== undefined && (!Array.isArray(papers) || papers.length < 1)) {
         return res.status(400).json({ message: "At least one paper is required" });
       }
-      
+
       if (assessmentData.topic && !assessmentData.name) {
         assessmentData.name = assessmentData.topic;
       }
-      
-      const updated = await storage.updateAssessment(id, assessmentData);
+
+      const validatedRefs = await validateAssessmentPayloadForSchool(scoped.schoolId, assessmentData, res, scoped.assessment);
+      if (!validatedRefs) return;
+
+      const updatePayload = {
+        ...assessmentData,
+        schoolId: scoped.schoolId,
+        classId: assessmentData.classId !== undefined ? Number(assessmentData.classId) : scoped.assessment.classId,
+        subjectId: assessmentData.subjectId !== undefined ? Number(assessmentData.subjectId) : scoped.assessment.subjectId,
+        assessmentTypeId: assessmentData.assessmentTypeId === undefined
+          ? scoped.assessment.assessmentTypeId
+          : (assessmentData.assessmentTypeId ? Number(assessmentData.assessmentTypeId) : null),
+        examId: assessmentData.examId === undefined
+          ? scoped.assessment.examId
+          : (assessmentData.examId ? Number(assessmentData.examId) : null),
+      };
+
+      const updated = await storage.updateAssessment(scoped.assessment.id, updatePayload);
       if (!updated) return res.status(404).json({ message: "Assessment not found" });
-      
+
       if (papers !== undefined) {
         const papersWithAssessmentId = papers.map((p: any, i: number) => ({
           ...p,
-          assessmentId: id,
+          assessmentId: scoped.assessment.id,
           sortOrder: i,
         }));
-        await storage.setAssessmentPapers(id, papersWithAssessmentId);
+        await storage.setAssessmentPapers(scoped.assessment.id, papersWithAssessmentId);
       }
-      
-      const savedPapers = await storage.getAssessmentPapers(id);
+
+      const savedPapers = await storage.getAssessmentPapers(scoped.assessment.id);
       res.json({ ...updated, papers: savedPapers });
     } catch (error) {
       next(error);
@@ -6151,18 +6443,18 @@ export async function registerRoutes(
   // Get marks entry data for an assessment (students with their marks)
   app.get("/api/marks-entry/:assessmentId", requireAuth, async (req, res, next) => {
     try {
-      const assessmentId = parseInt(req.params.assessmentId);
-      const assessment = await storage.getAssessment(assessmentId);
-      if (!assessment) {
-        return res.status(404).json({ message: "Assessment not found" });
-      }
-      
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      if (!scoped) return;
+
+      const assessmentId = scoped.assessment.id;
+      const assessment = scoped.assessment;
+
       // Get assessment papers
       const papers = await storage.getAssessmentPapers(assessmentId);
-      
+
       // Get students in the class
       const students = await storage.getStudentsByClass(assessment.classId);
-      
+
       // Get all marks for this assessment
       const marks = await storage.getAssessmentMarks(assessmentId);
       
@@ -6210,10 +6502,27 @@ export async function registerRoutes(
   // Save/update marks for a student
   app.post("/api/marks-entry", requireAuth, async (req, res, next) => {
     try {
-      const { assessmentId, studentId, classId, subjectId, schoolId, paperMarks, attStatus, customCommentText, commentSource } = req.body;
-      
+      const scoped = await getScopedAssessmentOrRespond(req, res, Number(req.body.assessmentId));
+      if (!scoped) return;
+
+      const { studentId, paperMarks, attStatus, customCommentText, commentSource } = req.body;
+      if (!Array.isArray(paperMarks)) {
+        return res.status(400).json({ message: "paperMarks is required" });
+      }
+
+      const assessment = scoped.assessment;
+      const schoolId = scoped.schoolId;
+      const classId = assessment.classId;
+      const subjectId = assessment.subjectId;
+
+      const student = await ensureStudentInSchool(Number(studentId), schoolId, res);
+      if (!student) return;
+      if (student.classId !== classId) {
+        return res.status(400).json({ message: "Student does not belong to the assessment class" });
+      }
+
       // Get assessment papers to calculate weighted percentage
-      const papers = await storage.getAssessmentPapers(assessmentId);
+      const papers = await storage.getAssessmentPapers(assessment.id);
       
       // Calculate weighted percentage
       let totalWeightedScore = 0;
@@ -6258,11 +6567,20 @@ export async function registerRoutes(
       }
       
       // Check if mark exists for this student/assessment
-      let existingMark = await storage.getAssessmentMarkByStudentAssessment(studentId, assessmentId);
-      
+      let existingMark = await storage.getAssessmentMarkByStudentAssessment(Number(studentId), assessment.id);
+
+      if (existingMark && existingMark.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Mark not in school context" });
+      }
+
       let mark;
       if (existingMark) {
         mark = await storage.updateAssessmentMark(existingMark.id, {
+          schoolId,
+          assessmentId: assessment.id,
+          studentId: Number(studentId),
+          classId,
+          subjectId,
           percentage: percentage?.toString() || null,
           gradeId,
           attStatus: attStatus || "present",
@@ -6274,8 +6592,8 @@ export async function registerRoutes(
       } else {
         mark = await storage.createAssessmentMark({
           schoolId,
-          assessmentId,
-          studentId,
+          assessmentId: assessment.id,
+          studentId: Number(studentId),
           classId,
           subjectId,
           percentage: percentage?.toString() || null,
@@ -6311,8 +6629,10 @@ export async function registerRoutes(
   // Delete a mark
   app.delete("/api/marks-entry/:markId", requireAuth, async (req, res, next) => {
     try {
-      const markId = parseInt(req.params.markId);
-      await storage.deleteAssessmentMark(markId);
+      const scopedMark = await getScopedAssessmentMarkOrRespond(req, res, parseInt(req.params.markId));
+      if (!scopedMark) return;
+
+      await storage.deleteAssessmentMark(scopedMark.mark.id);
       res.json({ message: "Mark deleted successfully" });
     } catch (error) {
       next(error);
