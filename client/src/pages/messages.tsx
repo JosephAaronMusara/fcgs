@@ -199,7 +199,7 @@ export default function MessagesPage() {
         <div className="flex items-center gap-3">
           <Mail className="h-8 w-8" style={{ color: "#1b2a5c" }} />
           <div>
-            <h1 className="text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }} data-testid="text-page-title">Messages History</h1>
+            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl" style={{ color: "#1b2a5c" }} data-testid="text-page-title">Messages History</h1>
             <p className="text-muted-foreground">Communication log of all messages sent to recipients</p>
           </div>
         </div>
@@ -212,7 +212,7 @@ export default function MessagesPage() {
 
       <Card className="p-4">
         <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
@@ -224,17 +224,17 @@ export default function MessagesPage() {
                 data-testid="input-search"
               />
             </div>
-            <Button variant="outline" size="icon" onClick={handleSearch} data-testid="button-search">
+            <Button variant="outline" size="icon" className="w-full sm:w-10" onClick={handleSearch} data-testid="button-search">
               <Search className="w-4 h-4" />
             </Button>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:flex xl:flex-wrap xl:items-center">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_1fr] xl:flex xl:items-center xl:gap-2">
               <Input
                 type="date"
                 value={startDate}
                 onChange={(e) => { setStartDate(e.target.value); setPage(1); }}
-                className="w-[150px]"
+                className="w-full sm:w-[150px]"
                 data-testid="input-start-date"
               />
               <span className="text-muted-foreground text-sm">to</span>
@@ -242,13 +242,13 @@ export default function MessagesPage() {
                 type="date"
                 value={endDate}
                 onChange={(e) => { setEndDate(e.target.value); setPage(1); }}
-                className="w-[150px]"
+                className="w-full sm:w-[150px]"
                 data-testid="input-end-date"
               />
             </div>
             <Filter className="w-4 h-4 text-muted-foreground shrink-0" />
             <Select value={recipientType} onValueChange={handleFilterChange(setRecipientType)}>
-              <SelectTrigger className="w-[150px]" data-testid="select-recipient-type">
+              <SelectTrigger className="w-full sm:w-[150px]" data-testid="select-recipient-type">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -258,7 +258,7 @@ export default function MessagesPage() {
               </SelectContent>
             </Select>
             <Select value={category} onValueChange={handleFilterChange(setCategory)}>
-              <SelectTrigger className="w-[170px]" data-testid="select-category">
+              <SelectTrigger className="w-full sm:w-[170px]" data-testid="select-category">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -268,7 +268,7 @@ export default function MessagesPage() {
               </SelectContent>
             </Select>
             <Select value={channel} onValueChange={handleFilterChange(setChannel)}>
-              <SelectTrigger className="w-[140px]" data-testid="select-channel">
+              <SelectTrigger className="w-full sm:w-[140px]" data-testid="select-channel">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -301,7 +301,7 @@ export default function MessagesPage() {
             const smsCount = log.channel === "sms" ? Math.ceil(charCount / 160) : null;
 
             return (
-              <Card key={log.id} className="p-4" data-testid={`message-card-${log.id}`}>
+              <Card key={log.id} className="p-3 sm:p-4" data-testid={`message-card-${log.id}`}>
                 <div className="space-y-2">
                   <div className="flex items-start justify-between gap-3 flex-wrap">
                     <div className="flex items-center gap-2 min-w-0">
@@ -362,7 +362,7 @@ export default function MessagesPage() {
                       </span>
                     )}
                     {log.errorMessage && (
-                      <span className="text-destructive text-xs truncate max-w-[300px]" data-testid={`text-error-${log.id}`}>
+                      <span className="max-w-full truncate text-destructive text-xs sm:max-w-[300px]" data-testid={`text-error-${log.id}`}>
                         Error: {log.errorMessage}
                       </span>
                     )}

@@ -235,9 +235,9 @@ export default function RecordOfMarksPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4 flex-wrap">
+          <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2 xl:flex xl:flex-wrap xl:items-center">
             <Select value={selectedClass} onValueChange={(v) => { setSelectedClass(v); setSelectedSubject(""); }}>
-              <SelectTrigger className="w-[200px]" data-testid="select-class">
+              <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-class">
                 <SelectValue placeholder="Select Class" />
               </SelectTrigger>
               <SelectContent>
@@ -254,7 +254,7 @@ export default function RecordOfMarksPage() {
               onValueChange={(v) => setSelectedSubject(v)}
               disabled={!selectedClass || !subjects?.length}
             >
-              <SelectTrigger className="w-[280px]" data-testid="select-subject">
+              <SelectTrigger className="w-full sm:w-[280px]" data-testid="select-subject">
                 <SelectValue placeholder={!selectedClass ? "Select class first" : "Select Subject"} />
               </SelectTrigger>
               <SelectContent>
@@ -266,26 +266,26 @@ export default function RecordOfMarksPage() {
               </SelectContent>
             </Select>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <Input
                 type="date"
                 value={dateFrom}
                 onChange={(e) => handleDateFromChange(e.target.value)}
-                className="w-[150px]"
+                className="w-full sm:w-[150px]"
                 data-testid="input-date-from"
               />
-              <span className="text-muted-foreground text-sm">&mdash;</span>
+              <span className="hidden text-muted-foreground text-sm sm:block">&mdash;</span>
               <Input
                 type="date"
                 value={dateTo}
                 onChange={(e) => handleDateToChange(e.target.value)}
-                className="w-[150px]"
+                className="w-full sm:w-[150px]"
                 data-testid="input-date-to"
               />
             </div>
 
             <Select value={selectedTerm} onValueChange={handleTermChange}>
-              <SelectTrigger className="w-[160px]" data-testid="select-term-filter">
+              <SelectTrigger className="w-full sm:w-[160px]" data-testid="select-term-filter">
                 <SelectValue placeholder="School Term" />
               </SelectTrigger>
               <SelectContent>

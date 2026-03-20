@@ -66,9 +66,9 @@ export default function MyAttendancePage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
+      <div className="space-y-6 p-4 sm:p-6">
         <Skeleton className="h-10 w-48" />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
           {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-24" />)}
         </div>
         <Skeleton className="h-64 w-full" />
@@ -77,14 +77,14 @@ export default function MyAttendancePage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-6 p-4 sm:p-6">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-3xl font-bold" data-testid="text-my-attendance-title">My Attendance</h1>
           <p className="text-muted-foreground">Your attendance records</p>
         </div>
         <Select value={monthFilter} onValueChange={setMonthFilter}>
-          <SelectTrigger className="w-[180px]" data-testid="select-month-filter">
+          <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-month-filter">
             <SelectValue placeholder="Filter by month" />
           </SelectTrigger>
           <SelectContent>
@@ -98,7 +98,7 @@ export default function MyAttendancePage() {
         </Select>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-5">
         <Card>
           <CardContent className="pt-4 pb-4">
             <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">

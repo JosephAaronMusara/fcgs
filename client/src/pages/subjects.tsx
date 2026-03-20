@@ -182,7 +182,7 @@ export default function SubjectsPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center gap-4 flex-wrap">
-            <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <div className="relative w-full min-w-0 sm:flex-1 sm:min-w-[200px] sm:max-w-sm">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
                 placeholder="Search subjects..."
@@ -193,7 +193,7 @@ export default function SubjectsPage() {
               />
             </div>
             <Select value={perPage.toString()} onValueChange={(v) => { setPerPage(parseInt(v)); setPage(1); }}>
-              <SelectTrigger className="w-[130px]" data-testid="select-per-page">
+              <SelectTrigger className="w-full sm:w-[130px]" data-testid="select-per-page">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -454,7 +454,7 @@ function SubjectDialog({
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="name">Subject Name</Label>
               <Input
@@ -488,7 +488,7 @@ function SubjectDialog({
               data-testid="input-syllabus-code"
             />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="subjectType">Subject Type (Optional)</Label>
               <Select 

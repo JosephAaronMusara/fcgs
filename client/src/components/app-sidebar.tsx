@@ -12,6 +12,7 @@ import {
   SidebarMenuItem,
   SidebarHeader,
   SidebarFooter,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -87,17 +88,6 @@ const staffMenuGroups: MenuGroup[] = [
     ],
   },
   {
-    label: "Accounting & Finance",
-    items: [
-      { title: "Student Payments", url: "/fees", icon: DollarSign, requiredPermissions: ["fees.view"], featureKey: "enableFinance" },
-      { title: "Parents With Arrears", url: "/arrears", icon: Banknote, requiredPermissions: ["arrears.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "School Expenses", url: "/school-expenses", icon: Receipt, requiredPermissions: ["school_expenses.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "School Incomes", url: "/school-incomes", icon: TrendingUp, requiredPermissions: ["school_incomes.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "Products", url: "/products", icon: ShoppingCart, requiredPermissions: ["products.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "Financial Statements", url: "/financial-statements", icon: BarChart3, requiredPermissions: ["financial_statements.view"], featureKey: "enableFinance", comingSoon: true },
-    ],
-  },
-  {
     label: "Library & E-Learning",
     items: [
       { title: "Library", url: "/library", icon: Library, requiredPermissions: ["library.view"], featureKey: "enableELibrary", badge: "In Production" },
@@ -127,6 +117,17 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Assessments Manager", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
       { title: "Marks Entry", url: "/marks-entry", icon: FileText, requiredPermissions: ["marks.view", "marks.create"] },
       { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"], badge: "In Production" },
+    ],
+  },
+  {
+    label: "Accounting & Finance",
+    items: [
+      { title: "Student Payments", url: "/fees", icon: DollarSign, requiredPermissions: ["fees.view"], featureKey: "enableFinance" },
+      { title: "Parents With Arrears", url: "/arrears", icon: Banknote, requiredPermissions: ["arrears.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "School Expenses", url: "/school-expenses", icon: Receipt, requiredPermissions: ["school_expenses.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "School Incomes", url: "/school-incomes", icon: TrendingUp, requiredPermissions: ["school_incomes.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "Products", url: "/products", icon: ShoppingCart, requiredPermissions: ["products.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "Financial Statements", url: "/financial-statements", icon: BarChart3, requiredPermissions: ["financial_statements.view"], featureKey: "enableFinance", comingSoon: true },
     ],
   },
   {
@@ -249,6 +250,7 @@ const parentMenuGroups: MenuGroup[] = [
 export function AppSidebar() {
   const [location] = useLocation();
   const { user, logout, currentSchoolId, hasAnyPermission } = useAuth();
+  const { isMobile, setOpenMobile } = useSidebar();
 
   const { data: schools } = useQuery<SchoolType[]>({
     queryKey: ["/api/schools"],
@@ -341,7 +343,15 @@ export function AppSidebar() {
                 {group.items.map((item) => (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton asChild isActive={location === item.url}>
-                      <Link href={item.url} data-testid={`nav-${item.title.toLowerCase().replace(/\s+/g, '-')}`}>
+                      <Link
+                        href={item.url}
+                        data-testid={`nav-${item.title.toLowerCase().replace(/\s+/g, '-')}`}
+                        onClick={() => {
+                          if (isMobile) {
+                            setOpenMobile(false);
+                          }
+                        }}
+                      >
                         <item.icon className="w-4 h-4" />
                         <span className="flex-1">{item.title}</span>
                         {(item.comingSoon || item.badge) && (

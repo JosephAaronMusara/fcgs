@@ -297,17 +297,17 @@ export default function AttendancePage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <ClipboardCheck className="h-8 w-8" style={{ color: "#1b2a5c" }} />
         <div>
-          <h1 className="text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }} data-testid="text-attendance-title">Attendance Register</h1>
+          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl" style={{ color: "#1b2a5c" }} data-testid="text-attendance-title">Attendance Register</h1>
           <p className="text-muted-foreground">Record and manage daily class attendance</p>
         </div>
       </div>
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center justify-between gap-4 flex-wrap">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 items-center gap-2">
               {selectedClass && gridData && !drawerOpen && (
                 <span className="text-sm text-muted-foreground ml-2" data-testid="text-summary">
                   Present: <span className="font-bold text-green-600">{gridData.present}</span>
@@ -317,14 +317,14 @@ export default function AttendancePage() {
               )}
             </div>
 
-            <div className="flex items-end gap-2 flex-wrap">
+            <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:flex xl:w-auto xl:flex-wrap xl:items-end">
               <div className="flex flex-col gap-1">
                 <span className="text-xs font-semibold text-muted-foreground">From</span>
                 <Input
                   type="date"
                   value={dateFrom}
                   onChange={(e) => setDateFrom(e.target.value)}
-                  className="w-[150px]"
+                  className="w-full sm:w-[150px]"
                   data-testid="input-date-from"
                 />
               </div>
@@ -334,11 +334,12 @@ export default function AttendancePage() {
                   type="date"
                   value={dateTo}
                   onChange={(e) => setDateTo(e.target.value)}
-                  className="w-[150px]"
+                  className="w-full sm:w-[150px]"
                   data-testid="input-date-to"
                 />
               </div>
               <Button
+                className="w-full sm:w-auto"
                 onClick={handleOpenDrawer}
                 disabled={!selectedClass}
                 data-testid="button-mark"
@@ -347,6 +348,7 @@ export default function AttendancePage() {
                 MARK
               </Button>
               <Button
+                className="w-full sm:w-auto"
                 variant="outline"
                 onClick={handleExport}
                 disabled={!selectedClass}
@@ -356,7 +358,7 @@ export default function AttendancePage() {
                 DOWNLOAD
               </Button>
               <Select value={selectedClass} onValueChange={(v) => { setSelectedClass(v); setDrawerOpen(false); setAttendanceState({}); }}>
-                <SelectTrigger className="w-[200px]" data-testid="select-class">
+                <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-class">
                   <SelectValue placeholder="Select Class" />
                 </SelectTrigger>
                 <SelectContent>
@@ -374,7 +376,7 @@ export default function AttendancePage() {
 
       {drawerOpen && selectedClass && (
         <Card className="overflow-hidden">
-          <div className="bg-[#0B1B3E] text-white px-4 py-3 flex items-center justify-between gap-4">
+          <div className="flex flex-wrap items-start justify-between gap-3 bg-[#0B1B3E] px-4 py-3 text-white">
             <div>
               <div className="font-bold text-sm" data-testid="text-drawer-title">
                 ATTENDANCE REGISTER FOR {selectedClassName.toUpperCase()}
@@ -392,15 +394,15 @@ export default function AttendancePage() {
             </Button>
           </div>
 
-          <div className="flex items-center gap-3 px-4 py-2.5 border-b bg-muted/30 flex-wrap">
+          <div className="flex flex-col gap-3 border-b bg-muted/30 px-4 py-2.5 sm:flex-row sm:items-center">
             <Input
               type="date"
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
-              className="w-[160px]"
+              className="w-full sm:w-[160px]"
               data-testid="input-attendance-date"
             />
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
               <label className="flex items-center gap-1.5 text-sm cursor-pointer" data-testid="radio-notify-yes">
                 <input
                   type="radio"
@@ -424,7 +426,7 @@ export default function AttendancePage() {
                 Do not Notify Parents
               </label>
             </div>
-            <div className="ml-auto flex gap-2 flex-wrap">
+            <div className="grid w-full grid-cols-1 gap-2 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap">
               <Button variant="outline" size="sm" onClick={handleMarkAllPresent} data-testid="button-mark-all-present">
                 <Check className="w-4 h-4 mr-1" />
                 All Present
@@ -468,7 +470,7 @@ export default function AttendancePage() {
                       className="border-b last:border-b-0"
                       data-testid={`attendance-row-${student.id}`}
                     >
-                      <div className="grid grid-cols-[40px_1fr_auto] gap-2 items-center px-3.5 py-2.5">
+                      <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-3 px-3.5 py-2.5 sm:grid-cols-[40px_minmax(0,1fr)_auto] sm:items-center">
                         <div className="text-sm text-muted-foreground font-medium">{idx + 1}</div>
                         <div className="min-w-0">
                           <div className="font-bold text-sm truncate">
@@ -476,10 +478,10 @@ export default function AttendancePage() {
                           </div>
                           <div className="text-xs text-muted-foreground">{student.admissionNo}</div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-1 sm:justify-end">
                           <button
                             type="button"
-                            className={`px-3 py-1.5 rounded-full text-xs font-bold border-2 transition-colors min-w-[100px] text-center ${
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold border-2 transition-colors min-w-[96px] text-center sm:min-w-[100px] ${
                               isPresent
                                 ? "bg-[#0b1b3e] border-[#0b1b3e] text-white"
                                 : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-foreground"
@@ -492,7 +494,7 @@ export default function AttendancePage() {
                           </button>
                           <button
                             type="button"
-                            className={`px-3 py-1.5 rounded-full text-xs font-bold border-2 transition-colors min-w-[100px] text-center ${
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold border-2 transition-colors min-w-[96px] text-center sm:min-w-[100px] ${
                               isAbsent
                                 ? "bg-[#7f1d1d] border-[#7f1d1d] text-white"
                                 : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-foreground"

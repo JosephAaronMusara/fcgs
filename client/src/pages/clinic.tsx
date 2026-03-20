@@ -264,11 +264,11 @@ export default function ClinicPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <Stethoscope className="h-8 w-8" style={{ color: "#1b2a5c" }} />
           <div>
-            <h1 className="text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }} data-testid="text-clinic-title">Clinic Records</h1>
+            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl" style={{ color: "#1b2a5c" }} data-testid="text-clinic-title">Clinic Records</h1>
             <p className="text-muted-foreground">Track student clinic visits and medical records</p>
           </div>
         </div>
@@ -308,8 +308,8 @@ export default function ClinicPage() {
         </div>
       </div>
 
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="relative flex-1 min-w-[200px] max-w-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="relative w-full flex-1 min-w-0 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search by student name or admission no..."
@@ -320,7 +320,7 @@ export default function ClinicPage() {
           />
         </div>
         <Select value={filterType} onValueChange={setFilterType}>
-          <SelectTrigger className="w-[180px]" data-testid="select-filter-type">
+          <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-filter-type">
             <SelectValue placeholder="Filter by type" />
           </SelectTrigger>
           <SelectContent>
@@ -388,7 +388,7 @@ export default function ClinicPage() {
                           {r.severity}
                         </Badge>
                       </TableCell>
-                      <TableCell className="max-w-[200px] truncate">{r.diagnosis || "-"}</TableCell>
+                      <TableCell className="max-w-[200px] break-words whitespace-normal">{r.diagnosis || "-"}</TableCell>
                       <TableCell>
                         {r.referredToHospital ? (
                           <Badge variant="destructive">Yes</Badge>
@@ -446,7 +446,7 @@ export default function ClinicPage() {
           </DialogHeader>
           {viewRecord && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
                 <div>
                   <span className="text-muted-foreground">Student</span>
                   <p className="font-medium">{getStudentName(viewRecord.studentId)}</p>
@@ -591,7 +591,7 @@ function ClinicForm({
         </Select>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="visitDate">Visit Date *</Label>
           <Input
@@ -618,7 +618,7 @@ function ClinicForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="severity">Severity</Label>
           <Select name="severity" defaultValue="mild">
@@ -650,7 +650,7 @@ function ClinicForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div className="space-y-2">
           <Label htmlFor="temperature">Temperature</Label>
           <Input id="temperature" name="temperature" placeholder="e.g., 37.5°C" data-testid="input-temperature" />

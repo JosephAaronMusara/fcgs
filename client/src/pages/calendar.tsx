@@ -1126,17 +1126,17 @@ export default function CalendarPage() {
       : null;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Calendar</h1>
+          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Calendar</h1>
           <p className="text-muted-foreground">
             Manage and view calendar events across your scope.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <Button className="w-full sm:w-auto"
             variant="outline"
             onClick={() => setIsEventListOpen(true)}
             data-testid="button-open-event-list"
@@ -1146,6 +1146,7 @@ export default function CalendarPage() {
           </Button>
 
           <Button
+            className="w-full sm:w-auto"
             data-testid="button-create-calendar-event"
             onClick={openCreateDialog}
           >
@@ -1157,8 +1158,8 @@ export default function CalendarPage() {
 
       <Card>
         <CardContent className="pt-6">
-          <div className="flex items-center gap-3 flex-wrap">
-            <div className="relative flex-1 min-w-[240px]">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="relative w-full flex-1 min-w-0 sm:min-w-[240px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
                 value={searchTerm}
@@ -1169,7 +1170,7 @@ export default function CalendarPage() {
               />
             </div>
 
-            <div className="text-sm text-muted-foreground">
+            <div className="text-xs text-muted-foreground sm:text-sm">
               {filteredEvents.length} event{filteredEvents.length === 1 ? "" : "s"}
             </div>
           </div>
@@ -1178,13 +1179,13 @@ export default function CalendarPage() {
 
       <div className="grid gap-6 xl:grid-cols-[1.7fr_1fr]">
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:space-y-0">
             <CardTitle className="flex items-center gap-2">
               <CalendarDays className="h-5 w-5" />
               {monthLabel}
             </CardTitle>
 
-            <div className="flex items-center gap-2">
+            <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
               <Button
                 variant="outline"
                 size="icon"
@@ -1225,107 +1226,111 @@ export default function CalendarPage() {
           </CardHeader>
 
           <CardContent>
-            <div className="grid grid-cols-7 gap-2 mb-2">
-              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
-                <div
-                  key={day}
-                  className="text-xs font-medium text-muted-foreground text-center py-2"
-                >
-                  {day}
-                </div>
-              ))}
-            </div>
-
-            {isLoading ? (
-              <div className="rounded-lg border p-6 text-sm text-muted-foreground">
-                Loading calendar events...
-              </div>
-            ) : error ? (
-              <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-                {(error as Error).message || "Failed to load calendar events."}
-              </div>
-            ) : (
-              <div className="grid grid-cols-7 gap-2">
-                {calendarDays.map((date) => {
-                  const inCurrentMonth = date.getMonth() === viewDate.getMonth();
-                  const isToday = isSameDay(date, today);
-                  const isSelected = isSameDay(date, selectedDate);
-                  const dateEvents = eventsForDate(date);
-                  const visibleDateEvents = dateEvents.slice(0, 2);
-                  const hiddenCount = Math.max(0, dateEvents.length - 2);
-
-                  return (
-                    <button
-                      key={date.toISOString()}
-                      type="button"
-                      onClick={() => setSelectedDate(date)}
-                      className={[
-                        "min-h-[118px] rounded-2xl border p-2 text-left transition hover:border-primary hover:bg-muted/40",
-                        !inCurrentMonth ? "opacity-45" : "",
-                        isSelected ? "border-primary ring-1 ring-primary" : "",
-                      ].join(" ")}
-                      data-testid={`calendar-day-${date.toISOString().slice(0, 10)}`}
+            <div className="-mx-1 overflow-x-auto pb-1">
+              <div className="min-w-[700px] px-1">
+                <div className="mb-2 grid grid-cols-7 gap-2">
+                  {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+                    <div
+                      key={day}
+                      className="py-2 text-center text-xs font-medium text-muted-foreground"
                     >
-                      <div className="flex items-center justify-between">
-                        <span
+                      {day}
+                    </div>
+                  ))}
+                </div>
+
+                {isLoading ? (
+                  <div className="rounded-lg border p-6 text-sm text-muted-foreground">
+                    Loading calendar events...
+                  </div>
+                ) : error ? (
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
+                    {(error as Error).message || "Failed to load calendar events."}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-7 gap-2">
+                    {calendarDays.map((date) => {
+                      const inCurrentMonth = date.getMonth() === viewDate.getMonth();
+                      const isToday = isSameDay(date, today);
+                      const isSelected = isSameDay(date, selectedDate);
+                      const dateEvents = eventsForDate(date);
+                      const visibleDateEvents = dateEvents.slice(0, 2);
+                      const hiddenCount = Math.max(0, dateEvents.length - 2);
+
+                      return (
+                        <button
+                          key={date.toISOString()}
+                          type="button"
+                          onClick={() => setSelectedDate(date)}
                           className={[
-                            "inline-flex h-7 w-7 items-center justify-center rounded-full text-sm",
-                            isToday ? "bg-primary text-primary-foreground" : "",
+                            "min-h-[96px] rounded-2xl border p-1.5 text-left transition hover:border-primary hover:bg-muted/40 sm:min-h-[118px] sm:p-2",
+                            !inCurrentMonth ? "opacity-45" : "",
+                            isSelected ? "border-primary ring-1 ring-primary" : "",
                           ].join(" ")}
+                          data-testid={`calendar-day-${date.toISOString().slice(0, 10)}`}
                         >
-                          {date.getDate()}
-                        </span>
-                        {dateEvents.length > 0 && (
-                          <span className="text-[10px] text-muted-foreground">
-                            {dateEvents.length}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="mt-2 space-y-1">
-                        {visibleDateEvents.map((event: any) => {
-                          const meta = getScopeMeta(event.scope);
-                          return (
-                            <button
-                              key={event.id}
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openViewDialog(event);
-                              }}
-                              className={`w-full rounded-md px-2 py-1 text-[11px] truncate text-left ${meta.chipClass}`}
-                              data-testid={`button-day-event-${event.id}`}
+                          <div className="flex items-center justify-between">
+                            <span
+                              className={[
+                                "inline-flex h-7 w-7 items-center justify-center rounded-full text-sm",
+                                isToday ? "bg-primary text-primary-foreground" : "",
+                              ].join(" ")}
                             >
-                              {event.title || "Untitled event"}
-                            </button>
-                          );
-                        })}
-
-                        {hiddenCount > 0 && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedDate(date);
-                            }}
-                            className="w-full rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground text-left hover:bg-muted/80"
-                            data-testid={`button-more-events-${date.toISOString().slice(0, 10)}`}
-                          >
-                            +{hiddenCount} more
-                          </button>
-                        )}
-
-                        {dateEvents.length === 0 && (
-                          <div className="rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">
-                            No events
+                              {date.getDate()}
+                            </span>
+                            {dateEvents.length > 0 && (
+                              <span className="text-[10px] text-muted-foreground">
+                                {dateEvents.length}
+                              </span>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    </button>
-                  );
-                })}
+
+                          <div className="mt-2 space-y-1">
+                            {visibleDateEvents.map((event: any) => {
+                              const meta = getScopeMeta(event.scope);
+                              return (
+                                <button
+                                  key={event.id}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openViewDialog(event);
+                                  }}
+                                  className={`w-full rounded-md px-2 py-1 text-[10px] truncate text-left sm:text-[11px] ${meta.chipClass}`}
+                                  data-testid={`button-day-event-${event.id}`}
+                                >
+                                  {event.title || "Untitled event"}
+                                </button>
+                              );
+                            })}
+
+                            {hiddenCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedDate(date);
+                                }}
+                                className="w-full rounded-md bg-muted px-2 py-1 text-[11px] text-left text-muted-foreground hover:bg-muted/80"
+                                data-testid={`button-more-events-${date.toISOString().slice(0, 10)}`}
+                              >
+                                +{hiddenCount} more
+                              </button>
+                            )}
+
+                            {dateEvents.length === 0 && (
+                              <div className="rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+                                No events
+                              </div>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
+            </div>
           </CardContent>
         </Card>
 

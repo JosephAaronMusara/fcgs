@@ -264,7 +264,7 @@ export default function ParentsPage() {
             <p className="text-muted-foreground">Manage parent and guardian records</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
           <Button variant="outline" onClick={handleExport} data-testid="button-download-parents">
             <Download className="w-4 h-4 mr-2" />
             Download
@@ -326,7 +326,7 @@ export default function ParentsPage() {
       <Card>
         <CardContent className="pt-4">
           <div className="flex items-center gap-4 mb-4 flex-wrap">
-            <div className="relative flex-1 min-w-[200px]">
+            <div className="relative w-full min-w-0 sm:flex-1 sm:min-w-[200px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
                 placeholder="Search parents (name, phone, email)..."
@@ -556,7 +556,7 @@ function ParentForm({
 
   return (
     <form onSubmit={onSubmit} className="space-y-4">
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="firstName">First Name</Label>
           <Input
@@ -578,7 +578,7 @@ function ParentForm({
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="phone">Phone Number</Label>
           <Input
@@ -600,7 +600,7 @@ function ParentForm({
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="relationship">Relationship</Label>
           <Input

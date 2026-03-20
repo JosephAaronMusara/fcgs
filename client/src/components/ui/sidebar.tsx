@@ -258,7 +258,8 @@ function SidebarTrigger({
   onClick,
   ...props
 }: React.ComponentProps<typeof Button>) {
-  const { toggleSidebar, open } = useSidebar()
+  const { toggleSidebar, open, openMobile, isMobile } = useSidebar()
+  const isExpanded = isMobile ? openMobile : open
 
   return (
     <Button
@@ -266,6 +267,7 @@ function SidebarTrigger({
       data-slot="sidebar-trigger"
       variant="outline"
       size="icon"
+      aria-expanded={isExpanded}
       className={cn("h-9 w-9 border border-border", className)}
       onClick={(event) => {
         onClick?.(event)
@@ -273,19 +275,25 @@ function SidebarTrigger({
       }}
       {...props}
     >
-      <div className="relative w-5 h-5 flex flex-col items-center justify-center">
-        <span className={cn(
-          "absolute h-[2px] w-5 bg-foreground rounded-sm transition-all duration-200",
-          open ? "rotate-45 translate-y-0" : "-translate-y-[6px]"
-        )} />
-        <span className={cn(
-          "absolute h-[2px] w-5 bg-foreground rounded-sm transition-all duration-200",
-          open ? "opacity-0 scale-x-0" : "opacity-100"
-        )} />
-        <span className={cn(
-          "absolute h-[2px] w-5 bg-foreground rounded-sm transition-all duration-200",
-          open ? "-rotate-45 translate-y-0" : "translate-y-[6px]"
-        )} />
+      <div className="relative flex h-5 w-5 flex-col items-center justify-center">
+        <span
+          className={cn(
+            "absolute h-[2px] w-5 rounded-sm bg-foreground transition-all duration-200",
+            isExpanded ? "translate-y-0 rotate-45" : "-translate-y-[6px]"
+          )}
+        />
+        <span
+          className={cn(
+            "absolute h-[2px] w-5 rounded-sm bg-foreground transition-all duration-200",
+            isExpanded ? "scale-x-0 opacity-0" : "opacity-100"
+          )}
+        />
+        <span
+          className={cn(
+            "absolute h-[2px] w-5 rounded-sm bg-foreground transition-all duration-200",
+            isExpanded ? "translate-y-0 -rotate-45" : "translate-y-[6px]"
+          )}
+        />
       </div>
       <span className="sr-only">Toggle Sidebar</span>
     </Button>

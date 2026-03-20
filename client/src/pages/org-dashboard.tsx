@@ -851,10 +851,10 @@ export default function OrgDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen overflow-x-hidden bg-background">
       <header className="border-b">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
+        <div className="container mx-auto flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
             {orgBranding?.logo ? (
               <img 
                 src={orgBranding.logo} 
@@ -867,13 +867,13 @@ export default function OrgDashboard() {
                 <GraduationCap className="h-6 w-6 text-primary" />
               </div>
             )}
-            <div>
-              <h1 className="text-xl font-semibold" data-testid="text-welcome-heading">{orgBranding?.name || "First Choice Group Of Schools"}</h1>
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold break-words" data-testid="text-welcome-heading">{orgBranding?.name || "First Choice Group Of Schools"}</h1>
               {orgBranding?.motto && (
-                <p className="text-sm text-muted-foreground" data-testid="text-org-motto">{orgBranding.motto}</p>
+                <p className="text-sm text-muted-foreground break-words" data-testid="text-org-motto">{orgBranding.motto}</p>
               )}
               {orgBranding?.address && (
-                <p className="text-sm text-muted-foreground flex items-center gap-1.5 mt-0.5" data-testid="text-org-address">
+                <p className="mt-0.5 flex flex-wrap items-start gap-1.5 text-sm text-muted-foreground" data-testid="text-org-address">
                   <MapPin className="w-3.5 h-3.5 shrink-0" />
                   {orgBranding.address}
                 </p>
@@ -881,13 +881,13 @@ export default function OrgDashboard() {
               {(orgBranding?.phone || orgBranding?.email) && (
                 <div className="flex flex-wrap items-center gap-4 mt-0.5">
                   {orgBranding.phone && (
-                    <span className="text-sm text-muted-foreground flex items-center gap-1.5" data-testid="text-org-phone">
+                    <span className="text-sm text-muted-foreground flex items-center gap-1.5 break-all" data-testid="text-org-phone">
                       <Phone className="w-3.5 h-3.5 shrink-0" />
                       {orgBranding.phone}
                     </span>
                   )}
                   {orgBranding.email && (
-                    <span className="text-sm text-muted-foreground flex items-center gap-1.5" data-testid="text-org-email">
+                    <span className="text-sm text-muted-foreground flex items-center gap-1.5 break-all" data-testid="text-org-email">
                       <Mail className="w-3.5 h-3.5 shrink-0" />
                       {orgBranding.email}
                     </span>
@@ -896,7 +896,7 @@ export default function OrgDashboard() {
               )}
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
             <Button
               variant="ghost"
               size="icon"
@@ -1012,6 +1012,7 @@ export default function OrgDashboard() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="justify-start sm:justify-center"
                       onClick={() => markAllAsRead.mutate()}
                       disabled={markAllAsRead.isPending}
                       data-testid="button-mark-all-read"
@@ -1054,7 +1055,7 @@ export default function OrgDashboard() {
             </Popover>
             <Button 
               variant="ghost" 
-              className="text-red-500"
+              className="w-full justify-center text-red-500 sm:w-auto"
               onClick={handleLogout}
               data-testid="button-logout"
             >
@@ -1065,7 +1066,7 @@ export default function OrgDashboard() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8 space-y-8">
+      <main className="container mx-auto space-y-6 px-4 py-6 sm:space-y-8 sm:py-8">
         {/* Global Search */}
         <Card>
           <CardHeader className="pb-3">
@@ -1120,7 +1121,7 @@ export default function OrgDashboard() {
                           {searchResults.staff.map((staffMember) => (
                             <div
                               key={staffMember.id}
-                              className="p-3 flex items-center justify-between"
+                              className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between"
                               data-testid={`search-result-staff-${staffMember.id}`}
                             >
                               <div className="flex-1">
@@ -1131,7 +1132,7 @@ export default function OrgDashboard() {
                                   {staffMember.phone && <span>{staffMember.phone}</span>}
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
                                 <Badge variant="secondary" className="flex items-center gap-1">
                                   <SchoolIcon className="h-3 w-3" />
                                   {staffMember.schoolName}
@@ -1180,7 +1181,7 @@ export default function OrgDashboard() {
                           {searchResults.students.map((student) => (
                             <div
                               key={student.id}
-                              className="p-3 flex items-center justify-between"
+                              className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between"
                               data-testid={`search-result-student-${student.id}`}
                             >
                               <div className="flex-1">
@@ -1193,7 +1194,7 @@ export default function OrgDashboard() {
                                   {student.phone && <span>{student.phone}</span>}
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
                                 <Badge variant="secondary" className="flex items-center gap-1">
                                   <SchoolIcon className="h-3 w-3" />
                                   {student.schoolName}
@@ -1242,7 +1243,7 @@ export default function OrgDashboard() {
                           {searchResults.parents.map((parent) => (
                             <div
                               key={parent.id}
-                              className="p-3 flex items-center justify-between"
+                              className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between"
                               data-testid={`search-result-parent-${parent.id}`}
                             >
                               <div className="flex-1">
@@ -1253,7 +1254,7 @@ export default function OrgDashboard() {
                                   {parent.phone && <span>{parent.phone}</span>}
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
                                 <Badge variant="outline">Organization-wide</Badge>
                                 <Button
                                   variant="outline"
@@ -1286,14 +1287,14 @@ export default function OrgDashboard() {
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="flex items-center gap-2">
               <Building2 className="h-5 w-5" />
               Our Schools
             </CardTitle>
             <Dialog open={isAddSchoolOpen} onOpenChange={setIsAddSchoolOpen}>
               <DialogTrigger asChild>
-                <Button variant="outline" size="sm" data-testid="button-add-school">
+                <Button variant="outline" size="sm" className="w-full sm:w-auto" data-testid="button-add-school">
                   <Plus className="h-4 w-4 mr-2" />
                   Add a School
                 </Button>
@@ -1316,7 +1317,7 @@ export default function OrgDashboard() {
                     <Label htmlFor="address">Address</Label>
                     <Input id="address" name="address" data-testid="input-school-address" />
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="latitude">Latitude</Label>
                       <Input id="latitude" name="latitude" placeholder="e.g., -17.8292" data-testid="input-school-latitude" />
@@ -1326,7 +1327,7 @@ export default function OrgDashboard() {
                       <Input id="longitude" name="longitude" placeholder="e.g., 31.0522" data-testid="input-school-longitude" />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="phone">Phone</Label>
                       <Input id="phone" name="phone" data-testid="input-school-phone" />
@@ -1336,7 +1337,7 @@ export default function OrgDashboard() {
                       <Input id="email" name="email" type="email" data-testid="input-school-email" />
                     </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                     <div className="space-y-2">
                       <Label>School Type</Label>
                       <Select value={newSchoolType} onValueChange={setNewSchoolType}>
@@ -1388,7 +1389,7 @@ export default function OrgDashboard() {
                 <p>No schools yet. Add your first school to get started.</p>
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 {schools.map((school) => {
                   const isPending = school.terminationStatus === "pending";
                   const initiator = isPending && school.terminationByUserId
@@ -1404,8 +1405,8 @@ export default function OrgDashboard() {
                       className={`p-4 border rounded-lg ${isPending ? "border-destructive/50 bg-destructive/5" : "hover-elevate"}`}
                       data-testid={`school-card-${school.id}`}
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="flex min-w-0 items-start gap-3">
                           <div className={`h-10 w-10 rounded-full flex items-center justify-center ${isPending ? "bg-destructive/10" : "bg-primary/10"}`}>
                             {isPending ? (
                               <AlertTriangle className="h-5 w-5 text-destructive" />
@@ -1413,9 +1414,9 @@ export default function OrgDashboard() {
                               <Building2 className="h-5 w-5 text-primary" />
                             )}
                           </div>
-                          <div>
-                            <h3 className="font-medium">{school.name}</h3>
-                            <p className="text-sm text-muted-foreground flex items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            <h3 className="font-medium break-words">{school.name}</h3>
+                            <p className="flex flex-wrap items-start gap-1 text-sm text-muted-foreground">
                               <MapPin className="h-3 w-3" />
                               {school.address || "No address"}
                               {school.latitude && school.longitude && (
@@ -1435,7 +1436,7 @@ export default function OrgDashboard() {
                             </div>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
                           {!isPending && (
                             <>
                               <button
@@ -1491,14 +1492,14 @@ export default function OrgDashboard() {
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="flex items-center gap-2">
               <Users className="h-5 w-5" />
               Org HQ
             </CardTitle>
             <Dialog open={isAddUserOpen} onOpenChange={setIsAddUserOpen}>
               <DialogTrigger asChild>
-                <Button variant="outline" size="sm" data-testid="button-add-user">
+                <Button variant="outline" size="sm" className="w-full sm:w-auto" data-testid="button-add-user">
                   <Plus className="h-4 w-4 mr-2" />
                   Add User
                 </Button>
@@ -1509,7 +1510,7 @@ export default function OrgDashboard() {
                   <DialogDescription>Add a new organization-level user</DialogDescription>
                 </DialogHeader>
                 <form onSubmit={handleAddUser} className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="firstName">First Name</Label>
                       <Input id="firstName" name="firstName" required data-testid="input-user-first-name" />
@@ -1544,28 +1545,29 @@ export default function OrgDashboard() {
               orgUsers.filter(u => u.role === "org_admin").map((orgUser) => (
                 <div
                   key={orgUser.id}
-                  className="flex items-center justify-between py-3 border-b last:border-b-0"
+                  className="flex flex-col gap-3 py-3 border-b last:border-b-0 sm:flex-row sm:items-center sm:justify-between"
                   data-testid={`user-row-${orgUser.id}`}
                 >
-                  <div className="flex items-center gap-3">
+                  <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
                     <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center">
                       <span className="text-sm font-medium">
                         {(orgUser.firstName?.[0] || orgUser.username[0]).toUpperCase()}
                       </span>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="font-medium">
                         {orgUser.firstName && orgUser.lastName 
                           ? `${orgUser.firstName} ${orgUser.lastName}` 
                           : orgUser.username}
                       </p>
-                      <p className="text-sm text-muted-foreground">{orgUser.email || orgUser.username}</p>
+                      <p className="text-sm text-muted-foreground break-all">{orgUser.email || orgUser.username}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 flex-wrap">
+                  <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end">
                     <Button 
                       variant="ghost"
                       size="sm"
+                      className="justify-start sm:justify-center"
                       onClick={() => handleOpenEdit(orgUser)}
                       data-testid={`button-edit-user-${orgUser.id}`}
                     >
@@ -1575,6 +1577,7 @@ export default function OrgDashboard() {
                     <Button 
                       variant="ghost"
                       size="sm"
+                      className="justify-start sm:justify-center"
                       onClick={() => handleOpenPermissions(orgUser)}
                       data-testid={`button-permissions-user-${orgUser.id}`}
                     >
@@ -1584,6 +1587,7 @@ export default function OrgDashboard() {
                     <Button 
                       variant="ghost"
                       size="sm"
+                      className="justify-start sm:justify-center"
                       onClick={() => handleOpenManageAccount(orgUser)}
                       data-testid={`button-manage-account-${orgUser.id}`}
                     >
@@ -1593,7 +1597,7 @@ export default function OrgDashboard() {
                     <Button 
                       variant="ghost"
                       size="sm"
-                      className="text-destructive"
+                      className="justify-start text-destructive sm:justify-center"
                       onClick={() => handleOpenDelete(orgUser)}
                       data-testid={`button-delete-user-${orgUser.id}`}
                     >
@@ -1615,7 +1619,7 @@ export default function OrgDashboard() {
             <DialogDescription>Update user information</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleEditUser} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="editFirstName">First Name</Label>
                 <Input 
@@ -2103,7 +2107,7 @@ export default function OrgDashboard() {
 
                 <div className="border-t pt-6">
                   <div className="flex items-center justify-between mb-4">
-                    <div>
+                    <div className="min-w-0">
                       <h3 className="text-base font-semibold">HQ Contact Details</h3>
                       <p className="text-sm text-muted-foreground">Organization name, email, phone, and address</p>
                     </div>
@@ -2314,7 +2318,7 @@ export default function OrgDashboard() {
                         <span className="text-muted-foreground text-xs">(auto-derived if blank)</span>
                       )}
                     </div>
-                    <div className="grid gap-3 grid-cols-2">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div className="space-y-1">
                         <Label className="text-xs">Start Date</Label>
                         <Input
@@ -2378,7 +2382,7 @@ export default function OrgDashboard() {
                   <CardContent className="pt-6">
                     <div className="space-y-4">
                       <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div>
+                        <div className="min-w-0">
                           <p className="text-sm font-medium">Photo Upload Size Limit</p>
                           <p className="text-xs text-muted-foreground">Maximum file size for student and staff profile photos</p>
                         </div>
@@ -2387,7 +2391,7 @@ export default function OrgDashboard() {
                             value={String(featuresValues.photoUploadLimitMB)}
                             onValueChange={(val) => setFeaturesValues({ ...featuresValues, photoUploadLimitMB: parseInt(val) })}
                           >
-                            <SelectTrigger className="w-[120px]" data-testid="select-photo-limit">
+                            <SelectTrigger className="w-full sm:w-[120px]" data-testid="select-photo-limit">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -2449,7 +2453,7 @@ export default function OrgDashboard() {
               <div className="space-y-2">
                 {assessmentTypes.map((type) => (
                   <div key={type.id} className="flex items-center justify-between p-3 border rounded-md" data-testid={`row-assessment-type-${type.id}`}>
-                    <div>
+                    <div className="min-w-0">
                       <p className="font-semibold text-sm" data-testid={`text-type-name-${type.id}`}>{type.name}</p>
                       {type.description && (
                         <p className="text-xs text-muted-foreground">{type.description}</p>
@@ -2487,18 +2491,18 @@ export default function OrgDashboard() {
                   placeholder="Type name"
                   value={assessmentTypeName}
                   onChange={(e) => setAssessmentTypeName(e.target.value)}
-                  className="flex-1 min-w-[150px]"
+                  className="w-full min-w-0 sm:flex-1 sm:min-w-[150px]"
                   data-testid="input-assessment-type-name"
                 />
                 <Input
                   placeholder="Description (optional)"
                   value={assessmentTypeDesc}
                   onChange={(e) => setAssessmentTypeDesc(e.target.value)}
-                  className="flex-1 min-w-[150px]"
+                  className="w-full min-w-0 sm:flex-1 sm:min-w-[150px]"
                   data-testid="input-assessment-type-desc"
                 />
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Button
                   onClick={handleAssessmentTypeSubmit}
                   disabled={createAssessmentTypeMutation.isPending || updateAssessmentTypeMutation.isPending}
@@ -2541,7 +2545,7 @@ export default function OrgDashboard() {
                   const linkedType = assessmentTypes?.find(t => t.id === exam.assessmentTypeId);
                   return (
                     <div key={exam.id} className="flex items-center justify-between p-3 border rounded-md" data-testid={`row-exam-${exam.id}`}>
-                      <div>
+                      <div className="min-w-0">
                         <p className="font-semibold text-sm" data-testid={`text-exam-name-${exam.id}`}>{exam.examName}</p>
                         {linkedType && (
                           <p className="text-xs text-muted-foreground">{linkedType.name}</p>
@@ -2566,7 +2570,7 @@ export default function OrgDashboard() {
                   placeholder="Exercise/Exam name"
                   value={examName}
                   onChange={(e) => setExamName(e.target.value)}
-                  className="flex-1 min-w-[180px]"
+                  className="w-full min-w-0 sm:flex-1 sm:min-w-[180px]"
                   data-testid="input-exam-name"
                 />
               </div>
@@ -2754,7 +2758,7 @@ function OrgActivityLogsSection({ schools }: { schools: SchoolType[] }) {
         <div className="space-y-1">
           <Label className="text-xs text-muted-foreground">School</Label>
           <Select value={schoolFilter} onValueChange={(v) => { setSchoolFilter(v); setPage(0); }}>
-            <SelectTrigger className="w-[200px]" data-testid="select-org-log-school">
+            <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-org-log-school">
               <SelectValue placeholder="All Schools" />
             </SelectTrigger>
             <SelectContent>
@@ -2768,7 +2772,7 @@ function OrgActivityLogsSection({ schools }: { schools: SchoolType[] }) {
         <div className="space-y-1">
           <Label className="text-xs text-muted-foreground">Category</Label>
           <Select value={category} onValueChange={(v) => { setCategory(v); setPage(0); }}>
-            <SelectTrigger className="w-[180px]" data-testid="select-org-log-category">
+            <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-org-log-category">
               <SelectValue placeholder="All Categories" />
             </SelectTrigger>
             <SelectContent>
@@ -2785,7 +2789,7 @@ function OrgActivityLogsSection({ schools }: { schools: SchoolType[] }) {
             type="date"
             value={fromDate}
             onChange={(e) => { setFromDate(e.target.value); setPage(0); }}
-            className="w-[160px]"
+            className="w-full sm:w-[160px]"
             data-testid="input-org-from-date"
           />
         </div>
@@ -2795,7 +2799,7 @@ function OrgActivityLogsSection({ schools }: { schools: SchoolType[] }) {
             type="date"
             value={toDate}
             onChange={(e) => { setToDate(e.target.value); setPage(0); }}
-            className="w-[160px]"
+            className="w-full sm:w-[160px]"
             data-testid="input-org-to-date"
           />
         </div>
@@ -2905,7 +2909,7 @@ function OrgActivityLogsSection({ schools }: { schools: SchoolType[] }) {
           <div className="text-sm text-muted-foreground">
             Page {page + 1} of {totalPages}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -3189,7 +3193,7 @@ function AccessRightsSection() {
                 onClick={() => handleSelectGroup(group)}
                 data-testid={`group-item-${group.id}`}
               >
-                <div className="flex items-center gap-3">
+                <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
                   <Users className="h-4 w-4 text-muted-foreground" />
                   <div>
                     <div className="font-medium flex items-center gap-2">
@@ -3242,7 +3246,7 @@ function AccessRightsSection() {
                   </div>
                 ) : (
                   <>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Users className="h-4 w-4 text-muted-foreground" />
                       <span className="font-medium">{group.name}</span>
                       {group.isSystemDefault && ["School Admin", "Org HQ"].includes(group.name) && (
@@ -3322,9 +3326,9 @@ function AccessRightsSection() {
                   </div>
                 ) : (
                   <>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <UserCog className="h-4 w-4 text-muted-foreground" />
-                      <div>
+                      <div className="min-w-0">
                         <span className="font-medium">{role.label}</span>
                         {role.description && <p className="text-xs text-muted-foreground">{role.description}</p>}
                       </div>
@@ -3425,7 +3429,7 @@ function AccessRightsSection() {
                           handleToggleCategory(category);
                         }}
                       >
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           {expandedCategories.has(category) ? (
                             <ChevronDown className="h-4 w-4" />
                           ) : (
@@ -3459,7 +3463,7 @@ function AccessRightsSection() {
                         <div className="px-3 pb-3 space-y-2 border-t pt-2">
                           {perms.map((perm) => (
                             <div key={perm.id} className="flex items-center justify-between py-1">
-                              <div>
+                              <div className="min-w-0">
                                 <p className="text-sm font-medium">{perm.name}</p>
                                 {perm.description && (
                                   <p className="text-xs text-muted-foreground">{perm.description}</p>

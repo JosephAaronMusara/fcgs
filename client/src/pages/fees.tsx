@@ -262,11 +262,11 @@ export default function FeesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <DollarSign className="h-8 w-8" style={{ color: "#1b2a5c" }} />
           <div>
-            <h1 className="text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }} data-testid="text-fees-title">Student Payments</h1>
+            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl" style={{ color: "#1b2a5c" }} data-testid="text-fees-title">Student Payments</h1>
             <p className="text-muted-foreground">
               Upload the latest Excel fees (saved as CSV), update balances, and send SMS / email reminders.
             </p>
@@ -280,7 +280,7 @@ export default function FeesPage() {
                 Upload from CSV
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-lg">
+            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>Upload / Update from Excel (CSV)</DialogTitle>
                 <DialogDescription>
@@ -289,7 +289,7 @@ export default function FeesPage() {
                 </DialogDescription>
               </DialogHeader>
               <form onSubmit={handleImportSubmit} className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label>Term total fee amount</Label>
                     <Input
@@ -339,7 +339,7 @@ export default function FeesPage() {
                 Record Payment
               </Button>
             </DialogTrigger>
-            <DialogContent>
+            <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
               <DialogHeader>
                 <DialogTitle>Record New Payment</DialogTitle>
                 <DialogDescription>Enter payment details for a student.</DialogDescription>
@@ -354,7 +354,7 @@ export default function FeesPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <Card>
           <CardContent className="pt-4 pb-3">
             <div className="flex items-center gap-3">
@@ -423,7 +423,7 @@ export default function FeesPage() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
+        <TabsList className="grid h-auto w-full grid-cols-1 sm:grid-cols-2">
           <TabsTrigger value="overview" data-testid="tab-overview">
             <Users className="w-4 h-4 mr-1" /> Fees Overview
           </TabsTrigger>
@@ -433,8 +433,8 @@ export default function FeesPage() {
         </TabsList>
 
         <TabsContent value="overview" className="mt-3">
-          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-            <div className="relative flex-1 min-w-[200px] max-w-md">
+          <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="relative w-full flex-1 min-w-0 md:max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
                 placeholder="Search by student name or class..."
@@ -445,6 +445,7 @@ export default function FeesPage() {
               />
             </div>
             <Button
+              className="w-full md:w-auto"
               variant="outline"
               onClick={handleNotifySelected}
               disabled={selectedIds.size === 0 || notifyMutation.isPending}
@@ -455,7 +456,7 @@ export default function FeesPage() {
             </Button>
           </div>
 
-          <div className="flex gap-4">
+          <div className="flex flex-col gap-4 lg:flex-row">
             <Card className="flex-1 min-w-0">
               <CardContent className="p-0">
                 {summaryLoading ? (
@@ -546,7 +547,7 @@ export default function FeesPage() {
             </Card>
 
             {selectedStudent && (
-              <Card className="w-[300px] shrink-0 hidden lg:block">
+              <Card className="w-full shrink-0 lg:w-[300px]">
                 <CardContent className="pt-6">
                   <div className="flex flex-col items-center text-center mb-4">
                     <Avatar className="w-16 h-16 mb-3">
@@ -612,7 +613,7 @@ export default function FeesPage() {
 
         <TabsContent value="payments" className="mt-3">
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between gap-2">
+            <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <CardTitle className="text-base">Recent Payments</CardTitle>
               <Badge variant="outline">
                 <TrendingUp className="w-3 h-3 mr-1" />

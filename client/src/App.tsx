@@ -557,11 +557,11 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <SidebarProvider style={style as React.CSSProperties}>
-      <div className="flex h-screen w-full">
+      <div className="flex h-screen w-full overflow-hidden">
         <AppSidebar />
         <div className="flex flex-col flex-1 overflow-hidden">
           <TerminationBanner />
-          <header className="flex items-center gap-4 px-4 py-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50">
+          <header className="sticky top-0 z-50 flex flex-wrap items-center gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60 sm:gap-4 sm:px-4">
             <SidebarTrigger data-testid="button-sidebar-toggle" />
             {user?.role === "org_admin" && currentSchoolId && (
               <Button 
@@ -585,7 +585,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
                       <MapPin className="w-4 h-4 text-primary" />
                     </div>
                   )}
-                  <span className="font-bold text-sm truncate" data-testid="text-header-school-name">{school.name}</span>
+                  <span className="truncate text-sm font-bold sm:text-base" data-testid="text-header-school-name">{school.name}</span>
                   {school.address && (
                     <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0 hidden md:flex">
                       <MapPin className="w-3 h-3" />
@@ -598,7 +598,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
                 </>
               )}
             </div>
-            <div className="flex items-center gap-3 shrink-0">
+            <div className="flex items-center gap-1.5 shrink-0 sm:gap-3">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground whitespace-nowrap hidden sm:flex" data-testid="text-header-clock">
                 <Clock className="w-3.5 h-3.5" />
                 <span>{currentTime} (CAT)</span>
@@ -700,7 +700,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
               </Sheet>
             </div>
           </header>
-          <main className="flex-1 overflow-auto p-6">
+          <main className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-4 sm:px-4 sm:py-5 lg:p-6">
             {children}
           </main>
         </div>

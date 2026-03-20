@@ -291,14 +291,14 @@ export default function StaffPage() {
           </div>
         </div>
         
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="relative">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <div className="relative w-full sm:w-auto">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               placeholder="Search Staff..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-10 w-[200px]"
+              className="pl-10 w-full sm:w-[200px]"
               data-testid="input-search-staff"
             />
           </div>
@@ -670,7 +670,7 @@ function StaffForm({
 
   return (
     <form onSubmit={onSubmit} className="space-y-4">
-      <div className="flex items-start gap-4 mb-2">
+      <div className="mb-2 flex flex-col gap-4 sm:flex-row sm:items-start">
         <div className="flex flex-col items-center gap-1.5">
           <div
             className="w-20 h-20 rounded-md border border-gray-300 dark:border-gray-600 overflow-hidden flex items-center justify-center bg-gray-50 dark:bg-gray-800 cursor-pointer"
@@ -706,7 +706,7 @@ function StaffForm({
             </>
           )}
         </div>
-        <div className="flex-1 grid grid-cols-2 gap-4">
+        <div className="grid flex-1 grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="staffNo">Staff No</Label>
           <Input
@@ -743,7 +743,7 @@ function StaffForm({
         </div>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="firstName">First Name</Label>
           <Input
@@ -765,7 +765,7 @@ function StaffForm({
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="email">Email</Label>
           <Input
@@ -786,7 +786,7 @@ function StaffForm({
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="gender">Gender</Label>
           <Select name="gender" defaultValue={defaultValues?.gender || ""}>
@@ -921,7 +921,7 @@ function StaffSubjectsForm({ staffId, subjects, onClose }: { staffId: number; su
           ))}
         </div>
       )}
-      <div className="relative">
+      <div className="relative w-full sm:w-auto">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           placeholder="Search subjects..."
@@ -1045,7 +1045,7 @@ function StaffClassesForm({ staffId, classes, onClose }: { staffId: number; clas
           ))}
         </div>
       )}
-      <div className="relative">
+      <div className="relative w-full sm:w-auto">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           placeholder="Search classes..."
@@ -1528,8 +1528,8 @@ function AccessRightsPanel({
         </Button>
       </div>
 
-      <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 min-w-[200px]">
+      <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+        <div className="relative w-full min-w-0 sm:flex-1 sm:min-w-[200px]">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search permissions..."
@@ -1540,7 +1540,7 @@ function AccessRightsPanel({
           />
         </div>
         <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-          <SelectTrigger className="w-[180px]" data-testid="select-permission-category">
+          <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-permission-category">
             <SelectValue placeholder="All Categories" />
           </SelectTrigger>
           <SelectContent>

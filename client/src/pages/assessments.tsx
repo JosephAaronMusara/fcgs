@@ -201,7 +201,7 @@ export default function AssessmentsPage() {
       </div>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-4 pb-4 flex-wrap">
+        <CardHeader className="flex flex-col gap-4 pb-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="relative w-full max-w-sm">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
@@ -212,9 +212,9 @@ export default function AssessmentsPage() {
               data-testid="input-search"
             />
           </div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:flex xl:w-auto xl:flex-wrap">
             <Select value={filterClassId} onValueChange={setFilterClassId}>
-              <SelectTrigger className="w-[180px]" data-testid="select-filter-class">
+              <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-filter-class">
                 <SelectValue placeholder="All Classes" />
               </SelectTrigger>
               <SelectContent>
@@ -225,7 +225,7 @@ export default function AssessmentsPage() {
               </SelectContent>
             </Select>
             <Select value={filterSubjectId} onValueChange={setFilterSubjectId}>
-              <SelectTrigger className="w-[180px]" data-testid="select-filter-subject">
+              <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-filter-subject">
                 <SelectValue placeholder="All Subjects" />
               </SelectTrigger>
               <SelectContent>
@@ -507,7 +507,7 @@ function AssessmentDialog({
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label>Topic *</Label>
               <Input
@@ -532,7 +532,7 @@ function AssessmentDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label>Class *</Label>
               <Select value={classId} onValueChange={setClassId}>
@@ -567,7 +567,7 @@ function AssessmentDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label>Assessment Type</Label>
               <Select value={assessmentTypeId} onValueChange={(val) => {

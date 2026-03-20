@@ -118,7 +118,7 @@ export default function TimetablePage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <Calendar className="h-8 w-8" style={{ color: "#1b2a5c" }} />
           <div>
@@ -139,7 +139,7 @@ export default function TimetablePage() {
               <DialogDescription>Schedule a new lesson</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid gap-4 grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="classId">Class</Label>
                   <Select name="classId" required>
@@ -186,7 +186,7 @@ export default function TimetablePage() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="grid gap-4 grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="dayOfWeek">Day</Label>
                   <Select name="dayOfWeek" required>
@@ -205,7 +205,7 @@ export default function TimetablePage() {
                   <Input id="room" name="room" placeholder="e.g., Room A1" data-testid="input-room" />
                 </div>
               </div>
-              <div className="grid gap-4 grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="startTime">Start Time</Label>
                   <Select name="startTime" required>
@@ -241,10 +241,10 @@ export default function TimetablePage() {
         </Dialog>
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <Label>Filter by Class:</Label>
         <Select value={selectedClass} onValueChange={setSelectedClass}>
-          <SelectTrigger className="w-[200px]" data-testid="select-filter-class">
+          <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-filter-class">
             <SelectValue placeholder="All Classes" />
           </SelectTrigger>
           <SelectContent>
@@ -267,7 +267,7 @@ export default function TimetablePage() {
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
+            <table className="w-full min-w-[700px] border-collapse">
               <thead>
                 <tr>
                   <th className="border p-2 bg-muted">Time</th>

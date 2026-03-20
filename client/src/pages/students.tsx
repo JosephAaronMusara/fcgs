@@ -428,7 +428,7 @@ export default function StudentsPage() {
       <Card>
         <CardContent className="pt-4">
           <div className="flex items-center gap-4 mb-4 flex-wrap">
-            <div className="relative flex-1 min-w-[200px]">
+            <div className="relative w-full min-w-0 sm:flex-1 sm:min-w-[200px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
                 placeholder="Search students..."
@@ -439,7 +439,7 @@ export default function StudentsPage() {
               />
             </div>
             <Select value={classFilter} onValueChange={setClassFilter}>
-              <SelectTrigger className="w-[180px]" data-testid="select-class-filter">
+              <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-class-filter">
                 <SelectValue placeholder="All Classes" />
               </SelectTrigger>
               <SelectContent>
@@ -452,7 +452,7 @@ export default function StudentsPage() {
               </SelectContent>
             </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[150px]" data-testid="select-status-filter">
+              <SelectTrigger className="w-full sm:w-[150px]" data-testid="select-status-filter">
                 <SelectValue placeholder="All Status" />
               </SelectTrigger>
               <SelectContent>
@@ -713,7 +713,7 @@ export default function StudentsPage() {
             <DialogTitle>Quick Add Parent</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleQuickAddParent} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="parentFirstName">First Name</Label>
                 <Input id="parentFirstName" name="parentFirstName" required />
@@ -723,7 +723,7 @@ export default function StudentsPage() {
                 <Input id="parentLastName" name="parentLastName" required />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="parentPhone">Phone</Label>
                 <Input id="parentPhone" name="parentPhone" required />
@@ -873,7 +873,7 @@ function StudentForm({
   };
   return (
     <form onSubmit={onSubmit} className="space-y-4">
-      <div className="flex items-start gap-4 mb-2">
+      <div className="mb-2 flex flex-col gap-4 sm:flex-row sm:items-start">
         <div className="flex flex-col items-center gap-1.5">
           <div
             className="w-20 h-20 rounded-md border border-gray-300 dark:border-gray-600 overflow-hidden flex items-center justify-center bg-gray-50 dark:bg-gray-800 cursor-pointer"
@@ -909,7 +909,7 @@ function StudentForm({
             </>
           )}
         </div>
-        <div className="flex-1 grid grid-cols-3 gap-4">
+        <div className="grid flex-1 grid-cols-1 gap-4 sm:grid-cols-3">
         <div className="space-y-2">
           <Label htmlFor="admissionNo">Admission No</Label>
           <Input
@@ -948,7 +948,7 @@ function StudentForm({
         </div>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="firstName">First Name</Label>
           <Input
@@ -970,7 +970,7 @@ function StudentForm({
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="gender">Gender</Label>
           <Select name="gender" defaultValue={defaultValues?.gender || ""}>
@@ -994,7 +994,7 @@ function StudentForm({
           />
         </div>
       </div>
-      <div className={`grid gap-4 ${isBoardingSchool ? "grid-cols-3" : "grid-cols-2"}`}>
+      <div className={`grid grid-cols-1 gap-4 ${isBoardingSchool ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
         <div className="space-y-2">
           <Label htmlFor="classId">Class</Label>
           <Select name="classId" defaultValue={defaultValues?.classId?.toString() || ""}>
@@ -1112,7 +1112,7 @@ function StudentForm({
           )}
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="email">Email</Label>
           <Input

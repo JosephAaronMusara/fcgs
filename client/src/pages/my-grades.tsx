@@ -72,9 +72,9 @@ export default function MyGradesPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
+      <div className="space-y-6 p-4 sm:p-6">
         <Skeleton className="h-10 w-48" />
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
           {[1, 2, 3].map(i => <Skeleton key={i} className="h-24" />)}
         </div>
         <Skeleton className="h-64 w-full" />
@@ -83,13 +83,13 @@ export default function MyGradesPage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-6 p-4 sm:p-6">
       <div>
         <h1 className="text-3xl font-bold" data-testid="text-my-grades-title">My Grades</h1>
         <p className="text-muted-foreground">Your assessment results and grades</p>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
         <Card>
           <CardContent className="pt-4 pb-4">
             <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">
@@ -121,9 +121,9 @@ export default function MyGradesPage() {
         </Card>
       </div>
 
-      <div className="flex items-center gap-3 flex-wrap">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:flex xl:flex-wrap xl:items-center">
         <Select value={termFilter} onValueChange={setTermFilter}>
-          <SelectTrigger className="w-[200px]" data-testid="select-term-filter">
+          <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-term-filter">
             <SelectValue placeholder="Filter by term" />
           </SelectTrigger>
           <SelectContent>
@@ -134,7 +134,7 @@ export default function MyGradesPage() {
           </SelectContent>
         </Select>
         <Select value={subjectFilter} onValueChange={setSubjectFilter}>
-          <SelectTrigger className="w-[200px]" data-testid="select-subject-filter">
+          <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-subject-filter">
             <SelectValue placeholder="Filter by subject" />
           </SelectTrigger>
           <SelectContent>
@@ -189,7 +189,7 @@ export default function MyGradesPage() {
                         <Badge variant={gradeColor(mark.grade)}>{mark.grade}</Badge>
                       ) : "—"}
                     </TableCell>
-                    <TableCell className="text-muted-foreground max-w-[200px] truncate">
+                    <TableCell className="max-w-[200px] text-muted-foreground break-words whitespace-normal">
                       {mark.comment || "—"}
                     </TableCell>
                   </TableRow>

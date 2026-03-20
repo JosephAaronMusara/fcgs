@@ -142,8 +142,8 @@ export default function Dashboard() {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' });
 
   return (
-    <div className="p-6 space-y-6 bg-background min-h-screen">
-      <div className="grid grid-cols-12 gap-6">
+    <div className="space-y-4 bg-background sm:space-y-6">
+      <div className="grid grid-cols-12 gap-4 lg:gap-6">
         {/* Left Column - Students Section */}
         <div className="col-span-12 lg:col-span-4 space-y-6">
           {/* Students Overview Card */}
@@ -160,7 +160,7 @@ export default function Dashboard() {
               {isLoading ? (
                 <Skeleton className="h-40 w-full" />
               ) : (
-                <div className="flex items-center gap-4">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
                   <div className="flex-1">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2" data-testid="stat-total-students">
                       <div>
@@ -179,7 +179,7 @@ export default function Dashboard() {
                       )}
                     </div>
                   </div>
-                  <div className="w-32 h-32">
+                  <div className="mx-auto h-28 w-28 sm:h-32 sm:w-32">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
@@ -253,7 +253,7 @@ export default function Dashboard() {
               {/* Students Daily Statistics */}
               <div className="mt-4 pt-4 border-t">
                 <h4 className="text-sm font-medium mb-3">Students Daily Statistics</h4>
-                <div className="grid grid-cols-3 gap-4 text-center">
+                <div className="grid grid-cols-1 gap-3 text-center sm:grid-cols-3 sm:gap-4">
                   <div>
                     <div className="flex items-center justify-center gap-1 text-green-600">
                       <ArrowUp className="w-4 h-4" />
@@ -576,7 +576,7 @@ export default function Dashboard() {
       </div>
 
       {/* Bottom Row - Classroom Population & Fees */}
-      <div className="grid grid-cols-12 gap-6">
+      <div className="grid grid-cols-12 gap-4 lg:gap-6">
         {/* Classroom Population */}
         <div className="col-span-12 lg:col-span-4">
           <Card>
