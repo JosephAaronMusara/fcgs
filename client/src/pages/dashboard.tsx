@@ -110,6 +110,27 @@ export default function Dashboard() {
     queryKey: ["/api/communication/stats"],
   });
 
+  const { data: school } = useQuery<any>({
+    queryKey: ["/api/schools/current"],
+    enabled: !!currentSchoolId,
+  });
+
+  const { data: boardingHostels = [] } = useQuery<any[]>({
+    queryKey: ["/api/hostels"],
+    enabled: !!school?.enableHostel,
+  });
+
+  const { data: boardingStudents = [] } = useQuery<any[]>({
+    queryKey: ["/api/students"],
+    enabled: !!school?.enableHostel,
+  });
+
+  const todayIso = new Date().toISOString().split('T')[0];
+  const { data: hostelRollCallToday = [] } = useQuery<any[]>({
+    queryKey: ["/api/hostel/rollcall", todayIso],
+    enabled: !!school?.enableHostel,
+  });
+
   const studentAttendanceRate = stats?.attendanceToday.total
     ? Math.round((stats.attendanceToday.present / stats.attendanceToday.total) * 100)
     : 0;
@@ -120,6 +141,14 @@ export default function Dashboard() {
   const staffPresentRate = staffTotal > 0 
     ? Math.round((stats!.staffMonitoring.present / staffTotal) * 100) 
     : 0;
+
+  const isBoardingSchool = !!school?.enableHostel;
+  const boarders = boardingStudents.filter((student) => student.isBoarding && !student.isDayScholar);
+  const assignedBoarders = boarders.filter((student) => !!student.hostelId);
+  const unassignedBoarders = boarders.length - assignedBoarders.length;
+  const occupiedBeds = assignedBoarders.length;
+  const hostelAttendancePresent = hostelRollCallToday.filter((row) => row.status === 'present').length;
+  const hostelAttendanceAbsent = hostelRollCallToday.filter((row) => row.status !== 'present').length;
 
   const activeStudents = stats ? stats.studentsDailyStats.approved : 0;
   const unspecifiedGender = stats ? Math.max(0, activeStudents - stats.studentsGender.male - stats.studentsGender.female) : 0;
@@ -143,6 +172,38 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-4 bg-background sm:space-y-6">
+      {isBoardingSchool && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-base">Boarding Hostels</CardTitle></CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{boardingHostels.length}</div>
+              <p className="text-sm text-muted-foreground">Active hostel cards</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-base">Assigned Boarders</CardTitle></CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{assignedBoarders.length}</div>
+              <p className="text-sm text-muted-foreground">{unassignedBoarders} unassigned boarder(s)</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-base">Occupied Beds</CardTitle></CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{occupiedBeds}</div>
+              <p className="text-sm text-muted-foreground">Across all hostels</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-base">Hostel Attendance Today</CardTitle></CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{hostelAttendancePresent}</div>
+              <p className="text-sm text-muted-foreground">{hostelAttendanceAbsent} absent / flagged</p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
       <div className="grid grid-cols-12 gap-4 lg:gap-6">
         {/* Left Column - Students Section */}
         <div className="col-span-12 lg:col-span-4 space-y-6">

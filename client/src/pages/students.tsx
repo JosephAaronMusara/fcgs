@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { CreateAccountForm } from "@/components/create-account-form";
@@ -29,6 +29,7 @@ export default function StudentsPage() {
   const [classFilter, setClassFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [viewingStudent, setViewingStudent] = useState<Student | null>(null);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [isNotifyOpen, setIsNotifyOpen] = useState(false);
   const [selectedStudentIds, setSelectedStudentIds] = useState<number[]>([]);
@@ -67,7 +68,7 @@ export default function StudentsPage() {
   });
 
   const { data: school } = useQuery<School>({
-    queryKey: ["/api/school"],
+    queryKey: ["/api/schools/current"],
     enabled: !!currentSchoolId,
   });
 
@@ -571,6 +572,36 @@ export default function StudentsPage() {
                       <TableCell>
                         <div className="flex items-center gap-1">
                           <Dialog
+                            open={viewingStudent?.id === s.id}
+                            onOpenChange={(open) => !open && setViewingStudent(null)}
+                          >
+                            <DialogTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => setViewingStudent(s)}
+                                data-testid={`button-view-student-${s.id}`}
+                                title="View"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </Button>
+                            </DialogTrigger>
+                            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                              <DialogHeader>
+                                <DialogTitle>View Student</DialogTitle>
+                              </DialogHeader>
+                              <StudentView
+                                student={s}
+                                className={getClassName(s.classId)}
+                                parentName={getParentName(s.parentId)}
+                                streamName={streams?.find((st) => st.id === s.streamId)?.name || "-"}
+                                hostelName={getHostelName(s) || "-"}
+                                isBoardingSchool={isBoardingSchool}
+                              />
+                            </DialogContent>
+                          </Dialog>
+
+                          <Dialog
                             open={editingStudent?.id === s.id}
                             onOpenChange={(open) => !open && setEditingStudent(null)}
                           >
@@ -743,6 +774,89 @@ export default function StudentsPage() {
   );
 }
 
+
+function StudentView({
+  student,
+  className,
+  parentName,
+  streamName,
+  hostelName,
+  isBoardingSchool,
+}: {
+  student: Student;
+  className: string;
+  parentName: string;
+  streamName: string;
+  hostelName: string;
+  isBoardingSchool: boolean;
+}) {
+  const studentType = student.isDayScholar ? "Day Scholar" : "Boarder";
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-4">
+        <div className="h-20 w-20 overflow-hidden rounded-md border bg-muted flex items-center justify-center">
+          {student.photo ? (
+            <img src={student.photo} alt={`${student.firstName} ${student.lastName}`} className="h-full w-full object-cover" />
+          ) : (
+            <span className="text-lg font-semibold">{student.firstName?.[0]}{student.lastName?.[0]}</span>
+          )}
+        </div>
+        <div>
+          <h3 className="text-lg font-semibold">{student.firstName} {student.lastName}</h3>
+          <p className="text-sm text-muted-foreground">Admission No: {student.admissionNo}</p>
+          <p className="text-sm text-muted-foreground">Status: {student.status || "-"}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-1">
+          <Label>Student Type</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{studentType}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Class</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{className}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Stream</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{streamName}</div>
+        </div>
+        {isBoardingSchool && !student.isDayScholar && (
+          <div className="space-y-1">
+            <Label>Hostel</Label>
+            <div className="rounded-md border px-3 py-2 text-sm">{hostelName}</div>
+          </div>
+        )}
+        <div className="space-y-1">
+          <Label>Parent / Guardian</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{parentName}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Gender</Label>
+          <div className="rounded-md border px-3 py-2 text-sm capitalize">{student.gender || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Date of Birth</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.dateOfBirth || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Enrollment Date</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.enrollmentDate || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Phone</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.phone || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Email</Label>
+          <div className="rounded-md border px-3 py-2 text-sm break-all">{student.email || "-"}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StudentForm({
   onSubmit,
   classes,
@@ -871,6 +985,45 @@ function StudentForm({
     }
     return isBoardingSchool ? "false" : "true";
   };
+
+  const getDefaultGender = () => defaultValues?.gender || "";
+
+  const [studentTypeValue, setStudentTypeValue] = useState<string>(getDefaultDayScholar());
+  const [selectedHostelId, setSelectedHostelId] = useState<string>(defaultValues?.hostelId?.toString() || "none");
+  const [selectedGender, setSelectedGender] = useState<string>(getDefaultGender());
+
+  useEffect(() => {
+    setStudentTypeValue(getDefaultDayScholar());
+  }, [defaultValues?.id, isBoardingSchool]);
+
+  useEffect(() => {
+    setSelectedHostelId(defaultValues?.hostelId?.toString() || "none");
+  }, [defaultValues?.id, defaultValues?.hostelId]);
+
+  useEffect(() => {
+    setSelectedGender(getDefaultGender());
+  }, [defaultValues?.id, defaultValues?.gender]);
+
+  useEffect(() => {
+    if (studentTypeValue === "true") {
+      setSelectedHostelId("none");
+    }
+  }, [studentTypeValue]);
+
+  const filteredHostels = useMemo(() => {
+    if (!selectedGender) return hostels;
+    return hostels.filter((hostel) => !hostel.gender || hostel.gender === selectedGender);
+  }, [hostels, selectedGender]);
+
+  useEffect(() => {
+    if (selectedHostelId === "none") return;
+    const selectedHostel = hostels.find((hostel) => hostel.id.toString() === selectedHostelId);
+    if (selectedHostel?.gender && selectedGender && selectedHostel.gender !== selectedGender) {
+      setSelectedHostelId("none");
+    }
+  }, [selectedGender, selectedHostelId, hostels]);
+
+  const showHostelField = isBoardingSchool && studentTypeValue === "false";
   return (
     <form onSubmit={onSubmit} className="space-y-4">
       <div className="mb-2 flex flex-col gap-4 sm:flex-row sm:items-start">
@@ -936,7 +1089,7 @@ function StudentForm({
         </div>
         <div className="space-y-2">
           <Label htmlFor="isDayScholar">Student Type</Label>
-          <Select name="isDayScholar" defaultValue={getDefaultDayScholar()}>
+          <Select name="isDayScholar" value={studentTypeValue} onValueChange={setStudentTypeValue}>
             <SelectTrigger data-testid="select-day-scholar">
               <SelectValue />
             </SelectTrigger>
@@ -973,7 +1126,8 @@ function StudentForm({
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="gender">Gender</Label>
-          <Select name="gender" defaultValue={defaultValues?.gender || ""}>
+          <input type="hidden" name="gender" value={selectedGender} />
+          <Select value={selectedGender} onValueChange={setSelectedGender}>
             <SelectTrigger data-testid="select-gender">
               <SelectValue placeholder="Select gender" />
             </SelectTrigger>
@@ -1010,16 +1164,17 @@ function StudentForm({
             </SelectContent>
           </Select>
         </div>
-        {isBoardingSchool && (
+        {showHostelField && (
           <div className="space-y-2">
             <Label htmlFor="hostelId">Hostel</Label>
-            <Select name="hostelId" defaultValue={defaultValues?.hostelId?.toString() || ""}>
+            <input type="hidden" name="hostelId" value={selectedHostelId === "none" ? "" : selectedHostelId} />
+            <Select value={selectedHostelId} onValueChange={setSelectedHostelId}>
               <SelectTrigger data-testid="select-hostel">
                 <SelectValue placeholder="Select hostel" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">None</SelectItem>
-                {hostels.map(h => (
+                <SelectItem value="none">None</SelectItem>
+                {filteredHostels.map(h => (
                   <SelectItem key={h.id} value={h.id.toString()}>
                     {h.name} {h.gender ? `(${h.gender === "male" ? "Boys" : "Girls"})` : ""}
                   </SelectItem>

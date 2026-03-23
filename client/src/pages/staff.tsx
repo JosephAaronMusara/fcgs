@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Pencil, Trash2, Phone, Mail, Download, Bell, Upload, Smartphone, BookOpen, GraduationCap, Home, UserCog, KeyRound, Eye, EyeOff, Shield, RotateCcw, Check, X, Camera, Users } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, Phone, Mail, Download, Bell, Upload, Smartphone, BookOpen, GraduationCap, School, UserCog, KeyRound, Eye, EyeOff, Shield, RotateCcw, Check, X, Camera, Users } from "lucide-react";
 import type { Staff, Subject, Class as ClassType, User, Permission, AccessGroup, UserPermissionOverride } from "@shared/schema";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
@@ -29,6 +29,7 @@ export default function StaffPage() {
   const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [viewingStaff, setViewingStaff] = useState<Staff | null>(null);
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
   const [isNotifyOpen, setIsNotifyOpen] = useState(false);
   const [selectedStaffIds, setSelectedStaffIds] = useState<number[]>([]);
@@ -450,17 +451,34 @@ export default function StaffPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1 flex-wrap">
-                        <Dialog open={editingStaff?.id === s.id} onOpenChange={(open) => !open && setEditingStaff(null)}>
+                        <Dialog open={viewingStaff?.id === s.id} onOpenChange={(open) => !open && setViewingStaff(null)}>
                           <DialogTrigger asChild>
                             <Button
                               variant="ghost"
-                              size="sm"
-                              onClick={() => setEditingStaff(s)}
-                              data-testid={`button-edit-staff-${s.id}`}
+                              size="icon"
+                              onClick={() => setViewingStaff(s)}
+                              data-testid={`button-view-staff-${s.id}`}
+                              title="View"
+                              aria-label="View"
                             >
-                              Edit
+                              <Eye className="h-4 w-4" />
                             </Button>
                           </DialogTrigger>
+                          <DialogContent className="max-w-2xl">
+                            <DialogHeader>
+                              <DialogTitle>View Staff Member</DialogTitle>
+                            </DialogHeader>
+                            <StaffViewModal
+                              staff={s}
+                              onEdit={() => {
+                                setViewingStaff(null);
+                                setEditingStaff(s);
+                              }}
+                            />
+                          </DialogContent>
+                        </Dialog>
+
+                        <Dialog open={editingStaff?.id === s.id} onOpenChange={(open) => !open && setEditingStaff(null)}>
                           <DialogContent className="max-w-lg">
                             <DialogHeader>
                               <DialogTitle>Edit Staff Member</DialogTitle>
@@ -479,11 +497,13 @@ export default function StaffPage() {
                           <DialogTrigger asChild>
                             <Button
                               variant="ghost"
-                              size="sm"
+                              size="icon"
                               onClick={() => setSubjectsDialogStaff(s)}
                               data-testid={`button-subjects-staff-${s.id}`}
+                              title="Subjects"
+                              aria-label="Subjects"
                             >
-                              Subjects
+                              <BookOpen className="h-4 w-4" />
                             </Button>
                           </DialogTrigger>
                           <DialogContent>
@@ -498,11 +518,13 @@ export default function StaffPage() {
                           <DialogTrigger asChild>
                             <Button
                               variant="ghost"
-                              size="sm"
+                              size="icon"
                               onClick={() => setClassesDialogStaff(s)}
                               data-testid={`button-classes-staff-${s.id}`}
+                              title="Classes"
+                              aria-label="Classes"
                             >
-                              Classes
+                              <School className="h-4 w-4" />
                             </Button>
                           </DialogTrigger>
                           <DialogContent>
@@ -513,23 +535,17 @@ export default function StaffPage() {
                           </DialogContent>
                         </Dialog>
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled
-                          data-testid={`button-hostels-staff-${s.id}`}
-                        >
-                          Hostels
-                        </Button>
 
                         {canManageAccessRights && (
                           <Button
                             variant="ghost"
-                            size="sm"
+                            size="icon"
                             onClick={() => setAccessRightsStaff(s)}
                             data-testid={`button-access-rights-${s.id}`}
+                            title="Access Rights"
+                            aria-label="Access Rights"
                           >
-                            Access Rights
+                            <KeyRound className="h-4 w-4" />
                           </Button>
                         )}
 
@@ -548,7 +564,7 @@ export default function StaffPage() {
 
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
                           className="text-destructive hover:text-destructive"
                           onClick={() => {
                             if (confirm("Are you sure you want to delete this staff member?")) {
@@ -556,8 +572,10 @@ export default function StaffPage() {
                             }
                           }}
                           data-testid={`button-delete-staff-${s.id}`}
+                          title="Delete"
+                          aria-label="Delete"
                         >
-                          Delete
+                          <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
                     </TableCell>
@@ -614,6 +632,62 @@ export default function StaffPage() {
           </DialogContent>
         </Dialog>
       )}
+    </div>
+  );
+}
+
+function StaffViewModal({
+  staff,
+  onEdit,
+}: {
+  staff: Staff;
+  onEdit: () => void;
+}) {
+  const detailRows = [
+    { label: "Staff No", value: staff.staffNo || "-" },
+    { label: "First Name", value: staff.firstName || "-" },
+    { label: "Last Name", value: staff.lastName || "-" },
+    { label: "Email", value: staff.email || "-" },
+    { label: "Phone", value: staff.phone || "-" },
+    { label: "Gender", value: staff.gender ? staff.gender.toUpperCase() : "-" },
+    { label: "Role", value: staff.role || "-" },
+    { label: "Status", value: staff.status ? staff.status.toUpperCase() : "-" },
+    { label: "Street Address", value: staff.streetAddress || "-" },
+    { label: "Residential Area", value: staff.residentialArea || "-" },
+    { label: "City", value: staff.address || "-" },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start gap-4">
+        <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-md border border-border bg-muted text-lg font-semibold">
+          {staff.photo ? (
+            <img src={staff.photo} alt={`${staff.firstName} ${staff.lastName}`} className="h-full w-full object-cover" />
+          ) : (
+            <span>{staff.firstName?.[0]}{staff.lastName?.[0]}</span>
+          )}
+        </div>
+        <div className="space-y-1">
+          <h3 className="text-lg font-semibold">{staff.firstName} {staff.lastName}</h3>
+          <p className="text-sm text-muted-foreground">{staff.email || "No email"}</p>
+          <p className="text-sm text-muted-foreground">{staff.phone || "No phone"}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {detailRows.map((row) => (
+          <div key={row.label} className="space-y-1 rounded-md border p-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{row.label}</p>
+            <p className="text-sm">{row.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex justify-end">
+        <Button type="button" onClick={onEdit} data-testid={`button-edit-staff-from-view-${staff.id}`}>
+          Edit
+        </Button>
+      </div>
     </div>
   );
 }

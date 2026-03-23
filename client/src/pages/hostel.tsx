@@ -91,7 +91,7 @@ export default function HostelPage() {
   });
   const [dateTo, setDateTo] = useState(new Date().toISOString().split("T")[0]);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [notifyParent, setNotifyParent] = useState(true);
+  const [notifySchoolAdmin, setNotifySchoolAdmin] = useState(true);
   const [attendanceState, setAttendanceState] = useState<Record<number, AttendanceState>>({});
 
   const { data: hostels = [], isLoading: hostelsLoading } = useQuery<Hostel[]>({
@@ -183,14 +183,14 @@ export default function HostelPage() {
           timeSlot: selectedTimeSlot,
           status: val.status,
           notes: val.reason || "",
-          notifyParent,
+          notifySchoolAdmin,
         }));
 
       if (records.length === 0) throw new Error("No attendance marked");
 
       return apiRequest("POST", "/api/hostel/rollcall/bulk", {
         records,
-        notifyParent,
+        notifySchoolAdmin,
       });
     },
     onSuccess: () => {
@@ -363,23 +363,23 @@ export default function HostelPage() {
                 <input
                   type="radio"
                   name="notify-parent"
-                  checked={notifyParent}
-                  onChange={() => setNotifyParent(true)}
+                  checked={notifySchoolAdmin}
+                  onChange={() => setNotifySchoolAdmin(true)}
                   className="accent-primary"
                 />
                 <Bell className="w-3.5 h-3.5" />
-                Notify Parents
+                Notify School Admin
               </label>
               <label className="flex items-center gap-1.5 text-sm cursor-pointer" data-testid="radio-notify-no">
                 <input
                   type="radio"
                   name="notify-parent"
-                  checked={!notifyParent}
-                  onChange={() => setNotifyParent(false)}
+                  checked={!notifySchoolAdmin}
+                  onChange={() => setNotifySchoolAdmin(false)}
                   className="accent-primary"
                 />
                 <BellOff className="w-3.5 h-3.5" />
-                Do not Notify Parents
+                Do not Notify School Admin
               </label>
             </div>
             <div className="grid w-full grid-cols-1 gap-2 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap">
