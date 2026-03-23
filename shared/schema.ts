@@ -605,6 +605,8 @@ export const hostels = pgTable("hostels", {
   name: text("name").notNull(),
   capacity: integer("capacity"),
   gender: genderEnum("gender"),
+  streamId: integer("stream_id").references(() => streams.id),
+  hostelMasterId: integer("hostel_master_id").references(() => staff.id),
   description: text("description"),
   createdAt: timestamp("created_at").defaultNow(),
 });

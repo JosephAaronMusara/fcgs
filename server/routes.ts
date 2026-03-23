@@ -1735,10 +1735,30 @@ export async function registerRoutes(
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const data = insertStudentSchema.parse(req.body);
-      const newStudent = await storage.createStudent({
+      const effectiveSchoolId = data.schoolId || schoolId || currentUser.schoolId || undefined;
+      const normalizedData: any = {
         ...data,
-        schoolId: data.schoolId || schoolId || currentUser.schoolId || undefined,
-      });
+        schoolId: effectiveSchoolId,
+      };
+      if (normalizedData.isDayScholar) {
+        normalizedData.isBoarding = false;
+        normalizedData.hostelId = null;
+      } else {
+        normalizedData.isBoarding = true;
+      }
+      if (normalizedData.hostelId) {
+        const hostel = await storage.getHostel(Number(normalizedData.hostelId));
+        if (!hostel) {
+          return res.status(400).json({ message: "Selected hostel was not found" });
+        }
+        if (effectiveSchoolId && hostel.schoolId !== effectiveSchoolId) {
+          return res.status(400).json({ message: "Selected hostel does not belong to this school" });
+        }
+        if (hostel.gender && normalizedData.gender && hostel.gender !== normalizedData.gender) {
+          return res.status(400).json({ message: "Student gender does not match the selected hostel" });
+        }
+      }
+      const newStudent = await storage.createStudent(normalizedData);
       logActivity(req, { action: "create", category: "students", description: `Added student: ${newStudent.firstName} ${newStudent.lastName}`, targetType: "student", targetId: newStudent.id, targetName: `${newStudent.firstName} ${newStudent.lastName}` });
       res.status(201).json(newStudent);
     } catch (error) {
@@ -1748,7 +1768,39 @@ export async function registerRoutes(
 
   app.put("/api/students/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateStudent(parseInt(req.params.id), req.body);
+      const studentId = parseInt(req.params.id);
+      const existing = await storage.getStudent(studentId);
+      if (!existing) {
+        return res.status(404).json({ message: "Student not found" });
+      }
+      const normalizedData: any = { ...req.body };
+      if (Object.prototype.hasOwnProperty.call(normalizedData, "isDayScholar")) {
+        if (normalizedData.isDayScholar) {
+          normalizedData.isBoarding = false;
+          normalizedData.hostelId = null;
+        } else {
+          normalizedData.isBoarding = true;
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(normalizedData, "hostelId") && normalizedData.hostelId) {
+        normalizedData.isBoarding = true;
+        normalizedData.isDayScholar = false;
+      }
+      const resolvedGender = normalizedData.gender ?? existing.gender;
+      const resolvedSchoolId = normalizedData.schoolId ?? existing.schoolId;
+      if (Object.prototype.hasOwnProperty.call(normalizedData, "hostelId") && normalizedData.hostelId) {
+        const hostel = await storage.getHostel(Number(normalizedData.hostelId));
+        if (!hostel) {
+          return res.status(400).json({ message: "Selected hostel was not found" });
+        }
+        if (resolvedSchoolId && hostel.schoolId !== resolvedSchoolId) {
+          return res.status(400).json({ message: "Selected hostel does not belong to this school" });
+        }
+        if (hostel.gender && resolvedGender && hostel.gender !== resolvedGender) {
+          return res.status(400).json({ message: "Student gender does not match the selected hostel" });
+        }
+      }
+      const updated = await storage.updateStudent(studentId, normalizedData);
       if (!updated) {
         return res.status(404).json({ message: "Student not found" });
       }
@@ -4753,16 +4805,75 @@ export async function registerRoutes(
 
   app.put("/api/hostels/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
+      const schoolId = getSchoolContext(req);
       const id = parseInt(req.params.id);
+      const existing = await storage.getHostel(id);
+      if (!existing) return res.status(404).json({ message: "Hostel not found" });
+      if (schoolId && existing.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
       const updated = await storage.updateHostel(id, req.body);
       if (!updated) return res.status(404).json({ message: "Hostel not found" });
       res.json(updated);
     } catch (error) { next(error); }
   });
 
+  app.post("/api/hostels/:id/manage-students", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      const hostelId = parseInt(req.params.id);
+      const { studentIds = [], mode = "assign" } = req.body as { studentIds?: number[]; mode?: "assign" | "remove" };
+      const hostel = await storage.getHostel(hostelId);
+      if (!hostel) return res.status(404).json({ message: "Hostel not found" });
+      if (schoolId && hostel.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      if (!Array.isArray(studentIds) || studentIds.length === 0) {
+        return res.status(400).json({ message: "Select at least one student" });
+      }
+
+      const allStudents = await storage.getAllStudents();
+      const selectedStudents = allStudents.filter(s => studentIds.includes(s.id));
+      if (selectedStudents.length !== studentIds.length) {
+        return res.status(400).json({ message: "One or more students were not found" });
+      }
+
+      for (const student of selectedStudents) {
+        if (schoolId && student.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+        if (student.schoolId !== hostel.schoolId) return res.status(400).json({ message: "Students must belong to the same school as the hostel" });
+        if (!student.isBoarding || student.isDayScholar) {
+          return res.status(400).json({ message: `${student.firstName} ${student.lastName} is not marked as a boarder` });
+        }
+        if (hostel.gender && student.gender && hostel.gender !== student.gender) {
+          return res.status(400).json({ message: `${student.firstName} ${student.lastName} does not match the hostel gender` });
+        }
+      }
+
+      if (mode === "assign" && hostel.capacity) {
+        const occupied = allStudents.filter(s => s.hostelId === hostel.id && s.isBoarding).length;
+        const incomingUnique = selectedStudents.filter(s => s.hostelId !== hostel.id).length;
+        if (occupied + incomingUnique > hostel.capacity) {
+          return res.status(400).json({ message: `This assignment exceeds hostel capacity (${hostel.capacity})` });
+        }
+      }
+
+      for (const student of selectedStudents) {
+        await storage.updateStudent(student.id, mode === "remove"
+          ? { hostelId: null }
+          : { hostelId });
+      }
+      res.json({ message: `${mode === "remove" ? "Removed" : "Assigned"} ${selectedStudents.length} student(s)` });
+    } catch (error) { next(error); }
+  });
+
   app.delete("/api/hostels/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
+      const schoolId = getSchoolContext(req);
       const id = parseInt(req.params.id);
+      const hostel = await storage.getHostel(id);
+      if (!hostel) return res.status(404).json({ message: "Hostel not found" });
+      if (schoolId && hostel.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      const allStudents = await storage.getAllStudents();
+      const assignedCount = allStudents.filter(s => s.hostelId === id && s.isBoarding).length;
+      if (assignedCount > 0) {
+        return res.status(400).json({ message: `This hostel has ${assignedCount} assigned student(s). Reassign or remove them first.` });
+      }
       await storage.deleteHostel(id);
       res.json({ message: "Hostel deleted" });
     } catch (error) { next(error); }
@@ -4907,13 +5018,73 @@ export async function registerRoutes(
 
   app.post("/api/hostel/rollcall/bulk", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
     try {
-      const { records } = req.body;
+      const { records, notifySchoolAdmin } = req.body;
       const schoolId = getSchoolContext(req);
       const parsed = records.map((r: any) => ({
         ...r,
         schoolId: r.schoolId || schoolId,
       }));
       const newRecords = await storage.bulkUpsertHostelRollCall(parsed);
+
+      if (notifySchoolAdmin && schoolId) {
+        const currentUser = req.user as any;
+        const school = await storage.getSchool(schoolId);
+        const allUsers = await storage.getAllUsers();
+        const adminUsers: any[] = [];
+        for (const user of allUsers.filter(u => u.schoolId === schoolId && u.isActive)) {
+          const groups = await storage.getUserAccessGroups(user.id);
+          const hasSchoolAdminGroup = groups.some(g => g.name === "School Admin");
+          if (user.role === "school_admin" || hasSchoolAdminGroup) {
+            adminUsers.push(user);
+          }
+        }
+        const hostels = await storage.getHostels(schoolId);
+        const students = await storage.getAllStudents();
+        for (const rec of newRecords) {
+          if (rec.status === "present") continue;
+          const student = await storage.getStudent(rec.studentId);
+          if (!student || student.schoolId !== schoolId) continue;
+          const hostel = student.hostelId ? hostels.find(h => h.id === student.hostelId) : null;
+          const message = `Hostel Attendance Alert: ${student.firstName} ${student.lastName} was marked ${rec.status.toUpperCase()} on ${rec.date}${hostel ? ` in ${hostel.name}` : ""}${rec.timeSlot ? ` (${rec.timeSlot})` : ""}${rec.notes ? `. Note: ${rec.notes}` : ""}.`;
+          for (const admin of adminUsers) {
+            await storage.createNotification({
+              userId: admin.id,
+              organizationId: admin.organizationId,
+              schoolId,
+              type: "attendance",
+              title: "Hostel Attendance Alert",
+              message,
+              data: { studentId: student.id, hostelId: hostel?.id || null, status: rec.status, date: rec.date, timeSlot: rec.timeSlot },
+              actionUrl: "/hostel",
+            });
+            if (admin.phone) {
+              communicationService.sendSms({
+                to: admin.phone,
+                message,
+                schoolId,
+                recipientType: "staff",
+                sentBy: currentUser.id,
+                category: "attendance",
+                recipientName: `${admin.firstName || ""} ${admin.lastName || ""}`.trim(),
+              }).catch(() => {});
+            }
+            if (admin.email) {
+              communicationService.sendEmail({
+                to: admin.email,
+                subject: `Hostel Attendance Alert${school?.name ? ` - ${school.name}` : ""}`,
+                text: message,
+                html: message.replace(/\n/g, '<br>'),
+                schoolId,
+                recipientType: "staff",
+                sentBy: currentUser.id,
+                category: "attendance",
+                recipientName: `${admin.firstName || ""} ${admin.lastName || ""}`.trim(),
+              }).catch(() => {});
+            }
+          }
+        }
+      }
+
       res.status(201).json(newRecords);
     } catch (error) {
       next(error);
