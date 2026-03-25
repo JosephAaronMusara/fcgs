@@ -7,7 +7,7 @@ export const userRoleEnum = pgEnum("user_role", ["org_admin", "school_admin", "t
 
 export const genderEnum = pgEnum("gender", ["male", "female"]);
 
-export const subjectTypeEnum = pgEnum("subject_type", ["ZIMSEC", "Cambridge", "HEXCO"]);
+export const subjectTypeEnum = pgEnum("subject_type", ["ZIMSEC", "Cambridge", "HEXCO", "ZIMSEC Advanced Level", "ZIMSEC Ordinary Level", "Cambridge Advanced Level", "Cambridge Ordinary Level", "Cambridge IGCSE", "DELF", "HSK"]);
 
 export const attendanceStatusEnum = pgEnum("attendance_status", ["present", "absent", "sick", "fees", "suspended", "absconding", "excused", "late"]);
 
@@ -112,6 +112,7 @@ export const schools = pgTable("schools", {
   callCentrePhone: text("call_centre_phone"),
   callCentreWhatsApp: text("call_centre_whatsapp"),
   schoolType: text("school_type").default("secondary"),
+  showClassPositionOnReports: boolean("show_class_position_on_reports").default(false),
   terminationStatus: text("termination_status"),
   terminationRequestedAt: timestamp("termination_requested_at"),
   terminationAt: timestamp("termination_at"),
@@ -258,7 +259,7 @@ export const studentSubjects = pgTable("student_subjects", {
   subjectId: integer("subject_id").references(() => subjects.id).notNull(),
 });
 
-export const gradeLevelEnum = pgEnum("grade_level", ["A_Level", "O_Level", "IGCSE"]);
+export const gradeLevelEnum = pgEnum("grade_level", ["A_Level", "O_Level", "IGCSE", "SEC_ZIM_A", "SEC_ZIM_O", "SEC_CAM_A", "SEC_CAM_O", "SEC_CAM_IGCSE", "PRI_ZIM_ECD", "PRI_ZIM_G12", "PRI_ZIM_G37", "PRI_CAM_ECD", "PRI_CAM_G12", "PRI_CAM_G37"]);
 
 export const grades = pgTable("grades", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -1167,6 +1168,51 @@ export const insertQcReportSchema = createInsertSchema(qcReports).omit({ id: tru
 export type InsertQcReport = z.infer<typeof insertQcReportSchema>;
 export type QcReport = typeof qcReports.$inferSelect;
 
+export const ecdRatingEnum = pgEnum("ecd_rating", ["YES", "NO", "ALMOST"]);
+
+export const ecdAssessmentDomains = pgTable("ecd_assessment_domains", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: text("code").notNull().unique(),
+  name: text("name").notNull(),
+  sortOrder: integer("sort_order").default(0),
+  isActive: boolean("is_active").default(true),
+});
+
+export const ecdAssessmentItems = pgTable("ecd_assessment_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  domainId: integer("domain_id").references(() => ecdAssessmentDomains.id).notNull(),
+  itemText: text("item_text").notNull(),
+  sortOrder: integer("sort_order").default(0),
+  isActive: boolean("is_active").default(true),
+});
+
+export const ecdAssessmentRecords = pgTable("ecd_assessment_records", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  classId: integer("class_id").references(() => classes.id).notNull(),
+  streamId: integer("stream_id").references(() => streams.id),
+  examId: integer("exam_id").references(() => exams.id).notNull(),
+  status: text("status").default("draft"),
+  publishedAt: timestamp("published_at"),
+  updatedBy: integer("updated_by").references(() => staff.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  studentExamUnique: uniqueIndex("ecd_assessment_records_student_exam_uidx").on(table.studentId, table.examId),
+}));
+
+export const ecdAssessmentResponses = pgTable("ecd_assessment_responses", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  recordId: integer("record_id").references(() => ecdAssessmentRecords.id).notNull(),
+  itemId: integer("item_id").references(() => ecdAssessmentItems.id).notNull(),
+  rating: ecdRatingEnum("rating"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  recordItemUnique: uniqueIndex("ecd_assessment_responses_record_item_uidx").on(table.recordId, table.itemId),
+}));
+
 export const reportCommentTypeEnum = pgEnum("report_comment_type", ["principal", "class_teacher"]);
 
 /**
@@ -1200,6 +1246,8 @@ export const reportComments = pgTable("report_comments", {
   schoolId: integer("school_id").references(() => schools.id).notNull(),
   gradeId: integer("grade_id").references(() => grades.id),
   commentGrade: text("comment_grade").notNull(),
+  gradeLevel: gradeLevelEnum("grade_level"),
+  subjectId: integer("subject_id").references(() => subjects.id),
   classId: integer("class_id").references(() => classes.id),
   commentText: text("comment_text").notNull(),
   commentType: reportCommentTypeEnum("comment_type").notNull(),
@@ -1209,6 +1257,19 @@ export const reportComments = pgTable("report_comments", {
 export const insertReportCommentSchema = createInsertSchema(reportComments).omit({ id: true, createdAt: true });
 export type InsertReportComment = z.infer<typeof insertReportCommentSchema>;
 export type ReportComment = typeof reportComments.$inferSelect;
+
+export const insertEcdAssessmentDomainSchema = createInsertSchema(ecdAssessmentDomains).omit({ id: true });
+export const insertEcdAssessmentItemSchema = createInsertSchema(ecdAssessmentItems).omit({ id: true });
+export const insertEcdAssessmentRecordSchema = createInsertSchema(ecdAssessmentRecords).omit({ id: true, createdAt: true, updatedAt: true, publishedAt: true });
+export const insertEcdAssessmentResponseSchema = createInsertSchema(ecdAssessmentResponses).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertEcdAssessmentDomain = z.infer<typeof insertEcdAssessmentDomainSchema>;
+export type EcdAssessmentDomain = typeof ecdAssessmentDomains.$inferSelect;
+export type InsertEcdAssessmentItem = z.infer<typeof insertEcdAssessmentItemSchema>;
+export type EcdAssessmentItem = typeof ecdAssessmentItems.$inferSelect;
+export type InsertEcdAssessmentRecord = z.infer<typeof insertEcdAssessmentRecordSchema>;
+export type EcdAssessmentRecord = typeof ecdAssessmentRecords.$inferSelect;
+export type InsertEcdAssessmentResponse = z.infer<typeof insertEcdAssessmentResponseSchema>;
+export type EcdAssessmentResponse = typeof ecdAssessmentResponses.$inferSelect;
 
 export const insertAssessmentTypeSchema = createInsertSchema(assessmentTypes).omit({ id: true, createdAt: true });
 export const insertExamTypeSchema = createInsertSchema(examTypes).omit({ id: true, createdAt: true });

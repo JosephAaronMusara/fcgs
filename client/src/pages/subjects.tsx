@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -18,6 +18,7 @@ import { useAuth } from "@/lib/auth";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 import type { Subject } from "@shared/schema";
+import { getSubjectTypeOptionsForSchool, normalizeExamBoard, normalizeSchoolType, resolveSecondaryGroupingFromStream } from "@shared/academic-profiles";
 
 interface SubjectsResponse {
   items: Subject[];
@@ -39,6 +40,7 @@ interface Stream {
 interface SchoolInfo {
   id: number;
   schoolType: string | null;
+  examinationBoard: string | null;
 }
 
 export default function SubjectsPage() {
@@ -67,7 +69,7 @@ export default function SubjectsPage() {
   }, [perPage]);
 
   const { data, isLoading } = useQuery<SubjectsResponse>({
-    queryKey: ["/api/subjects", page, perPage, debouncedSearch],
+    queryKey: ["/api/subjects", currentSchoolId, page, perPage, debouncedSearch],
     queryFn: async () => {
       const params = new URLSearchParams({
         page: page.toString(),
@@ -80,16 +82,30 @@ export default function SubjectsPage() {
     },
   });
 
-  const { data: schools } = useQuery<SchoolInfo[]>({
-    queryKey: ["/api/schools"],
+  const { data: currentSchool } = useQuery<SchoolInfo>({
+    queryKey: ["/api/schools/current", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/schools/current");
+      if (!res.ok) throw new Error("Failed to fetch current school");
+      return res.json();
+    },
   });
-  const currentSchool = schools?.find(s => s.id === currentSchoolId);
-  const schoolType = currentSchool?.schoolType || "secondary";
+  const schoolType = normalizeSchoolType(currentSchool?.schoolType);
+  const examinationBoard = normalizeExamBoard(currentSchool?.examinationBoard);
 
-  const { data: streams } = useQuery<Stream[]>({
-    queryKey: [`/api/streams?schoolType=${schoolType}`],
-    enabled: !!currentSchool,
+  const { data: streamsResponse } = useQuery<any>({
+    queryKey: ["/api/streams", schoolType, currentSchoolId],
+    enabled: !!currentSchool && !!schoolType,
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/streams?schoolType=${schoolType}`);
+      if (!res.ok) throw new Error("Failed to fetch streams");
+      return res.json();
+    },
   });
+  const streams: Stream[] = Array.isArray(streamsResponse)
+    ? streamsResponse
+    : (streamsResponse?.items ?? []);
 
   const streamMap = new Map((streams || []).map(s => [s.id, s.name]));
 
@@ -143,7 +159,7 @@ export default function SubjectsPage() {
       name: formData.name,
       shortCode: formData.shortCode,
       syllabusCode: formData.syllabusCode || null,
-      subjectType: formData.subjectType as "ZIMSEC" | "Cambridge" | "HEXCO" | undefined,
+      subjectType: formData.subjectType || undefined,
       description: formData.description || undefined,
       streamIds: formData.streamIds && formData.streamIds.length > 0 ? formData.streamIds : null,
       streamId: formData.streamIds && formData.streamIds.length === 1 ? formData.streamIds[0] : null,
@@ -344,6 +360,8 @@ export default function SubjectsPage() {
         isLoading={createMutation.isPending}
         title="Add Subject"
         streams={streams || []}
+        schoolType={schoolType}
+        examinationBoard={examinationBoard}
       />
 
       {editingSubject && (
@@ -355,6 +373,8 @@ export default function SubjectsPage() {
           title="Edit Subject"
           defaultValues={editingSubject}
           streams={streams || []}
+          schoolType={schoolType}
+          examinationBoard={examinationBoard}
         />
       )}
     </div>
@@ -369,6 +389,8 @@ function SubjectDialog({
   title,
   defaultValues,
   streams,
+  schoolType,
+  examinationBoard,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -377,6 +399,8 @@ function SubjectDialog({
   title: string;
   defaultValues?: Subject;
   streams: Stream[];
+  schoolType: "primary" | "secondary";
+  examinationBoard: "ZIMSEC" | "Cambridge";
 }) {
   const getDefaultStreamIds = () => {
     if (defaultValues?.streamIds && defaultValues.streamIds.length > 0) return defaultValues.streamIds;
@@ -392,6 +416,8 @@ function SubjectDialog({
     description: defaultValues?.description || "",
     selectedStreamIds: getDefaultStreamIds(),
   });
+
+  const subjectTypeOptions = useMemo(() => getSubjectTypeOptionsForSchool(schoolType, examinationBoard), [schoolType, examinationBoard]);
 
   useEffect(() => {
     if (open) {
@@ -440,6 +466,19 @@ function SubjectDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (schoolType === "secondary" && !formData.subjectType) {
+      return;
+    }
+
+    if (schoolType === "secondary" && formData.selectedStreamIds.length > 0) {
+      const selectedStreams = streams.filter((stream) => formData.selectedStreamIds.includes(stream.id));
+      const levelGroups = new Set(selectedStreams.map((stream) => resolveSecondaryGroupingFromStream(stream.name)).filter(Boolean));
+      if (levelGroups.size > 1) {
+        return;
+      }
+    }
+
     onSubmit({
       ...formData,
       subjectType: formData.subjectType || undefined,
@@ -490,19 +529,24 @@ function SubjectDialog({
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="subjectType">Subject Type (Optional)</Label>
+              <Label htmlFor="subjectType">Subject Type{schoolType === "secondary" ? "" : " (Optional)"}</Label>
               <Select 
                 value={formData.subjectType || "none"} 
                 onValueChange={(v) => setFormData(p => ({ ...p, subjectType: v === "none" ? "" : v }))}
               >
                 <SelectTrigger data-testid="select-subject-type">
-                  <SelectValue placeholder="Subject Type (Optional)" />
+                  <SelectValue placeholder={schoolType === "secondary" ? "Select subject type" : "Subject Type (Optional)"} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">Subject Type (Optional)</SelectItem>
-                  <SelectItem value="ZIMSEC">ZIMSEC</SelectItem>
-                  <SelectItem value="Cambridge">Cambridge</SelectItem>
-                  <SelectItem value="HEXCO">HEXCO</SelectItem>
+                  {schoolType === "primary" && (
+                    <SelectItem value="none">Subject Type (Optional)</SelectItem>
+                  )}
+                  {schoolType === "secondary" && !formData.subjectType && (
+                    <SelectItem value="none">Select subject type</SelectItem>
+                  )}
+                  {subjectTypeOptions.map((option) => (
+                    <SelectItem key={option} value={option}>{option}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

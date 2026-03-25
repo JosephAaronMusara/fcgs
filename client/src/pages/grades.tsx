@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -16,7 +16,18 @@ import { useToast } from "@/hooks/use-toast";
 import { Plus, Search, Pencil, Trash2, ChevronLeft, ChevronRight, X, FileText } from "lucide-react";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
+import { useAuth } from "@/lib/auth";
 import type { Grade, Class as ClassType, School } from "@shared/schema";
+import { getGradeProfileLabel, getGradeTypeOptionsForProfile, getGradingProfilesForSchool, isEcdStream, normalizeExamBoard, normalizeSchoolType, resolvePrimaryGroupingFromStream, resolveSecondaryGroupingFromStream, type GradeProfileKey } from "@shared/academic-profiles";
+
+
+interface Stream {
+  id: number;
+  name: string;
+  description: string | null;
+  schoolType: string | null;
+  sortOrder: number | null;
+}
 
 interface GradesResponse {
   items: Grade[];
@@ -29,11 +40,12 @@ interface GradesResponse {
 
 export default function GradesPage() {
   const { toast } = useToast();
+  const { currentSchoolId } = useAuth();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [perPage] = useState(10);
-  const [activeTab, setActiveTab] = useState("A_Level");
+  const [activeTab, setActiveTab] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingGrade, setEditingGrade] = useState<Grade | null>(null);
 
@@ -46,15 +58,53 @@ export default function GradesPage() {
   }, [search]);
 
   const { data: school } = useQuery<School>({
-    queryKey: ["/api/schools/current"],
+    queryKey: ["/api/schools/current", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/schools/current");
+      if (!res.ok) throw new Error("Failed to fetch current school");
+      return res.json();
+    },
   });
 
-  const { data: classes } = useQuery<ClassType[]>({
-    queryKey: ["/api/classes"],
+  const { data: classesResponse } = useQuery<any>({
+    queryKey: ["/api/classes", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/classes");
+      if (!res.ok) throw new Error("Failed to fetch classes");
+      return res.json();
+    },
   });
+  const classes: ClassType[] = Array.isArray(classesResponse)
+    ? classesResponse
+    : (classesResponse?.items ?? []);
+
+  const schoolType = normalizeSchoolType(school?.schoolType);
+  const examinationBoard = normalizeExamBoard(school?.examinationBoard);
+  const gradingProfiles = useMemo(() => getGradingProfilesForSchool(schoolType, examinationBoard), [schoolType, examinationBoard]);
+
+  const { data: streamsResponse } = useQuery<any>({
+    queryKey: ["/api/streams", schoolType, currentSchoolId],
+    enabled: !!schoolType,
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/streams?schoolType=${schoolType}`);
+      if (!res.ok) throw new Error("Failed to fetch streams");
+      return res.json();
+    },
+  });
+  const streams: Stream[] = Array.isArray(streamsResponse)
+    ? streamsResponse
+    : (streamsResponse?.items ?? []);
+
+  useEffect(() => {
+    if (!activeTab && gradingProfiles.length > 0) {
+      setActiveTab(gradingProfiles[0].key);
+    }
+  }, [activeTab, gradingProfiles]);
 
   const { data, isLoading, refetch } = useQuery<GradesResponse>({
-    queryKey: ["/api/grades", page, perPage, debouncedSearch, activeTab],
+    queryKey: ["/api/grades", currentSchoolId, page, perPage, debouncedSearch, activeTab],
     queryFn: async () => {
       const params = new URLSearchParams({
         page: page.toString(),
@@ -113,7 +163,7 @@ export default function GradesPage() {
 
   const handleSubmit = (formData: {
     gradeName: string;
-    gradeLevel: "A_Level" | "O_Level" | "IGCSE";
+    gradeLevel: GradeProfileKey;
     classIds: number[];
     appliesAll: boolean;
     lowerLimit: number;
@@ -126,7 +176,7 @@ export default function GradesPage() {
       ...formData,
       gradePoints: formData.gradePoints || undefined,
       gradeStatus: formData.gradeStatus || undefined,
-      gradeType: formData.gradeType as "ZIMSEC" | "Cambridge" | "HEXCO" | undefined,
+      gradeType: formData.gradeType || undefined,
     };
 
     if (editingGrade) {
@@ -141,11 +191,7 @@ export default function GradesPage() {
     setPage(1);
   };
 
-  const examinationBoard = school?.examinationBoard || "ZIMSEC";
-  const tabLabels = {
-    A_Level: "Advanced Level",
-    O_Level: examinationBoard === "Cambridge" ? "IGCSE" : "Ordinary Level"
-  };
+  const tabLabels = Object.fromEntries(gradingProfiles.map((profile) => [profile.key, profile.label]));
 
   const gradesList = data?.items || [];
   const { sortedData: sortedGrades, sortConfig, requestSort } = useTableSort(gradesList);
@@ -187,13 +233,12 @@ export default function GradesPage() {
         </CardHeader>
         <CardContent>
           <Tabs value={activeTab} onValueChange={handleTabChange}>
-            <TabsList className="mb-4">
-              <TabsTrigger value="A_Level" data-testid="tab-a-level">
-                {tabLabels.A_Level}
-              </TabsTrigger>
-              <TabsTrigger value={examinationBoard === "Cambridge" ? "IGCSE" : "O_Level"} data-testid="tab-o-level">
-                {tabLabels.O_Level}
-              </TabsTrigger>
+            <TabsList className="mb-4 flex flex-wrap h-auto justify-start">
+              {gradingProfiles.map((profile) => (
+                <TabsTrigger key={profile.key} value={profile.key} data-testid={`tab-${profile.key}`}>
+                  {profile.label}
+                </TabsTrigger>
+              ))}
             </TabsList>
 
             <TabsContent value={activeTab}>
@@ -322,8 +367,11 @@ export default function GradesPage() {
         isLoading={createMutation.isPending}
         title="Add Grade"
         classes={classes || []}
-        defaultGradeLevel={activeTab}
+        streams={streams}
+        defaultGradeLevel={activeTab as GradeProfileKey}
         examinationBoard={examinationBoard}
+        schoolType={schoolType}
+        profileLabel={tabLabels[activeTab] || getGradeProfileLabel(activeTab)}
       />
 
       {editingGrade && (
@@ -335,8 +383,11 @@ export default function GradesPage() {
           title={`Assessment Grade Details for #${editingGrade.id}`}
           defaultValues={editingGrade}
           classes={classes || []}
-          defaultGradeLevel={activeTab}
+          streams={streams}
+          defaultGradeLevel={(editingGrade.gradeLevel || activeTab) as GradeProfileKey}
           examinationBoard={examinationBoard}
+          schoolType={schoolType}
+          profileLabel={getGradeProfileLabel(editingGrade.gradeLevel || activeTab)}
         />
       )}
     </div>
@@ -351,14 +402,17 @@ function GradeDialog({
   title,
   defaultValues,
   classes,
+  streams,
   defaultGradeLevel,
   examinationBoard,
+  schoolType,
+  profileLabel,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (data: {
     gradeName: string;
-    gradeLevel: "A_Level" | "O_Level" | "IGCSE";
+    gradeLevel: GradeProfileKey;
     classIds: number[];
     appliesAll: boolean;
     lowerLimit: number;
@@ -371,8 +425,11 @@ function GradeDialog({
   title: string;
   defaultValues?: Grade;
   classes: ClassType[];
-  defaultGradeLevel: string;
+  streams: Stream[];
+  defaultGradeLevel: GradeProfileKey;
   examinationBoard: string;
+  schoolType: "primary" | "secondary";
+  profileLabel: string;
 }) {
   const [formData, setFormData] = useState({
     gradeName: defaultValues?.gradeName || "",
@@ -383,7 +440,7 @@ function GradeDialog({
     upperLimit: defaultValues?.upperLimit?.toString() || "",
     gradePoints: defaultValues?.gradePoints || "",
     gradeStatus: defaultValues?.gradeStatus || "",
-    gradeType: defaultValues?.gradeType || examinationBoard,
+    gradeType: defaultValues?.gradeType || "",
   });
 
   useEffect(() => {
@@ -397,20 +454,67 @@ function GradeDialog({
         upperLimit: defaultValues?.upperLimit?.toString() || "",
         gradePoints: defaultValues?.gradePoints || "",
         gradeStatus: defaultValues?.gradeStatus || "",
-        gradeType: defaultValues?.gradeType || examinationBoard,
+        gradeType: defaultValues?.gradeType || "",
       });
     }
-  }, [open, defaultValues, defaultGradeLevel, examinationBoard]);
+  }, [open, defaultValues, defaultGradeLevel]);
+
+  const streamMap = useMemo(() => new Map(streams.map((stream) => [stream.id, stream.name])), [streams]);
+
+  const allowedClasses = useMemo(() => {
+    return classes.filter((klass) => {
+      const streamName = streamMap.get(klass.streamId ?? -1);
+      if (!streamName) return false;
+      switch (formData.gradeLevel) {
+        case "SEC_ZIM_A":
+        case "SEC_CAM_A":
+        case "A_Level":
+          return resolveSecondaryGroupingFromStream(streamName) === "ADVANCED";
+        case "SEC_ZIM_O":
+        case "SEC_CAM_O":
+        case "SEC_CAM_IGCSE":
+        case "O_Level":
+        case "IGCSE":
+          return resolveSecondaryGroupingFromStream(streamName) === "LOWER";
+        case "PRI_ZIM_ECD":
+        case "PRI_CAM_ECD":
+          return isEcdStream(streamName);
+        case "PRI_ZIM_G12":
+        case "PRI_CAM_G12":
+          return resolvePrimaryGroupingFromStream(streamName) === "G12";
+        case "PRI_ZIM_G37":
+        case "PRI_CAM_G37":
+          return resolvePrimaryGroupingFromStream(streamName) === "G37";
+        default:
+          return true;
+      }
+    });
+  }, [classes, formData.gradeLevel, streamMap]);
+
+  const allowedClassIds = useMemo(() => new Set(allowedClasses.map((klass) => klass.id)), [allowedClasses]);
+
+  useEffect(() => {
+    setFormData((prev) => ({
+      ...prev,
+      classIds: prev.classIds.filter((id) => allowedClassIds.has(id)),
+      gradeType: getGradeTypeOptionsForProfile(prev.gradeLevel, schoolType, examinationBoard).includes(prev.gradeType) ? prev.gradeType : "",
+    }));
+  }, [allowedClassIds, schoolType, examinationBoard]);
+
+  const gradeTypeOptions = useMemo(
+    () => getGradeTypeOptionsForProfile(formData.gradeLevel, schoolType, examinationBoard),
+    [formData.gradeLevel, schoolType, examinationBoard],
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSubmit({
       gradeName: formData.gradeName,
-      gradeLevel: formData.gradeLevel as "A_Level" | "O_Level" | "IGCSE",
-      classIds: formData.appliesAll ? [] : formData.classIds,
+      gradeLevel: formData.gradeLevel as GradeProfileKey,
+      classIds: formData.appliesAll ? [] : formData.classIds.filter((id) => allowedClassIds.has(id)),
       appliesAll: formData.appliesAll,
-      lowerLimit: parseInt(formData.lowerLimit),
-      upperLimit: parseInt(formData.upperLimit),
+      lowerLimit: Number(formData.lowerLimit),
+      upperLimit: Number(formData.upperLimit),
       gradePoints: formData.gradePoints || undefined,
       gradeStatus: formData.gradeStatus || undefined,
       gradeType: formData.gradeType || undefined,
@@ -433,13 +537,14 @@ function GradeDialog({
     }));
   };
 
-  const selectedClasses = classes.filter(c => formData.classIds.includes(c.id));
+  const selectedClasses = allowedClasses.filter(c => formData.classIds.includes(c.id));
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
+          <p className="text-sm text-muted-foreground">{profileLabel}</p>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
@@ -486,7 +591,7 @@ function GradeDialog({
                       <SelectValue placeholder="Add class..." />
                     </SelectTrigger>
                     <SelectContent>
-                      {classes.filter(c => !formData.classIds.includes(c.id)).map(c => (
+                      {allowedClasses.filter(c => !formData.classIds.includes(c.id)).map(c => (
                         <SelectItem key={c.id} value={c.id.toString()}>
                           {c.className}
                         </SelectItem>
@@ -574,9 +679,9 @@ function GradeDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">Grade Type (Optional)</SelectItem>
-                <SelectItem value="ZIMSEC">ZIMSEC</SelectItem>
-                <SelectItem value="Cambridge">Cambridge</SelectItem>
-                <SelectItem value="HEXCO">HEXCO</SelectItem>
+                {gradeTypeOptions.map((option) => (
+                  <SelectItem key={option} value={option}>{option}</SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>

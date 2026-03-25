@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Pencil, Trash2, Download, Bell, Users, UserCog, Send, Upload, UserCheck } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, Download, Bell, Users, UserCog, Send, Upload, UserCheck, Eye } from "lucide-react";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
 import * as XLSX from "xlsx";
@@ -28,6 +28,7 @@ export default function ParentsPage() {
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [viewingParent, setViewingParent] = useState<Parent | null>(null);
   const [editingParent, setEditingParent] = useState<Parent | null>(null);
   const [isNotifyOpen, setIsNotifyOpen] = useState(false);
   const [studentsDialogParent, setStudentsDialogParent] = useState<Parent | null>(null);
@@ -411,6 +412,33 @@ export default function ParentsPage() {
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
                           <Dialog
+                            open={viewingParent?.id === p.id}
+                            onOpenChange={(open) => !open && setViewingParent(null)}
+                          >
+                            <DialogTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => setViewingParent(p)}
+                                data-testid={`button-view-parent-${p.id}`}
+                                title="View"
+                                aria-label="View"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </Button>
+                            </DialogTrigger>
+                            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                              <DialogHeader>
+                                <DialogTitle>View Parent</DialogTitle>
+                              </DialogHeader>
+                              <ParentView
+                                parent={p}
+                                linkedStudents={getLinkedStudents(p.id)}
+                              />
+                            </DialogContent>
+                          </Dialog>
+
+                          <Dialog
                             open={editingParent?.id === p.id}
                             onOpenChange={(open) => !open && setEditingParent(null)}
                           >
@@ -536,6 +564,62 @@ export default function ParentsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+
+function ParentView({ parent, linkedStudents }: { parent: Parent; linkedStudents: Student[] }) {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-4">
+        <div className="h-16 w-16 rounded-md border bg-muted flex items-center justify-center text-lg font-semibold">
+          {parent.firstName?.[0]}{parent.lastName?.[0]}
+        </div>
+        <div>
+          <h3 className="text-lg font-semibold">{parent.firstName} {parent.lastName}</h3>
+          <p className="text-sm text-muted-foreground capitalize">{parent.relationship || "Parent"}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-1">
+          <Label>Phone</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{parent.phone || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Email</Label>
+          <div className="rounded-md border px-3 py-2 text-sm break-all">{parent.email || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Relationship</Label>
+          <div className="rounded-md border px-3 py-2 text-sm capitalize">{parent.relationship || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Occupation</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{parent.occupation || "-"}</div>
+        </div>
+        <div className="space-y-1 sm:col-span-2">
+          <Label>Address</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{parent.address || parent.streetAddress || "-"}</div>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label>Linked Students</Label>
+        {linkedStudents.length === 0 ? (
+          <div className="rounded-md border px-3 py-2 text-sm text-muted-foreground">No linked students</div>
+        ) : (
+          <div className="space-y-2">
+            {linkedStudents.map((student) => (
+              <div key={student.id} className="rounded-md border px-3 py-2 text-sm">
+                <div className="font-medium">{student.firstName} {student.lastName}</div>
+                <div className="text-muted-foreground">Admission No: {student.admissionNo || "-"}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

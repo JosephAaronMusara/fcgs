@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess } from "@shared/schema";
+import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, sql } from "drizzle-orm";
@@ -31,6 +31,7 @@ import {
   insertPermissionSchema, insertAccessGroupSchema,
   type User, type InsertStudent, type InsertActivityLog
 } from "@shared/schema";
+import { ECD_DOMAIN_SEEDS, getGradingProfilesForSchool, getGradeProfileLabel, getSubjectTypeOptionsForSchool, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, type GradeProfileKey } from "@shared/academic-profiles";
 
 function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -57,6 +58,253 @@ const PASSWORD_RULES = {
   requireUppercase: true,
   requireSpecial: true,
 };
+
+const LEGACY_PROFILE_FALLBACKS: Record<string, string[]> = {
+  SEC_ZIM_A: ["A_Level"],
+  SEC_CAM_A: ["A_Level"],
+  SEC_ZIM_O: ["O_Level"],
+  SEC_CAM_O: ["O_Level"],
+  SEC_CAM_IGCSE: ["IGCSE"],
+};
+
+function getGradesForProfile(grades: any[], profileKey: string | null | undefined) {
+  if (!profileKey) return grades;
+  const fallbacks = LEGACY_PROFILE_FALLBACKS[profileKey] || [];
+  const exact = grades.filter((grade) => grade.gradeLevel === profileKey);
+  if (exact.length > 0) return exact;
+  if (fallbacks.length === 0) return exact;
+  return grades.filter((grade) => fallbacks.includes(grade.gradeLevel));
+}
+
+async function resolveGradeProfileContext(args: {
+  schoolId: number;
+  classId: number;
+  subjectId: number;
+  studentId?: number;
+}): Promise<{
+  profileKey: GradeProfileKey | null;
+  school: any;
+  classInfo: any;
+  subject: any;
+  streamName: string | null;
+}> {
+  const school = await storage.getSchool(args.schoolId);
+  const classInfo = await storage.getClass(args.classId);
+  const subject = await storage.getSubject(args.subjectId);
+  let streamId = classInfo?.streamId ?? null;
+  if (args.studentId) {
+    const student = await storage.getStudent(args.studentId);
+    if (student?.streamId) streamId = student.streamId;
+  }
+  const stream = streamId ? await storage.getStream(streamId) : undefined;
+  const streamName = stream?.name || null;
+  const profileKey = resolveGradeProfileKey({
+    schoolType: school?.schoolType,
+    examinationBoard: school?.examinationBoard,
+    streamName,
+    subjectType: subject?.subjectType,
+  });
+  return { profileKey, school, classInfo, subject, streamName };
+}
+
+function isSubjectAvailableForClass(subject: any, classInfo: any): boolean {
+  const classStreamId = classInfo?.streamId ? Number(classInfo.streamId) : null;
+  const subjectStreamIds = Array.isArray(subject?.streamIds) && subject.streamIds.length > 0
+    ? subject.streamIds.map((id: any) => Number(id))
+    : subject?.streamId ? [Number(subject.streamId)] : [];
+
+  if (!classStreamId || subjectStreamIds.length === 0) return true;
+  return subjectStreamIds.includes(classStreamId);
+}
+
+function isGradeApplicableToClass(grade: any, classId: number): boolean {
+  if (grade?.appliesAll) return true;
+  if (!Array.isArray(grade?.classIds) || grade.classIds.length === 0) return true;
+  return grade.classIds.map((id: any) => Number(id)).includes(Number(classId));
+}
+
+function getApplicableGradesForContext(grades: any[], args: { profileKey: string | null | undefined; classId: number }) {
+  return getGradesForProfile(grades, args.profileKey).filter((grade) => isGradeApplicableToClass(grade, args.classId));
+}
+
+async function getCurrentStaffMember(req: Request, schoolId: number) {
+  const currentUser = await storage.getUser((req.user as any).id);
+  if (!currentUser) return null;
+  const schoolStaff = await storage.getStaffBySchool(schoolId);
+  return schoolStaff.find((member) => member.userId === currentUser.id) || null;
+}
+
+async function ensureTeacherAssignmentForAssessment(_req: Request, _res: Response, _schoolId: number, _classId: number, _subjectId: number) {
+  return true;
+}
+
+function calculatePositionMap(items: Array<{ id: number; value: number | null }>) {
+  const filtered = items.filter((item) => item.value !== null).sort((a, b) => (b.value || 0) - (a.value || 0));
+  const map = new Map<number, string>();
+  const size = filtered.length;
+  let currentPosition = 0;
+  let lastValue: number | null = null;
+  filtered.forEach((item, index) => {
+    if (item.value !== lastValue) {
+      currentPosition = index + 1;
+      lastValue = item.value;
+    }
+    map.set(item.id, `${currentPosition}/${size}`);
+  });
+  return { size, map };
+}
+
+async function calculateStreamPositionMap(examId: number, schoolId: number, streamId?: number | null) {
+  if (!streamId) return { size: 0, map: new Map<number, string>() };
+  const classes = (await storage.getClassesBySchool(schoolId)).filter((cls) => cls.streamId === streamId);
+  if (classes.length === 0) return { size: 0, map: new Map<number, string>() };
+
+  const allAssessments = await storage.getAssessmentsByExam(examId);
+  const classIds = new Set(classes.map((cls) => cls.id));
+  const streamAssessments = allAssessments.filter((assessment) => classIds.has(assessment.classId));
+  if (streamAssessments.length === 0) return { size: 0, map: new Map<number, string>() };
+
+  const studentsByClass = new Map<number, any[]>();
+  for (const cls of classes) {
+    studentsByClass.set(cls.id, await storage.getStudentsByClass(cls.id));
+  }
+
+  const marks = await storage.getAssessmentMarksByAssessments(streamAssessments.map((assessment) => assessment.id));
+  const totals = new Map<number, { sum: number; count: number }>();
+  for (const mark of marks) {
+    if (mark.percentage === null || mark.percentage === undefined) continue;
+    const current = totals.get(mark.studentId) || { sum: 0, count: 0 };
+    current.sum += parseFloat(mark.percentage as any);
+    current.count += 1;
+    totals.set(mark.studentId, current);
+  }
+
+  const items: Array<{ id: number; value: number | null }> = [];
+  for (const students of studentsByClass.values()) {
+    for (const student of students) {
+      const entry = totals.get(student.id);
+      items.push({ id: student.id, value: entry && entry.count > 0 ? entry.sum / entry.count : null });
+    }
+  }
+  return calculatePositionMap(items);
+}
+
+async function validateSubjectPayloadForSchool(schoolId: number, payload: any, res: Response, existingSubject?: any) {
+  const school = await storage.getSchool(schoolId);
+  if (!school) {
+    res.status(404).json({ message: "School not found" });
+    return null;
+  }
+
+  const schoolType = normalizeSchoolType(school.schoolType);
+  const board = normalizeExamBoard(school.examinationBoard);
+  const nextSubjectType = payload.subjectType !== undefined ? payload.subjectType : existingSubject?.subjectType;
+  const nextStreamIds = Array.isArray(payload.streamIds)
+    ? payload.streamIds
+    : payload.streamId !== undefined && payload.streamId !== null
+      ? [payload.streamId]
+      : Array.isArray(existingSubject?.streamIds) && existingSubject.streamIds.length > 0
+        ? existingSubject.streamIds
+        : existingSubject?.streamId
+          ? [existingSubject.streamId]
+          : [];
+
+  if (schoolType === "secondary") {
+    if (!nextSubjectType) {
+      res.status(400).json({ message: "Subject Type is required for secondary school subjects" });
+      return null;
+    }
+    const allowedTypes = board === "Cambridge"
+      ? ["Cambridge Advanced Level", "Cambridge Ordinary Level", "Cambridge IGCSE", "DELF", "HEXCO", "HSK"]
+      : ["ZIMSEC Advanced Level", "ZIMSEC Ordinary Level", "DELF", "HEXCO", "HSK"];
+    if (!allowedTypes.includes(nextSubjectType)) {
+      res.status(400).json({ message: `Invalid subject type for ${board} secondary school` });
+      return null;
+    }
+  }
+
+  if (schoolType === "primary" && nextSubjectType) {
+    const allowedTypes = getSubjectTypeOptionsForSchool(schoolType, board);
+    if (!allowedTypes.includes(nextSubjectType)) {
+      res.status(400).json({ message: `Invalid subject type for ${board} primary school` });
+      return null;
+    }
+  }
+
+  if (nextStreamIds.length > 0) {
+    const streamRecords = await Promise.all(nextStreamIds.map((id: number) => storage.getStream(Number(id))));
+    const validStreams = streamRecords.filter(Boolean);
+    if (validStreams.length !== nextStreamIds.length) {
+      res.status(400).json({ message: "One or more selected streams do not exist" });
+      return null;
+    }
+    if (validStreams.some((stream) => normalizeSchoolType(stream!.schoolType) !== schoolType)) {
+      res.status(400).json({ message: "Subject streams must belong to the same school type" });
+      return null;
+    }
+    if (schoolType === "secondary") {
+      const levelGroups = new Set(validStreams.map((stream) => resolveSecondaryGroupingFromStream(stream!.name)).filter(Boolean));
+      if (levelGroups.size > 1) {
+        res.status(400).json({ message: "Secondary subjects cannot span both lower and advanced level streams" });
+        return null;
+      }
+      const levelGroup = Array.from(levelGroups)[0];
+      const expectedGroup = nextSubjectType === "Cambridge Advanced Level" || nextSubjectType === "ZIMSEC Advanced Level" ? "ADVANCED" : "LOWER";
+      if (levelGroup && levelGroup !== expectedGroup) {
+        res.status(400).json({ message: "Selected streams do not match the chosen subject type level" });
+        return null;
+      }
+    }
+  }
+
+  return { schoolType, board, subjectType: nextSubjectType, streamIds: nextStreamIds };
+}
+
+async function ensureEcdSeedData() {
+  const existingDomains = await storage.getEcdAssessmentDomains();
+  if (existingDomains.length > 0) return;
+  for (const domainSeed of ECD_DOMAIN_SEEDS) {
+    const [domain] = await db.insert((await import("@shared/schema")).ecdAssessmentDomains).values({
+      code: domainSeed.code,
+      name: domainSeed.name,
+      sortOrder: domainSeed.sortOrder,
+      isActive: true,
+    }).returning();
+    for (let index = 0; index < domainSeed.items.length; index += 1) {
+      await db.insert((await import("@shared/schema")).ecdAssessmentItems).values({
+        domainId: domain.id,
+        itemText: domainSeed.items[index],
+        sortOrder: index + 1,
+        isActive: true,
+      });
+    }
+  }
+}
+
+async function loadEcdSectionsForStudentExam(studentId: number, examId: number, streamName?: string | null) {
+  if (!isEcdStream(streamName)) return [];
+  const exam = await storage.getExam(examId);
+  const assessmentType = exam?.assessmentTypeId ? await storage.getAssessmentType(exam.assessmentTypeId) : null;
+  if (!assessmentType || assessmentType.name !== "End-of-Term Exam") return [];
+
+  const record = await storage.getEcdAssessmentRecord(studentId, examId);
+  const responses = record ? await storage.getEcdAssessmentResponses(record.id) : [];
+  const responseMap = new Map(responses.map((row) => [row.itemId, row.rating]));
+  const domains = await storage.getEcdAssessmentDomains();
+  const items = await storage.getEcdAssessmentItems();
+
+  return domains.map((domain) => ({
+    code: domain.code,
+    name: domain.name,
+    items: items
+      .filter((item) => item.domainId === domain.id)
+      .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
+      .map((item) => ({
+        itemText: item.itemText,
+        rating: responseMap.get(item.id) || null,
+      })),
+  }));
+}
 
 function validatePassword(password: string): { valid: boolean; message?: string } {
   if (password.length < PASSWORD_RULES.minLength) return { valid: false, message: "Password must be at least 8 characters" };
@@ -344,6 +592,17 @@ async function validateAssessmentPayloadForSchool(
     if (!assessmentType) return null;
   }
 
+  if (!isSubjectAvailableForClass(subjectInfo, classInfo)) {
+    res.status(400).json({ message: "Selected subject is not available for the chosen class stream" });
+    return null;
+  }
+
+  const classSubjectRows = await storage.getClassSubjects(classInfo.id);
+  if (classSubjectRows.length > 0 && !classSubjectRows.some((row) => row.subjectId === subjectInfo.id)) {
+    res.status(400).json({ message: "Selected subject is not assigned to the chosen class" });
+    return null;
+  }
+
   return { classInfo, subjectInfo };
 }
 
@@ -394,6 +653,7 @@ export async function registerRoutes(
   setupAuth(app);
   registerObjectStorageRoutes(app);
   registerCalendarRoutes(app);
+  await ensureEcdSeedData();
 
   const readOnlyExemptPaths = [
     "/api/auth/login",
@@ -2371,6 +2631,8 @@ export async function registerRoutes(
       if (!schoolId) {
         return res.status(400).json({ message: "School context required" });
       }
+      const validated = await validateSubjectPayloadForSchool(schoolId, req.body, res);
+      if (!validated) return;
       const data = insertSubjectSchema.parse({ ...req.body, schoolId });
       const newSubject = await storage.createSubject(data);
       res.status(201).json(newSubject);
@@ -2389,6 +2651,8 @@ export async function registerRoutes(
       if (schoolId && subject.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
+      const validated = await validateSubjectPayloadForSchool(subject.schoolId, req.body, res, subject);
+      if (!validated) return;
       const { name, shortCode, syllabusCode, subjectType, description, streamId, streamIds } = req.body;
       const updateData: Partial<{ name: string; shortCode: string; syllabusCode: string | null; subjectType: string; description: string; streamId: number | null; streamIds: number[] | null }> = {};
       if (name !== undefined) updateData.name = name;
@@ -6412,6 +6676,30 @@ export async function registerRoutes(
   });
 
   // Report Comments (Principal / Class Teacher)
+  const normalizeReportCommentClassIds = (payload: any): number[] => {
+    const rawClassIds = (() => {
+      if (Array.isArray(payload?.classIds)) return payload.classIds;
+      if (typeof payload?.classIds === "string") {
+        try {
+          const parsed = JSON.parse(payload.classIds);
+          if (Array.isArray(parsed)) return parsed;
+        } catch {}
+        return payload.classIds.split(",").map((value: string) => value.trim()).filter(Boolean);
+      }
+      if (Array.isArray(payload?.classes)) return payload.classes;
+      if (payload?.classId !== undefined && payload?.classId !== null) return [payload.classId];
+      return [];
+    })();
+    return rawClassIds
+      .map((value: any) => typeof value === "object" && value !== null ? Number(value.id ?? value.value ?? value.classId) : Number(value))
+      .filter((value: number) => Number.isFinite(value) && value > 0);
+  };
+
+  const reportCommentMatchesGrade = (comment: any, gradeId: number | null, commentGrade: string, gradeLevel?: string | null) => {
+    if (gradeId && comment.gradeId === gradeId) return true;
+    return comment.commentGrade === commentGrade && (comment.gradeLevel || null) === (gradeLevel || null);
+  };
+
   app.get("/api/report-comments", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
@@ -6428,28 +6716,184 @@ export async function registerRoutes(
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });
-      const { commentGrade, commentText, commentType, classId } = req.body;
-      if (!commentGrade || !commentText || !commentType) {
-        return res.status(400).json({ message: "commentGrade, commentText, and commentType are required" });
+      const { gradeId, commentGrade, commentText, commentType, gradeLevel } = req.body;
+      if (!commentText || !commentType) {
+        return res.status(400).json({ message: "commentText and commentType are required" });
       }
       if (!["principal", "class_teacher"].includes(commentType)) {
         return res.status(400).json({ message: "commentType must be 'principal' or 'class_teacher'" });
       }
-      if (commentType === "class_teacher" && !classId) {
+      const normalizedClassIds = normalizeReportCommentClassIds(req.body);
+      if (commentType === "class_teacher" && normalizedClassIds.length === 0) {
         return res.status(400).json({ message: "classId is required for class teacher comments" });
       }
-      const { COMMENT_GRADE_OPTIONS } = await import("@shared/schema");
-      if (!COMMENT_GRADE_OPTIONS.includes(commentGrade)) {
-        return res.status(400).json({ message: `Invalid comment grade. Must be one of: ${COMMENT_GRADE_OPTIONS.join(", ")}` });
+      let resolvedCommentGrade = commentGrade;
+      let resolvedGradeLevel = gradeLevel;
+      let resolvedGradeId = gradeId ? Number(gradeId) : null;
+      if (resolvedGradeId) {
+        const grade = await ensureGradeInSchool(resolvedGradeId, schoolId, res);
+        if (!grade) return;
+        resolvedCommentGrade = grade.gradeName;
+        resolvedGradeLevel = grade.gradeLevel;
+      }
+      if (!resolvedCommentGrade) {
+        return res.status(400).json({ message: "A grade must be selected" });
+      }
+      const createdComments = [];
+      if (commentType === "class_teacher") {
+        for (const selectedClassId of normalizedClassIds) {
+          const classInfo = await ensureClassInSchool(selectedClassId, schoolId, res);
+          if (!classInfo) return;
+          const comment = await storage.createReportComment({
+            schoolId,
+            gradeId: resolvedGradeId,
+            commentGrade: resolvedCommentGrade,
+            gradeLevel: resolvedGradeLevel,
+            subjectId: null,
+            commentText,
+            commentType,
+            classId: selectedClassId,
+          } as any);
+          createdComments.push(comment);
+        }
+        return res.status(201).json(createdComments);
       }
       const comment = await storage.createReportComment({
         schoolId,
-        commentGrade,
+        gradeId: resolvedGradeId,
+        commentGrade: resolvedCommentGrade,
+        gradeLevel: resolvedGradeLevel,
+        subjectId: null,
         commentText,
         commentType,
-        ...(commentType === "class_teacher" && classId ? { classId } : {}),
-      });
+      } as any);
       res.status(201).json(comment);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/report-comments/check-duplicates", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "No school context" });
+      const { commentType, gradeId, gradeLevel } = req.body;
+      if (!commentType || !["principal", "class_teacher"].includes(commentType)) {
+        return res.status(400).json({ message: "commentType is required" });
+      }
+      if (!gradeId) return res.status(400).json({ message: "gradeId is required" });
+
+      const grade = await ensureGradeInSchool(Number(gradeId), schoolId, res);
+      if (!grade) return;
+      const resolvedGradeId = Number(grade.id);
+      const resolvedCommentGrade = grade.gradeName;
+      const resolvedGradeLevel = grade.gradeLevel || gradeLevel || null;
+      const allComments = await storage.getReportComments(schoolId, commentType);
+
+      if (commentType === "principal") {
+        const existing = allComments.find((comment: any) => reportCommentMatchesGrade(comment, resolvedGradeId, resolvedCommentGrade, resolvedGradeLevel));
+        if (existing) {
+          return res.json({
+            duplicates: [{
+              id: existing.id,
+              gradeName: resolvedCommentGrade,
+              commentText: existing.commentText,
+            }],
+            missingTargets: [],
+          });
+        }
+        return res.json({ duplicates: [], missingTargets: [{ gradeName: resolvedCommentGrade }] });
+      }
+
+      const normalizedClassIds = normalizeReportCommentClassIds(req.body);
+      if (normalizedClassIds.length === 0) {
+        return res.status(400).json({ message: "classId is required for class teacher comments" });
+      }
+
+      const duplicates: any[] = [];
+      const missingTargets: any[] = [];
+      for (const classId of normalizedClassIds) {
+        const classInfo = await ensureClassInSchool(classId, schoolId, res);
+        if (!classInfo) return;
+        const existing = allComments.find((comment: any) => Number(comment.classId) === classId && reportCommentMatchesGrade(comment, resolvedGradeId, resolvedCommentGrade, resolvedGradeLevel));
+        if (existing) {
+          duplicates.push({
+            id: existing.id,
+            classId,
+            className: classInfo.className || "",
+            gradeName: resolvedCommentGrade,
+            commentText: existing.commentText,
+          });
+        } else {
+          missingTargets.push({
+            classId,
+            className: classInfo.className || "",
+          });
+        }
+      }
+      duplicates.sort((a, b) => a.className.localeCompare(b.className, undefined, { numeric: true }));
+      return res.json({ duplicates, missingTargets });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/report-comments/overwrite-and-create", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "No school context" });
+      const { overwriteIds, missingTargets, gradeId, gradeLevel, commentText, commentType } = req.body;
+      if (!commentText?.trim()) return res.status(400).json({ message: "commentText is required" });
+      if (!commentType || !["principal", "class_teacher"].includes(commentType)) {
+        return res.status(400).json({ message: "commentType is required" });
+      }
+      if (!gradeId) return res.status(400).json({ message: "gradeId is required" });
+
+      const grade = await ensureGradeInSchool(Number(gradeId), schoolId, res);
+      if (!grade) return;
+      const resolvedGradeId = Number(grade.id);
+      const resolvedCommentGrade = grade.gradeName;
+      const resolvedGradeLevel = grade.gradeLevel || gradeLevel || null;
+
+      let overwritten = 0;
+      if (Array.isArray(overwriteIds)) {
+        for (const id of overwriteIds) {
+          const [existing] = await db.select().from(reportComments).where(and(eq(reportComments.id, Number(id)), eq(reportComments.schoolId, schoolId), eq(reportComments.commentType, commentType as any)));
+          if (!existing) continue;
+          await db.update(reportComments).set({
+            commentText: commentText.trim(),
+            gradeId: resolvedGradeId,
+            commentGrade: resolvedCommentGrade,
+            gradeLevel: resolvedGradeLevel,
+          }).where(and(eq(reportComments.id, existing.id), eq(reportComments.schoolId, schoolId)));
+          overwritten++;
+        }
+      }
+
+      let created = 0;
+      if (Array.isArray(missingTargets)) {
+        for (const target of missingTargets) {
+          let classId: number | null = null;
+          if (commentType === "class_teacher") {
+            classId = Number(target.classId);
+            const classInfo = await ensureClassInSchool(classId, schoolId, res);
+            if (!classInfo) return;
+          }
+          await storage.createReportComment({
+            schoolId,
+            gradeId: resolvedGradeId,
+            commentGrade: resolvedCommentGrade,
+            gradeLevel: resolvedGradeLevel,
+            subjectId: null,
+            commentText: commentText.trim(),
+            commentType,
+            classId,
+          } as any);
+          created++;
+        }
+      }
+
+      return res.json({ overwritten, created });
     } catch (error) {
       next(error);
     }
@@ -6495,6 +6939,22 @@ export async function registerRoutes(
 
       assessmentList = assessmentList.filter((a) => a.schoolId === schoolId);
 
+      const currentUser = await storage.getUser((req.user as any).id);
+      if (currentUser && ["teacher", "assistant_teacher"].includes(currentUser.role)) {
+        const staffMember = await getCurrentStaffMember(req, schoolId);
+        if (staffMember) {
+          const assignments = await storage.getStaffSubjects(staffMember.id);
+          const allowedPairs = new Set(
+            assignments
+              .filter((row) => row.classId && row.subjectId)
+              .map((row) => `${row.classId}-${row.subjectId}`)
+          );
+          assessmentList = assessmentList.filter((a) => allowedPairs.has(`${a.classId}-${a.subjectId}`));
+        } else {
+          assessmentList = [];
+        }
+      }
+
       if (subjectId) {
         assessmentList = assessmentList.filter((a) => a.subjectId === subjectId);
       }
@@ -6533,6 +6993,7 @@ export async function registerRoutes(
 
       const validatedRefs = await validateAssessmentPayloadForSchool(schoolId, assessmentData, res);
       if (!validatedRefs) return;
+      if (!(await ensureTeacherAssignmentForAssessment(req, res, schoolId, Number(assessmentData.classId), Number(assessmentData.subjectId)))) return;
 
       const assessmentWithName = {
         ...assessmentData,
@@ -6541,8 +7002,9 @@ export async function registerRoutes(
         subjectId: Number(assessmentData.subjectId),
         assessmentTypeId: assessmentData.assessmentTypeId ? Number(assessmentData.assessmentTypeId) : null,
         examId: assessmentData.examId ? Number(assessmentData.examId) : null,
-        name: assessmentData.name || assessmentData.topic || "Assessment",
+        name: assessmentData.name || assessmentData.topic,
       };
+
       const assessment = await storage.createAssessment(assessmentWithName);
 
       const papersWithAssessmentId = papers.map((p: any, i: number) => ({
@@ -6576,6 +7038,9 @@ export async function registerRoutes(
 
       const validatedRefs = await validateAssessmentPayloadForSchool(scoped.schoolId, assessmentData, res, scoped.assessment);
       if (!validatedRefs) return;
+      const effectiveClassId = assessmentData.classId !== undefined ? Number(assessmentData.classId) : scoped.assessment.classId;
+      const effectiveSubjectId = assessmentData.subjectId !== undefined ? Number(assessmentData.subjectId) : scoped.assessment.subjectId;
+      if (!(await ensureTeacherAssignmentForAssessment(req, res, scoped.schoolId, effectiveClassId, effectiveSubjectId))) return;
 
       const updatePayload = {
         ...assessmentData,
@@ -6641,9 +7106,14 @@ export async function registerRoutes(
         marksByStudent[mark.studentId] = mark;
       }
       
-      // Get grades for grade lookup
-      const grades = await storage.getGradesBySchool(assessment.schoolId || 0);
-      
+      const allGrades = await storage.getGradesBySchool(assessment.schoolId || 0);
+      const { profileKey } = await resolveGradeProfileContext({
+        schoolId: assessment.schoolId || scoped.schoolId,
+        classId: assessment.classId,
+        subjectId: assessment.subjectId,
+      });
+      const grades = getApplicableGradesForContext(allGrades, { profileKey, classId: assessment.classId });
+
       // Get comments for auto-comment lookup
       const comments = await storage.getAssessmentComments(assessment.schoolId || undefined, assessment.classId, assessment.subjectId);
       
@@ -6654,6 +7124,7 @@ export async function registerRoutes(
         marksByStudent,
         grades,
         comments,
+        gradeProfileKey: profileKey,
       });
     } catch (error) {
       next(error);
@@ -6661,12 +7132,25 @@ export async function registerRoutes(
   });
 
   // Helper function to calculate grade from percentage
-  function calculateGrade(percentage: number, grades: any[]): { gradeId: number | null; gradeName: string } {
-    for (const grade of grades) {
-      if (percentage >= grade.lowerLimit && percentage <= grade.upperLimit) {
-        return { gradeId: grade.id, gradeName: grade.gradeName };
+  function calculateGrade(percentage: number, grades: any[], subjectType?: string | null): { gradeId: number | null; gradeName: string } {
+    const orderedGrades = [...grades].sort((a, b) => Number(b.upperLimit) - Number(a.upperLimit));
+    const compatibleTyped = orderedGrades.filter((grade) => grade.gradeType && isSubjectTypeCompatibleWithGradeType(subjectType, grade.gradeType));
+    const genericGrades = orderedGrades.filter((grade) => !grade.gradeType);
+    const candidateSets = compatibleTyped.length > 0
+      ? [compatibleTyped, genericGrades, orderedGrades]
+      : [genericGrades, orderedGrades];
+
+    for (const set of candidateSets) {
+      for (const grade of set) {
+        const lower = Number(grade.lowerLimit);
+        const upper = Number(grade.upperLimit);
+        if (Number.isNaN(lower) || Number.isNaN(upper)) continue;
+        if (percentage >= lower && percentage <= upper) {
+          return { gradeId: grade.id, gradeName: grade.gradeName };
+        }
       }
     }
+
     return { gradeId: null, gradeName: "" };
   }
 
@@ -6712,8 +7196,16 @@ export async function registerRoutes(
       const percentage = totalWeight > 0 ? Math.round(totalWeightedScore) : null;
       
       // Get grade from percentage
-      const grades = await storage.getGradesBySchool(schoolId);
-      const { gradeId, gradeName } = percentage !== null ? calculateGrade(percentage, grades) : { gradeId: null, gradeName: "" };
+      const allGrades = await storage.getGradesBySchool(schoolId);
+      const { profileKey } = await resolveGradeProfileContext({
+        schoolId,
+        classId,
+        subjectId,
+        studentId: Number(studentId),
+      });
+      const grades = getApplicableGradesForContext(allGrades, { profileKey, classId });
+      const subject = await storage.getSubject(subjectId);
+      const { gradeId, gradeName } = percentage !== null ? calculateGrade(percentage, grades, subject?.subjectType) : { gradeId: null, gradeName: "" };
       
       // Always look up pool comment for this grade (used for auto snapshot)
       let commentId = null;
@@ -6805,6 +7297,156 @@ export async function registerRoutes(
 
       await storage.deleteAssessmentMark(scopedMark.mark.id);
       res.json({ message: "Mark deleted successfully" });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/ecd-assessment/template", requireAuth, async (_req, res, next) => {
+    try {
+      const domains = await storage.getEcdAssessmentDomains();
+      const items = await storage.getEcdAssessmentItems();
+      res.json({
+        domains: domains.map((domain) => ({
+          ...domain,
+          items: items.filter((item) => item.domainId === domain.id),
+        })),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/ecd-assessment/context", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const school = await storage.getSchool(schoolId);
+      if (normalizeSchoolType(school?.schoolType) !== "primary") {
+        return res.status(400).json({ message: "ECD assessment is only available for primary schools" });
+      }
+      const classes = await storage.getClassesBySchool(schoolId);
+      const ecdClasses = [];
+      for (const cls of classes) {
+        const stream = cls.streamId ? await storage.getStream(cls.streamId) : undefined;
+        const streamName = stream?.name || null;
+        if (!isEcdStream(streamName) && !isEcdStream(cls.className)) continue;
+        ecdClasses.push({ ...cls, streamName: streamName || cls.className });
+      }
+      const examId = Number(req.query.examId || 0);
+      const classId = Number(req.query.classId || 0);
+      const exam = examId ? await storage.getExam(examId) : undefined;
+      const assessmentType = exam?.assessmentTypeId ? await storage.getAssessmentType(exam.assessmentTypeId) : undefined;
+      const isEndOfTermExam = assessmentType?.name === "End-of-Term Exam";
+      const students = classId ? await storage.getStudentsByClass(classId) : [];
+      const roster = [];
+      for (const student of students) {
+        const record = examId ? await storage.getEcdAssessmentRecord(student.id, examId) : undefined;
+        const responseCount = record ? (await storage.getEcdAssessmentResponses(record.id)).filter((row) => row.rating).length : 0;
+        roster.push({
+          id: student.id,
+          firstName: student.firstName,
+          lastName: student.lastName,
+          admissionNo: student.admissionNo,
+          status: record?.status || "draft",
+          completedResponses: responseCount,
+        });
+      }
+      res.json({ ecdClasses, exam, isEndOfTermExam, students: roster });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/ecd-assessment/record", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const studentId = Number(req.query.studentId || 0);
+      const examId = Number(req.query.examId || 0);
+      const classId = Number(req.query.classId || 0);
+      if (!studentId || !examId) return res.status(400).json({ message: "studentId and examId are required" });
+      const student = await storage.getStudent(studentId);
+      const exam = await storage.getExam(examId);
+      const classInfo = await storage.getClass(classId || Number(student?.classId || 0));
+      if (!student || !exam || !classInfo) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      if (classInfo.schoolId !== schoolId) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      if (student.classId && Number(student.classId) !== classInfo.id) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      if (exam.schoolId && exam.schoolId !== schoolId) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      const record = await storage.getEcdAssessmentRecord(studentId, examId);
+      const responses = record ? await storage.getEcdAssessmentResponses(record.id) : [];
+      res.json({ record: record || null, responses });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/ecd-assessment/record", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const { studentId, examId, classId, streamId, itemId, rating, status, clearAll } = req.body;
+      if (!studentId || !examId || !classId) {
+        return res.status(400).json({ message: "studentId, classId and examId are required" });
+      }
+      const student = await storage.getStudent(Number(studentId));
+      const exam = await storage.getExam(Number(examId));
+      const classInfo = await storage.getClass(Number(classId));
+      if (!student || !exam || !classInfo) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      if (classInfo.schoolId !== schoolId) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      if (student.classId && Number(student.classId) !== classInfo.id) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      if (exam.schoolId && exam.schoolId !== schoolId) {
+        return res.status(404).json({ message: "Record context not found" });
+      }
+      const assessmentType = exam.assessmentTypeId ? await storage.getAssessmentType(exam.assessmentTypeId) : undefined;
+      if (assessmentType?.name !== "End-of-Term Exam") {
+        return res.status(400).json({ message: "ECD assessment is only available for End-of-Term Exam records" });
+      }
+      const stream = streamId ? await storage.getStream(Number(streamId)) : (classInfo?.streamId ? await storage.getStream(classInfo.streamId) : undefined);
+      if (!stream || !isEcdStream(stream.name)) {
+        return res.status(400).json({ message: "ECD assessment is only available for ECD classes" });
+      }
+      const record = await storage.upsertEcdAssessmentRecord({
+        schoolId,
+        studentId: Number(studentId),
+        classId: Number(classId),
+        streamId: stream.id,
+        examId: Number(examId),
+        status: status || "draft",
+        updatedBy: null,
+      } as any);
+      if (clearAll) {
+        const existingResponses = await storage.getEcdAssessmentResponses(record.id);
+        for (const response of existingResponses) {
+          await storage.upsertEcdAssessmentResponse({
+            recordId: record.id,
+            itemId: Number(response.itemId),
+            rating: null,
+          } as any);
+        }
+      } else if (itemId) {
+        await storage.upsertEcdAssessmentResponse({
+          recordId: record.id,
+          itemId: Number(itemId),
+          rating: rating || null,
+        } as any);
+      }
+      const responses = await storage.getEcdAssessmentResponses(record.id);
+      res.json({ record, responses });
     } catch (error) {
       next(error);
     }
@@ -6963,10 +7605,6 @@ export async function registerRoutes(
         });
       }
       
-      const gradePointsMap: Record<string, number> = {
-        'A*': 5, 'A': 5, 'B': 4, 'C': 3, 'D': 2, 'E': 1, 'F': 0, 'U': 0,
-      };
-      
       const prevPctMap: Record<string, number> = {};
       const overtimeMap: Record<number, Array<{ label: string; avg: number }>> = {};
       try {
@@ -7030,7 +7668,7 @@ export async function registerRoutes(
         }
       } catch (e) {}
       
-      const reportCards = students.map((student) => {
+      const reportCards = await Promise.all(students.map(async (student) => {
         const rows = studentSubjectRows[student.id] || {};
         const subjectResults: Array<{
           subjectId: number;
@@ -7065,8 +7703,7 @@ export async function registerRoutes(
           
           if (pct >= 60) passed++;
           
-          const gLabel = row.grade.toUpperCase().trim();
-          points += gradePointsMap[gLabel] ?? 0;
+          points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
           
           const avgVal = subjectAvg[row.subjectId];
           const classAvgStr = avgVal !== undefined
@@ -7114,6 +7751,8 @@ export async function registerRoutes(
         
         const chartOvertimeLabels = (overtimeMap[student.id] || []).map(o => o.label);
         const chartOvertimeAvgs = (overtimeMap[student.id] || []).map(o => o.avg);
+        const studentStream = student.streamId ? await storage.getStream(student.streamId) : classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
+        const ecdSections = await loadEcdSectionsForStudentExam(student.id, examId, studentStream?.name || null);
         
         return {
           student: {
@@ -7130,6 +7769,7 @@ export async function registerRoutes(
             avgMark: avgMarkStr,
             subjectsPassed,
             points: nSubjects > 0 ? points.toString() : '',
+            classPosition: '',
             overallPosition: '',
             classSize: 0,
             averagePercentage: avgPct,
@@ -7140,8 +7780,9 @@ export async function registerRoutes(
           chartClassAvgs,
           chartOvertimeLabels,
           chartOvertimeAvgs,
+          ecdSections,
         };
-      });
+      }));
       
       const { getCommentGradeForAverage } = await import("@shared/schema");
       const allReportComments = await storage.getReportComments(schoolId);
@@ -7160,28 +7801,16 @@ export async function registerRoutes(
       }
 
       const studentsWithMarks = reportCards.filter(r => r.summary.averagePercentage !== null);
-      const sortedByAvg = [...studentsWithMarks]
-        .sort((a, b) => (b.summary.averagePercentage || 0) - (a.summary.averagePercentage || 0));
-      
-      const classSize = studentsWithMarks.length;
-      
+      const classPositionMap = calculatePositionMap(
+        studentsWithMarks.map((rc) => ({ id: rc.student.id, value: rc.summary.averagePercentage }))
+      );
+      const streamPositionMap = await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
+      const classSize = classPositionMap.size;
+
       for (const rc of reportCards) {
         rc.summary.classSize = classSize;
-      }
-      
-      let currentPosition = 0;
-      let lastAvg: number | null = null;
-      
-      for (let i = 0; i < sortedByAvg.length; i++) {
-        const rc = sortedByAvg[i];
-        if (rc.summary.averagePercentage !== lastAvg) {
-          currentPosition = i + 1;
-          lastAvg = rc.summary.averagePercentage;
-        }
-        const original = reportCards.find(r => r.student.id === rc.student.id);
-        if (original) {
-          original.summary.overallPosition = `${currentPosition}/${classSize}`;
-        }
+        rc.summary.classPosition = classPositionMap.map.get(rc.student.id) || '';
+        rc.summary.overallPosition = streamPositionMap.map.get(rc.student.id) || rc.summary.classPosition || '';
       }
       
       res.json({
@@ -7198,6 +7827,7 @@ export async function registerRoutes(
           currentAcademicYear: school?.currentAcademicYear || org?.currentAcademicYear,
           currentTerm: school?.currentTerm || org?.currentTerm,
           examinationBoard: school?.examinationBoard,
+          showClassPositionOnReports: !!school?.showClassPositionOnReports,
         },
         class: classInfo,
         exam,
@@ -7302,6 +7932,7 @@ export async function registerRoutes(
           currentAcademicYear: school?.currentAcademicYear || org2?.currentAcademicYear,
           currentTerm: school?.currentTerm || org2?.currentTerm,
           examinationBoard: school?.examinationBoard,
+          showClassPositionOnReports: !!school?.showClassPositionOnReports,
         },
         class: classInfo,
         exam,
@@ -7425,10 +8056,6 @@ export async function registerRoutes(
       sorted.forEach(([sid], i) => { subjectRank[subjId][parseInt(sid)] = `${i + 1}/${n}`; });
     }
 
-    const gradePointsMap: Record<string, number> = {
-      'A*': 5, 'A': 5, 'B': 4, 'C': 3, 'D': 2, 'E': 1, 'F': 0, 'U': 0,
-    };
-
     const pdfPrevPctMap: Record<string, number> = {};
     try {
       const allSchoolExams = await storage.getExamsBySchool(schoolId);
@@ -7463,8 +8090,7 @@ export async function registerRoutes(
       sumMarks += pct;
       nSubjects++;
       if (pct >= 60) passed++;
-      const gLabel = row.grade.toUpperCase().trim();
-      points += gradePointsMap[gLabel] ?? 0;
+      points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
 
       const avgVal = subjectAvg[row.subjectId];
       const classAvgStr = avgVal !== undefined ? parseFloat(avgVal.toFixed(1)).toString() : '';
@@ -7514,9 +8140,13 @@ export async function registerRoutes(
       if (studentAvgs[i].avg !== lastAvg) { currentPos = i + 1; lastAvg = studentAvgs[i].avg; }
       if (studentAvgs[i].id === studentId) { position = `${currentPos}/${classSize}`; break; }
     }
+    const streamPositionMap = await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
+    const overallPosition = streamPositionMap.map.get(studentId) || position;
 
     const student = students.find(s => s.id === studentId);
     if (!student) return null;
+    const studentStream = student.streamId ? await storage.getStream(student.streamId) : classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
+    const ecdSections = await loadEcdSectionsForStudentExam(studentId, examId, studentStream?.name || null);
 
     const termId = examInfo?.termId;
     const termName = termId ? `Term ${termId}` : undefined;
@@ -7555,8 +8185,10 @@ export async function registerRoutes(
         avgMark: avgMarkStr,
         subjectsPassed,
         points: nSubjects > 0 ? points.toString() : '',
-        overallPosition: position,
+        classPosition: position,
+        overallPosition,
       },
+      ecdSections,
       principalComment,
       classTeacherComment,
     };

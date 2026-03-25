@@ -132,6 +132,8 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "reports.view", name: "View Reports", description: "View academic report cards and analytics", category: "Reports" },
   { code: "reports.generate", name: "Generate Reports", description: "Generate and download report cards", category: "Reports" },
   { code: "reports.send", name: "Send Reports", description: "Send report cards to parents via email/SMS", category: "Reports" },
+  { code: "reports.ecd_entry", name: "Manage ECD Assessment Entry", description: "Create and update ECD assessment ticks in Academic Reports", category: "Reports" },
+  { code: "reports.comments_manage", name: "Manage Report Comments", description: "Create and manage report comment banks", category: "Reports" },
 
   // QC Reports
   { code: "qc_reports.view", name: "View QC Reports", description: "View quality control assessment reports", category: "QC Reports" },

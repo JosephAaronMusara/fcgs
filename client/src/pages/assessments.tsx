@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -8,13 +8,16 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { Plus, Search, Pencil, Trash2, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, RotateCcw, X, Menu, MessageSquare, ClipboardList } from "lucide-react";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
-import type { Assessment, Subject, Class as ClassType, AssessmentType, Exam, Grade, AssessmentComment } from "@shared/schema";
+import { useAuth } from "@/lib/auth";
+import type { Assessment, Subject, Class as ClassType, AssessmentType, Exam, Grade, AssessmentComment, School } from "@shared/schema";
+import { getGradingProfilesForSchool, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName } from "@shared/academic-profiles";
 
 interface AssessmentPaper {
   id?: number;
@@ -27,8 +30,33 @@ interface AssessmentWithPapers extends Assessment {
   papers: AssessmentPaper[];
 }
 
+interface Stream {
+  id: number;
+  name: string;
+  schoolType: string | null;
+}
+
+interface ClassSubjectRow {
+  id: number;
+  classId: number;
+  subjectId: number;
+}
+
+interface StaffRecord {
+  id: number;
+  userId: number | null;
+  schoolId: number | null;
+}
+
+interface StaffAssignment {
+  id: number;
+  subjectId: number;
+  classId: number | null;
+}
+
 export default function AssessmentsPage() {
   const { toast } = useToast();
+  const { currentSchoolId, user } = useAuth();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -49,34 +77,152 @@ export default function AssessmentsPage() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  const { data: classes } = useQuery<ClassType[]>({
-    queryKey: ["/api/classes"],
+  const { data: classesResponse } = useQuery<any>({
+    queryKey: ["/api/classes", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/classes");
+      if (!res.ok) throw new Error("Failed to fetch classes");
+      return res.json();
+    },
+  });
+  const classes: ClassType[] = Array.isArray(classesResponse)
+    ? classesResponse
+    : (classesResponse?.items ?? []);
+
+  const { data: subjectsData } = useQuery<any>({
+    queryKey: ["/api/subjects", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/subjects");
+      if (!res.ok) throw new Error("Failed to fetch subjects");
+      return res.json();
+    },
+  });
+  const subjects: Subject[] = Array.isArray(subjectsData)
+    ? subjectsData
+    : (subjectsData?.items ?? []);
+
+  const { data: assessmentTypesResponse } = useQuery<any>({
+    queryKey: ["/api/assessment-types", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/assessment-types");
+      if (!res.ok) throw new Error("Failed to fetch assessment types");
+      return res.json();
+    },
+  });
+  const assessmentTypes: AssessmentType[] = Array.isArray(assessmentTypesResponse)
+    ? assessmentTypesResponse
+    : (assessmentTypesResponse?.items ?? []);
+
+  const { data: examsResponse } = useQuery<any>({
+    queryKey: ["/api/exams", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/exams");
+      if (!res.ok) throw new Error("Failed to fetch exams");
+      return res.json();
+    },
+  });
+  const exams: Exam[] = Array.isArray(examsResponse)
+    ? examsResponse
+    : (examsResponse?.items ?? []);
+
+  const { data: currentSchool } = useQuery<School>({
+    queryKey: ["/api/schools/current", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/schools/current");
+      if (!res.ok) throw new Error("Failed to fetch current school");
+      return res.json();
+    },
   });
 
-  const { data: subjectsData } = useQuery<{ items: Subject[]; total: number }>({
-    queryKey: ["/api/subjects"],
+  const { data: gradesResponse } = useQuery<any>({
+    queryKey: ["/api/grades", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/grades");
+      if (!res.ok) throw new Error("Failed to fetch grades");
+      return res.json();
+    },
   });
-  const subjects = subjectsData?.items;
+  const grades: Grade[] = Array.isArray(gradesResponse)
+    ? gradesResponse
+    : (gradesResponse?.items ?? []);
 
-  const { data: assessmentTypes } = useQuery<AssessmentType[]>({
-    queryKey: ["/api/assessment-types"],
+  const { data: assessmentCommentsResponse } = useQuery<any>({
+    queryKey: ["/api/assessment-comments", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/assessment-comments");
+      if (!res.ok) throw new Error("Failed to fetch assessment comments");
+      return res.json();
+    },
   });
+  const assessmentComments: Array<AssessmentComment & { className: string; subjectName: string; gradeName: string }> = Array.isArray(assessmentCommentsResponse)
+    ? assessmentCommentsResponse
+    : (assessmentCommentsResponse?.items ?? []);
 
-  const { data: exams } = useQuery<Exam[]>({
-    queryKey: ["/api/exams"],
+  const { data: classSubjectRowsResponse } = useQuery<any>({
+    queryKey: ["/api/class-subjects/all", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/class-subjects/all");
+      if (!res.ok) throw new Error("Failed to fetch class subjects");
+      return res.json();
+    },
   });
+  const classSubjectRows: ClassSubjectRow[] = Array.isArray(classSubjectRowsResponse)
+    ? classSubjectRowsResponse
+    : (classSubjectRowsResponse?.items ?? []);
 
-  const { data: gradesResponse } = useQuery<{ items: Grade[] }>({
-    queryKey: ["/api/grades"],
+  const schoolType = normalizeSchoolType(currentSchool?.schoolType);
+
+  const { data: streamsResponse } = useQuery<any>({
+    queryKey: [`/api/streams?schoolType=${schoolType}`, currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/streams?schoolType=${schoolType}`);
+      if (!res.ok) throw new Error("Failed to fetch streams");
+      return res.json();
+    },
   });
-  const grades = gradesResponse?.items;
+  const streams: Stream[] = Array.isArray(streamsResponse)
+    ? streamsResponse
+    : (streamsResponse?.items ?? []);
 
-  const { data: assessmentComments } = useQuery<Array<AssessmentComment & { className: string; subjectName: string; gradeName: string }>>({
-    queryKey: ["/api/assessment-comments"],
+  const isTeacherScoped = user?.role === "teacher" || user?.role === "assistant_teacher";
+  const { data: staffListResponse } = useQuery<any>({
+    queryKey: ["/api/staff", currentSchoolId],
+    enabled: !!currentSchoolId && isTeacherScoped,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/staff");
+      if (!res.ok) throw new Error("Failed to fetch staff");
+      return res.json();
+    },
   });
+  const staffList: StaffRecord[] = Array.isArray(staffListResponse)
+    ? staffListResponse
+    : (staffListResponse?.items ?? []);
+  const currentStaff = useMemo(() => staffList.find((item) => item.userId === user?.id) || null, [staffList, user?.id]);
 
-  const { data: assessments, isLoading } = useQuery<AssessmentWithPapers[]>({
-    queryKey: ["/api/assessments", filterClassId, filterSubjectId, debouncedSearch],
+  const { data: currentStaffAssignmentsResponse } = useQuery<any>({
+    queryKey: ["/api/staff-subjects", currentSchoolId, currentStaff?.id],
+    enabled: !!currentSchoolId && !!currentStaff?.id && isTeacherScoped,
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/staff/${currentStaff!.id}/subjects`);
+      if (!res.ok) throw new Error("Failed to fetch teacher assignments");
+      return res.json();
+    },
+  });
+  const currentStaffAssignments: StaffAssignment[] = Array.isArray(currentStaffAssignmentsResponse)
+    ? currentStaffAssignmentsResponse
+    : (currentStaffAssignmentsResponse?.items ?? []);
+
+  const { data: assessmentsResponse, isLoading } = useQuery<any>({
+    queryKey: ["/api/assessments", currentSchoolId, filterClassId, filterSubjectId, debouncedSearch],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (filterClassId && filterClassId !== "all") {
@@ -93,6 +239,10 @@ export default function AssessmentsPage() {
       return res.json();
     },
   });
+  const assessments: AssessmentWithPapers[] = Array.isArray(assessmentsResponse)
+    ? assessmentsResponse
+    : (assessmentsResponse?.items ?? []);
+
 
   const createMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -363,6 +513,10 @@ export default function AssessmentsPage() {
         subjects={subjects || []}
         assessmentTypes={assessmentTypes || []}
         exams={exams || []}
+        streams={streams || []}
+        classSubjects={classSubjectRows || []}
+        teacherAssignments={currentStaffAssignments || []}
+        currentUserRole={user?.role || null}
         onSubmit={(data) => {
           if (editingAssessment) {
             updateMutation.mutate({ id: editingAssessment.id, data });
@@ -382,6 +536,9 @@ export default function AssessmentsPage() {
         subjects={subjects || []}
         classes={classes || []}
         grades={grades || []}
+        streams={streams || []}
+        schoolType={normalizeSchoolType(currentSchool?.schoolType)}
+        examinationBoard={normalizeExamBoard(currentSchool?.examinationBoard)}
       />
     </div>
   );
@@ -395,6 +552,10 @@ interface AssessmentDialogProps {
   subjects: Subject[];
   assessmentTypes: AssessmentType[];
   exams: Exam[];
+  streams: Stream[];
+  classSubjects: ClassSubjectRow[];
+  teacherAssignments: StaffAssignment[];
+  currentUserRole: string | null;
   onSubmit: (data: any) => void;
   isSubmitting: boolean;
 }
@@ -407,6 +568,10 @@ function AssessmentDialog({
   subjects,
   assessmentTypes,
   exams,
+  streams,
+  classSubjects,
+  teacherAssignments,
+  currentUserRole,
   onSubmit,
   isSubmitting,
 }: AssessmentDialogProps) {
@@ -476,6 +641,47 @@ function AssessmentDialog({
   const isExamValid = examId !== "";
   const hasPapers = papers.length >= 1;
 
+  const availableClasses = useMemo(() => classes, [classes]);
+
+  const selectedClass = useMemo(() => classes.find((item) => String(item.id) === classId) || null, [classes, classId]);
+  const selectedClassExplicitSubjectIds = useMemo(() => {
+    if (!selectedClass) return [];
+    return classSubjects.filter((row) => row.classId === selectedClass.id).map((row) => row.subjectId);
+  }, [classSubjects, selectedClass]);
+
+  const availableSubjects = useMemo(() => {
+    let filtered = subjects;
+    if (selectedClass) {
+      const classStreamId = selectedClass.streamId;
+      filtered = filtered.filter((subject) => {
+        const streamIds = Array.isArray((subject as any).streamIds) && (subject as any).streamIds.length > 0
+          ? (subject as any).streamIds
+          : (subject as any).streamId ? [(subject as any).streamId] : [];
+        const streamCompatible = !classStreamId || streamIds.length === 0 || streamIds.includes(classStreamId);
+        if (!streamCompatible) return false;
+        if (selectedClassExplicitSubjectIds.length > 0) {
+          return selectedClassExplicitSubjectIds.includes(subject.id);
+        }
+        return true;
+      });
+    }
+
+    return filtered;
+  }, [subjects, selectedClass, selectedClassExplicitSubjectIds]);
+
+  useEffect(() => {
+    if (classId && !availableClasses.some((item) => String(item.id) === classId)) {
+      setClassId("");
+      setSubjectId("");
+    }
+  }, [classId, availableClasses]);
+
+  useEffect(() => {
+    if (subjectId && !availableSubjects.some((item) => String(item.id) === subjectId)) {
+      setSubjectId("");
+    }
+  }, [subjectId, availableSubjects]);
+
   const handleSubmit = () => {
     setTouched(true);
     
@@ -540,7 +746,7 @@ function AssessmentDialog({
                   <SelectValue placeholder="Select class" />
                 </SelectTrigger>
                 <SelectContent>
-                  {classes.map((c) => (
+                  {availableClasses.map((c) => (
                     <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
                   ))}
                 </SelectContent>
@@ -556,7 +762,7 @@ function AssessmentDialog({
                   <SelectValue placeholder="Select subject" />
                 </SelectTrigger>
                 <SelectContent>
-                  {subjects.map((s) => (
+                  {availableSubjects.map((s) => (
                     <SelectItem key={s.id} value={s.id.toString()}>{s.name}</SelectItem>
                   ))}
                 </SelectContent>
@@ -720,6 +926,7 @@ interface CommentsDialogProps {
   subjects: Subject[];
   classes: ClassType[];
   grades: Grade[];
+  streams: Stream[];
 }
 
 function MultiSelectPicker({ label, options, selected, onChange, testId }: {
@@ -799,12 +1006,14 @@ function MultiSelectPicker({ label, options, selected, onChange, testId }: {
   );
 }
 
-function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grades }: CommentsDialogProps) {
+function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grades, streams, schoolType, examinationBoard }: CommentsDialogProps & { schoolType: "primary" | "secondary"; examinationBoard: "ZIMSEC" | "Cambridge" }) {
   const { toast } = useToast();
   const [commentText, setCommentText] = useState("");
   const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState<number[]>([]);
   const [gradeId, setGradeId] = useState("");
+  const profileTabs = useMemo(() => getGradingProfilesForSchool(schoolType, examinationBoard), [schoolType, examinationBoard]);
+  const [activeTab, setActiveTab] = useState("");
 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
@@ -815,15 +1024,47 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
   const [pendingText, setPendingText] = useState("");
   const [pendingGradeId, setPendingGradeId] = useState<number>(0);
 
-  const classOptions = (classes || []).map(c => ({ id: c.id, name: c.className }));
+  const streamMap = useMemo(() => new Map((streams || []).map((stream) => [stream.id, stream.name])), [streams]);
+  const classOptions = useMemo(() => (classes || [])
+    .filter((klass) => {
+      if (!activeTab) return true;
+      const streamName = klass.streamId ? streamMap.get(klass.streamId) : klass.className;
+      return profileMatchesStreamName(activeTab, streamName);
+    })
+    .map(c => ({ id: c.id, name: c.className })), [classes, activeTab, streamMap]);
+  const classOptionIds = useMemo(() => new Set(classOptions.map((option) => option.id)), [classOptions]);
   const subjectOptions = (subjects || []).map(s => ({ id: s.id, name: s.name }));
 
+  useEffect(() => {
+    if (!activeTab && profileTabs.length > 0) {
+      setActiveTab(profileTabs[0].key);
+    }
+  }, [activeTab, profileTabs]);
+
+  useEffect(() => {
+    setSelectedClassIds((prev) => prev.filter((id) => classOptionIds.has(id)));
+  }, [classOptionIds]);
+
+  const gradeMap = useMemo(() => new Map((grades || []).map((grade) => [grade.id, grade])), [grades]);
   const gradeRankMap: Record<string, number> = { 'A*': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'U': 6 };
   const sortedGrades = [...(grades || [])].sort((a, b) => {
     const ra = gradeRankMap[a.gradeName.toUpperCase().replace(/\s/g, '')] ?? 999;
     const rb = gradeRankMap[b.gradeName.toUpperCase().replace(/\s/g, '')] ?? 999;
     return ra - rb;
   });
+  const filteredGrades = useMemo(
+    () => sortedGrades.filter((grade) => !activeTab || grade.gradeLevel === activeTab),
+    [sortedGrades, activeTab],
+  );
+  const filteredComments = useMemo(
+    () =>
+      (comments || []).filter((comment) => {
+        if (!activeTab) return true;
+        const grade = gradeMap.get(comment.gradeId);
+        return grade?.gradeLevel === activeTab;
+      }),
+    [comments, activeTab, gradeMap],
+  );
 
   const createMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -951,7 +1192,16 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
             <DialogDescription>Multi Class x Multi Subject / Single Grade</DialogDescription>
           </DialogHeader>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 min-h-0 flex flex-col">
+            <TabsList className="flex flex-wrap h-auto justify-start">
+              {profileTabs.map((profile) => (
+                <TabsTrigger key={profile.key} value={profile.key} data-testid={`tab-assessment-comments-${profile.key}`}>
+                  {profile.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
             <MultiSelectPicker
               label="Classes (multi)"
               options={classOptions}
@@ -974,7 +1224,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Select Grade</SelectItem>
-                  {sortedGrades.map((g) => (
+                  {filteredGrades.map((g) => (
                     <SelectItem key={g.id} value={g.id.toString()}>{g.gradeName}</SelectItem>
                   ))}
                 </SelectContent>
@@ -982,7 +1232,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
             </div>
           </div>
 
-          <div className="flex gap-2 items-end">
+          <div className="flex gap-2 items-end mt-3">
             <Input
               placeholder="Write your comment here"
               value={commentText}
@@ -1003,12 +1253,12 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
             One comment per Class x Subject for the chosen Grade. This keeps Marks auto-comments working.
           </p>
 
-          <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
+          <div className="flex-1 min-h-0 overflow-y-auto border rounded-md mt-3">
             {comments.length === 0 ? (
               <div className="p-6 text-center text-muted-foreground text-sm">No comments yet.</div>
             ) : (
               <div className="divide-y">
-                {comments.map((c) => (
+                {filteredComments.map((c) => (
                   <div key={c.id} className="p-3" data-testid={`comment-item-${c.id}`}>
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm">
@@ -1043,6 +1293,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
               </div>
             )}
           </div>
+          </Tabs>
         </DialogContent>
       </Dialog>
 

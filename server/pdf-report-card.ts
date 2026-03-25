@@ -16,7 +16,14 @@ interface Summary {
   avgMark: string;
   subjectsPassed: string;
   points: string;
+  classPosition?: string;
   overallPosition: string;
+}
+
+interface EcdPdfSection {
+  code: string;
+  name: string;
+  items: Array<{ itemText: string; rating: string | null }>;
 }
 
 interface SchoolInfo {
@@ -31,7 +38,7 @@ interface SchoolInfo {
 }
 
 export interface ReportCardPdfData {
-  school: SchoolInfo;
+  school: SchoolInfo & { showClassPositionOnReports?: boolean };
   studentName: string;
   admissionNo: string;
   className: string;
@@ -39,6 +46,7 @@ export interface ReportCardPdfData {
   termName?: string;
   subjects: SubjectRow[];
   summary: Summary;
+  ecdSections?: EcdPdfSection[];
   principalComment?: string;
   classTeacherComment?: string;
 }
@@ -106,15 +114,20 @@ export async function generateReportCardPdf(data: ReportCardPdfData): Promise<Bu
       doc.moveDown(0.8);
 
       const summaryBoxY = doc.y;
-      const summaryHeaders = ['Total Marks', 'Average', 'Passed', 'Points', 'Position'];
+      const summaryHeaders = ['Total Marks', 'Average', 'Passed', 'Points'];
       const summaryValues = [
         data.summary.totalMark || '-',
         data.summary.avgMark || '-',
         data.summary.subjectsPassed || '-',
         data.summary.points || '-',
-        data.summary.overallPosition || '-',
       ];
-      const summaryColWidth = pageWidth / 5;
+      if (data.school.showClassPositionOnReports) {
+        summaryHeaders.push('Class Position');
+        summaryValues.push(data.summary.classPosition || '-');
+      }
+      summaryHeaders.push('Overall Position');
+      summaryValues.push(data.summary.overallPosition || '-');
+      const summaryColWidth = pageWidth / summaryHeaders.length;
 
       doc.fontSize(8).font('Helvetica-Bold');
       for (let i = 0; i < summaryHeaders.length; i++) {
@@ -136,6 +149,58 @@ export async function generateReportCardPdf(data: ReportCardPdfData): Promise<Bu
       }
 
       doc.y = valY + 24;
+
+      if (data.ecdSections && data.ecdSections.length > 0) {
+        doc.fontSize(9).font('Helvetica-Bold').text('ECD Development Assessment', leftMargin, doc.y, { align: 'center', width: pageWidth });
+        doc.moveDown(0.4);
+        for (const section of data.ecdSections) {
+          if (doc.y > doc.page.height - 140) {
+            doc.addPage();
+            doc.y = 40;
+          }
+          doc.fontSize(8).font('Helvetica-Bold');
+          doc.rect(leftMargin, doc.y, pageWidth, 14).fillAndStroke('#f3f4f6', '#d1d5db');
+          doc.fillColor('#000').text(`${section.code}. ${section.name}`, leftMargin + 4, doc.y + 4, { width: pageWidth - 8 });
+          doc.y += 14;
+
+          const ecdCols = [
+            { header: 'Checklist Item', width: pageWidth * 0.64, align: 'left' as const },
+            { header: 'Yes', width: pageWidth * 0.12, align: 'center' as const },
+            { header: 'No', width: pageWidth * 0.12, align: 'center' as const },
+            { header: 'Almost', width: pageWidth * 0.12, align: 'center' as const },
+          ];
+          let x = leftMargin;
+          const topY = doc.y;
+          doc.fontSize(7).font('Helvetica-Bold');
+          for (const col of ecdCols) {
+            doc.rect(x, topY, col.width, 14).fillAndStroke('#fafafa', '#d1d5db');
+            doc.fillColor('#000').text(col.header, x + 2, topY + 4, { width: col.width - 4, align: col.align });
+            x += col.width;
+          }
+          let rowY = topY + 14;
+          doc.fontSize(7).font('Helvetica');
+          for (const item of section.items) {
+            if (rowY > doc.page.height - 80) {
+              doc.addPage();
+              rowY = 40;
+            }
+            x = leftMargin;
+            const cells = [
+              item.itemText,
+              item.rating === 'YES' ? '✓' : '',
+              item.rating === 'NO' ? '✓' : '',
+              item.rating === 'ALMOST' ? '✓' : '',
+            ];
+            for (let i = 0; i < ecdCols.length; i++) {
+              doc.rect(x, rowY, ecdCols[i].width, 13).stroke('#d1d5db');
+              doc.text(cells[i], x + 2, rowY + 3, { width: ecdCols[i].width - 4, align: ecdCols[i].align, lineBreak: false });
+              x += ecdCols[i].width;
+            }
+            rowY += 13;
+          }
+          doc.y = rowY + 6;
+        }
+      }
 
       const cols = [
         { header: 'Subject', width: pageWidth * 0.20, align: 'left' as const },

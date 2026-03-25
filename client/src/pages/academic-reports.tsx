@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
@@ -10,6 +10,7 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -31,7 +32,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest, queryClient, schoolFetch } from "@/lib/queryClient";
 import {
   Dialog,
   DialogContent,
@@ -67,6 +68,7 @@ import {
   Eye,
   Layers,
   MessageSquare,
+  X,
 } from "lucide-react";
 import type {
   Exam,
@@ -78,6 +80,8 @@ import type {
   AssessmentType,
 } from "@shared/schema";
 import { COMMENT_GRADE_SCALE, COMMENT_GRADE_OPTIONS } from "@shared/schema";
+import { getGradingProfilesForSchool, getGradeProfileLabel, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName } from "@shared/academic-profiles";
+import { EcdAssessmentTab } from "@/components/academic-reports/ecd-assessment-tab";
 
 type ViewMode = "hub" | "class-level" | "report-cards";
 
@@ -187,6 +191,12 @@ interface ReportSubject {
   gradePoints: number;
 }
 
+interface EcdReportSection {
+  code: string;
+  name: string;
+  items: Array<{ itemText: string; rating: string | null }>;
+}
+
 interface ReportStudent {
   student: {
     id: number;
@@ -202,6 +212,7 @@ interface ReportStudent {
     avgMark: string;
     subjectsPassed: string;
     points: string;
+    classPosition?: string;
     overallPosition: string;
     classSize: number;
     averagePercentage: number | null;
@@ -212,6 +223,7 @@ interface ReportStudent {
   chartClassAvgs: (number | null)[];
   chartOvertimeLabels: string[];
   chartOvertimeAvgs: number[];
+  ecdSections?: EcdReportSection[];
   principalComment?: string;
   classTeacherComment?: string;
 }
@@ -230,6 +242,7 @@ interface ReportCardData {
     currentAcademicYear: string | null;
     currentTerm: string | null;
     examinationBoard: string | null;
+    showClassPositionOnReports?: boolean;
   };
   class: Class;
   exam: Exam;
@@ -257,6 +270,43 @@ function DevCell({ dev }: { dev: string }) {
       <TrendingUp className="w-3 h-3 inline" />{" "}
       {dev.replace("+", "").replace("NEW", "NEW")}
     </span>
+  );
+}
+
+function EcdChecklistSection({ sections }: { sections: EcdReportSection[] }) {
+  if (!sections.length) return null;
+
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="text-[11px] font-bold uppercase text-center">ECD Development Assessment</div>
+      {sections.map((section) => (
+        <div key={section.code} className="rounded-sm border border-gray-300 dark:border-gray-600 overflow-hidden">
+          <div className="bg-gray-200 dark:bg-gray-800 px-2 py-1 text-[10px] font-semibold uppercase">
+            {section.code}. {section.name}
+          </div>
+          <table className="w-full border-collapse text-[9px]">
+            <thead>
+              <tr>
+                <th className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left w-[64%]">Checklist Item</th>
+                <th className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center w-[12%]">Yes</th>
+                <th className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center w-[12%]">No</th>
+                <th className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center w-[12%]">Almost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {section.items.map((item, index) => (
+                <tr key={`${section.code}-${index}`}>
+                  <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1">{item.itemText}</td>
+                  <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center font-bold">{item.rating === "YES" ? "✓" : ""}</td>
+                  <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center font-bold">{item.rating === "NO" ? "✓" : ""}</td>
+                  <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center font-bold">{item.rating === "ALMOST" ? "✓" : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -396,6 +446,11 @@ function ReportCardSlip({
                     <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
                       Points
                     </th>
+                    {data.school.showClassPositionOnReports && (
+                      <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                        Class Position
+                      </th>
+                    )}
                     <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
                       Overall Position
                     </th>
@@ -427,6 +482,14 @@ function ReportCardSlip({
                     >
                       {summary.points}
                     </td>
+                    {data.school.showClassPositionOnReports && (
+                      <td
+                        className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                        data-testid="text-class-position"
+                      >
+                        {summary.classPosition || "–"}
+                      </td>
+                    )}
                     <td
                       className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
                       data-testid="text-position"
@@ -438,6 +501,10 @@ function ReportCardSlip({
               </table>
             </div>
           </div>
+
+          {studentReport.ecdSections && studentReport.ecdSections.length > 0 && (
+            <EcdChecklistSection sections={studentReport.ecdSections} />
+          )}
 
           <table
             className="w-full border-collapse mt-1.5 text-[11px]"
@@ -1731,6 +1798,20 @@ export default function AcademicReportsPage() {
     enabled: !!currentSchoolId,
   });
 
+  const { data: currentSchool } = useQuery<any>({
+    queryKey: ["/api/schools/current", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await fetch("/api/schools/current", {
+        credentials: "include",
+        headers: currentSchoolId ? { "X-School-Id": String(currentSchoolId) } : undefined,
+      });
+      if (!res.ok) throw new Error("Failed to load current school");
+      return res.json();
+    },
+  });
+  const isPrimarySchool = normalizeSchoolType(currentSchool?.schoolType) === "primary";
+
   const { data: reportCardData, isLoading: reportLoading } =
     useQuery<ReportCardData>({
       queryKey: ["/api/report-cards", selectedExamId, "class", selectedClassId],
@@ -1989,8 +2070,9 @@ export default function AcademicReportsPage() {
                   }
                 });
 
-                const defaultTab =
-                  assessmentTypes[0]?.id?.toString() || "unassigned";
+                const defaultTab = isPrimarySchool
+                  ? "ecd-assessment"
+                  : assessmentTypes[0]?.id?.toString() || "unassigned";
 
                 return (
                   <Tabs defaultValue={defaultTab} className="w-full">
@@ -1998,6 +2080,11 @@ export default function AcademicReportsPage() {
                       className="flex flex-wrap h-auto gap-1 w-full justify-start"
                       data-testid="tabs-assessment-types"
                     >
+                      {isPrimarySchool && (
+                        <TabsTrigger value="ecd-assessment" data-testid="tab-ecd-assessment">
+                          ECD Assessment
+                        </TabsTrigger>
+                      )}
                       {assessmentTypes.map((at) => (
                         <TabsTrigger
                           key={at.id}
@@ -2024,6 +2111,12 @@ export default function AcademicReportsPage() {
                         </TabsTrigger>
                       )}
                     </TabsList>
+
+                    {isPrimarySchool && (
+                      <TabsContent value="ecd-assessment" data-testid="tab-content-ecd-assessment">
+                        <EcdAssessmentTab exams={exams} assessmentTypes={assessmentTypes} />
+                      </TabsContent>
+                    )}
 
                     {assessmentTypes.map((at) => {
                       const typeExams = examsByType.get(at.id) || [];
@@ -2479,6 +2572,88 @@ function ClassLevelBlock({
   );
 }
 
+
+function MultiSelectPicker({
+  label,
+  options,
+  selected,
+  onChange,
+  testId,
+}: {
+  label: string;
+  options: { id: number; name: string }[];
+  selected: number[];
+  onChange: (ids: number[]) => void;
+  testId: string;
+}) {
+  const [filterText, setFilterText] = useState("");
+  const [isOpen, setIsOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setIsOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const filtered = options.filter((o) => !filterText || o.name.toLowerCase().includes(filterText.toLowerCase()));
+
+  const toggle = (id: number) => {
+    onChange(selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id]);
+  };
+
+  const remove = (id: number) => {
+    onChange(selected.filter((s) => s !== id));
+  };
+
+  return (
+    <div ref={ref} className="relative" data-testid={testId}>
+      <Label className="text-xs text-muted-foreground mb-1 block">{label}</Label>
+      <div
+        className="flex flex-wrap gap-1 items-center border rounded-md px-2 py-1.5 min-h-[36px] cursor-text bg-background"
+        onClick={() => setIsOpen(true)}
+      >
+        {selected.map((id) => {
+          const opt = options.find((o) => o.id === id);
+          return (
+            <Badge key={id} variant="secondary" className="text-xs gap-1">
+              {opt?.name || id}
+              <X className="w-3 h-3 cursor-pointer" onClick={(e) => { e.stopPropagation(); remove(id); }} />
+            </Badge>
+          );
+        })}
+        <input
+          className="flex-1 min-w-[80px] border-none outline-none bg-transparent text-sm"
+          placeholder={selected.length === 0 ? "Tap to select..." : ""}
+          value={filterText}
+          onChange={(e) => setFilterText(e.target.value)}
+          onFocus={() => setIsOpen(true)}
+        />
+      </div>
+      {isOpen && (
+        <div className="absolute z-50 left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg max-h-[200px] overflow-auto">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-muted-foreground">No options</div>
+          ) : (
+            filtered.map((o) => (
+              <div
+                key={o.id}
+                className={`flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-accent text-sm ${selected.includes(o.id) ? "bg-accent/50" : ""}`}
+                onClick={() => toggle(o.id)}
+              >
+                <span>{o.name}</span>
+                {selected.includes(o.id) && <span className="text-primary font-bold">✓</span>}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReportCommentsModal({
   open,
   onOpenChange,
@@ -2491,35 +2666,109 @@ function ReportCommentsModal({
   title: string;
 }) {
   const { toast } = useToast();
+  const { currentSchoolId, user } = useAuth();
   const [commentText, setCommentText] = useState("");
-  const [selectedGrade, setSelectedGrade] = useState("");
-  const [classId, setClassId] = useState("");
+  const [selectedGradeId, setSelectedGradeId] = useState("");
+  const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
+  const [activeTab, setActiveTab] = useState("");
+  const [dupModalOpen, setDupModalOpen] = useState(false);
+  const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [missingTargets, setMissingTargets] = useState<any[]>([]);
+  const [pendingText, setPendingText] = useState("");
+  const [pendingGradeId, setPendingGradeId] = useState<number | null>(null);
   const isClassTeacher = commentType === "class_teacher";
 
-  const gradeRankMap: Record<string, number> = {
-    "A*": 0,
-    A: 1,
-    B: 2,
-    C: 3,
-    D: 4,
-    E: 5,
-    F: 6,
-    G: 7,
-    U: 8,
-  };
-
-  const { data: comments, isLoading } = useQuery<ReportComment[]>({
-    queryKey: [`/api/report-comments?commentType=${commentType}`],
-    enabled: open,
+  const { data: comments = [], isLoading } = useQuery<ReportComment[]>({
+    queryKey: ["/api/report-comments", currentSchoolId, commentType],
+    enabled: open && !!currentSchoolId,
+    staleTime: 0,
+    refetchOnMount: "always",
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/report-comments?commentType=${commentType}`);
+      if (!res.ok) throw new Error("Failed to load report comments");
+      return res.json();
+    },
   });
 
-  const { data: classesData } = useQuery<any>({
-    queryKey: ["/api/classes"],
-    enabled: isClassTeacher && open,
+  const { data: classesData = [] } = useQuery<Class[]>({
+    queryKey: ["/api/classes", currentSchoolId, "report-comments"],
+    enabled: open && !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/classes");
+      if (!res.ok) throw new Error("Failed to load classes");
+      return res.json();
+    },
   });
-  const allClasses: any[] = Array.isArray(classesData)
-    ? classesData
-    : ((classesData as any)?.items ?? []);
+
+  const { data: staffData = [] } = useQuery<any[]>({
+    queryKey: ["/api/staff", currentSchoolId, "report-comments"],
+    enabled: open && !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/staff");
+      if (!res.ok) throw new Error("Failed to load staff");
+      return res.json();
+    },
+  });
+
+  const { data: gradesResponse } = useQuery<{ items: Grade[] } | Grade[]>({
+    queryKey: ["/api/grades", currentSchoolId, "report-comments"],
+    enabled: open && !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/grades");
+      if (!res.ok) throw new Error("Failed to load grades");
+      return res.json();
+    },
+  });
+  const gradesData = Array.isArray(gradesResponse) ? gradesResponse : (gradesResponse?.items ?? []);
+
+  const { data: currentSchool } = useQuery<any>({
+    queryKey: ["/api/schools/current", currentSchoolId, "report-comments"],
+    enabled: open && !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/schools/current");
+      if (!res.ok) throw new Error("Failed to load current school");
+      return res.json();
+    },
+  });
+
+  const schoolType = normalizeSchoolType(currentSchool?.schoolType);
+  const examinationBoard = normalizeExamBoard(currentSchool?.examinationBoard);
+  const profileTabs = useMemo(() => getGradingProfilesForSchool(schoolType, examinationBoard), [schoolType, examinationBoard]);
+
+  const { data: streamsData = [] } = useQuery<Stream[]>({
+    queryKey: ["/api/streams", schoolType, currentSchoolId, "report-comments"],
+    enabled: open && !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/streams?schoolType=${schoolType}`);
+      if (!res.ok) throw new Error("Failed to load streams");
+      return res.json();
+    },
+  });
+
+  useEffect(() => {
+    if (!activeTab && profileTabs.length > 0) setActiveTab(profileTabs[0].key);
+  }, [activeTab, profileTabs]);
+
+  useEffect(() => {
+    setSelectedGradeId("");
+    setSelectedClassIds([]);
+  }, [activeTab]);
+
+  const allClasses: Class[] = Array.isArray(classesData) ? classesData : [];
+  const streamMap = useMemo(() => new Map((streamsData || []).map((stream) => [stream.id, stream.name])), [streamsData]);
+  const currentStaff = Array.isArray(staffData) ? staffData.find((staff: any) => staff.userId === user?.id) : undefined;
+
+  const filteredClasses = useMemo(() => {
+    const scoped = allClasses.filter((klass: any) => {
+      if (!activeTab) return true;
+      const streamName = klass.streamId ? streamMap.get(klass.streamId) : klass.className;
+      return profileMatchesStreamName(activeTab, streamName);
+    });
+    if (!isClassTeacher) return scoped;
+    if (!currentStaff?.id) return scoped;
+    const assigned = scoped.filter((klass: any) => klass.classTeacherId === currentStaff.id);
+    return assigned.length > 0 ? assigned : scoped;
+  }, [allClasses, activeTab, streamMap, isClassTeacher, currentStaff?.id]);
 
   const classMap = useMemo(() => {
     const m: Record<number, string> = {};
@@ -2529,40 +2778,130 @@ function ReportCommentsModal({
     return m;
   }, [allClasses]);
 
-  const sortedComments = useMemo(() => {
-    if (!comments) return [];
-    return [...comments].sort((a, b) => {
-      const ra = gradeRankMap[a.commentGrade] ?? 999;
-      const rb = gradeRankMap[b.commentGrade] ?? 999;
-      return ra - rb;
+  const gradeMap = useMemo(() => {
+    const m = new Map<number, Grade>();
+    gradesData.forEach((grade) => m.set(grade.id, grade));
+    return m;
+  }, [gradesData]);
+
+  const filteredGrades = useMemo(
+    () => gradesData.filter((grade) => !activeTab || grade.gradeLevel === activeTab),
+    [gradesData, activeTab],
+  );
+
+  const filteredComments = useMemo(() => {
+    return comments.filter((comment) => {
+      if (activeTab && comment.gradeLevel && comment.gradeLevel !== activeTab) return false;
+      if (isClassTeacher && selectedClassIds.length > 0 && !selectedClassIds.includes(comment.classId || -1)) return false;
+      return comment.commentType === commentType;
     });
-  }, [comments]);
+  }, [comments, activeTab, selectedClassIds, isClassTeacher, commentType]);
+
+  const sortedComments = useMemo(() => {
+    return [...filteredComments].sort((a, b) => {
+      const gradeA = a.gradeId ? gradeMap.get(a.gradeId) : undefined;
+      const gradeB = b.gradeId ? gradeMap.get(b.gradeId) : undefined;
+      return (gradeB?.upperLimit ?? 0) - (gradeA?.upperLimit ?? 0);
+    });
+  }, [filteredComments, gradeMap]);
+
+  const refreshComments = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["/api/report-comments", currentSchoolId, commentType] });
+    await queryClient.refetchQueries({ queryKey: ["/api/report-comments", currentSchoolId, commentType], exact: true });
+  };
 
   const createMutation = useMutation({
     mutationFn: async (data: {
-      commentGrade: string;
+      gradeId: number;
+      gradeLevel: string;
       commentText: string;
       commentType: string;
       classId?: number;
+      classIds?: number[];
     }) => {
+      if (data.commentType === "class_teacher") {
+        const classIds = Array.from(new Set((data.classIds || []).map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)));
+        if (classIds.length === 0 && data.classId) {
+          classIds.push(Number(data.classId));
+        }
+        const responses = [];
+        for (const classId of classIds) {
+          const res = await apiRequest("POST", "/api/report-comments", { ...data, classId, classIds: [classId] });
+          responses.push(await res.json());
+        }
+        return responses;
+      }
       const res = await apiRequest("POST", "/api/report-comments", data);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: [`/api/report-comments?commentType=${commentType}`],
-      });
+    onSuccess: async () => {
+      await refreshComments();
       setCommentText("");
-      setSelectedGrade("");
-      setClassId("");
+      setSelectedGradeId("");
+      setSelectedClassIds([]);
       toast({ title: "Success", description: "Comment saved" });
     },
     onError: (error: Error) => {
-      toast({
-        title: "Error",
-        description: error.message,
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const overwriteMutation = useMutation({
+    mutationFn: async () => {
+      if (!pendingGradeId) throw new Error("No pending grade selected");
+
+      const selectedDuplicates = duplicates.filter((item) => item.selected);
+      for (const item of selectedDuplicates) {
+        await apiRequest("DELETE", `/api/report-comments/${item.id}`);
+      }
+
+      let created = 0;
+      if (isClassTeacher) {
+        const classIdsToCreate = Array.from(new Set([
+          ...selectedDuplicates.map((item) => Number(item.classId)).filter((value) => Number.isFinite(value) && value > 0),
+          ...missingTargets.map((target: any) => Number(target.classId)).filter((value: number) => Number.isFinite(value) && value > 0),
+        ]));
+        if (classIdsToCreate.length > 0) {
+          for (const classId of classIdsToCreate) {
+            const res = await apiRequest("POST", "/api/report-comments", {
+              gradeId: pendingGradeId,
+              gradeLevel: activeTab,
+              commentText: pendingText,
+              commentType,
+              classId,
+              classIds: [classId],
+            });
+            await res.json();
+          }
+          created = classIdsToCreate.length;
+        }
+      } else if (selectedDuplicates.length > 0 || missingTargets.length > 0) {
+        const res = await apiRequest("POST", "/api/report-comments", {
+          gradeId: pendingGradeId,
+          gradeLevel: activeTab,
+          commentText: pendingText,
+          commentType,
+        });
+        await res.json();
+        created = 1;
+      }
+
+      return { overwritten: selectedDuplicates.length, created };
+    },
+    onSuccess: async (data) => {
+      await refreshComments();
+      setDupModalOpen(false);
+      setDuplicates([]);
+      setMissingTargets([]);
+      setPendingText("");
+      setPendingGradeId(null);
+      setCommentText("");
+      setSelectedGradeId("");
+      setSelectedClassIds([]);
+      toast({ title: "Success", description: `Overwrote ${data.overwritten || 0} & created ${data.created || 0}` });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
     },
   });
 
@@ -2570,211 +2909,256 @@ function ReportCommentsModal({
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/report-comments/${id}`);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: [`/api/report-comments?commentType=${commentType}`],
-      });
+    onSuccess: async () => {
+      await refreshComments();
       toast({ title: "Success", description: "Comment deleted" });
     },
     onError: (error: Error) => {
-      toast({
-        title: "Error",
-        description: error.message,
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: error.message, variant: "destructive" });
     },
   });
 
-  const handleSave = () => {
-    if (!selectedGrade) {
-      toast({
-        title: "Error",
-        description: "Select a grade",
-        variant: "destructive",
-      });
+  const handleSave = async () => {
+    if (!selectedGradeId) {
+      toast({ title: "Error", description: "Select a grade", variant: "destructive" });
       return;
     }
     if (!commentText.trim()) {
-      toast({
-        title: "Error",
-        description: "Enter a comment",
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: "Enter a comment", variant: "destructive" });
       return;
     }
-    if (isClassTeacher && !classId) {
-      toast({
-        title: "Error",
-        description: "Select a class",
-        variant: "destructive",
-      });
+    if (isClassTeacher && selectedClassIds.length === 0) {
+      toast({ title: "Error", description: "Select at least one class", variant: "destructive" });
       return;
     }
-    createMutation.mutate({
-      commentGrade: selectedGrade,
-      commentText: commentText.trim(),
+
+    const gradeIdNum = parseInt(selectedGradeId);
+    const selectedGrade = gradeMap.get(gradeIdNum);
+    const matchesGrade = (comment: any) => {
+      if (comment.gradeId && comment.gradeId === gradeIdNum) return true;
+      if (selectedGrade && comment.commentGrade === selectedGrade.gradeName && (comment.gradeLevel || null) === (activeTab || null)) return true;
+      return false;
+    };
+
+    const payload = {
+      gradeId: gradeIdNum,
+      gradeLevel: activeTab,
       commentType,
-      ...(isClassTeacher && classId ? { classId: parseInt(classId) } : {}),
-    });
+      ...(isClassTeacher ? { classIds: selectedClassIds, classId: selectedClassIds[0] } : {}),
+    };
+
+    const scopedComments = comments.filter((comment) => comment.commentType === commentType && (!activeTab || (comment.gradeLevel || null) === (activeTab || null)));
+
+    if (isClassTeacher) {
+      const duplicateItems: any[] = [];
+      const newTargets: any[] = [];
+      for (const classId of selectedClassIds) {
+        const existing = scopedComments.find((comment: any) => Number(comment.classId) === classId && matchesGrade(comment));
+        if (existing) {
+          duplicateItems.push({
+            id: existing.id,
+            classId,
+            className: classMap[classId] || "",
+            gradeName: selectedGrade?.gradeName || existing.commentGrade,
+            commentText: existing.commentText,
+            selected: true,
+          });
+        } else {
+          newTargets.push({ classId, className: classMap[classId] || "" });
+        }
+      }
+      if (duplicateItems.length > 0) {
+        setDuplicates(duplicateItems);
+        setMissingTargets(newTargets);
+        setPendingText(commentText.trim());
+        setPendingGradeId(gradeIdNum);
+        setDupModalOpen(true);
+        return;
+      }
+      createMutation.mutate({ ...payload, commentText: commentText.trim() });
+      return;
+    }
+
+    const existing = scopedComments.find((comment: any) => matchesGrade(comment));
+    if (existing) {
+      setDuplicates([{
+        id: existing.id,
+        gradeName: selectedGrade?.gradeName || existing.commentGrade,
+        commentText: existing.commentText,
+        selected: true,
+      }]);
+      setMissingTargets([]);
+      setPendingText(commentText.trim());
+      setPendingGradeId(gradeIdNum);
+      setDupModalOpen(true);
+      return;
+    }
+
+    createMutation.mutate({ ...payload, commentText: commentText.trim() });
+  };
+
+  const toggleDuplicate = (id: number) => {
+    setDuplicates((prev) => prev.map((item) => item.id === id ? { ...item, selected: !item.selected } : item));
+  };
+
+  const handleOverwrite = () => {
+    if (!pendingGradeId) return;
+    overwriteMutation.mutate();
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle data-testid="text-report-comments-title">
-            {title}
-          </DialogTitle>
-          <DialogDescription className="text-xs text-muted-foreground">
-            Comments are matched to students based on their average mark:{" "}
-            {COMMENT_GRADE_SCALE.map(
-              (g) => `${g.grade}: ${g.min}–${g.max}%`,
-            ).join(", ")}
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="max-w-4xl max-h-[88vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle data-testid="text-report-comments-title">{title}</DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground">
+              {isClassTeacher
+                ? "Comments are matched by grading system, class, and overall average grade band."
+                : "Comments are matched by grading system and overall average grade band."}
+            </DialogDescription>
+          </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto">
-          {isLoading ? (
-            <div className="space-y-2">
-              {[1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-10 w-full" />
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 min-h-0 flex flex-col">
+            <TabsList className="flex flex-wrap h-auto justify-start">
+              {profileTabs.map((profile) => (
+                <TabsTrigger key={profile.key} value={profile.key} data-testid={`tab-report-comments-${profile.key}`}>
+                  {profile.label}
+                </TabsTrigger>
               ))}
-            </div>
-          ) : sortedComments.length === 0 ? (
-            <p className="text-center text-muted-foreground py-8">
-              No comments yet. Add one below.
-            </p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className={isClassTeacher ? "w-[40%]" : "w-[55%]"}>
-                    Comment
-                  </TableHead>
-                  {isClassTeacher && (
-                    <TableHead className="text-center">Class</TableHead>
-                  )}
-                  <TableHead className="text-center">Grade</TableHead>
-                  <TableHead className="text-center">Range</TableHead>
-                  <TableHead className="text-center">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sortedComments.map((c, idx) => {
-                  const scaleEntry = COMMENT_GRADE_SCALE.find(
-                    (g) => g.grade === c.commentGrade,
-                  );
-                  return (
-                    <TableRow
-                      key={c.id}
-                      className={idx % 2 === 0 ? "bg-muted/30" : ""}
-                    >
-                      <TableCell
-                        className="text-sm"
-                        data-testid={`text-report-comment-${c.id}`}
-                      >
-                        {c.commentText}
-                      </TableCell>
-                      {isClassTeacher && (
-                        <TableCell
-                          className="text-center text-sm"
-                          data-testid={`text-report-comment-class-${c.id}`}
-                        >
-                          {c.classId ? classMap[c.classId] || "—" : "—"}
-                        </TableCell>
-                      )}
-                      <TableCell
-                        className="text-center font-medium"
-                        data-testid={`text-report-comment-grade-${c.id}`}
-                      >
-                        {c.commentGrade}
-                      </TableCell>
-                      <TableCell className="text-center text-xs text-muted-foreground">
-                        {scaleEntry
-                          ? `${scaleEntry.min}–${scaleEntry.max}%`
-                          : "—"}
-                      </TableCell>
-                      <TableCell className="text-center">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="text-destructive border-destructive"
-                          onClick={() => deleteMutation.mutate(c.id)}
-                          disabled={deleteMutation.isPending}
-                          data-testid={`button-delete-report-comment-${c.id}`}
-                        >
-                          Delete
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          )}
-        </div>
+            </TabsList>
 
-        <div className="border-t pt-4 space-y-3">
-          <Textarea
-            placeholder="Enter the comment"
-            value={commentText}
-            onChange={(e) => setCommentText(e.target.value)}
-            className="resize-none"
-            rows={2}
-            data-testid="textarea-report-comment"
-          />
-          <div className="flex items-center gap-3 flex-wrap">
-            {isClassTeacher && (
-              <Select value={classId} onValueChange={setClassId}>
-                <SelectTrigger
-                  className="w-[200px]"
-                  data-testid="select-report-comment-class"
-                >
-                  <SelectValue placeholder="Please select classes" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(allClasses || []).map((c: any) => (
-                    <SelectItem key={c.id} value={c.id.toString()}>
-                      {c.className}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-            <Select value={selectedGrade} onValueChange={setSelectedGrade}>
-              <SelectTrigger
-                className="w-[160px]"
-                data-testid="select-report-comment-grade"
-              >
-                <SelectValue placeholder="Grade" />
-              </SelectTrigger>
-              <SelectContent>
-                {COMMENT_GRADE_SCALE.map((g) => (
-                  <SelectItem key={g.grade} value={g.grade}>
-                    {g.grade} ({g.min}–{g.max}%)
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <div className="ml-auto flex items-center gap-2">
-              <Button
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-                data-testid="button-cancel-report-comment"
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={handleSave}
-                disabled={createMutation.isPending}
-                data-testid="button-submit-report-comment"
-              >
-                {createMutation.isPending ? "Saving..." : "Submit"}
-              </Button>
+            <div className={`mt-4 grid grid-cols-1 ${isClassTeacher ? "md:grid-cols-3" : "md:grid-cols-2"} gap-3`}>
+              <div>
+                <Label className="text-xs text-muted-foreground mb-1 block">Grade</Label>
+                <Select value={selectedGradeId} onValueChange={setSelectedGradeId}>
+                  <SelectTrigger data-testid="select-report-comment-grade">
+                    <SelectValue placeholder="Select grade" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {filteredGrades.map((grade) => (
+                      <SelectItem key={grade.id} value={String(grade.id)}>{grade.gradeName}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {isClassTeacher && (
+                <MultiSelectPicker
+                  label="Classes"
+                  options={filteredClasses.map((c: any) => ({ id: c.id, name: c.className }))}
+                  selected={selectedClassIds}
+                  onChange={setSelectedClassIds}
+                  testId="multi-select-report-comment-classes"
+                />
+              )}
+              <div className="flex items-end">
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs w-full">
+                  Active Tab: <span className="font-semibold">{getGradeProfileLabel(activeTab)}</span>
+                </div>
+              </div>
             </div>
+
+            <div className="mt-3 border rounded-md p-3 space-y-3">
+              <Textarea
+                placeholder="Enter the comment"
+                value={commentText}
+                onChange={(e) => setCommentText(e.target.value)}
+                className="resize-none"
+                rows={2}
+                data-testid="textarea-report-comment"
+              />
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-cancel-report-comment">Cancel</Button>
+                <Button onClick={handleSave} disabled={createMutation.isPending || overwriteMutation.isPending} data-testid="button-submit-report-comment">
+                  {(createMutation.isPending || overwriteMutation.isPending) ? "Saving..." : "Submit"}
+                </Button>
+              </div>
+            </div>
+
+            <div className="mt-4 flex-1 min-h-0 overflow-y-auto border rounded-md">
+              {isLoading ? (
+                <div className="space-y-2 p-3">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
+              ) : sortedComments.length === 0 ? (
+                <p className="text-center text-muted-foreground py-8">No comments yet for this grading tab.</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      {isClassTeacher && <TableHead className="text-center">Class</TableHead>}
+                      <TableHead className="text-center">Grade</TableHead>
+                      <TableHead>Comment</TableHead>
+                      <TableHead className="text-center">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sortedComments.map((comment) => {
+                      const grade = comment.gradeId ? gradeMap.get(comment.gradeId) : undefined;
+                      return (
+                        <TableRow key={comment.id}>
+                          {isClassTeacher && <TableCell className="text-center">{comment.classId ? classMap[comment.classId] || "—" : "—"}</TableCell>}
+                          <TableCell className="text-center">{grade?.gradeName || comment.commentGrade}</TableCell>
+                          <TableCell className="text-sm">{comment.commentText}</TableCell>
+                          <TableCell className="text-center">
+                            <Button variant="outline" size="sm" className="text-destructive border-destructive" onClick={() => deleteMutation.mutate(comment.id)} disabled={deleteMutation.isPending} data-testid={`button-delete-report-comment-${comment.id}`}>
+                              Delete
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={dupModalOpen} onOpenChange={(open) => { if (!open) { setDupModalOpen(false); setDuplicates([]); setMissingTargets([]); } }}>
+        <DialogContent className="max-w-xl max-h-[88vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Existing Comments Found</DialogTitle>
+            <DialogDescription>Select which existing comments to overwrite with the new text. Missing targets will be created automatically.</DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 min-h-0 overflow-y-auto border rounded-md p-2 space-y-2">
+            {duplicates.map((item) => (
+              <div
+                key={item.id}
+                className={`flex items-center gap-3 p-2 rounded-md border cursor-pointer ${item.selected ? "border-primary bg-accent/30" : "border-border"}`}
+                onClick={() => toggleDuplicate(item.id)}
+                data-testid={`dup-report-comment-${item.id}`}
+              >
+                <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center text-xs ${item.selected ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground"}`}>
+                  {item.selected ? "✓" : ""}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm">
+                    {isClassTeacher && item.className ? <><span className="font-semibold">{item.className}</span> — </> : null}
+                    <span className="italic">{item.gradeName}</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground truncate">{item.commentText}</p>
+                </div>
+              </div>
+            ))}
           </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+
+          {missingTargets.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {missingTargets.length} new comment(s) will also be created for targets without existing comments.
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2 mt-2">
+            <Button variant="outline" onClick={() => { setDupModalOpen(false); setDuplicates([]); setMissingTargets([]); }}>Cancel</Button>
+            <Button onClick={handleOverwrite} disabled={overwriteMutation.isPending || (duplicates.filter((item) => item.selected).length === 0 && missingTargets.length === 0)} data-testid="button-confirm-report-comment-overwrite">
+              {overwriteMutation.isPending ? "Processing..." : duplicates.filter((item) => item.selected).length > 0
+                ? `Overwrite ${duplicates.filter((item) => item.selected).length} & Create ${missingTargets.length}`
+                : missingTargets.length > 0 ? `Create ${missingTargets.length} New` : "Nothing to do"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

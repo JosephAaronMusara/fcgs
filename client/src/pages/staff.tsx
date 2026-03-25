@@ -33,8 +33,7 @@ export default function StaffPage() {
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
   const [isNotifyOpen, setIsNotifyOpen] = useState(false);
   const [selectedStaffIds, setSelectedStaffIds] = useState<number[]>([]);
-  const [subjectsDialogStaff, setSubjectsDialogStaff] = useState<Staff | null>(null);
-  const [classesDialogStaff, setClassesDialogStaff] = useState<Staff | null>(null);
+  const [assignmentsDialogStaff, setAssignmentsDialogStaff] = useState<Staff | null>(null);
   const [accountDialogStaff, setAccountDialogStaff] = useState<Staff | null>(null);
   const [accessRightsStaff, setAccessRightsStaff] = useState<Staff | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -493,12 +492,12 @@ export default function StaffPage() {
                           </DialogContent>
                         </Dialog>
 
-                        <Dialog open={subjectsDialogStaff?.id === s.id} onOpenChange={(open) => !open && setSubjectsDialogStaff(null)}>
+                        <Dialog open={assignmentsDialogStaff?.id === s.id} onOpenChange={(open) => !open && setAssignmentsDialogStaff(null)}>
                           <DialogTrigger asChild>
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={() => setSubjectsDialogStaff(s)}
+                              onClick={() => setAssignmentsDialogStaff(s)}
                               data-testid={`button-subjects-staff-${s.id}`}
                               title="Subjects"
                               aria-label="Subjects"
@@ -506,32 +505,16 @@ export default function StaffPage() {
                               <BookOpen className="h-4 w-4" />
                             </Button>
                           </DialogTrigger>
-                          <DialogContent>
+                          <DialogContent className="max-w-3xl">
                             <DialogHeader>
-                              <DialogTitle>Assign Subjects - {s.firstName} {s.lastName}</DialogTitle>
+                              <DialogTitle>Assign Classes & Subjects - {s.firstName} {s.lastName}</DialogTitle>
                             </DialogHeader>
-                            <StaffSubjectsForm staffId={s.id} subjects={subjects || []} onClose={() => setSubjectsDialogStaff(null)} />
-                          </DialogContent>
-                        </Dialog>
-
-                        <Dialog open={classesDialogStaff?.id === s.id} onOpenChange={(open) => !open && setClassesDialogStaff(null)}>
-                          <DialogTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => setClassesDialogStaff(s)}
-                              data-testid={`button-classes-staff-${s.id}`}
-                              title="Classes"
-                              aria-label="Classes"
-                            >
-                              <School className="h-4 w-4" />
-                            </Button>
-                          </DialogTrigger>
-                          <DialogContent>
-                            <DialogHeader>
-                              <DialogTitle>Assign Classes - {s.firstName} {s.lastName}</DialogTitle>
-                            </DialogHeader>
-                            <StaffClassesForm staffId={s.id} classes={classes || []} onClose={() => setClassesDialogStaff(null)} />
+                            <StaffAssignmentsForm
+                              staffId={s.id}
+                              subjects={subjects || []}
+                              classes={classes || []}
+                              onClose={() => setAssignmentsDialogStaff(null)}
+                            />
                           </DialogContent>
                         </Dialog>
 
@@ -931,6 +914,190 @@ function StaffForm({
         {isLoading ? "Saving..." : defaultValues ? "Update Staff" : "Add Staff"}
       </Button>
     </form>
+  );
+}
+
+function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId: number; subjects: Subject[]; classes: ClassType[]; onClose: () => void }) {
+  const { toast } = useToast();
+  const [selectedSubjects, setSelectedSubjects] = useState<number[]>([]);
+  const [selectedClasses, setSelectedClasses] = useState<number[]>([]);
+  const [subjectSearch, setSubjectSearch] = useState("");
+  const [classSearch, setClassSearch] = useState("");
+
+  const { data: staffSubjects = [], isLoading: subjectsLoading } = useQuery<Array<{ id: number; subjectId: number }>>({
+    queryKey: ["/api/staff-subjects", staffId],
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/staff/${staffId}/subjects`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+  });
+
+  const { data: staffClasses = [], isLoading: classesLoading } = useQuery<Array<{ id: number; classId: number }>>({
+    queryKey: ["/api/staff-classes", staffId],
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/staff/${staffId}/classes`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+  });
+
+  useEffect(() => {
+    setSelectedSubjects(staffSubjects.map((s) => s.subjectId));
+  }, [staffSubjects]);
+
+  useEffect(() => {
+    setSelectedClasses(staffClasses.map((c) => c.classId));
+  }, [staffClasses]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      await Promise.all([
+        apiRequest("PUT", `/api/staff/${staffId}/subjects`, { subjectIds: selectedSubjects }),
+        apiRequest("PUT", `/api/staff/${staffId}/classes`, { classIds: selectedClasses }),
+      ]);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/staff-subjects", staffId] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/staff-classes", staffId] }),
+      ]);
+      toast({ title: "Success", description: "Assignments updated successfully" });
+      onClose();
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  if (subjectsLoading || classesLoading) return <Skeleton className="h-48 w-full" />;
+
+  const filteredSubjects = subjects.filter((s) => s.name.toLowerCase().includes(subjectSearch.toLowerCase()));
+  const filteredClasses = classes.filter((c) => c.className.toLowerCase().includes(classSearch.toLowerCase()));
+  const selectedSubjectObjects = subjects.filter((s) => selectedSubjects.includes(s.id));
+  const selectedClassObjects = classes.filter((c) => selectedClasses.includes(c.id));
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-3">
+        <div>
+          <h3 className="font-semibold">Classes</h3>
+          <p className="text-sm text-muted-foreground">Select the classes assigned to this staff member.</p>
+        </div>
+        {selectedClassObjects.length > 0 && (
+          <div className="flex flex-wrap gap-1.5" data-testid="selected-classes-tags">
+            {selectedClassObjects.map((cls) => (
+              <Badge key={cls.id} variant="secondary" className="gap-1 pr-1" data-testid={`tag-class-${cls.id}`}>
+                {cls.className}
+                <button
+                  type="button"
+                  className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/20"
+                  onClick={() => setSelectedClasses(selectedClasses.filter((id) => id !== cls.id))}
+                  data-testid={`button-remove-class-${cls.id}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </Badge>
+            ))}
+          </div>
+        )}
+        <div className="relative w-full sm:w-auto">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search classes..."
+            value={classSearch}
+            onChange={(e) => setClassSearch(e.target.value)}
+            className="pl-9"
+            data-testid="input-search-classes"
+          />
+        </div>
+        <div className="border rounded-md max-h-[220px] overflow-y-auto">
+          {filteredClasses.length === 0 ? (
+            <p className="text-sm text-muted-foreground p-3 text-center">No classes found</p>
+          ) : (
+            filteredClasses.map((cls) => {
+              const isSelected = selectedClasses.includes(cls.id);
+              return (
+                <button
+                  key={cls.id}
+                  type="button"
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
+                  onClick={() => setSelectedClasses(isSelected ? selectedClasses.filter((id) => id !== cls.id) : [...selectedClasses, cls.id])}
+                  data-testid={`button-select-class-${cls.id}`}
+                >
+                  {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
+                  <span>{cls.className}</span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-3 border-t pt-5">
+        <div>
+          <h3 className="font-semibold">Subjects</h3>
+          <p className="text-sm text-muted-foreground">Select the subjects assigned to this staff member.</p>
+        </div>
+        {selectedSubjectObjects.length > 0 && (
+          <div className="flex flex-wrap gap-1.5" data-testid="selected-subjects-tags">
+            {selectedSubjectObjects.map((subject) => (
+              <Badge key={subject.id} variant="secondary" className="gap-1 pr-1" data-testid={`tag-subject-${subject.id}`}>
+                {subject.name} ({(subject as any).syllabusCode || ""})
+                <button
+                  type="button"
+                  className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/20"
+                  onClick={() => setSelectedSubjects(selectedSubjects.filter((id) => id !== subject.id))}
+                  data-testid={`button-remove-subject-${subject.id}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </Badge>
+            ))}
+          </div>
+        )}
+        <div className="relative w-full sm:w-auto">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search subjects..."
+            value={subjectSearch}
+            onChange={(e) => setSubjectSearch(e.target.value)}
+            className="pl-9"
+            data-testid="input-search-subjects"
+          />
+        </div>
+        <div className="border rounded-md max-h-[220px] overflow-y-auto">
+          {filteredSubjects.length === 0 ? (
+            <p className="text-sm text-muted-foreground p-3 text-center">No subjects found</p>
+          ) : (
+            filteredSubjects.map((subject) => {
+              const isSelected = selectedSubjects.includes(subject.id);
+              return (
+                <button
+                  key={subject.id}
+                  type="button"
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
+                  onClick={() => setSelectedSubjects(isSelected ? selectedSubjects.filter((id) => id !== subject.id) : [...selectedSubjects, subject.id])}
+                  data-testid={`button-select-subject-${subject.id}`}
+                >
+                  {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
+                  <span>{subject.name} ({(subject as any).syllabusCode || ""})</span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <Button variant="outline" className="flex-1" onClick={onClose} data-testid="button-cancel-assignments">
+          Cancel
+        </Button>
+        <Button className="flex-1" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-assignments">
+          {saveMutation.isPending ? "Saving..." : "Save"}
+        </Button>
+      </div>
+    </div>
   );
 }
 

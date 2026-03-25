@@ -9,6 +9,7 @@ import {
   permissions, accessGroups, accessGroupPermissions, userAccessGroups, userPermissionOverrides, userSchoolAccess,
   communicationLogs, assessmentTypes, examTypes, exams, assessmentPapers, assessmentComments,
   assessmentMarks, assessmentMarkPapers, reportComments,
+  ecdAssessmentDomains, ecdAssessmentItems, ecdAssessmentRecords, ecdAssessmentResponses,
   type User, type InsertUser,
   type Staff, type InsertStaff,
   type Stream, type InsertStream,
@@ -59,6 +60,10 @@ import {
   type AssessmentMark, type InsertAssessmentMark,
   type AssessmentMarkPaper, type InsertAssessmentMarkPaper,
   type ReportComment, type InsertReportComment,
+  type EcdAssessmentDomain, type InsertEcdAssessmentDomain,
+  type EcdAssessmentItem, type InsertEcdAssessmentItem,
+  type EcdAssessmentRecord, type InsertEcdAssessmentRecord,
+  type EcdAssessmentResponse, type InsertEcdAssessmentResponse,
   type Notification, type InsertNotification,
   notifications,
   activityLogs,
@@ -421,6 +426,12 @@ export interface IStorage {
 
   // Report Comments (Principal / Class Teacher)
   getReportComments(schoolId: number, commentType?: string): Promise<ReportComment[]>;
+  getEcdAssessmentDomains(): Promise<EcdAssessmentDomain[]>;
+  getEcdAssessmentItems(): Promise<EcdAssessmentItem[]>;
+  getEcdAssessmentRecord(studentId: number, examId: number): Promise<EcdAssessmentRecord | undefined>;
+  upsertEcdAssessmentRecord(data: InsertEcdAssessmentRecord): Promise<EcdAssessmentRecord>;
+  getEcdAssessmentResponses(recordId: number): Promise<EcdAssessmentResponse[]>;
+  upsertEcdAssessmentResponse(data: InsertEcdAssessmentResponse): Promise<EcdAssessmentResponse>;
   createReportComment(comment: InsertReportComment): Promise<ReportComment>;
   deleteReportComment(id: number, schoolId: number): Promise<boolean>;
 
@@ -2601,6 +2612,43 @@ export class DatabaseStorage implements IStorage {
     const conditions = [eq(reportComments.schoolId, schoolId)];
     if (commentType) conditions.push(eq(reportComments.commentType, commentType as any));
     return db.select().from(reportComments).where(and(...conditions));
+  }
+
+  async getEcdAssessmentDomains(): Promise<EcdAssessmentDomain[]> {
+    return db.select().from(ecdAssessmentDomains).orderBy(ecdAssessmentDomains.sortOrder);
+  }
+
+  async getEcdAssessmentItems(): Promise<EcdAssessmentItem[]> {
+    return db.select().from(ecdAssessmentItems).orderBy(ecdAssessmentItems.domainId, ecdAssessmentItems.sortOrder);
+  }
+
+  async getEcdAssessmentRecord(studentId: number, examId: number): Promise<EcdAssessmentRecord | undefined> {
+    const [record] = await db.select().from(ecdAssessmentRecords).where(and(eq(ecdAssessmentRecords.studentId, studentId), eq(ecdAssessmentRecords.examId, examId)));
+    return record;
+  }
+
+  async upsertEcdAssessmentRecord(data: InsertEcdAssessmentRecord): Promise<EcdAssessmentRecord> {
+    const existing = await this.getEcdAssessmentRecord(data.studentId, data.examId);
+    if (existing) {
+      const [updated] = await db.update(ecdAssessmentRecords).set({ ...data, updatedAt: new Date() }).where(eq(ecdAssessmentRecords.id, existing.id)).returning();
+      return updated;
+    }
+    const [created] = await db.insert(ecdAssessmentRecords).values(data).returning();
+    return created;
+  }
+
+  async getEcdAssessmentResponses(recordId: number): Promise<EcdAssessmentResponse[]> {
+    return db.select().from(ecdAssessmentResponses).where(eq(ecdAssessmentResponses.recordId, recordId));
+  }
+
+  async upsertEcdAssessmentResponse(data: InsertEcdAssessmentResponse): Promise<EcdAssessmentResponse> {
+    const [existing] = await db.select().from(ecdAssessmentResponses).where(and(eq(ecdAssessmentResponses.recordId, data.recordId), eq(ecdAssessmentResponses.itemId, data.itemId)));
+    if (existing) {
+      const [updated] = await db.update(ecdAssessmentResponses).set({ rating: data.rating, updatedAt: new Date() }).where(eq(ecdAssessmentResponses.id, existing.id)).returning();
+      return updated;
+    }
+    const [created] = await db.insert(ecdAssessmentResponses).values(data).returning();
+    return created;
   }
 
   async createReportComment(comment: InsertReportComment): Promise<ReportComment> {

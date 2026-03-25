@@ -17,8 +17,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Building2, Settings, Save, School, Shield, Plus, Pencil, Trash2, Users, Lock, ChevronDown, ChevronRight, ChevronLeft, Calendar, Clock, Upload, ImageIcon, Stamp, User, Mail, Phone, MapPin, FileText, GraduationCap, BookOpen, Download, Filter, ClipboardList, Search, ArrowLeft, ArrowRight } from "lucide-react";
+import { Building2, Settings, Save, School, Shield, Plus, Pencil, Trash2, Users, Lock, ChevronDown, ChevronRight, ChevronLeft, Calendar, Clock, Upload, ImageIcon, Stamp, User, Mail, Phone, MapPin, FileText, GraduationCap, BookOpen, Download, Filter, ClipboardList, Search, ArrowLeft, ArrowRight, AlertTriangle } from "lucide-react";
 import type { School as SchoolType, ActivityLog } from "@shared/schema";
+
+function normalizeSchoolType(value?: string | null): "primary" | "secondary" {
+  const normalized = (value ?? "").toString().trim().toLowerCase();
+  return normalized.startsWith("primary") ? "primary" : "secondary";
+}
 
 function getCurrentHarareTime(): string {
   return new Date().toLocaleString("en-US", {
@@ -40,7 +45,6 @@ export default function SchoolSettingsPage() {
   const [school, setSchool] = useState<SchoolType | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [isEditingFeatures, setIsEditingFeatures] = useState(false);
-  const [isEditingSchoolType, setIsEditingSchoolType] = useState(false);
   const [isEditingBranding, setIsEditingBranding] = useState(false);
   const [brandingValues, setBrandingValues] = useState({ motto: "", logo: "", stamp: "" });
   
@@ -387,84 +391,6 @@ export default function SchoolSettingsPage() {
                       disabled={updateSchool.isPending}
                       onClick={() => setIsEditingBranding(false)}
                       data-testid="button-cancel-branding"
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* School Type Toggle */}
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between gap-2">
-                <div>
-                  <CardTitle>School Type</CardTitle>
-                  <CardDescription>Select the type of school to configure appropriate class levels and streams</CardDescription>
-                </div>
-                {!isEditingSchoolType && (
-                  <Button variant="outline" onClick={() => setIsEditingSchoolType(true)} data-testid="button-edit-school-type">
-                    <Pencil className="h-4 w-4 mr-2" />
-                    Edit
-                  </Button>
-                )}
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-4">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!isEditingSchoolType) return;
-                      updateSchool.mutate({ schoolType: "primary" });
-                      setIsEditingSchoolType(false);
-                    }}
-                    className={`flex-1 flex flex-col items-center gap-3 p-6 rounded-md border-2 transition-colors ${
-                      isEditingSchoolType ? "cursor-pointer" : "cursor-default"
-                    } ${
-                      school.schoolType === "primary"
-                        ? "border-primary bg-primary/5"
-                        : isEditingSchoolType ? "border-muted hover-elevate" : "border-muted opacity-60"
-                    }`}
-                    disabled={!isEditingSchoolType || updateSchool.isPending}
-                    data-testid="button-school-type-primary"
-                  >
-                    <BookOpen className={`h-8 w-8 ${school.schoolType === "primary" ? "text-primary" : "text-muted-foreground"}`} />
-                    <div className="text-center">
-                      <p className={`font-semibold ${school.schoolType === "primary" ? "text-primary" : ""}`}>Primary School</p>
-                      <p className="text-xs text-muted-foreground mt-1">ECD A, ECD B, Grade 1-7</p>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!isEditingSchoolType) return;
-                      updateSchool.mutate({ schoolType: "secondary" });
-                      setIsEditingSchoolType(false);
-                    }}
-                    className={`flex-1 flex flex-col items-center gap-3 p-6 rounded-md border-2 transition-colors ${
-                      isEditingSchoolType ? "cursor-pointer" : "cursor-default"
-                    } ${
-                      school.schoolType === "secondary" || !school.schoolType
-                        ? "border-primary bg-primary/5"
-                        : isEditingSchoolType ? "border-muted hover-elevate" : "border-muted opacity-60"
-                    }`}
-                    disabled={!isEditingSchoolType || updateSchool.isPending}
-                    data-testid="button-school-type-secondary"
-                  >
-                    <GraduationCap className={`h-8 w-8 ${school.schoolType === "secondary" || !school.schoolType ? "text-primary" : "text-muted-foreground"}`} />
-                    <div className="text-center">
-                      <p className={`font-semibold ${school.schoolType === "secondary" || !school.schoolType ? "text-primary" : ""}`}>Secondary School</p>
-                      <p className="text-xs text-muted-foreground mt-1">Form 1-4, Lower 6, Upper 6</p>
-                    </div>
-                  </button>
-                </div>
-                {isEditingSchoolType && (
-                  <div className="pt-4 border-t mt-4">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => setIsEditingSchoolType(false)}
-                      data-testid="button-cancel-school-type"
                     >
                       Cancel
                     </Button>
@@ -821,90 +747,245 @@ interface AcademicSettingsProps {
 
 function AcademicSettingsSection({ school, onUpdate, isPending }: AcademicSettingsProps) {
   const [currentTime, setCurrentTime] = useState(getCurrentHarareTime());
-  const [isEditingAcademic, setIsEditingAcademic] = useState(false);
-  const [examBoard, setExamBoard] = useState(school.examinationBoard || "ZIMSEC");
-  
-  const handleCancelAcademic = () => {
-    setExamBoard(school.examinationBoard || "ZIMSEC");
-    setIsEditingAcademic(false);
-  };
+  const [isEditingClassPosition, setIsEditingClassPosition] = useState(false);
+  const [isEditingIdentity, setIsEditingIdentity] = useState(false);
+  const [showClassPosition, setShowClassPosition] = useState(!!school.showClassPositionOnReports);
+  const [draftSchoolType, setDraftSchoolType] = useState((school.schoolType || "secondary") as string);
+  const [draftExamBoard, setDraftExamBoard] = useState(school.examinationBoard || "ZIMSEC");
+  const [preEditWarningOpen, setPreEditWarningOpen] = useState(false);
+  const [confirmSaveWarningOpen, setConfirmSaveWarningOpen] = useState(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
       setCurrentTime(getCurrentHarareTime());
     }, 1000);
-
     return () => clearInterval(timer);
   }, []);
 
-  const handleSaveAcademic = () => {
-    onUpdate({
-      examinationBoard: examBoard,
-    });
-    setIsEditingAcademic(false);
+  useEffect(() => {
+    setDraftSchoolType((school.schoolType || "secondary") as string);
+    setDraftExamBoard(school.examinationBoard || "ZIMSEC");
+    setShowClassPosition(!!school.showClassPositionOnReports);
+  }, [school.schoolType, school.examinationBoard, school.showClassPositionOnReports]);
+
+  const hasIdentityChanges = draftSchoolType !== (school.schoolType || "secondary") || draftExamBoard !== (school.examinationBoard || "ZIMSEC");
+
+  const handleSaveClassPosition = () => {
+    onUpdate({ showClassPositionOnReports: showClassPosition });
+    setIsEditingClassPosition(false);
   };
-  
+
+  const handleCancelClassPosition = () => {
+    setShowClassPosition(!!school.showClassPositionOnReports);
+    setIsEditingClassPosition(false);
+  };
+
+  const proceedToEditIdentity = () => {
+    setPreEditWarningOpen(false);
+    setIsEditingIdentity(true);
+  };
+
+  const handleSaveIdentity = () => {
+    if (!hasIdentityChanges) {
+      setIsEditingIdentity(false);
+      return;
+    }
+    setConfirmSaveWarningOpen(true);
+  };
+
+  const handleConfirmSaveIdentity = () => {
+    onUpdate({ schoolType: draftSchoolType, examinationBoard: draftExamBoard });
+    setConfirmSaveWarningOpen(false);
+    setIsEditingIdentity(false);
+  };
+
+  const handleCancelIdentity = () => {
+    setDraftSchoolType((school.schoolType || "secondary") as string);
+    setDraftExamBoard(school.examinationBoard || "ZIMSEC");
+    setIsEditingIdentity(false);
+  };
+
   return (
     <>
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-2">
-        <div>
-          <CardTitle className="flex items-center gap-2">
-            <Calendar className="h-5 w-5" />
-            Academic Settings
-          </CardTitle>
-          <CardDescription>Configure examination board for this school</CardDescription>
-        </div>
-        <div className="flex items-center gap-4 flex-wrap">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted px-3 py-2 rounded-md">
-            <Clock className="h-4 w-4" />
-            <span data-testid="text-current-time">{currentTime}</span>
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Calendar className="h-5 w-5" />
+              Academic Settings
+            </CardTitle>
+            <CardDescription>Manage academic settings and high-impact academic identity values for this school.</CardDescription>
           </div>
-          {!isEditingAcademic && (
-            <Button variant="outline" onClick={() => setIsEditingAcademic(true)} data-testid="button-edit-academic">
-              <Pencil className="h-4 w-4 mr-2" />
-              Edit
-            </Button>
-          )}
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        <div className="space-y-2">
-          <Label className="text-base font-semibold">Examination Board</Label>
-          <Select value={examBoard} onValueChange={setExamBoard} disabled={!isEditingAcademic}>
-            <SelectTrigger data-testid="select-exam-board" disabled={!isEditingAcademic} className="max-w-sm">
-              <SelectValue placeholder="Select board" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ZIMSEC">ZIMSEC</SelectItem>
-              <SelectItem value="Cambridge">Cambridge</SelectItem>
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            Academic year, term, and term dates are managed from HQ Global Settings.
-          </p>
-        </div>
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted px-3 py-2 rounded-md">
+              <Clock className="h-4 w-4" />
+              <span data-testid="text-current-time">{currentTime}</span>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="rounded-lg border p-4">
+            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+              <div className="space-y-1">
+                <Label className="text-base font-semibold">Show Class Position on Report Cards</Label>
+                <p className="text-xs text-muted-foreground">
+                  When enabled, report summaries include a class-based ranking column next to the overall stream position.
+                </p>
+              </div>
+              {!isEditingClassPosition && (
+                <Button variant="outline" onClick={() => setIsEditingClassPosition(true)} data-testid="button-edit-class-position">
+                  <Pencil className="h-4 w-4 mr-2" />
+                  Edit
+                </Button>
+              )}
+            </div>
+            <div className="mt-4 flex items-center justify-between gap-4 rounded-lg border p-4 bg-muted/20">
+              <div className="space-y-1">
+                <div className="text-sm font-medium">Report Card Class Position</div>
+                <div className="text-xs text-muted-foreground">{showClassPosition ? "Class Position is visible on report cards." : "Class Position is hidden on report cards."}</div>
+              </div>
+              <Switch
+                checked={showClassPosition}
+                onCheckedChange={setShowClassPosition}
+                disabled={!isEditingClassPosition}
+                data-testid="switch-show-class-position"
+              />
+            </div>
+            {isEditingClassPosition && (
+              <div className="pt-4 border-t mt-4 flex gap-2">
+                <Button onClick={handleSaveClassPosition} disabled={isPending} data-testid="button-save-class-position">
+                  <Save className="h-4 w-4 mr-2" />
+                  Save
+                </Button>
+                <Button type="button" variant="outline" onClick={handleCancelClassPosition} disabled={isPending} data-testid="button-cancel-class-position">
+                  Cancel
+                </Button>
+              </div>
+            )}
+          </div>
 
-        {isEditingAcademic && (
-          <div className="pt-4 border-t flex gap-2">
-            <Button onClick={handleSaveAcademic} disabled={isPending} data-testid="button-save-academic">
-              <Save className="h-4 w-4 mr-2" />
-              Save Academic Settings
-            </Button>
-            <Button 
-              type="button" 
-              variant="outline" 
-              onClick={handleCancelAcademic}
-              disabled={isPending}
-              data-testid="button-cancel-academic"
-            >
-              Cancel
-            </Button>
+          <div className="rounded-lg border border-amber-300 bg-amber-50/90 p-4 text-amber-950">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 mt-0.5 text-amber-700" />
+              <div className="space-y-1">
+                <p className="text-sm font-semibold">High-impact academic identity settings</p>
+                <p className="text-xs leading-relaxed text-amber-900">
+                  Changing School Type or Examination Board changes the school&apos;s academic processing identity. This can affect grading families, subject type availability, assessment and report comment categories, ECD routing, report-card logic, and grade/comment lookup behavior.
+                </p>
+              </div>
+            </div>
           </div>
-        )}
-      </CardContent>
-    </Card>
-    
+
+          <div className="rounded-lg border border-red-300 bg-red-50/60 p-4">
+            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+              <div className="space-y-1">
+                <Label className="text-base font-semibold text-red-900">Academic Identity</Label>
+                <p className="text-xs text-red-900/80">
+                  These values define the academic identity used by grading, comments, reports, and ECD processing for this school.
+                </p>
+              </div>
+              {!isEditingIdentity && (
+                <Button variant="outline" className="border-red-300 text-red-900 hover:bg-red-100" onClick={() => setPreEditWarningOpen(true)} data-testid="button-edit-academic-identity">
+                  <Pencil className="h-4 w-4 mr-2" />
+                  Edit
+                </Button>
+              )}
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label className="text-base font-semibold">School Type</Label>
+                {isEditingIdentity ? (
+                  <Select value={draftSchoolType} onValueChange={setDraftSchoolType}>
+                    <SelectTrigger data-testid="select-school-type" className="max-w-sm bg-white">
+                      <SelectValue placeholder="Select school type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="primary">Primary School</SelectItem>
+                      <SelectItem value="secondary">Secondary School</SelectItem>
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <div className="rounded-md border bg-white px-3 py-2 text-sm" data-testid="text-school-type-readonly">
+                    {normalizeSchoolType(school.schoolType) === "primary" ? "Primary School" : "Secondary School"}
+                  </div>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label className="text-base font-semibold">Examination Board</Label>
+                {isEditingIdentity ? (
+                  <Select value={draftExamBoard} onValueChange={setDraftExamBoard}>
+                    <SelectTrigger data-testid="select-exam-board" className="max-w-sm bg-white">
+                      <SelectValue placeholder="Select board" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="ZIMSEC">ZIMSEC</SelectItem>
+                      <SelectItem value="Cambridge">Cambridge</SelectItem>
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <div className="rounded-md border bg-white px-3 py-2 text-sm" data-testid="text-exam-board-readonly">
+                    {school.examinationBoard || "ZIMSEC"}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {isEditingIdentity && (
+              <div className="pt-4 border-t mt-4 flex gap-2">
+                <Button onClick={handleSaveIdentity} disabled={isPending} className="bg-red-700 hover:bg-red-800 text-white" data-testid="button-save-academic-identity">
+                  <Save className="h-4 w-4 mr-2" />
+                  Save Academic Identity
+                </Button>
+                <Button type="button" variant="outline" onClick={handleCancelIdentity} disabled={isPending} data-testid="button-cancel-academic-identity">
+                  Cancel
+                </Button>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog open={preEditWarningOpen} onOpenChange={setPreEditWarningOpen}>
+        <DialogContent className="border-red-500 bg-red-50/95">
+          <DialogHeader>
+            <DialogTitle className="text-red-900 flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5" />
+              Critical Academic Configuration Warning
+            </DialogTitle>
+            <DialogDescription className="text-red-950 space-y-2">
+              <span className="block">You are about to edit the school&apos;s academic identity.</span>
+              <span className="block">Changing School Type and Examination Board affects grading-system families, subject type options, assessment and report comment categories, ECD assessment availability, report-card generation rules, and grade/comment lookup logic.</span>
+              <span className="block font-semibold text-red-900">Existing academic records are not automatically migrated or rewritten when these settings change.</span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreEditWarningOpen(false)} data-testid="button-cancel-academic-warning">Cancel</Button>
+            <Button className="bg-red-700 hover:bg-red-800 text-white" onClick={proceedToEditIdentity} data-testid="button-continue-edit-academic-warning">Continue to edit</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmSaveWarningOpen} onOpenChange={setConfirmSaveWarningOpen}>
+        <DialogContent className="border-red-600 bg-red-50/95">
+          <DialogHeader>
+            <DialogTitle className="text-red-900 flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5" />
+              Confirm Critical Academic Configuration Change
+            </DialogTitle>
+            <DialogDescription className="text-red-950 space-y-2">
+              <span className="block">You changed the school&apos;s academic identity.</span>
+              <span className="block">Saving these changes will switch the academic processing context used for grading families, subject type rules, assessment and report comment categories, ECD routing, report-card logic, and grade/comment resolution for future operations.</span>
+              <span className="block font-semibold text-red-900">This action does not migrate existing academic data.</span>
+              <span className="block">Previously configured grades, subjects, comments, and reports may no longer align with the active academic configuration for this school.</span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmSaveWarningOpen(false)} data-testid="button-cancel-save-academic-warning">Cancel</Button>
+            <Button className="bg-red-700 hover:bg-red-800 text-white" onClick={handleConfirmSaveIdentity} data-testid="button-confirm-save-academic-warning">Yes, save changes</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

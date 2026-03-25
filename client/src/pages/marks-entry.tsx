@@ -110,9 +110,18 @@ export default function MarksEntryPage() {
 
   const getPoolComment = useCallback((gradeId: number | null): string => {
     if (!gradeId || !marksData?.comments) return "";
-    const comment = marksData.comments.find(c => c.gradeId === gradeId);
-    return comment?.commentText || "";
-  }, [marksData?.comments]);
+    const exact = marksData.comments.find(c => c.gradeId === gradeId);
+    if (exact?.commentText) return exact.commentText;
+
+    const gradeName = marksData.grades.find((grade) => grade.id === gradeId)?.gradeName?.trim().toUpperCase();
+    if (!gradeName) return "";
+
+    const fallback = marksData.comments.find((comment: any) => {
+      const commentGradeName = marksData.grades.find((grade) => grade.id === comment.gradeId)?.gradeName?.trim().toUpperCase();
+      return commentGradeName === gradeName;
+    });
+    return fallback?.commentText || "";
+  }, [marksData?.comments, marksData?.grades]);
 
   const calculatePercentageAndGrade = useCallback((paperMarks: Record<number, string>): { 
     percentage: number | null; 
@@ -147,8 +156,12 @@ export default function MarksEntryPage() {
     let gradeName = "";
     let gradeId: number | null = null;
     if (percentage !== null) {
-      for (const grade of grades) {
-        if (percentage >= grade.lowerLimit && percentage <= grade.upperLimit) {
+      const orderedGrades = [...grades].sort((a, b) => Number(b.upperLimit) - Number(a.upperLimit));
+      for (const grade of orderedGrades) {
+        const lower = Number(grade.lowerLimit);
+        const upper = Number(grade.upperLimit);
+        if (Number.isNaN(lower) || Number.isNaN(upper)) continue;
+        if (percentage >= lower && percentage <= upper) {
           gradeName = grade.gradeName;
           gradeId = grade.id;
           break;
