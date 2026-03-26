@@ -37,6 +37,112 @@ interface SchoolInfo {
   principalPhone?: string | null;
 }
 
+const ECD_DISPLAY_RATINGS = [
+  { value: 'YES', label: 'YES' },
+  { value: 'ALMOST', label: 'ALMOST' },
+  { value: 'NO', label: 'NO' },
+] as const;
+
+function drawEcdSectionTable(
+  doc: PDFDocument,
+  section: EcdPdfSection,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): number {
+  const headerHeight = 13;
+  const availableBodyHeight = Math.max(height - headerHeight, section.items.length * 12);
+  const rowHeight = availableBodyHeight / Math.max(section.items.length, 1);
+  const sectionTitle = `${section.code}. ${section.name.toUpperCase()}`;
+  const cols = [
+    { header: `${sectionTitle} (checklist items)`, width: width * 0.64, align: 'left' as const },
+    ...ECD_DISPLAY_RATINGS.map((rating) => ({ header: rating.label, width: width * 0.12, align: 'center' as const, value: rating.value })),
+  ];
+
+  let currentX = x;
+  let currentY = y;
+
+  doc.fontSize(7.4).font('Helvetica-Bold');
+  for (const col of cols) {
+    doc.rect(currentX, currentY, col.width, headerHeight).fillAndStroke('#f3f4f6', '#d1d5db');
+    doc.fillColor('#000').text(col.header, currentX + 3, currentY + 3.5, {
+      width: col.width - 6,
+      align: col.align,
+      lineBreak: false,
+    });
+    currentX += col.width;
+  }
+
+  currentY += headerHeight;
+  doc.fontSize(7.5).font('Helvetica');
+
+  for (const item of section.items) {
+    currentX = x;
+    const cells = [
+      item.itemText,
+      item.rating === 'YES' ? '✓' : '',
+      item.rating === 'ALMOST' ? '✓' : '',
+      item.rating === 'NO' ? '✓' : '',
+    ];
+
+    cols.forEach((col, index) => {
+      doc.rect(currentX, currentY, col.width, rowHeight).stroke('#d1d5db');
+      doc.text(cells[index], currentX + 3, currentY + Math.max(3, rowHeight * 0.25), {
+        width: col.width - 6,
+        height: rowHeight - 4,
+        align: col.align,
+        lineBreak: false,
+      });
+      currentX += col.width;
+    });
+
+    currentY += rowHeight;
+  }
+
+  return y + height;
+}
+
+function drawEcdAssessmentPage(doc: PDFDocument, data: ReportCardPdfData, leftMargin: number, pageWidth: number) {
+  if (!data.ecdSections || data.ecdSections.length === 0) return;
+
+  doc.addPage();
+  const topY = 40;
+  const bottomMargin = 40;
+  const sectionGap = 6;
+
+  doc.fontSize(14).font('Helvetica-Bold').fillColor('#000')
+    .text('ECD Assessment', leftMargin, topY, { align: 'center', width: pageWidth });
+
+  doc.fontSize(8).font('Helvetica').fillColor('#444')
+    .text(
+      `Name: ${data.studentName}    Reg No: ${data.admissionNo}    Class: ${data.className}    Exam: ${data.examName}`,
+      leftMargin,
+      doc.y + 4,
+      { align: 'center', width: pageWidth }
+    );
+
+  const startY = doc.y + 8;
+  const availableHeight = doc.page.height - bottomMargin - startY;
+  const totalWeight = data.ecdSections.reduce((sum, section) => sum + Math.max(section.items.length + 2, 6), 0);
+  const totalGap = sectionGap * Math.max(data.ecdSections.length - 1, 0);
+  const usableHeight = Math.max(availableHeight - totalGap, 120);
+
+  let currentY = startY;
+  data.ecdSections.forEach((section, index) => {
+    const weight = Math.max(section.items.length + 2, 6);
+    const isLast = index === data.ecdSections!.length - 1;
+    const sectionHeight = isLast
+      ? doc.page.height - bottomMargin - currentY
+      : (usableHeight * weight) / totalWeight;
+
+    drawEcdSectionTable(doc, section, leftMargin, currentY, pageWidth, Math.max(sectionHeight, 48));
+    currentY += Math.max(sectionHeight, 48) + (isLast ? 0 : sectionGap);
+  });
+
+  doc.fillColor('#000');
+}
+
 export interface ReportCardPdfData {
   school: SchoolInfo & { showClassPositionOnReports?: boolean };
   studentName: string;
@@ -150,58 +256,6 @@ export async function generateReportCardPdf(data: ReportCardPdfData): Promise<Bu
 
       doc.y = valY + 24;
 
-      if (data.ecdSections && data.ecdSections.length > 0) {
-        doc.fontSize(9).font('Helvetica-Bold').text('ECD Development Assessment', leftMargin, doc.y, { align: 'center', width: pageWidth });
-        doc.moveDown(0.4);
-        for (const section of data.ecdSections) {
-          if (doc.y > doc.page.height - 140) {
-            doc.addPage();
-            doc.y = 40;
-          }
-          doc.fontSize(8).font('Helvetica-Bold');
-          doc.rect(leftMargin, doc.y, pageWidth, 14).fillAndStroke('#f3f4f6', '#d1d5db');
-          doc.fillColor('#000').text(`${section.code}. ${section.name}`, leftMargin + 4, doc.y + 4, { width: pageWidth - 8 });
-          doc.y += 14;
-
-          const ecdCols = [
-            { header: 'Checklist Item', width: pageWidth * 0.64, align: 'left' as const },
-            { header: 'Yes', width: pageWidth * 0.12, align: 'center' as const },
-            { header: 'No', width: pageWidth * 0.12, align: 'center' as const },
-            { header: 'Almost', width: pageWidth * 0.12, align: 'center' as const },
-          ];
-          let x = leftMargin;
-          const topY = doc.y;
-          doc.fontSize(7).font('Helvetica-Bold');
-          for (const col of ecdCols) {
-            doc.rect(x, topY, col.width, 14).fillAndStroke('#fafafa', '#d1d5db');
-            doc.fillColor('#000').text(col.header, x + 2, topY + 4, { width: col.width - 4, align: col.align });
-            x += col.width;
-          }
-          let rowY = topY + 14;
-          doc.fontSize(7).font('Helvetica');
-          for (const item of section.items) {
-            if (rowY > doc.page.height - 80) {
-              doc.addPage();
-              rowY = 40;
-            }
-            x = leftMargin;
-            const cells = [
-              item.itemText,
-              item.rating === 'YES' ? '✓' : '',
-              item.rating === 'NO' ? '✓' : '',
-              item.rating === 'ALMOST' ? '✓' : '',
-            ];
-            for (let i = 0; i < ecdCols.length; i++) {
-              doc.rect(x, rowY, ecdCols[i].width, 13).stroke('#d1d5db');
-              doc.text(cells[i], x + 2, rowY + 3, { width: ecdCols[i].width - 4, align: ecdCols[i].align, lineBreak: false });
-              x += ecdCols[i].width;
-            }
-            rowY += 13;
-          }
-          doc.y = rowY + 6;
-        }
-      }
-
       const cols = [
         { header: 'Subject', width: pageWidth * 0.20, align: 'left' as const },
         { header: 'Mark', width: pageWidth * 0.08, align: 'center' as const },
@@ -308,6 +362,8 @@ export async function generateReportCardPdf(data: ReportCardPdfData): Promise<Bu
       doc.fontSize(8).font('Helvetica').fillColor('#888')
         .text('www.firstchoicegroup.co.zw', leftMargin, doc.y, { align: 'center', width: pageWidth });
       doc.fillColor('#000');
+
+      drawEcdAssessmentPage(doc, data, leftMargin, pageWidth);
 
       doc.end();
     } catch (error) {

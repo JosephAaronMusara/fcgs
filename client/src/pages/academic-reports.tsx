@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient, schoolFetch } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
   Dialog,
   DialogContent,
@@ -273,39 +273,118 @@ function DevCell({ dev }: { dev: string }) {
   );
 }
 
-function EcdChecklistSection({ sections }: { sections: EcdReportSection[] }) {
-  if (!sections.length) return null;
+const ECD_DISPLAY_RATINGS = [
+  { value: "YES", label: "YES" },
+  { value: "ALMOST", label: "ALMOST" },
+  { value: "NO", label: "NO" },
+] as const;
+
+function EcdChecklistTable({
+  section,
+  stretch = false,
+}: {
+  section: EcdReportSection;
+  stretch?: boolean;
+}) {
+  const itemCount = Math.max(section.items.length, 1);
+  const totalRows = itemCount + 1;
+  const rowHeight = stretch ? `calc(100% / ${totalRows})` : undefined;
+  const sectionTitle = `${section.code}. ${section.name.toUpperCase()}`;
 
   return (
-    <div className="mt-3 space-y-2">
-      <div className="text-[11px] font-bold uppercase text-center">ECD Development Assessment</div>
-      {sections.map((section) => (
-        <div key={section.code} className="rounded-sm border border-gray-300 dark:border-gray-600 overflow-hidden">
-          <div className="bg-gray-200 dark:bg-gray-800 px-2 py-1 text-[10px] font-semibold uppercase">
-            {section.code}. {section.name}
-          </div>
-          <table className="w-full border-collapse text-[9px]">
-            <thead>
-              <tr>
-                <th className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left w-[64%]">Checklist Item</th>
-                <th className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center w-[12%]">Yes</th>
-                <th className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center w-[12%]">No</th>
-                <th className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center w-[12%]">Almost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {section.items.map((item, index) => (
-                <tr key={`${section.code}-${index}`}>
-                  <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1">{item.itemText}</td>
-                  <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center font-bold">{item.rating === "YES" ? "✓" : ""}</td>
-                  <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center font-bold">{item.rating === "NO" ? "✓" : ""}</td>
-                  <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center font-bold">{item.rating === "ALMOST" ? "✓" : ""}</td>
-                </tr>
+    <div
+      className={`rounded-sm border border-gray-300 dark:border-gray-600 overflow-hidden bg-white dark:bg-gray-900 ${stretch ? "h-full min-h-0" : ""}`}
+    >
+      <table className="w-full h-full border-collapse table-fixed text-[8.5px] leading-tight">
+        <thead>
+          <tr style={stretch ? { height: rowHeight } : undefined}>
+            <th className="border border-gray-300 dark:border-gray-600 bg-gray-200 dark:bg-gray-800 px-1.5 py-0.5 text-left w-[64%] text-[9.5px] font-semibold uppercase leading-tight">
+              {sectionTitle} <span className="normal-case">(checklist items)</span>
+            </th>
+            {ECD_DISPLAY_RATINGS.map((rating) => (
+              <th
+                key={rating.value}
+                className="border border-gray-300 dark:border-gray-600 bg-gray-200 dark:bg-gray-800 px-1 py-0.5 text-center w-[12%] text-[9px] font-semibold leading-tight"
+              >
+                {rating.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {section.items.map((item, index) => (
+            <tr
+              key={`${section.code}-${index}`}
+              style={stretch ? { height: rowHeight } : undefined}
+            >
+              <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-0.5 align-middle">
+                {item.itemText}
+              </td>
+              {ECD_DISPLAY_RATINGS.map((rating) => (
+                <td
+                  key={rating.value}
+                  className="border border-gray-300 dark:border-gray-600 px-1 py-0.5 text-center align-middle font-bold"
+                >
+                  {item.rating === rating.value ? "✓" : ""}
+                </td>
               ))}
-            </tbody>
-          </table>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EcdChecklistSection({
+  sections,
+  studentName,
+  admissionNo,
+  className,
+  examName,
+}: {
+  sections: EcdReportSection[];
+  studentName: string;
+  admissionNo: string;
+  className: string;
+  examName: string;
+}) {
+  if (!sections.length) return null;
+
+  const gridTemplateRows = sections
+    .map((section) => `minmax(0, ${Math.max(section.items.length + 2, 6)}fr)`)
+    .join(" ");
+
+  return (
+    <div
+      className="report-slip-inner report-slip-page report-slip-page--ecd border border-gray-300 dark:border-gray-600 p-3 relative overflow-hidden bg-white dark:bg-gray-900"
+      style={{
+        fontSize: "12px",
+        minHeight: "calc(297mm - 10mm - 16px)",
+        pageBreakBefore: "always",
+        breakBefore: "page",
+      }}
+    >
+      <div className="relative z-10 h-full flex flex-col">
+        <div className="text-center mb-3">
+          <div className="text-[16px] font-bold">ECD Assessment</div>
+          <div className="mt-1 text-[8.5px] text-gray-700 dark:text-gray-300 flex items-center justify-center gap-3 flex-wrap">
+            <span><strong>Name:</strong> {studentName}</span>
+            <span><strong>Reg No:</strong> {admissionNo}</span>
+            <span><strong>Class:</strong> {className}</span>
+            <span><strong>Exam:</strong> {examName}</span>
+          </div>
         </div>
-      ))}
+
+        <div
+          className="grid grid-cols-1 gap-2 flex-1 min-h-0"
+          style={{ gridTemplateRows }}
+        >
+          {sections.map((section) => (
+            <EcdChecklistTable key={section.code} section={section} stretch />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -314,16 +393,19 @@ function ReportCardSlip({
   data,
   studentReport,
   onSendIndividual,
+  onPrintIndividual,
   sendingId,
 }: {
   data: ReportCardData;
   studentReport: ReportStudent;
   onSendIndividual: (studentId: number) => void;
+  onPrintIndividual: (studentId: number) => void;
   sendingId: number | null;
 }) {
   const { student, subjects, summary } = studentReport;
   const { school } = data;
   const name = `${student.firstName} ${student.lastName}`;
+  const { toast } = useToast();
 
   return (
     <div
@@ -501,10 +583,6 @@ function ReportCardSlip({
               </table>
             </div>
           </div>
-
-          {studentReport.ecdSections && studentReport.ecdSections.length > 0 && (
-            <EcdChecklistSection sections={studentReport.ecdSections} />
-          )}
 
           <table
             className="w-full border-collapse mt-1.5 text-[11px]"
@@ -998,25 +1076,20 @@ function ReportCardSlip({
           </div>
         </div>
       </div>
+      {studentReport.ecdSections && studentReport.ecdSections.length > 0 && (
+        <EcdChecklistSection
+          sections={studentReport.ecdSections}
+          studentName={name}
+          admissionNo={student.admissionNo}
+          className={data.class.className}
+          examName={data.exam.examName}
+        />
+      )}
       <div className="flex justify-end gap-2 mt-2 print:hidden flex-wrap">
         <Button
           size="sm"
           variant="outline"
-          onClick={() => {
-            const originalTitle = document.title;
-            const studentName =
-              `${studentReport.student.firstName}_${studentReport.student.lastName}`.replace(
-                /\s+/g,
-                "_",
-              );
-            const examLabel =
-              data.exam?.examName?.replace(/\s+/g, "_") || "Exam";
-            const classLabel =
-              data.class?.className?.replace(/\s+/g, "_") || "Class";
-            document.title = `Report_Card_${studentName}_${classLabel}_${examLabel}`;
-            window.print();
-            document.title = originalTitle;
-          }}
+          onClick={() => onPrintIndividual(student.id)}
           data-testid={`button-download-${student.id}`}
         >
           <Download className="w-4 h-4 mr-1" />
@@ -1766,6 +1839,8 @@ export default function AcademicReportsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [sendingAll, setSendingAll] = useState(false);
+  const [printStudentId, setPrintStudentId] = useState<number | null>(null);
+  const originalTitleRef = useRef<string | null>(null);
 
   const [missingMarksOpen, setMissingMarksOpen] = useState(false);
   const [meritOpen, setMeritOpen] = useState(false);
@@ -1831,6 +1906,24 @@ export default function AcademicReportsPage() {
     });
   }, [reportCardData, searchTerm]);
 
+  const studentsForPrint = useMemo(() => {
+    if (!printStudentId) return filteredStudents;
+    return filteredStudents.filter((rc) => rc.student.id === printStudentId);
+  }, [filteredStudents, printStudentId]);
+
+  useEffect(() => {
+    const handleAfterPrint = () => {
+      if (originalTitleRef.current !== null) {
+        document.title = originalTitleRef.current;
+        originalTitleRef.current = null;
+      }
+      setPrintStudentId(null);
+    };
+
+    window.addEventListener("afterprint", handleAfterPrint);
+    return () => window.removeEventListener("afterprint", handleAfterPrint);
+  }, []);
+
   const handleSendAll = async () => {
     if (!reportCardData || filteredStudents.length === 0) return;
     if (
@@ -1887,6 +1980,35 @@ export default function AcademicReportsPage() {
     } finally {
       setSendingId(null);
     }
+  };
+
+
+  const triggerPrintPreview = (title: string, studentId: number | null = null) => {
+    originalTitleRef.current = document.title;
+    document.title = title;
+    setPrintStudentId(studentId);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.print();
+      });
+    });
+  };
+
+  const handlePrintAll = () => {
+    const examLabel = selectedExamName?.replace(/\s+/g, "_") || "Exam";
+    const classLabel = selectedClassName?.replace(/\s+/g, "_") || "Class";
+    triggerPrintPreview(`Report_Cards_${classLabel}_${examLabel}`);
+  };
+
+  const handlePrintIndividual = (studentId: number) => {
+    const rc = filteredStudents.find((row) => row.student.id === studentId);
+    if (!rc) return;
+
+    const studentName = `${rc.student.firstName}_${rc.student.lastName}`.replace(/\s+/g, "_");
+    const examLabel = selectedExamName?.replace(/\s+/g, "_") || "Exam";
+    const classLabel = selectedClassName?.replace(/\s+/g, "_") || "Class";
+    triggerPrintPreview(`Report_Card_${studentName}_${classLabel}_${examLabel}`, studentId);
   };
 
   const navigateToClassLevel = (
@@ -2322,16 +2444,7 @@ export default function AcademicReportsPage() {
                   <div className="flex gap-2 flex-wrap">
                     <Button
                       variant="outline"
-                      onClick={() => {
-                        const originalTitle = document.title;
-                        const examLabel =
-                          selectedExamName?.replace(/\s+/g, "_") || "Exam";
-                        const classLabel =
-                          selectedClassName?.replace(/\s+/g, "_") || "Class";
-                        document.title = `Report_Cards_${classLabel}_${examLabel}`;
-                        window.print();
-                        document.title = originalTitle;
-                      }}
+                      onClick={handlePrintAll}
                       data-testid="button-download-all"
                     >
                       <Download className="w-4 h-4 mr-2" />
@@ -2396,18 +2509,20 @@ export default function AcademicReportsPage() {
                   data={reportCardData}
                   studentReport={rc}
                   onSendIndividual={handleSendIndividual}
+                  onPrintIndividual={handlePrintIndividual}
                   sendingId={sendingId}
                 />
               ))}
             </div>
             {createPortal(
               <div id="report-print-portal">
-                {filteredStudents.map((rc) => (
+                {studentsForPrint.map((rc) => (
                   <ReportCardSlip
                     key={`print-${rc.student.id}`}
                     data={reportCardData}
                     studentReport={rc}
                     onSendIndividual={handleSendIndividual}
+                    onPrintIndividual={handlePrintIndividual}
                     sendingId={sendingId}
                   />
                 ))}

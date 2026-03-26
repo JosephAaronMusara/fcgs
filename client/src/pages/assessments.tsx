@@ -65,6 +65,7 @@ export default function AssessmentsPage() {
   const [editingAssessment, setEditingAssessment] = useState<AssessmentWithPapers | null>(null);
   const [filterClassId, setFilterClassId] = useState<string>("all");
   const [filterSubjectId, setFilterSubjectId] = useState<string>("all");
+  const schoolScopeId = currentSchoolId || user?.schoolId || null;
   
   // Exam, Assessment Types, and Comments dialog state
   const [isCommentsDialogOpen, setIsCommentsDialogOpen] = useState(false);
@@ -78,8 +79,8 @@ export default function AssessmentsPage() {
   }, [search]);
 
   const { data: classesResponse } = useQuery<any>({
-    queryKey: ["/api/classes", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/classes", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/classes");
       if (!res.ok) throw new Error("Failed to fetch classes");
@@ -91,8 +92,8 @@ export default function AssessmentsPage() {
     : (classesResponse?.items ?? []);
 
   const { data: subjectsData } = useQuery<any>({
-    queryKey: ["/api/subjects", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/subjects", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/subjects");
       if (!res.ok) throw new Error("Failed to fetch subjects");
@@ -104,8 +105,8 @@ export default function AssessmentsPage() {
     : (subjectsData?.items ?? []);
 
   const { data: assessmentTypesResponse } = useQuery<any>({
-    queryKey: ["/api/assessment-types", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/assessment-types", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/assessment-types");
       if (!res.ok) throw new Error("Failed to fetch assessment types");
@@ -117,8 +118,8 @@ export default function AssessmentsPage() {
     : (assessmentTypesResponse?.items ?? []);
 
   const { data: examsResponse } = useQuery<any>({
-    queryKey: ["/api/exams", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/exams", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/exams");
       if (!res.ok) throw new Error("Failed to fetch exams");
@@ -130,8 +131,8 @@ export default function AssessmentsPage() {
     : (examsResponse?.items ?? []);
 
   const { data: currentSchool } = useQuery<School>({
-    queryKey: ["/api/schools/current", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/schools/current", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/schools/current");
       if (!res.ok) throw new Error("Failed to fetch current school");
@@ -140,8 +141,8 @@ export default function AssessmentsPage() {
   });
 
   const { data: gradesResponse } = useQuery<any>({
-    queryKey: ["/api/grades", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/grades", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/grades");
       if (!res.ok) throw new Error("Failed to fetch grades");
@@ -153,8 +154,8 @@ export default function AssessmentsPage() {
     : (gradesResponse?.items ?? []);
 
   const { data: assessmentCommentsResponse } = useQuery<any>({
-    queryKey: ["/api/assessment-comments", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/assessment-comments", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/assessment-comments");
       if (!res.ok) throw new Error("Failed to fetch assessment comments");
@@ -166,8 +167,8 @@ export default function AssessmentsPage() {
     : (assessmentCommentsResponse?.items ?? []);
 
   const { data: classSubjectRowsResponse } = useQuery<any>({
-    queryKey: ["/api/class-subjects/all", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/class-subjects/all", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/class-subjects/all");
       if (!res.ok) throw new Error("Failed to fetch class subjects");
@@ -181,8 +182,8 @@ export default function AssessmentsPage() {
   const schoolType = normalizeSchoolType(currentSchool?.schoolType);
 
   const { data: streamsResponse } = useQuery<any>({
-    queryKey: [`/api/streams?schoolType=${schoolType}`, currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: [`/api/streams?schoolType=${schoolType}`, schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch(`/api/streams?schoolType=${schoolType}`);
       if (!res.ok) throw new Error("Failed to fetch streams");
@@ -195,8 +196,8 @@ export default function AssessmentsPage() {
 
   const isTeacherScoped = user?.role === "teacher" || user?.role === "assistant_teacher";
   const { data: staffListResponse } = useQuery<any>({
-    queryKey: ["/api/staff", currentSchoolId],
-    enabled: !!currentSchoolId && isTeacherScoped,
+    queryKey: ["/api/staff", schoolScopeId],
+    enabled: !!schoolScopeId && isTeacherScoped,
     queryFn: async () => {
       const res = await schoolFetch("/api/staff");
       if (!res.ok) throw new Error("Failed to fetch staff");
@@ -209,8 +210,8 @@ export default function AssessmentsPage() {
   const currentStaff = useMemo(() => staffList.find((item) => item.userId === user?.id) || null, [staffList, user?.id]);
 
   const { data: currentStaffAssignmentsResponse } = useQuery<any>({
-    queryKey: ["/api/staff-subjects", currentSchoolId, currentStaff?.id],
-    enabled: !!currentSchoolId && !!currentStaff?.id && isTeacherScoped,
+    queryKey: ["/api/staff-subjects", schoolScopeId, currentStaff?.id],
+    enabled: !!schoolScopeId && !!currentStaff?.id && isTeacherScoped,
     queryFn: async () => {
       const res = await schoolFetch(`/api/staff/${currentStaff!.id}/subjects`);
       if (!res.ok) throw new Error("Failed to fetch teacher assignments");
@@ -222,7 +223,7 @@ export default function AssessmentsPage() {
     : (currentStaffAssignmentsResponse?.items ?? []);
 
   const { data: assessmentsResponse, isLoading } = useQuery<any>({
-    queryKey: ["/api/assessments", currentSchoolId, filterClassId, filterSubjectId, debouncedSearch],
+    queryKey: ["/api/assessments", schoolScopeId, filterClassId, filterSubjectId, debouncedSearch],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (filterClassId && filterClassId !== "all") {
