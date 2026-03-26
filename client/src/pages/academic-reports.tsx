@@ -2144,12 +2144,16 @@ export default function AcademicReportsPage() {
               onOpenChange={setPrincipalCommentsOpen}
               commentType="principal"
               title="Head/Principal's Comments"
+              schoolType={currentSchool?.schoolType}
+              examinationBoard={currentSchool?.examinationBoard}
             />
             <ReportCommentsModal
               open={classTeacherCommentsOpen}
               onOpenChange={setClassTeacherCommentsOpen}
               commentType="class_teacher"
               title="Class Teacher's Comments"
+              schoolType={currentSchool?.schoolType}
+              examinationBoard={currentSchool?.examinationBoard}
             />
 
             {examsLoading || atLoading ? (
@@ -2774,11 +2778,15 @@ function ReportCommentsModal({
   onOpenChange,
   commentType,
   title,
+  schoolType: currentSchoolType,
+  examinationBoard: currentExaminationBoard,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   commentType: "principal" | "class_teacher";
   title: string;
+  schoolType?: string | null;
+  examinationBoard?: string | null;
 }) {
   const { toast } = useToast();
   const { currentSchoolId, user } = useAuth();
@@ -2836,33 +2844,38 @@ function ReportCommentsModal({
   });
   const gradesData = Array.isArray(gradesResponse) ? gradesResponse : (gradesResponse?.items ?? []);
 
-  const { data: currentSchool } = useQuery<any>({
-    queryKey: ["/api/schools/current", currentSchoolId, "report-comments"],
-    enabled: open && !!currentSchoolId,
-    queryFn: async () => {
-      const res = await schoolFetch("/api/schools/current");
-      if (!res.ok) throw new Error("Failed to load current school");
-      return res.json();
-    },
-  });
-
-  const schoolType = normalizeSchoolType(currentSchool?.schoolType);
-  const examinationBoard = normalizeExamBoard(currentSchool?.examinationBoard);
-  const profileTabs = useMemo(() => getGradingProfilesForSchool(schoolType, examinationBoard), [schoolType, examinationBoard]);
+  const resolvedSchoolType = useMemo(
+    () => (currentSchoolType ? normalizeSchoolType(currentSchoolType) : null),
+    [currentSchoolType],
+  );
+  const resolvedExaminationBoard = useMemo(
+    () => (currentExaminationBoard ? normalizeExamBoard(currentExaminationBoard) : null),
+    [currentExaminationBoard],
+  );
+  const profileTabs = useMemo(() => {
+    if (!resolvedSchoolType || !resolvedExaminationBoard) return [];
+    return getGradingProfilesForSchool(resolvedSchoolType, resolvedExaminationBoard);
+  }, [resolvedSchoolType, resolvedExaminationBoard]);
 
   const { data: streamsData = [] } = useQuery<Stream[]>({
-    queryKey: ["/api/streams", schoolType, currentSchoolId, "report-comments"],
-    enabled: open && !!currentSchoolId,
+    queryKey: ["/api/streams", resolvedSchoolType, currentSchoolId, "report-comments"],
+    enabled: open && !!currentSchoolId && !!resolvedSchoolType,
     queryFn: async () => {
-      const res = await schoolFetch(`/api/streams?schoolType=${schoolType}`);
+      const res = await schoolFetch(`/api/streams?schoolType=${resolvedSchoolType}`);
       if (!res.ok) throw new Error("Failed to load streams");
       return res.json();
     },
   });
 
   useEffect(() => {
-    if (!activeTab && profileTabs.length > 0) setActiveTab(profileTabs[0].key);
-  }, [activeTab, profileTabs]);
+    if (profileTabs.length === 0) {
+      setActiveTab("");
+      return;
+    }
+
+    const validTabs = new Set(profileTabs.map((profile) => profile.key));
+    setActiveTab((previous) => (validTabs.has(previous) ? previous : profileTabs[0].key));
+  }, [profileTabs]);
 
   useEffect(() => {
     setSelectedGradeId("");
