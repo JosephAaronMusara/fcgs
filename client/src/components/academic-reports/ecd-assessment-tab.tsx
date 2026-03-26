@@ -7,11 +7,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import type { AssessmentType, Exam } from "@shared/schema";
-import { ECD_RATINGS } from "@shared/academic-profiles";
 
 interface EcdAssessmentTabProps {
   exams: Exam[];
@@ -41,6 +39,12 @@ interface EcdContextStudent {
   status: string;
   completedResponses: number;
 }
+
+const ECD_DISPLAY_RATINGS = [
+  { value: "YES", label: "YES" },
+  { value: "ALMOST", label: "ALMOST" },
+  { value: "NO", label: "NO" },
+] as const;
 
 export function EcdAssessmentTab({ exams, assessmentTypes }: EcdAssessmentTabProps) {
   const { toast } = useToast();
@@ -128,7 +132,6 @@ export function EcdAssessmentTab({ exams, assessmentTypes }: EcdAssessmentTabPro
 
   const selectedClass = contextData?.ecdClasses?.find((item) => String(item.id) === selectedClassId);
   const selectedStudent = contextData?.students?.find((item) => String(item.id) === selectedStudentId);
-  const currentStatus = recordData?.record?.status || selectedStudent?.status || "draft";
 
   const saveMutation = useMutation({
     mutationFn: async (payload: { itemId?: number; rating?: string | null; status?: string; clearAll?: boolean }) => {
@@ -162,10 +165,6 @@ export function EcdAssessmentTab({ exams, assessmentTypes }: EcdAssessmentTabPro
     },
   });
 
-  const handleStatusToggle = () => {
-    saveMutation.mutate({ status: currentStatus === "published" ? "draft" : "published" });
-  };
-
   const handleRatingToggle = (itemId: number, nextRating: string) => {
     const currentRating = responseMap.get(itemId) || null;
     saveMutation.mutate({ itemId, rating: currentRating === nextRating ? null : nextRating });
@@ -179,6 +178,11 @@ export function EcdAssessmentTab({ exams, assessmentTypes }: EcdAssessmentTabPro
   const totalItems = useMemo(
     () => (templateData?.domains || []).reduce((sum, domain) => sum + domain.items.length, 0),
     [templateData?.domains],
+  );
+
+  const hasRecordedEntries = useMemo(
+    () => (recordData?.responses || []).some((row) => Boolean(row.rating)) || (selectedStudent?.completedResponses || 0) > 0,
+    [recordData?.responses, selectedStudent?.completedResponses],
   );
 
   return (
@@ -222,14 +226,13 @@ export function EcdAssessmentTab({ exams, assessmentTypes }: EcdAssessmentTabPro
           </Select>
 
           <div className="ml-auto flex items-center gap-2">
-            <Badge variant={currentStatus === "published" ? "default" : "secondary"} data-testid="badge-ecd-status">
-              {currentStatus}
-            </Badge>
-            <Button variant="outline" onClick={() => setClearConfirmOpen(true)} disabled={!selectedStudentId || saveMutation.isPending} data-testid="button-ecd-clear-report">
+            <Button
+              variant="outline"
+              onClick={() => setClearConfirmOpen(true)}
+              disabled={!selectedStudentId || !hasRecordedEntries || saveMutation.isPending}
+              data-testid="button-ecd-clear-report"
+            >
               Clear Report
-            </Button>
-            <Button variant="outline" onClick={handleStatusToggle} disabled={!selectedStudentId || saveMutation.isPending} data-testid="button-ecd-toggle-status">
-              {currentStatus === "published" ? "Mark Draft" : "Publish"}
             </Button>
           </div>
         </div>
@@ -254,48 +257,53 @@ export function EcdAssessmentTab({ exams, assessmentTypes }: EcdAssessmentTabPro
           </div>
         ) : (
           <div className="space-y-4">
-            {(templateData?.domains || []).map((domain) => (
-              <div key={domain.id} className="overflow-hidden rounded-lg border">
-                <div className="bg-muted px-3 py-2 text-sm font-semibold">
-                  {domain.code}. {domain.name}
+            {(templateData?.domains || []).map((domain) => {
+              const sectionTitle = `${domain.code}. ${domain.name.toUpperCase()}`;
+
+              return (
+                <div key={domain.id} className="overflow-hidden rounded-lg border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted hover:bg-muted">
+                        <TableHead className="w-[60%] px-3 py-2 text-sm font-semibold uppercase text-foreground">
+                          {sectionTitle} <span className="normal-case">(checklist items)</span>
+                        </TableHead>
+                        {ECD_DISPLAY_RATINGS.map((rating) => (
+                          <TableHead key={rating.value} className="px-2 py-2 text-center text-xs font-semibold text-foreground">
+                            {rating.label}
+                          </TableHead>
+                        ))}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {domain.items.map((item) => {
+                        const selectedRating = responseMap.get(item.id) || null;
+                        return (
+                          <TableRow key={item.id}>
+                            <TableCell className="py-2 text-sm">{item.itemText}</TableCell>
+                            {ECD_DISPLAY_RATINGS.map((rating) => {
+                              const isSelected = selectedRating === rating.value;
+                              return (
+                                <TableCell key={rating.value} className="w-[90px] p-1 text-center">
+                                  <button
+                                    type="button"
+                                    className={`w-full rounded border px-2 py-2 text-xs font-semibold transition ${isSelected ? "border-primary bg-primary/10 text-primary" : "border-border bg-background text-muted-foreground hover:bg-muted"}`}
+                                    onClick={() => handleRatingToggle(item.id, rating.value)}
+                                    data-testid={`button-ecd-${item.id}-${rating.value}`}
+                                  >
+                                    {isSelected ? "✓" : ""}
+                                  </button>
+                                </TableCell>
+                              );
+                            })}
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
                 </div>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-[60%]">Checklist Item</TableHead>
-                      {ECD_RATINGS.map((rating) => (
-                        <TableHead key={rating} className="text-center">{rating}</TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {domain.items.map((item) => {
-                      const selectedRating = responseMap.get(item.id) || null;
-                      return (
-                        <TableRow key={item.id}>
-                          <TableCell className="py-2 text-sm">{item.itemText}</TableCell>
-                          {ECD_RATINGS.map((rating) => {
-                            const isSelected = selectedRating === rating;
-                            return (
-                              <TableCell key={rating} className="w-[90px] p-1 text-center">
-                                <button
-                                  type="button"
-                                  className={`w-full rounded border px-2 py-2 text-xs font-semibold transition ${isSelected ? "border-primary bg-primary/10 text-primary" : "border-border bg-background text-muted-foreground hover:bg-muted"}`}
-                                  onClick={() => handleRatingToggle(item.id, rating)}
-                                  data-testid={`button-ecd-${item.id}-${rating}`}
-                                >
-                                  {isSelected ? "✓" : ""}
-                                </button>
-                              </TableCell>
-                            );
-                          })}
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </CardContent>
@@ -304,7 +312,7 @@ export function EcdAssessmentTab({ exams, assessmentTypes }: EcdAssessmentTabPro
           <AlertDialogHeader>
             <AlertDialogTitle>Clear this ECD report?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will remove all ticks for the currently selected student and reset the report status to Draft.
+              This will remove all ticks for the currently selected student.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

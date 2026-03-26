@@ -281,13 +281,16 @@ async function ensureEcdSeedData() {
   }
 }
 
-async function loadEcdSectionsForStudentExam(studentId: number, examId: number, streamName?: string | null) {
-  if (!isEcdStream(streamName)) return [];
+async function loadEcdSectionsForStudentExam(studentId: number, examId: number, streamNames?: Array<string | null | undefined>) {
   const exam = await storage.getExam(examId);
   const assessmentType = exam?.assessmentTypeId ? await storage.getAssessmentType(exam.assessmentTypeId) : null;
   if (!assessmentType || assessmentType.name !== "End-of-Term Exam") return [];
 
   const record = await storage.getEcdAssessmentRecord(studentId, examId);
+  const streamCandidates = Array.isArray(streamNames) ? streamNames : [];
+  const hasEcdStream = streamCandidates.some((name) => isEcdStream(name));
+  if (!record && !hasEcdStream) return [];
+
   const responses = record ? await storage.getEcdAssessmentResponses(record.id) : [];
   const responseMap = new Map(responses.map((row) => [row.itemId, row.rating]));
   const domains = await storage.getEcdAssessmentDomains();
@@ -6939,22 +6942,6 @@ export async function registerRoutes(
 
       assessmentList = assessmentList.filter((a) => a.schoolId === schoolId);
 
-      const currentUser = await storage.getUser((req.user as any).id);
-      if (currentUser && ["teacher", "assistant_teacher"].includes(currentUser.role)) {
-        const staffMember = await getCurrentStaffMember(req, schoolId);
-        if (staffMember) {
-          const assignments = await storage.getStaffSubjects(staffMember.id);
-          const allowedPairs = new Set(
-            assignments
-              .filter((row) => row.classId && row.subjectId)
-              .map((row) => `${row.classId}-${row.subjectId}`)
-          );
-          assessmentList = assessmentList.filter((a) => allowedPairs.has(`${a.classId}-${a.subjectId}`));
-        } else {
-          assessmentList = [];
-        }
-      }
-
       if (subjectId) {
         assessmentList = assessmentList.filter((a) => a.subjectId === subjectId);
       }
@@ -6993,7 +6980,6 @@ export async function registerRoutes(
 
       const validatedRefs = await validateAssessmentPayloadForSchool(schoolId, assessmentData, res);
       if (!validatedRefs) return;
-      if (!(await ensureTeacherAssignmentForAssessment(req, res, schoolId, Number(assessmentData.classId), Number(assessmentData.subjectId)))) return;
 
       const assessmentWithName = {
         ...assessmentData,
@@ -7038,9 +7024,6 @@ export async function registerRoutes(
 
       const validatedRefs = await validateAssessmentPayloadForSchool(scoped.schoolId, assessmentData, res, scoped.assessment);
       if (!validatedRefs) return;
-      const effectiveClassId = assessmentData.classId !== undefined ? Number(assessmentData.classId) : scoped.assessment.classId;
-      const effectiveSubjectId = assessmentData.subjectId !== undefined ? Number(assessmentData.subjectId) : scoped.assessment.subjectId;
-      if (!(await ensureTeacherAssignmentForAssessment(req, res, scoped.schoolId, effectiveClassId, effectiveSubjectId))) return;
 
       const updatePayload = {
         ...assessmentData,
@@ -7751,8 +7734,9 @@ export async function registerRoutes(
         
         const chartOvertimeLabels = (overtimeMap[student.id] || []).map(o => o.label);
         const chartOvertimeAvgs = (overtimeMap[student.id] || []).map(o => o.avg);
-        const studentStream = student.streamId ? await storage.getStream(student.streamId) : classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
-        const ecdSections = await loadEcdSectionsForStudentExam(student.id, examId, studentStream?.name || null);
+        const studentStream = student.streamId ? await storage.getStream(student.streamId) : null;
+        const classStream = classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
+        const ecdSections = await loadEcdSectionsForStudentExam(student.id, examId, [studentStream?.name, classStream?.name]);
         
         return {
           student: {
@@ -8145,8 +8129,9 @@ export async function registerRoutes(
 
     const student = students.find(s => s.id === studentId);
     if (!student) return null;
-    const studentStream = student.streamId ? await storage.getStream(student.streamId) : classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
-    const ecdSections = await loadEcdSectionsForStudentExam(studentId, examId, studentStream?.name || null);
+    const studentStream = student.streamId ? await storage.getStream(student.streamId) : null;
+    const classStream = classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
+    const ecdSections = await loadEcdSectionsForStudentExam(studentId, examId, [studentStream?.name, classStream?.name]);
 
     const termId = examInfo?.termId;
     const termName = termId ? `Term ${termId}` : undefined;
@@ -8210,6 +8195,19 @@ export async function registerRoutes(
     const termId = exam?.termId;
     const termName = termId ? `Term ${termId}` : '';
 
+    const student = await storage.getStudent(studentId);
+    const studentClass = student?.classId ? await storage.getClass(student.classId) : null;
+    const studentStream = student?.streamId ? await storage.getStream(student.streamId) : null;
+    const classStream = studentClass?.streamId ? await storage.getStream(studentClass.streamId) : null;
+    const ecdSections = await loadEcdSectionsForStudentExam(studentId, examId, [studentStream?.name, classStream?.name]);
+
+    const formatEcdRating = (rating: string | null | undefined) => {
+      if (rating === 'YES') return 'Yes';
+      if (rating === 'NO') return 'No';
+      if (rating === 'ALMOST') return 'Almost';
+      return '';
+    };
+
     const lines: Array<{ subject: string; pct: string; grade: string }> = [];
     let totalPct = 0;
     let subjectCount = 0;
@@ -8243,9 +8241,24 @@ export async function registerRoutes(
       subjectCount++;
     }
 
-    if (lines.length < 1) return null;
-
     lines.sort((a, b) => a.subject.localeCompare(b.subject));
+
+    const ecdBlocks = ecdSections
+      .map((section) => {
+        const itemLines = section.items
+          .filter((item) => item.rating)
+          .map((item) => `${item.itemText}: ${formatEcdRating(item.rating)}`);
+
+        if (itemLines.length === 0) return null;
+
+        return [
+          `${section.code}. ${section.name.toUpperCase()}`,
+          ...itemLines,
+        ].join('\n');
+      })
+      .filter(Boolean) as string[];
+
+    if (lines.length < 1 && ecdBlocks.length < 1) return null;
 
     const resultLines = lines.map(l => {
       const gradeStr = l.grade ? ` (${l.grade})` : '';
@@ -8260,9 +8273,11 @@ export async function registerRoutes(
     const hasGradePoints = grades.length > 0;
 
     const summaryParts: string[] = [];
-    if (avgStr !== null) summaryParts.push(`Avg: ${avgStr}%`);
-    summaryParts.push(`Total: ${totalStr}`);
-    if (hasGradePoints) summaryParts.push(`Points: ${Math.round(totalGradePoints)}`);
+    if (subjectCount > 0) {
+      if (avgStr !== null) summaryParts.push(`Avg: ${avgStr}%`);
+      summaryParts.push(`Total: ${totalStr}`);
+      if (hasGradePoints) summaryParts.push(`Points: ${Math.round(totalGradePoints)}`);
+    }
 
     const headerLines = [
       `${schoolName}`,
@@ -8277,16 +8292,70 @@ export async function registerRoutes(
     const msgParts = [
       ...headerLines,
       ``,
-      `Results:`,
-      ...resultLines,
-      ``,
     ];
-    if (summaryParts.length > 0) msgParts.push(summaryParts.join(' | '));
-    msgParts.push('');
+
+    if (resultLines.length > 0) {
+      msgParts.push(`Academic Results:`);
+      msgParts.push(...resultLines);
+      msgParts.push(``);
+    }
+
+    if (summaryParts.length > 0) {
+      msgParts.push(summaryParts.join(' | '));
+    }
+
+    if (ecdBlocks.length > 0) {
+      msgParts.push(``);
+      msgParts.push(`ECD Assessment:`);
+      msgParts.push(...ecdBlocks);
+      msgParts.push(``);
+    }
+
     msgParts.push('Hardwork - Discipline - Changing Lives');
 
     return msgParts.join('\n');
   }
+
+
+  app.get("/api/report-cards/:examId/student/:studentId/download", requireAuth, async (req, res, next) => {
+    try {
+      const examId = parseInt(req.params.examId);
+      const studentId = parseInt(req.params.studentId);
+      const classId = req.query.classId ? parseInt(req.query.classId as string) : null;
+
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+
+      const student = await storage.getStudent(studentId);
+      if (!student || student.schoolId !== schoolId) return res.status(404).json({ message: "Student not found" });
+
+      const activeClassId = classId || student.classId;
+      if (!activeClassId) return res.status(400).json({ message: "Class context required" });
+
+      const school = await storage.getSchool(schoolId);
+      const classInfo = await storage.getClass(activeClassId);
+      const exam = await storage.getExam(examId);
+      if (!classInfo) return res.status(404).json({ message: "Class not found" });
+      if (classInfo.schoolId && classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      if (!exam) return res.status(404).json({ message: "Exam not found" });
+      if (exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+
+      const pdfData = await buildReportCardPdfData(studentId, examId, schoolId, school, classInfo, exam);
+      if (!pdfData) return res.status(404).json({ message: "No report card data available for this student" });
+
+      const pdfBuffer = await generateReportCardPdf(pdfData);
+      const safeStudentName = `${student.firstName}_${student.lastName}`.replace(/\s+/g, "_");
+      const safeClassName = (classInfo.className || 'Class').replace(/\s+/g, "_");
+      const safeExamName = (exam.examName || 'Exam').replace(/\s+/g, "_");
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="Report_Card_${safeStudentName}_${safeClassName}_${safeExamName}.pdf"`);
+      res.send(pdfBuffer);
+    } catch (error) {
+      next(error);
+    }
+  });
 
   app.post("/api/report-cards/send-all", requireAuth, async (req, res, next) => {
     try {
