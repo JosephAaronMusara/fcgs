@@ -13,6 +13,7 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "staff.create", name: "Create Staff", description: "Add new staff members", category: "Staff" },
   { code: "staff.edit", name: "Edit Staff", description: "Modify staff information", category: "Staff" },
   { code: "staff.delete", name: "Delete Staff", description: "Remove staff from the system", category: "Staff" },
+  { code: "staff.assign_subjects", name: "Assign Classes & Subjects", description: "Assign class and subject teaching combinations to staff members", category: "Staff" },
   
   // Parents
   { code: "parents.view", name: "View Parents", description: "View parent/guardian information", category: "Parents" },

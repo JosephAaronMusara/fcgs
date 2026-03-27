@@ -251,7 +251,9 @@ export const staffSubjects = pgTable("staff_subjects", {
   staffId: integer("staff_id").references(() => staff.id).notNull(),
   subjectId: integer("subject_id").references(() => subjects.id).notNull(),
   classId: integer("class_id").references(() => classes.id),
-});
+}, (table) => ({
+  classSubjectUnique: uniqueIndex("staff_subjects_class_subject_uidx").on(table.classId, table.subjectId),
+}));
 
 export const studentSubjects = pgTable("student_subjects", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),

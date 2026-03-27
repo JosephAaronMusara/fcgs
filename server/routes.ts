@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { setupAuth, requireAuth, requireRole } from "./auth";
+import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
 import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments } from "@shared/schema";
@@ -1107,6 +1107,188 @@ export async function registerRoutes(
       }
       await storage.updateStaffSubjects(staffId, subjectIds);
       res.json({ message: "Subjects updated successfully" });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/staff/:id/subject-assignments", requireAuth, requirePermission("staff.assign_subjects"), async (req, res, next) => {
+    try {
+      const staffId = parseInt(req.params.id, 10);
+      if (Number.isNaN(staffId)) return res.status(400).json({ message: "Invalid staff ID" });
+
+      const rows = await storage.getStaffSubjects(staffId);
+      res.json(rows.filter((row) => row.classId !== null));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/staff-subject-assignment-conflict", requireAuth, requirePermission("staff.assign_subjects"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const classId = parseInt(String(req.query.classId || ""), 10);
+      const subjectId = parseInt(String(req.query.subjectId || ""), 10);
+      const excludeStaffId = req.query.excludeStaffId ? parseInt(String(req.query.excludeStaffId), 10) : null;
+
+      if (Number.isNaN(classId) || Number.isNaN(subjectId)) {
+        return res.status(400).json({ message: "classId and subjectId are required" });
+      }
+
+      const classInfo = await storage.getClass(classId);
+      const subjectInfo = await storage.getSubject(subjectId);
+      if (!classInfo || classInfo.schoolId !== schoolId) {
+        return res.status(404).json({ message: "Class not found" });
+      }
+      if (!subjectInfo || subjectInfo.schoolId !== schoolId) {
+        return res.status(404).json({ message: "Subject not found" });
+      }
+
+      const existingRows = await db.select().from(staffSubjects).where(
+        and(
+          eq(staffSubjects.classId, classId),
+          eq(staffSubjects.subjectId, subjectId),
+          excludeStaffId ? sql`${staffSubjects.staffId} <> ${excludeStaffId}` : sql`true`
+        )
+      );
+
+      if (existingRows.length === 0) {
+        return res.json({ conflict: false });
+      }
+
+      const existing = existingRows[0];
+      const existingStaff = await storage.getStaff(existing.staffId);
+      const existingUser = existingStaff?.userId ? await storage.getUser(existingStaff.userId) : null;
+      const teacherName = existingUser
+        ? `${existingUser.firstName || ""} ${existingUser.lastName || ""}`.trim()
+        : existingStaff
+          ? `${existingStaff.firstName || ""} ${existingStaff.lastName || ""}`.trim() || `Staff #${existing.staffId}`
+          : `Staff #${existing.staffId}`;
+
+      return res.json({
+        conflict: true,
+        assignment: {
+          staffId: existing.staffId,
+          classId,
+          subjectId,
+          teacherName,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/staff/:id/subject-assignments", requireAuth, requirePermission("staff.assign_subjects"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const staffId = parseInt(req.params.id, 10);
+      if (Number.isNaN(staffId)) return res.status(400).json({ message: "Invalid staff ID" });
+
+      const staffMember = await storage.getStaff(staffId);
+      if (!staffMember || staffMember.schoolId !== schoolId) {
+        return res.status(404).json({ message: "Staff member not found" });
+      }
+
+      const bodyAssignments = Array.isArray(req.body?.assignments) ? req.body.assignments : null;
+      const bodyReassignments = Array.isArray(req.body?.reassignments) ? req.body.reassignments : [];
+      if (!bodyAssignments) {
+        return res.status(400).json({ message: "Assignments payload is required" });
+      }
+
+      const normalizedAssignments = bodyAssignments.map((row: any) => ({
+        classId: Number(row?.classId),
+        subjectId: Number(row?.subjectId),
+      }));
+      const normalizedReassignments = new Set(
+        bodyReassignments.map((row: any) => `${Number(row?.classId)}-${Number(row?.subjectId)}`)
+      );
+
+      if (normalizedAssignments.some((row) => Number.isNaN(row.classId) || Number.isNaN(row.subjectId))) {
+        return res.status(400).json({ message: "Each assignment must include classId and subjectId" });
+      }
+
+      const dedupedAssignments = normalizedAssignments.filter((row, index, arr) =>
+        arr.findIndex((candidate) => candidate.classId === row.classId && candidate.subjectId === row.subjectId) === index
+      );
+
+      for (const assignment of dedupedAssignments) {
+        const classInfo = await storage.getClass(assignment.classId);
+        const subjectInfo = await storage.getSubject(assignment.subjectId);
+
+        if (!classInfo || classInfo.schoolId !== schoolId) {
+          return res.status(404).json({ message: `Class ${assignment.classId} not found in current school` });
+        }
+        if (!subjectInfo || subjectInfo.schoolId !== schoolId) {
+          return res.status(404).json({ message: `Subject ${assignment.subjectId} not found in current school` });
+        }
+
+        const conflictRows = await db.select().from(staffSubjects).where(
+          and(
+            eq(staffSubjects.classId, assignment.classId),
+            eq(staffSubjects.subjectId, assignment.subjectId),
+            sql`${staffSubjects.staffId} <> ${staffId}`
+          )
+        );
+
+        if (conflictRows.length > 0) {
+          const conflictKey = `${assignment.classId}-${assignment.subjectId}`;
+          if (!normalizedReassignments.has(conflictKey)) {
+            const conflicting = conflictRows[0];
+            const conflictingStaff = await storage.getStaff(conflicting.staffId);
+            const conflictingUser = conflictingStaff?.userId ? await storage.getUser(conflictingStaff.userId) : null;
+            const teacherName = conflictingUser
+              ? `${conflictingUser.firstName || ""} ${conflictingUser.lastName || ""}`.trim()
+              : conflictingStaff
+                ? `${conflictingStaff.firstName || ""} ${conflictingStaff.lastName || ""}`.trim() || `Staff #${conflicting.staffId}`
+                : `Staff #${conflicting.staffId}`;
+
+            return res.status(409).json({
+              message: `This Class + Subject combination submitted is already assigned to ${teacherName}.`,
+              code: "ASSIGNMENT_CONFLICT",
+              assignment: {
+                staffId: conflicting.staffId,
+                classId: assignment.classId,
+                subjectId: assignment.subjectId,
+                teacherName,
+              },
+            });
+          }
+        }
+      }
+
+      await db.transaction(async (tx) => {
+        await tx.delete(staffSubjects).where(eq(staffSubjects.staffId, staffId));
+
+        for (const assignment of dedupedAssignments) {
+          const conflictKey = `${assignment.classId}-${assignment.subjectId}`;
+          if (normalizedReassignments.has(conflictKey)) {
+            await tx.delete(staffSubjects).where(
+              and(
+                eq(staffSubjects.classId, assignment.classId),
+                eq(staffSubjects.subjectId, assignment.subjectId),
+                sql`${staffSubjects.staffId} <> ${staffId}`
+              )
+            );
+          }
+        }
+
+        if (dedupedAssignments.length > 0) {
+          await tx.insert(staffSubjects).values(
+            dedupedAssignments.map((assignment) => ({
+              staffId,
+              classId: assignment.classId,
+              subjectId: assignment.subjectId,
+            }))
+          );
+        }
+      });
+
+      res.json({ message: "Assignments updated successfully" });
     } catch (error) {
       next(error);
     }
