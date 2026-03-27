@@ -79,7 +79,6 @@ import type {
   ReportComment,
   AssessmentType,
 } from "@shared/schema";
-import { COMMENT_GRADE_SCALE, COMMENT_GRADE_OPTIONS } from "@shared/schema";
 import { getGradingProfilesForSchool, getGradeProfileLabel, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName } from "@shared/academic-profiles";
 import { EcdAssessmentTab } from "@/components/academic-reports/ecd-assessment-tab";
 
@@ -585,33 +584,33 @@ function ReportCardSlip({
           </div>
 
           <table
-            className="w-full border-collapse mt-1.5 text-[11px]"
+            className="w-full table-fixed border-collapse mt-1.5 text-[11px]"
             data-testid={`table-subjects-${student.id}`}
           >
             <thead>
               <tr>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                <th className="w-[25%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
                   Subject
                 </th>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
-                  Mark
+                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                  Mark %
                 </th>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Dev.
                 </th>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
-                  Class Avg
+                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                  Class Avg %
                 </th>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Grade
                 </th>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Rank
                 </th>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                <th className="w-[35%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
                   Comment
                 </th>
-                <th className="border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                <th className="w-[10%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px] whitespace-nowrap">
                   Teacher
                 </th>
               </tr>
@@ -629,28 +628,28 @@ function ReportCardSlip({
               ) : (
                 subjects.map((subj) => (
                   <tr key={subj.subjectId}>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left break-words">
                       {subj.subjectName}
                     </td>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center whitespace-nowrap">
                       {subj.mark}
                     </td>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center whitespace-nowrap">
                       <DevCell dev={subj.dev} />
                     </td>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center whitespace-nowrap">
                       {subj.classAvg}
                     </td>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center whitespace-nowrap">
                       {subj.grade}
                     </td>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-center">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-center whitespace-nowrap">
                       {subj.rank}
                     </td>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left whitespace-normal break-words align-top">
                       {subj.comment}
                     </td>
-                    <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left">
+                    <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-left whitespace-normal break-words">
                       {subj.teacher}
                     </td>
                   </tr>

@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Pencil, Trash2, Phone, Mail, Download, Bell, Upload, Smartphone, BookOpen, GraduationCap, School, UserCog, KeyRound, Eye, EyeOff, Shield, RotateCcw, Check, X, Camera, Users } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, Phone, Mail, Download, Bell, Upload, Smartphone, BookOpen, GraduationCap, School, UserCog, KeyRound, Eye, EyeOff, Shield, RotateCcw, Check, X, Camera, Users, AlertTriangle } from "lucide-react";
 import type { Staff, Subject, Class as ClassType, User, Permission, AccessGroup, UserPermissionOverride } from "@shared/schema";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
@@ -919,48 +919,173 @@ function StaffForm({
 
 function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId: number; subjects: Subject[]; classes: ClassType[]; onClose: () => void }) {
   const { toast } = useToast();
-  const [selectedSubjects, setSelectedSubjects] = useState<number[]>([]);
-  const [selectedClasses, setSelectedClasses] = useState<number[]>([]);
+  const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
+  const [selectedSubjectId, setSelectedSubjectId] = useState<number | null>(null);
   const [subjectSearch, setSubjectSearch] = useState("");
   const [classSearch, setClassSearch] = useState("");
+  const [assignmentChips, setAssignmentChips] = useState<Array<{ classId: number; subjectId: number }>>([]);
+  const [reassignmentMeta, setReassignmentMeta] = useState<Record<string, { previousStaffId: number | null }>>({});
+  const [notice, setNotice] = useState<
+    | { type: "duplicate"; message: string }
+    | { type: "conflict"; message: string; assignment: { classId: number; subjectId: number; teacherName: string; staffId: number | null } }
+    | null
+  >(null);
 
-  const { data: staffSubjects = [], isLoading: subjectsLoading } = useQuery<Array<{ id: number; subjectId: number }>>({
-    queryKey: ["/api/staff-subjects", staffId],
+  const { data: staffAssignments = [], isLoading } = useQuery<Array<{ id: number; classId: number | null; subjectId: number }>>({
+    queryKey: ["/api/staff-subject-assignments", staffId],
     queryFn: async () => {
-      const res = await schoolFetch(`/api/staff/${staffId}/subjects`);
-      if (!res.ok) return [];
-      return res.json();
-    },
-  });
-
-  const { data: staffClasses = [], isLoading: classesLoading } = useQuery<Array<{ id: number; classId: number }>>({
-    queryKey: ["/api/staff-classes", staffId],
-    queryFn: async () => {
-      const res = await schoolFetch(`/api/staff/${staffId}/classes`);
+      const res = await schoolFetch(`/api/staff/${staffId}/subject-assignments`);
       if (!res.ok) return [];
       return res.json();
     },
   });
 
   useEffect(() => {
-    setSelectedSubjects(staffSubjects.map((s) => s.subjectId));
-  }, [staffSubjects]);
+    setAssignmentChips(
+      staffAssignments
+        .filter((row) => row.classId !== null)
+        .map((row) => ({ classId: row.classId as number, subjectId: row.subjectId }))
+    );
+    setReassignmentMeta({});
+    setNotice(null);
+  }, [staffAssignments]);
 
-  useEffect(() => {
-    setSelectedClasses(staffClasses.map((c) => c.classId));
-  }, [staffClasses]);
+  const filteredSubjects = subjects.filter((subject) =>
+    subject.name.toLowerCase().includes(subjectSearch.toLowerCase())
+  );
+  const filteredClasses = classes.filter((cls) =>
+    cls.className.toLowerCase().includes(classSearch.toLowerCase())
+  );
+
+  const selectedClass = selectedClassId ? classes.find((cls) => cls.id === selectedClassId) || null : null;
+  const selectedSubject = selectedSubjectId ? subjects.find((subject) => subject.id === selectedSubjectId) || null : null;
+
+  const chipKey = (classId: number, subjectId: number) => `${classId}-${subjectId}`;
+
+  const clearBuilders = () => {
+    setSelectedClassId(null);
+    setSelectedSubjectId(null);
+    setClassSearch("");
+    setSubjectSearch("");
+  };
+
+  const addAssignmentChip = (
+    classId: number,
+    subjectId: number,
+    reassignment?: { previousStaffId: number | null }
+  ) => {
+    const key = chipKey(classId, subjectId);
+    if (assignmentChips.some((chip) => chipKey(chip.classId, chip.subjectId) === key)) {
+      setNotice({
+        type: "duplicate",
+        message: "This Class + Subject combination submitted already exists.",
+      });
+      return;
+    }
+
+    setAssignmentChips((current) => [...current, { classId, subjectId }]);
+    if (reassignment) {
+      setReassignmentMeta((current) => ({
+        ...current,
+        [key]: { previousStaffId: reassignment.previousStaffId ?? null },
+      }));
+    }
+    setNotice(null);
+    clearBuilders();
+  };
+
+  const handleRemoveChip = (classId: number, subjectId: number) => {
+    const key = chipKey(classId, subjectId);
+    setAssignmentChips((current) => current.filter((chip) => chipKey(chip.classId, chip.subjectId) !== key));
+    setReassignmentMeta((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setNotice(null);
+  };
+
+  const handleAddCombination = async () => {
+    if (!selectedClassId || !selectedSubjectId) {
+      toast({
+        title: "Missing selection",
+        description: "Please select one class and one subject first.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const newKey = chipKey(selectedClassId, selectedSubjectId);
+    if (assignmentChips.some((chip) => chipKey(chip.classId, chip.subjectId) === newKey)) {
+      setNotice({ type: "duplicate", message: "This Class + Subject combination submitted already exists." });
+      return;
+    }
+
+    try {
+      const res = await schoolFetch(`/api/staff-subject-assignment-conflict?classId=${selectedClassId}&subjectId=${selectedSubjectId}&excludeStaffId=${staffId}`);
+      if (!res.ok) {
+        throw new Error((await res.text()) || "Failed to validate assignment combination");
+      }
+      const data = await res.json();
+      if (data?.conflict && data?.assignment) {
+        setNotice({
+          type: "conflict",
+          message: `This Class + Subject combination submitted is already assigned to ${data.assignment.teacherName}, would you like to reassign?`,
+          assignment: {
+            classId: data.assignment.classId,
+            subjectId: data.assignment.subjectId,
+            teacherName: data.assignment.teacherName,
+            staffId: data.assignment.staffId ?? null,
+          },
+        });
+        return;
+      }
+
+      addAssignmentChip(selectedClassId, selectedSubjectId);
+    } catch (error: any) {
+      toast({ title: "Error", description: error?.message || "Failed to validate assignment combination", variant: "destructive" });
+    }
+  };
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      await Promise.all([
-        apiRequest("PUT", `/api/staff/${staffId}/subjects`, { subjectIds: selectedSubjects }),
-        apiRequest("PUT", `/api/staff/${staffId}/classes`, { classIds: selectedClasses }),
-      ]);
+      const payload = {
+        assignments: assignmentChips.map((chip) => ({ classId: chip.classId, subjectId: chip.subjectId })),
+        reassignments: assignmentChips
+          .filter((chip) => Boolean(reassignmentMeta[chipKey(chip.classId, chip.subjectId)]))
+          .map((chip) => ({ classId: chip.classId, subjectId: chip.subjectId })),
+      };
+
+      const res = await schoolFetch(`/api/staff/${staffId}/subject-assignments`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const responseBody = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(responseBody?.message || `Failed to save assignments (${res.status})`);
+      }
+      return responseBody;
     },
     onSuccess: async () => {
+      const reassignedEntries = Object.entries(reassignmentMeta);
+      for (const [key, meta] of reassignedEntries) {
+        if (!meta.previousStaffId) continue;
+        const [classIdRaw, subjectIdRaw] = key.split("-");
+        const classId = Number(classIdRaw);
+        const subjectId = Number(subjectIdRaw);
+
+        queryClient.setQueryData<Array<{ id: number; classId: number | null; subjectId: number }>>(
+          ["/api/staff-subject-assignments", meta.previousStaffId],
+          (current = []) => current.filter((row) => !(row.classId === classId && row.subjectId === subjectId))
+        );
+      }
+
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["/api/staff-subjects", staffId] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/staff-classes", staffId] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/staff-subject-assignments"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/staff-subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/staff"] }),
       ]);
       toast({ title: "Success", description: "Assignments updated successfully" });
       onClose();
@@ -970,130 +1095,201 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
     },
   });
 
-  if (subjectsLoading || classesLoading) return <Skeleton className="h-48 w-full" />;
+  const chipLabels = assignmentChips.map((chip) => {
+    const cls = classes.find((item) => item.id === chip.classId);
+    const subject = subjects.find((item) => item.id === chip.subjectId);
+    return {
+      ...chip,
+      key: chipKey(chip.classId, chip.subjectId),
+      className: cls?.className || `Class #${chip.classId}`,
+      subjectName: subject?.name || `Subject #${chip.subjectId}`,
+    };
+  });
 
-  const filteredSubjects = subjects.filter((s) => s.name.toLowerCase().includes(subjectSearch.toLowerCase()));
-  const filteredClasses = classes.filter((c) => c.className.toLowerCase().includes(classSearch.toLowerCase()));
-  const selectedSubjectObjects = subjects.filter((s) => selectedSubjects.includes(s.id));
-  const selectedClassObjects = classes.filter((c) => selectedClasses.includes(c.id));
+  if (isLoading) return <Skeleton className="h-48 w-full" />;
 
   return (
     <div className="space-y-6">
-      <div className="space-y-3">
-        <div>
-          <h3 className="font-semibold">Classes</h3>
-          <p className="text-sm text-muted-foreground">Select the classes assigned to this staff member.</p>
-        </div>
-        {selectedClassObjects.length > 0 && (
-          <div className="flex flex-wrap gap-1.5" data-testid="selected-classes-tags">
-            {selectedClassObjects.map((cls) => (
-              <Badge key={cls.id} variant="secondary" className="gap-1 pr-1" data-testid={`tag-class-${cls.id}`}>
-                {cls.className}
-                <button
-                  type="button"
-                  className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/20"
-                  onClick={() => setSelectedClasses(selectedClasses.filter((id) => id !== cls.id))}
-                  data-testid={`button-remove-class-${cls.id}`}
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </Badge>
-            ))}
+      <div>
+        <h3 className="font-semibold">Create assignment combination</h3>
+        <p className="text-sm text-muted-foreground">
+          Select one class and one subject, then add that exact Class + Subject combination.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="space-y-3">
+          <div>
+            <h4 className="font-medium">Class</h4>
           </div>
-        )}
-        <div className="relative w-full sm:w-auto">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search classes..."
-            value={classSearch}
-            onChange={(e) => setClassSearch(e.target.value)}
-            className="pl-9"
-            data-testid="input-search-classes"
-          />
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search classes..."
+              value={classSearch}
+              onChange={(e) => setClassSearch(e.target.value)}
+              className="pl-9"
+              data-testid="input-search-classes"
+            />
+          </div>
+          <div className="border rounded-md max-h-[220px] overflow-y-auto">
+            {filteredClasses.length === 0 ? (
+              <p className="text-sm text-muted-foreground p-3 text-center">No classes found</p>
+            ) : (
+              filteredClasses.map((cls) => {
+                const isSelected = selectedClassId === cls.id;
+                return (
+                  <button
+                    key={cls.id}
+                    type="button"
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
+                    onClick={() => setSelectedClassId(cls.id)}
+                    data-testid={`button-select-class-${cls.id}`}
+                  >
+                    {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
+                    <span>{cls.className}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground min-h-[1rem]">
+            {selectedClass ? `Selected: ${selectedClass.className}` : "No class selected"}
+          </p>
         </div>
-        <div className="border rounded-md max-h-[220px] overflow-y-auto">
-          {filteredClasses.length === 0 ? (
-            <p className="text-sm text-muted-foreground p-3 text-center">No classes found</p>
-          ) : (
-            filteredClasses.map((cls) => {
-              const isSelected = selectedClasses.includes(cls.id);
-              return (
-                <button
-                  key={cls.id}
-                  type="button"
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
-                  onClick={() => setSelectedClasses(isSelected ? selectedClasses.filter((id) => id !== cls.id) : [...selectedClasses, cls.id])}
-                  data-testid={`button-select-class-${cls.id}`}
-                >
-                  {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
-                  <span>{cls.className}</span>
-                </button>
-              );
-            })
-          )}
+
+        <div className="space-y-3">
+          <div>
+            <h4 className="font-medium">Subject</h4>
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search subjects..."
+              value={subjectSearch}
+              onChange={(e) => setSubjectSearch(e.target.value)}
+              className="pl-9"
+              data-testid="input-search-subjects"
+            />
+          </div>
+          <div className="border rounded-md max-h-[220px] overflow-y-auto">
+            {filteredSubjects.length === 0 ? (
+              <p className="text-sm text-muted-foreground p-3 text-center">No subjects found</p>
+            ) : (
+              filteredSubjects.map((subject) => {
+                const isSelected = selectedSubjectId === subject.id;
+                const syllabusCode = (subject as any).syllabusCode || "n/a";
+                return (
+                  <button
+                    key={subject.id}
+                    type="button"
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
+                    onClick={() => setSelectedSubjectId(subject.id)}
+                    data-testid={`button-select-subject-${subject.id}`}
+                  >
+                    {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
+                    <span>{subject.name} ({syllabusCode})</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground min-h-[1rem]">
+            {selectedSubject ? `Selected: ${selectedSubject.name}` : "No subject selected"}
+          </p>
         </div>
       </div>
+
+      <Button
+        type="button"
+        className="w-full md:w-[96%] mx-auto"
+        onClick={handleAddCombination}
+        data-testid="button-add-combination"
+      >
+        Add Combination
+      </Button>
+
+      {notice && (
+        <div
+          className={`flex flex-col md:flex-row md:items-center md:justify-between gap-3 rounded-md border px-3 py-2 ${notice.type === "conflict" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-blue-200 bg-blue-50 text-blue-900"}`}
+          data-testid="assignment-notice"
+        >
+          <div className="flex items-start gap-2 text-sm">
+            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+            <span>{notice.message}</span>
+          </div>
+          {notice.type === "conflict" ? (
+            <div className="flex items-center gap-2 md:shrink-0">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setNotice(null)}
+                data-testid="button-reassign-no"
+              >
+                No
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => {
+                  addAssignmentChip(notice.assignment.classId, notice.assignment.subjectId, {
+                    previousStaffId: notice.assignment.staffId ?? null,
+                  });
+                  setNotice(null);
+                }}
+                data-testid="button-reassign-yes"
+              >
+                Yes
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      )}
 
       <div className="space-y-3 border-t pt-5">
         <div>
-          <h3 className="font-semibold">Subjects</h3>
-          <p className="text-sm text-muted-foreground">Select the subjects assigned to this staff member.</p>
+          <h3 className="font-semibold">Assigned combinations</h3>
+          <p className="text-sm text-muted-foreground">The saved Class + Subject combinations for this staff member appear here.</p>
         </div>
-        {selectedSubjectObjects.length > 0 && (
-          <div className="flex flex-wrap gap-1.5" data-testid="selected-subjects-tags">
-            {selectedSubjectObjects.map((subject) => (
-              <Badge key={subject.id} variant="secondary" className="gap-1 pr-1" data-testid={`tag-subject-${subject.id}`}>
-                {subject.name} ({(subject as any).syllabusCode || ""})
+        {chipLabels.length > 0 ? (
+          <div className="flex flex-wrap gap-2" data-testid="assigned-combination-tags">
+            {chipLabels.map((chip) => (
+              <Badge key={chip.key} variant="secondary" className="gap-1 pr-1 py-1" data-testid={`tag-assignment-${chip.classId}-${chip.subjectId}`}>
+                <span>{chip.className} + {chip.subjectName}</span>
                 <button
                   type="button"
                   className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/20"
-                  onClick={() => setSelectedSubjects(selectedSubjects.filter((id) => id !== subject.id))}
-                  data-testid={`button-remove-subject-${subject.id}`}
+                  onClick={() => handleRemoveChip(chip.classId, chip.subjectId)}
+                  data-testid={`button-remove-assignment-${chip.classId}-${chip.subjectId}`}
                 >
                   <X className="h-3 w-3" />
                 </button>
               </Badge>
             ))}
           </div>
+        ) : (
+          <div className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground" data-testid="empty-assignment-combinations">
+            No Class + Subject combinations added yet.
+          </div>
         )}
-        <div className="relative w-full sm:w-auto">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search subjects..."
-            value={subjectSearch}
-            onChange={(e) => setSubjectSearch(e.target.value)}
-            className="pl-9"
-            data-testid="input-search-subjects"
-          />
-        </div>
-        <div className="border rounded-md max-h-[220px] overflow-y-auto">
-          {filteredSubjects.length === 0 ? (
-            <p className="text-sm text-muted-foreground p-3 text-center">No subjects found</p>
-          ) : (
-            filteredSubjects.map((subject) => {
-              const isSelected = selectedSubjects.includes(subject.id);
-              return (
-                <button
-                  key={subject.id}
-                  type="button"
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
-                  onClick={() => setSelectedSubjects(isSelected ? selectedSubjects.filter((id) => id !== subject.id) : [...selectedSubjects, subject.id])}
-                  data-testid={`button-select-subject-${subject.id}`}
-                >
-                  {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
-                  <span>{subject.name} ({(subject as any).syllabusCode || ""})</span>
-                </button>
-              );
-            })
-          )}
-        </div>
       </div>
 
       <div className="flex gap-2">
-        <Button variant="outline" className="flex-1" onClick={onClose} data-testid="button-cancel-assignments">
+        <Button
+          variant="outline"
+          className="flex-1"
+          onClick={onClose}
+          data-testid="button-cancel-assignments"
+        >
           Cancel
         </Button>
-        <Button className="flex-1" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-assignments">
+        <Button
+          className="flex-1"
+          onClick={() => saveMutation.mutate()}
+          disabled={saveMutation.isPending}
+          data-testid="button-save-assignments"
+        >
           {saveMutation.isPending ? "Saving..." : "Save"}
         </Button>
       </div>
