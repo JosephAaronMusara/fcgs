@@ -412,7 +412,7 @@ function ReportCardSlip({
       style={{ pageBreakInside: "avoid", pageBreakAfter: "always" }}
     >
       <div
-        className="report-slip-inner border border-gray-300 dark:border-gray-600 p-3 relative overflow-hidden flex flex-col"
+        className="report-slip-inner report-slip-page report-slip-page--main border border-gray-300 dark:border-gray-600 py-3 px-1.5 relative overflow-hidden flex flex-col"
         style={{ fontSize: "12px", minHeight: "calc(297mm - 10mm - 16px)" }}
       >
         {school.logo && (
@@ -425,7 +425,7 @@ function ReportCardSlip({
         )}
 
         <div className="relative z-10">
-          <div className="grid grid-cols-[150px_1fr_150px] items-center gap-3">
+          <div className="grid grid-cols-[112px_1fr_112px] items-center gap-2">
             <div className="text-left">
               {school.logo ? (
                 <img
@@ -584,7 +584,7 @@ function ReportCardSlip({
           </div>
 
           <table
-            className="w-full table-fixed border-collapse mt-1.5 text-[11px]"
+            className="w-full table-fixed border-collapse mt-1.5 text-[10px]"
             data-testid={`table-subjects-${student.id}`}
           >
             <thead>
@@ -592,19 +592,19 @@ function ReportCardSlip({
                 <th className="w-[25%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
                   Subject
                 </th>
-                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[7%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Mark %
                 </th>
-                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[8%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Dev.
                 </th>
-                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[10%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Class Avg %
                 </th>
-                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[7%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Grade
                 </th>
-                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[8%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
                   Rank
                 </th>
                 <th className="w-[35%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
@@ -675,11 +675,36 @@ function ReportCardSlip({
               className="border border-gray-300 dark:border-gray-600 rounded-sm p-1.5"
               style={{ background: "rgba(0,0,0,0.04)" }}
             >
-              <div className="text-[11px] font-semibold mb-1 text-center">
-                Subject Performance vs Class
+              <div className="flex items-center justify-center gap-8 mb-1">
+                <div className="text-[11px] font-semibold text-center">
+                  Subject Performance vs Class
+                </div>
+                <div className="flex gap-3 text-[8px] items-center">
+                  <span className="flex items-center gap-1">
+                    <span
+                      className="w-2 h-2 inline-block rounded-sm"
+                      style={{
+                        background: "linear-gradient(180deg, #7CB9F7, #5B9FE8)",
+                      }}
+                    />{" "}
+                    Student
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span
+                      className="w-4 h-0.5 inline-block rounded"
+                      style={{ background: "#4CAF50" }}
+                    />
+                    <span
+                      className="w-1.5 h-1.5 inline-block rounded-full"
+                      style={{ background: "#4CAF50" }}
+                    />{" "}
+                    Class Avg
+                  </span>
+                </div>
               </div>
+
               <div className="flex flex-col overflow-hidden">
-                <div className="flex" style={{ height: "160px" }}>
+                <div className="flex" style={{ height: "100px" }}>
                   <div
                     className="flex flex-col justify-between py-0.5 pr-0.5 flex-shrink-0"
                     style={{ width: "22px" }}
@@ -852,39 +877,31 @@ function ReportCardSlip({
                   })()}
                 </div>
               </div>
-              <div className="flex gap-3 mt-1 text-[8px] justify-center">
-                <span className="flex items-center gap-1">
-                  <span
-                    className="w-2 h-2 inline-block rounded-sm"
-                    style={{
-                      background: "linear-gradient(180deg, #7CB9F7, #5B9FE8)",
-                    }}
-                  />{" "}
-                  Student
-                </span>
-                <span className="flex items-center gap-1">
-                  <span
-                    className="w-4 h-0.5 inline-block rounded"
-                    style={{ background: "#4CAF50" }}
-                  />
-                  <span
-                    className="w-1.5 h-1.5 inline-block rounded-full"
-                    style={{ background: "#4CAF50" }}
-                  />{" "}
-                  Class Avg
-                </span>
-              </div>
             </div>
 
             <div
               className="border border-gray-300 dark:border-gray-600 rounded-sm p-1.5"
               style={{ background: "rgba(0,0,0,0.04)" }}
             >
-              <div className="text-[11px] font-semibold mb-1 text-center">
-                Term Average Trend
+              <div className="flex items-center justify-center gap-8 mb-1">
+                <div className="text-[11px] font-semibold text-center">
+                  Term Average Trend
+                </div>
+                <div className="flex gap-3 text-[8px] items-center">
+                  <span className="flex items-center gap-1">
+                    <span
+                      className="w-2 h-2 inline-block rounded-sm"
+                      style={{
+                        background: "linear-gradient(180deg, #A8B5C8, #8D9BB0)",
+                      }}
+                    />{" "}
+                    Term Average
+                  </span>
+                </div>
               </div>
+
               <div className="flex flex-col overflow-hidden">
-                <div className="flex" style={{ height: "160px" }}>
+                <div className="flex" style={{ height: "100px" }}>
                   <div
                     className="flex flex-col justify-between py-0.5 pr-0.5 flex-shrink-0"
                     style={{ width: "22px" }}
@@ -1007,17 +1024,6 @@ function ReportCardSlip({
                     ));
                   })()}
                 </div>
-              </div>
-              <div className="flex gap-3 mt-1 text-[8px] justify-center">
-                <span className="flex items-center gap-1">
-                  <span
-                    className="w-2 h-2 inline-block rounded-sm"
-                    style={{
-                      background: "linear-gradient(180deg, #A8B5C8, #8D9BB0)",
-                    }}
-                  />{" "}
-                  Term Average
-                </span>
               </div>
             </div>
           </div>
