@@ -406,6 +406,27 @@ function ReportCardSlip({
   const name = `${student.firstName} ${student.lastName}`;
   const { toast } = useToast();
 
+  const parseGraphNumber = (value: string | number | null | undefined) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "number") {
+      return Number.isFinite(value) ? value : null;
+    }
+    const cleaned = value.replace(/[^0-9.-]/g, "").trim();
+    if (!cleaned) return null;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const subjectChartLabels = subjects.map((subj) => subj.subjectName);
+  const subjectChartStudentMarks = subjects.map((subj) => {
+    const parsed = parseGraphNumber(subj.mark);
+    return Math.max(parsed ?? 0, 0);
+  });
+  const subjectChartClassAvgs = subjects.map((subj) => {
+    const parsed = parseGraphNumber(subj.classAvg);
+    return parsed === null ? null : Math.max(parsed, 0);
+  });
+
   return (
     <div
       className="report-slip bg-white dark:bg-gray-900 rounded-lg mb-8 shadow-lg p-2 print:shadow-none print:rounded-none print:mb-0 print:p-0"
@@ -719,9 +740,9 @@ function ReportCardSlip({
                     ))}
                   </div>
                   <div className="flex-1 relative border-l border-gray-300 dark:border-gray-600 border-b">
-                    {studentReport.chartSubjectLabels.length > 0 ? (
+                    {subjectChartLabels.length > 0 ? (
                       (() => {
-                        const count = studentReport.chartSubjectLabels.length;
+                        const count = subjectChartLabels.length;
                         const slots = Math.max(count, 10);
                         const gap = 2;
                         return (
@@ -733,10 +754,10 @@ function ReportCardSlip({
                                 padding: "0 2px 0 2px",
                               }}
                             >
-                              {studentReport.chartSubjectLabels.map(
+                              {subjectChartLabels.map(
                                 (label, i) => {
                                   const studentMark =
-                                    studentReport.chartStudentMarks[i] || 0;
+                                    subjectChartStudentMarks[i] || 0;
                                   const barH = Math.max(studentMark, 0);
                                   const barWidth = `calc((100% - ${(slots - 1) * gap + 4}px) / ${slots})`;
                                   return (
@@ -763,7 +784,7 @@ function ReportCardSlip({
                                 },
                               )}
                             </div>
-                            {studentReport.chartClassAvgs.some(
+                            {subjectChartClassAvgs.some(
                               (v) => v !== null,
                             ) && (
                               <svg
@@ -777,7 +798,7 @@ function ReportCardSlip({
                                   strokeWidth="6"
                                   strokeLinejoin="round"
                                   strokeLinecap="round"
-                                  points={studentReport.chartClassAvgs
+                                  points={subjectChartClassAvgs
                                     .map((avg, i) => {
                                       if (avg === null) return null;
                                       const slotW = 1000 / slots;
@@ -788,7 +809,7 @@ function ReportCardSlip({
                                     .filter(Boolean)
                                     .join(" ")}
                                 />
-                                {studentReport.chartClassAvgs.map((avg, i) => {
+                                {subjectChartClassAvgs.map((avg, i) => {
                                   if (avg === null) return null;
                                   const slotW = 1000 / slots;
                                   const x = i * slotW + slotW / 2;
@@ -838,10 +859,10 @@ function ReportCardSlip({
                   }}
                 >
                   {(() => {
-                    const count = studentReport.chartSubjectLabels.length;
+                    const count = subjectChartLabels.length;
                     const slots = Math.max(count, 10);
                     const barWidth = `calc((100% - ${(slots - 1) * 2 + 4}px) / ${slots})`;
-                    return studentReport.chartSubjectLabels.map((label, i) => (
+                    return subjectChartLabels.map((label, i) => (
                       <div
                         key={i}
                         className="flex-shrink-0"
