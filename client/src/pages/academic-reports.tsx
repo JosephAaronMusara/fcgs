@@ -79,7 +79,7 @@ import type {
   ReportComment,
   AssessmentType,
 } from "@shared/schema";
-import { getGradingProfilesForSchool, getGradeProfileLabel, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName } from "@shared/academic-profiles";
+import { getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName } from "@shared/academic-profiles";
 import { EcdAssessmentTab } from "@/components/academic-reports/ecd-assessment-tab";
 
 type ViewMode = "hub" | "class-level" | "report-cards";
@@ -225,7 +225,13 @@ interface ReportStudent {
   ecdSections?: EcdReportSection[];
   principalComment?: string;
   classTeacherComment?: string;
+  principalCommentPool?: string;
+  classTeacherCommentPool?: string;
 }
+
+type ReportCardCommentType = "principal" | "class_teacher";
+type ReportCardCommentDraftMap = Record<number, { principal: string; class_teacher: string }>;
+type ReportCardCommentStatus = "idle" | "saving" | "saved" | "error";
 
 interface ReportCardData {
   school: {
@@ -265,6 +271,31 @@ type ReportCommentGradeOption = {
 function formatReportCommentGradeLabel(grade: Pick<ReportCommentGradeOption, "gradeName" | "gradeStatus" | "lowerLimit" | "upperLimit">) {
   return `${grade.gradeName} (${grade.gradeStatus}) • ${grade.lowerLimit}% - ${grade.upperLimit}%`;
 }
+function normalizeReportCommentProfileToken(value?: string | null) {
+  return (value || "").trim().toLowerCase();
+}
+
+function getReportCommentProfileTokens(profileKey?: string | null) {
+  if (!profileKey) return new Set<string>();
+  const keys = Array.from(new Set([profileKey, ...getCompatibleGradeProfileKeys(profileKey)]));
+  const tokens = new Set<string>();
+  keys.forEach((key) => {
+    const normalizedKey = normalizeReportCommentProfileToken(key);
+    if (normalizedKey) tokens.add(normalizedKey);
+    const label = getGradeProfileLabel(key);
+    const normalizedLabel = normalizeReportCommentProfileToken(label);
+    if (normalizedLabel) tokens.add(normalizedLabel);
+  });
+  return tokens;
+}
+
+function reportCommentGradeMatchesTab(gradeLevel: string | null | undefined, activeTab?: string | null) {
+  if (!activeTab) return true;
+  const normalizedGradeLevel = normalizeReportCommentProfileToken(gradeLevel);
+  if (!normalizedGradeLevel) return false;
+  return getReportCommentProfileTokens(activeTab).has(normalizedGradeLevel);
+}
+
 function DevCell({ dev }: { dev: string }) {
   if (dev === "0" || dev === "0%") {
     return (
@@ -410,12 +441,20 @@ function ReportCardSlip({
   onSendIndividual,
   onPrintIndividual,
   sendingId,
+  editableComments,
+  commentValues,
+  commentSaveStates,
+  onCommentChange,
 }: {
   data: ReportCardData;
   studentReport: ReportStudent;
   onSendIndividual: (studentId: number) => void;
   onPrintIndividual: (studentId: number) => void;
   sendingId: number | null;
+  editableComments: boolean;
+  commentValues?: { principal: string; class_teacher: string };
+  commentSaveStates?: { principal: ReportCardCommentStatus; class_teacher: ReportCardCommentStatus };
+  onCommentChange?: (studentId: number, commentType: ReportCardCommentType, value: string) => void;
 }) {
   const { student, subjects, summary } = studentReport;
   const { school } = data;
@@ -442,6 +481,18 @@ function ReportCardSlip({
     const parsed = parseGraphNumber(subj.classAvg);
     return parsed === null ? null : Math.max(parsed, 0);
   });
+
+  const displayedClassTeacherComment =
+    commentValues?.class_teacher ?? studentReport.classTeacherComment ?? "";
+  const displayedPrincipalComment =
+    commentValues?.principal ?? studentReport.principalComment ?? "";
+
+  const getSaveStateLabel = (state?: ReportCardCommentStatus) => {
+    if (state === "saving") return "Saving...";
+    if (state === "saved") return "Saved";
+    if (state === "error") return "Save failed";
+    return "";
+  };
 
   return (
     <div
@@ -626,7 +677,7 @@ function ReportCardSlip({
           >
             <thead>
               <tr>
-                <th className="w-[25%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                <th className="w-[20%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
                   Subject
                 </th>
                 <th className="w-[7%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
@@ -647,7 +698,7 @@ function ReportCardSlip({
                 <th className="w-[35%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
                   Comment
                 </th>
-                <th className="w-[10%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px] whitespace-nowrap">
+                <th className="w-[15%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px] whitespace-nowrap">
                   Teacher
                 </th>
               </tr>
@@ -805,6 +856,7 @@ function ReportCardSlip({
                             ) && (
                               <svg
                                 className="absolute inset-0 z-10 pointer-events-none overflow-visible"
+                                style={{ opacity: 0 }}
                                 preserveAspectRatio="xMinYMin meet"
                                 viewBox={`0 0 1000 1000`}
                               >
@@ -1065,15 +1117,45 @@ function ReportCardSlip({
             </div>
           </div>
 
-          <div className="mt-2.5 text-[11px]">
-            <p className="my-0.5">
-              <strong>Class Teacher's comment:</strong>{" "}
-              {studentReport.classTeacherComment || ""}
-            </p>
-            <p className="my-0.5">
-              <strong>Head/Principal's comment:</strong>{" "}
-              {studentReport.principalComment || ""}
-            </p>
+          <div className="mt-2.5 text-[11px] space-y-2">
+            <div>
+              <div className="font-semibold mb-1">Class Teacher's comment:</div>
+              {editableComments ? (
+                <>
+                  <Textarea
+                    value={displayedClassTeacherComment}
+                    onChange={(e) => onCommentChange?.(student.id, "class_teacher", e.target.value)}
+                    rows={2}
+                    className="min-h-[56px] text-[11px] leading-snug resize-none bg-white"
+                    data-testid={`textarea-class-teacher-comment-${student.id}`}
+                  />
+                  <div className="text-[10px] text-gray-500 mt-1 text-right min-h-[14px]">
+                    {getSaveStateLabel(commentSaveStates?.class_teacher)}
+                  </div>
+                </>
+              ) : (
+                <p className="my-0.5 whitespace-pre-wrap">{displayedClassTeacherComment}</p>
+              )}
+            </div>
+            <div>
+              <div className="font-semibold mb-1">Head/Principal's comment:</div>
+              {editableComments ? (
+                <>
+                  <Textarea
+                    value={displayedPrincipalComment}
+                    onChange={(e) => onCommentChange?.(student.id, "principal", e.target.value)}
+                    rows={2}
+                    className="min-h-[56px] text-[11px] leading-snug resize-none bg-white"
+                    data-testid={`textarea-principal-comment-${student.id}`}
+                  />
+                  <div className="text-[10px] text-gray-500 mt-1 text-right min-h-[14px]">
+                    {getSaveStateLabel(commentSaveStates?.principal)}
+                  </div>
+                </>
+              ) : (
+                <p className="my-0.5 whitespace-pre-wrap">{displayedPrincipalComment}</p>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-[0.85fr_1.7fr_0.85fr] gap-4 mt-auto pt-3 text-[11px] items-stretch">
@@ -1883,6 +1965,14 @@ export default function AcademicReportsPage() {
   const [sendingAll, setSendingAll] = useState(false);
   const [printStudentId, setPrintStudentId] = useState<number | null>(null);
   const originalTitleRef = useRef<string | null>(null);
+  const [reportCardCommentDrafts, setReportCardCommentDrafts] =
+    useState<ReportCardCommentDraftMap>({});
+  const [, setReportCardCommentPools] =
+    useState<ReportCardCommentDraftMap>({});
+  const [reportCardCommentStatuses, setReportCardCommentStatuses] =
+    useState<Record<string, ReportCardCommentStatus>>({});
+  const reportCardCommentPoolsRef = useRef<ReportCardCommentDraftMap>({});
+  const reportCardCommentTimeoutsRef = useRef<Record<string, number>>({});
 
   const [missingMarksOpen, setMissingMarksOpen] = useState(false);
   const [meritOpen, setMeritOpen] = useState(false);
@@ -1952,6 +2042,121 @@ export default function AcademicReportsPage() {
     if (!printStudentId) return filteredStudents;
     return filteredStudents.filter((rc) => rc.student.id === printStudentId);
   }, [filteredStudents, printStudentId]);
+
+  useEffect(() => {
+    if (!reportCardData) {
+      setReportCardCommentDrafts({});
+      setReportCardCommentPools({});
+      setReportCardCommentStatuses({});
+      reportCardCommentPoolsRef.current = {};
+      return;
+    }
+
+    const nextDrafts: ReportCardCommentDraftMap = {};
+    const nextPools: ReportCardCommentDraftMap = {};
+    for (const rc of reportCardData.reportCards) {
+      nextDrafts[rc.student.id] = {
+        principal: rc.principalComment || "",
+        class_teacher: rc.classTeacherComment || "",
+      };
+      nextPools[rc.student.id] = {
+        principal: rc.principalCommentPool || "",
+        class_teacher: rc.classTeacherCommentPool || "",
+      };
+    }
+    setReportCardCommentDrafts(nextDrafts);
+    setReportCardCommentPools(nextPools);
+    reportCardCommentPoolsRef.current = nextPools;
+    setReportCardCommentStatuses({});
+  }, [reportCardData]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(reportCardCommentTimeoutsRef.current).forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
+    };
+  }, []);
+
+  const saveReportCardCommentOverride = async (
+    studentId: number,
+    commentType: ReportCardCommentType,
+    value: string,
+  ) => {
+    if (!selectedExamId) return;
+
+    const statusKey = `${studentId}:${commentType}`;
+    setReportCardCommentStatuses((prev) => ({
+      ...prev,
+      [statusKey]: "saving",
+    }));
+
+    try {
+      await apiRequest("POST", "/api/report-card-comment-overrides", {
+        examId: Number(selectedExamId),
+        studentId,
+        commentType,
+        commentText: value,
+      });
+
+      if (!value.trim()) {
+        const fallback = reportCardCommentPoolsRef.current[studentId]?.[commentType] || "";
+        setReportCardCommentDrafts((prev) => ({
+          ...prev,
+          [studentId]: {
+            principal: prev[studentId]?.principal || "",
+            class_teacher: prev[studentId]?.class_teacher || "",
+            [commentType]: fallback,
+          },
+        }));
+      }
+
+      setReportCardCommentStatuses((prev) => ({
+        ...prev,
+        [statusKey]: "saved",
+      }));
+    } catch (error: any) {
+      setReportCardCommentStatuses((prev) => ({
+        ...prev,
+        [statusKey]: "error",
+      }));
+      toast({
+        title: "Autosave failed",
+        description: error?.message || "Failed to save report card comment.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleReportCardCommentChange = (
+    studentId: number,
+    commentType: ReportCardCommentType,
+    value: string,
+  ) => {
+    setReportCardCommentDrafts((prev) => ({
+      ...prev,
+      [studentId]: {
+        principal: prev[studentId]?.principal || "",
+        class_teacher: prev[studentId]?.class_teacher || "",
+        [commentType]: value,
+      },
+    }));
+
+    const statusKey = `${studentId}:${commentType}`;
+    setReportCardCommentStatuses((prev) => ({
+      ...prev,
+      [statusKey]: "idle",
+    }));
+
+    const existingTimeout = reportCardCommentTimeoutsRef.current[statusKey];
+    if (existingTimeout) {
+      window.clearTimeout(existingTimeout);
+    }
+
+    reportCardCommentTimeoutsRef.current[statusKey] = window.setTimeout(() => {
+      void saveReportCardCommentOverride(studentId, commentType, value);
+    }, 700);
+  };
 
   useEffect(() => {
     const handleAfterPrint = () => {
@@ -2557,6 +2762,15 @@ export default function AcademicReportsPage() {
                   onSendIndividual={handleSendIndividual}
                   onPrintIndividual={handlePrintIndividual}
                   sendingId={sendingId}
+                  editableComments
+                  commentValues={reportCardCommentDrafts[rc.student.id]}
+                  commentSaveStates={{
+                    principal:
+                      reportCardCommentStatuses[`${rc.student.id}:principal`] || "idle",
+                    class_teacher:
+                      reportCardCommentStatuses[`${rc.student.id}:class_teacher`] || "idle",
+                  }}
+                  onCommentChange={handleReportCardCommentChange}
                 />
               ))}
             </div>
@@ -2570,6 +2784,9 @@ export default function AcademicReportsPage() {
                     onSendIndividual={handleSendIndividual}
                     onPrintIndividual={handlePrintIndividual}
                     sendingId={sendingId}
+                    editableComments={false}
+                    commentValues={reportCardCommentDrafts[rc.student.id]}
+                    commentSaveStates={{ principal: "idle", class_teacher: "idle" }}
                   />
                 ))}
               </div>,
@@ -2876,11 +3093,10 @@ function ReportCommentsModal({
   });
 
   const { data: gradesResponse } = useQuery<{ items: Grade[] } | Grade[]>({
-    queryKey: ["/api/grades", currentSchoolId, "report-comments", activeTab],
-    enabled: open && !!currentSchoolId && !!activeTab,
+    queryKey: ["/api/grades", currentSchoolId, "report-comments"],
+    enabled: open && !!currentSchoolId,
     queryFn: async () => {
-      const params = new URLSearchParams({ page: "1", perPage: "200" });
-      if (activeTab) params.set("gradeLevel", activeTab);
+      const params = new URLSearchParams({ page: "1", perPage: "500" });
       const res = await schoolFetch(`/api/grades?${params.toString()}`);
       if (!res.ok) throw new Error("Failed to load grades");
       return res.json();
@@ -2967,7 +3183,19 @@ function ReportCommentsModal({
   }, [gradesData]);
 
   const filteredGrades = useMemo<ReportCommentGradeOption[]>(() => {
-    return sortedGrades.map((grade) => ({
+    const matchedGrades = sortedGrades.filter((grade) => reportCommentGradeMatchesTab(grade.gradeLevel, activeTab));
+    const blankProfileGrades = sortedGrades.filter((grade) => !normalizeReportCommentProfileToken(grade.gradeLevel));
+
+    const sourceGrades =
+      matchedGrades.length > 0
+        ? matchedGrades
+        : blankProfileGrades.length > 0
+          ? blankProfileGrades
+          : resolvedSchoolType === "primary"
+            ? sortedGrades
+            : matchedGrades;
+
+    return sourceGrades.map((grade) => ({
       id: grade.id,
       gradeName: grade.gradeName,
       gradeLevel: grade.gradeLevel,
@@ -2977,7 +3205,7 @@ function ReportCommentsModal({
       gradeStatus: grade.gradeStatus,
       gradeType: grade.gradeType,
     }));
-  }, [sortedGrades]);
+  }, [sortedGrades, activeTab, resolvedSchoolType]);
 
   const selectableGradeMap = useMemo(() => {
     const m = new Map<number, ReportCommentGradeOption>();
@@ -3010,12 +3238,16 @@ function ReportCommentsModal({
       if (activeTab) {
         const linkedGrade = comment.gradeId ? fetchedGradeMap.get(comment.gradeId) : undefined;
         const commentProfile = linkedGrade?.gradeLevel || comment.gradeLevel || null;
-        if (commentProfile !== activeTab) return false;
+        if (!reportCommentGradeMatchesTab(commentProfile, activeTab)) {
+          const visibleGradeNames = new Set(filteredGrades.map((grade) => grade.gradeName.trim().toLowerCase()));
+          const fallbackGradeName = (comment.commentGrade || "").trim().toLowerCase();
+          if (!fallbackGradeName || !visibleGradeNames.has(fallbackGradeName)) return false;
+        }
       }
       if (isClassTeacher && selectedClassIds.length > 0 && !selectedClassIds.includes(comment.classId || -1)) return false;
       return true;
     });
-  }, [comments, activeTab, selectedClassIds, isClassTeacher, commentType, fetchedGradeMap]);
+  }, [comments, activeTab, selectedClassIds, isClassTeacher, commentType, fetchedGradeMap, filteredGrades]);
 
   const sortedComments = useMemo(() => {
     return [...filteredComments].sort((a, b) => {

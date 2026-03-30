@@ -6,7 +6,7 @@ import { db } from "./db";
 import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, like } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
@@ -247,23 +247,97 @@ async function validateSubjectPayloadForSchool(schoolId: number, payload: any, r
   return { schoolType, board, subjectType: nextSubjectType, streamIds: nextStreamIds };
 }
 
+const ECD_ITEM_TEXT_ALIASES: Record<string, string[]> = {
+  "Can share with others": ["Can share"],
+};
+
 async function ensureEcdSeedData() {
-  const existingDomains = await storage.getEcdAssessmentDomains();
-  if (existingDomains.length > 0) return;
+  const { ecdAssessmentDomains, ecdAssessmentItems } = await import("@shared/schema");
+  const existingDomains = await db.select().from(ecdAssessmentDomains);
+  const existingItems = await db.select().from(ecdAssessmentItems);
+  const domainByCode = new Map(existingDomains.map((domain) => [domain.code, domain]));
+  const matchedDomainIds = new Set<number>();
+  const matchedItemIds = new Set<number>();
+
   for (const domainSeed of ECD_DOMAIN_SEEDS) {
-    const [domain] = await db.insert((await import("@shared/schema")).ecdAssessmentDomains).values({
-      code: domainSeed.code,
-      name: domainSeed.name,
-      sortOrder: domainSeed.sortOrder,
-      isActive: true,
-    }).returning();
+    let domain = domainByCode.get(domainSeed.code);
+    if (domain) {
+      matchedDomainIds.add(domain.id);
+      if (domain.name !== domainSeed.name || domain.sortOrder !== domainSeed.sortOrder || domain.isActive !== true) {
+        const [updatedDomain] = await db
+          .update(ecdAssessmentDomains)
+          .set({
+            name: domainSeed.name,
+            sortOrder: domainSeed.sortOrder,
+            isActive: true,
+          })
+          .where(eq(ecdAssessmentDomains.id, domain.id))
+          .returning();
+        domain = updatedDomain;
+        domainByCode.set(domain.code, domain);
+      }
+    } else {
+      const [createdDomain] = await db
+        .insert(ecdAssessmentDomains)
+        .values({
+          code: domainSeed.code,
+          name: domainSeed.name,
+          sortOrder: domainSeed.sortOrder,
+          isActive: true,
+        })
+        .returning();
+      domain = createdDomain;
+      domainByCode.set(domain.code, domain);
+      matchedDomainIds.add(domain.id);
+    }
+
     for (let index = 0; index < domainSeed.items.length; index += 1) {
-      await db.insert((await import("@shared/schema")).ecdAssessmentItems).values({
-        domainId: domain.id,
-        itemText: domainSeed.items[index],
-        sortOrder: index + 1,
-        isActive: true,
-      });
+      const itemText = domainSeed.items[index];
+      const candidateTexts = [itemText, ...(ECD_ITEM_TEXT_ALIASES[itemText] || [])];
+      const existingItem =
+        existingItems.find(
+          (item) => !matchedItemIds.has(item.id) && item.domainId === domain.id && candidateTexts.includes(item.itemText),
+        ) ||
+        existingItems.find((item) => !matchedItemIds.has(item.id) && candidateTexts.includes(item.itemText));
+
+      if (existingItem) {
+        matchedItemIds.add(existingItem.id);
+        if (
+          existingItem.domainId !== domain.id ||
+          existingItem.itemText !== itemText ||
+          existingItem.sortOrder !== index + 1 ||
+          existingItem.isActive !== true
+        ) {
+          await db
+            .update(ecdAssessmentItems)
+            .set({
+              domainId: domain.id,
+              itemText,
+              sortOrder: index + 1,
+              isActive: true,
+            })
+            .where(eq(ecdAssessmentItems.id, existingItem.id));
+        }
+      } else {
+        await db.insert(ecdAssessmentItems).values({
+          domainId: domain.id,
+          itemText,
+          sortOrder: index + 1,
+          isActive: true,
+        });
+      }
+    }
+  }
+
+  for (const domain of existingDomains) {
+    if (!matchedDomainIds.has(domain.id) && domain.isActive !== false) {
+      await db.update(ecdAssessmentDomains).set({ isActive: false }).where(eq(ecdAssessmentDomains.id, domain.id));
+    }
+  }
+
+  for (const item of existingItems) {
+    if (!matchedItemIds.has(item.id) && item.isActive !== false) {
+      await db.update(ecdAssessmentItems).set({ isActive: false }).where(eq(ecdAssessmentItems.id, item.id));
     }
   }
 }
@@ -6904,6 +6978,47 @@ export async function registerRoutes(
     return (exactClass || matches.find((comment) => !comment.classId) || matches[0] || {}).commentText || "";
   }
 
+  const REPORT_CARD_OVERRIDE_PREFIX = "__REPORT_CARD_OVERRIDE__";
+
+  function buildReportCardOverrideKey(studentId: number, examId: number) {
+    return `${REPORT_CARD_OVERRIDE_PREFIX}:${studentId}:${examId}`;
+  }
+
+  function parseReportCardOverrideKey(value: string | null | undefined): { studentId: number; examId: number } | null {
+    if (!value || typeof value !== "string") return null;
+    const match = value.match(/^__REPORT_CARD_OVERRIDE__:(\d+):(\d+)$/);
+    if (!match) return null;
+    const studentId = Number(match[1]);
+    const examId = Number(match[2]);
+    if (!Number.isFinite(studentId) || !Number.isFinite(examId)) return null;
+    return { studentId, examId };
+  }
+
+  async function getReportCardCommentOverrideMap(schoolId: number, examId: number, studentIds?: number[]) {
+    const rows = await db
+      .select()
+      .from(reportComments)
+      .where(and(
+        eq(reportComments.schoolId, schoolId),
+        like(reportComments.commentGrade, `${REPORT_CARD_OVERRIDE_PREFIX}:%:${examId}`),
+      ));
+
+    const allowedStudentIds = studentIds ? new Set(studentIds.map((id) => Number(id))) : null;
+    const map = new Map<number, { principal?: string; class_teacher?: string }>();
+
+    for (const row of rows) {
+      const parsed = parseReportCardOverrideKey(row.commentGrade);
+      if (!parsed || parsed.examId !== examId) continue;
+      if (allowedStudentIds && !allowedStudentIds.has(parsed.studentId)) continue;
+      const entry = map.get(parsed.studentId) || {};
+      if (row.commentType === "principal") entry.principal = row.commentText || "";
+      if (row.commentType === "class_teacher") entry.class_teacher = row.commentText || "";
+      map.set(parsed.studentId, entry);
+    }
+
+    return map;
+  }
+
   app.get("/api/report-comments", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
@@ -7110,6 +7225,73 @@ export async function registerRoutes(
       const id = parseInt(req.params.id);
       await storage.deleteReportComment(id, schoolId);
       res.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/report-card-comment-overrides", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "No school context" });
+
+      const examId = Number(req.body?.examId);
+      const studentId = Number(req.body?.studentId);
+      const commentType = req.body?.commentType;
+      const commentText = typeof req.body?.commentText === "string" ? req.body.commentText : "";
+
+      if (!Number.isFinite(examId) || !Number.isFinite(studentId)) {
+        return res.status(400).json({ message: "examId and studentId are required" });
+      }
+      if (commentType !== "principal" && commentType !== "class_teacher") {
+        return res.status(400).json({ message: "commentType must be 'principal' or 'class_teacher'" });
+      }
+
+      const student = await storage.getStudent(studentId);
+      if (!student || Number(student.schoolId) !== Number(schoolId)) {
+        return res.status(404).json({ message: "Student not found" });
+      }
+
+      const overrideKey = buildReportCardOverrideKey(studentId, examId);
+      const [existing] = await db
+        .select()
+        .from(reportComments)
+        .where(and(
+          eq(reportComments.schoolId, schoolId),
+          eq(reportComments.commentType, commentType as any),
+          eq(reportComments.commentGrade, overrideKey),
+        ));
+
+      const trimmed = commentText.trim();
+      if (!trimmed) {
+        if (existing) {
+          await db.delete(reportComments).where(eq(reportComments.id, existing.id));
+        }
+        return res.json({ ok: true, overrideText: null });
+      }
+
+      if (existing) {
+        await db
+          .update(reportComments)
+          .set({
+            commentText: trimmed,
+            classId: commentType === "class_teacher" ? student.classId ?? null : null,
+          })
+          .where(eq(reportComments.id, existing.id));
+      } else {
+        await db.insert(reportComments).values({
+          schoolId,
+          gradeId: null,
+          commentGrade: overrideKey,
+          gradeLevel: null,
+          subjectId: null,
+          classId: commentType === "class_teacher" ? student.classId ?? null : null,
+          commentText: trimmed,
+          commentType,
+        });
+      }
+
+      res.json({ ok: true, overrideText: trimmed });
     } catch (error) {
       next(error);
     }
@@ -7984,19 +8166,34 @@ export async function registerRoutes(
         });
         const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
         const configuredGrade = resolveReportCommentGradeForAverage(applicableGrades, avg);
-        (rc as any).principalComment = findReportCommentForConfiguredGrade({
+        const principalPoolComment = findReportCommentForConfiguredGrade({
           comments: allReportComments,
           commentType: "principal",
           grade: configuredGrade,
           profileKey,
         });
-        (rc as any).classTeacherComment = findReportCommentForConfiguredGrade({
+        const classTeacherPoolComment = findReportCommentForConfiguredGrade({
           comments: allReportComments,
           commentType: "class_teacher",
           grade: configuredGrade,
           profileKey,
           classId,
         });
+        (rc as any).principalCommentPool = principalPoolComment;
+        (rc as any).classTeacherCommentPool = classTeacherPoolComment;
+        (rc as any).principalComment = principalPoolComment;
+        (rc as any).classTeacherComment = classTeacherPoolComment;
+      }
+
+      const overrideMap = await getReportCardCommentOverrideMap(schoolId, examId, reportCards.map((rc) => rc.student.id));
+      for (const rc of reportCards) {
+        const overrides = overrideMap.get(rc.student.id);
+        if (overrides?.principal !== undefined) {
+          (rc as any).principalComment = overrides.principal || "";
+        }
+        if (overrides?.class_teacher !== undefined) {
+          (rc as any).classTeacherComment = overrides.class_teacher || "";
+        }
       }
 
       const studentsWithMarks = reportCards.filter(r => r.summary.averagePercentage !== null);
@@ -8376,6 +8573,15 @@ export async function registerRoutes(
         profileKey,
         classId: classInfo.id,
       });
+    }
+
+    const pdfOverrideMap = await getReportCardCommentOverrideMap(schoolId, examId, [studentId]);
+    const pdfOverrides = pdfOverrideMap.get(studentId);
+    if (pdfOverrides?.principal !== undefined) {
+      principalComment = pdfOverrides.principal || '';
+    }
+    if (pdfOverrides?.class_teacher !== undefined) {
+      classTeacherComment = pdfOverrides.class_teacher || '';
     }
 
     return {
