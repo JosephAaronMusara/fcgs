@@ -7977,6 +7977,28 @@ export async function registerRoutes(
       }
       
       const teacherMap = new Map<string, string>();
+      const getTeacherDisplayName = async (staffId: number) => {
+        const staffMember = await storage.getStaff(staffId);
+        if (!staffMember) return `Staff #${staffId}`;
+
+        const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
+        const normalizedGender = (staffMember.gender || "").toString().toLowerCase();
+        const title = normalizedGender === "male" ? "Mr." : normalizedGender === "female" ? "Ms." : "";
+
+        const firstName = ((staffMember.firstName || user?.firstName || "") as string).trim();
+        const lastName = ((staffMember.lastName || user?.lastName || "") as string).trim();
+        const firstInitial = firstName ? `${firstName.charAt(0).toUpperCase()}.` : "";
+
+        if (lastName) {
+          return [title, firstInitial, lastName].filter(Boolean).join(" ").trim();
+        }
+
+        const fallbackName = user
+          ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
+          : `${staffMember.firstName || ""} ${staffMember.lastName || ""}`.trim();
+
+        return fallbackName || `Staff #${staffId}`;
+      };
       try {
         const allStaffSubjects = await db.select({
           staffId: staffSubjects.staffId,
@@ -7986,12 +8008,8 @@ export async function registerRoutes(
           eq(staffSubjects.classId, classId)
         );
         for (const ss of allStaffSubjects) {
-          const staffMember = await storage.getStaff(ss.staffId);
-          if (staffMember) {
-            const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
-            const name = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : `Staff #${ss.staffId}`;
-            teacherMap.set(`${ss.subjectId}-${ss.classId}`, name);
-          }
+          const name = await getTeacherDisplayName(ss.staffId);
+          teacherMap.set(`${ss.subjectId}-${ss.classId}`, name);
         }
       } catch (e) {}
       
@@ -8489,6 +8507,29 @@ export async function registerRoutes(
     }>> = {};
 
     const teacherMap = new Map<string, string>();
+    const getTeacherDisplayName = async (staffId: number) => {
+      const staffMember = await storage.getStaff(staffId);
+      if (!staffMember) return `Staff #${staffId}`;
+
+      const normalizedGender = (staffMember.gender || "").toString().toLowerCase();
+      const title = normalizedGender === "male" ? "Mr" : normalizedGender === "female" ? "Ms" : "";
+      const lastName = (staffMember.lastName || "").trim();
+      if (lastName) {
+        return `${title ? `${title} ` : ""}${lastName}`.trim();
+      }
+
+      const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
+      const userLastName = (user?.lastName || "").trim();
+      if (userLastName) {
+        return `${title ? `${title} ` : ""}${userLastName}`.trim();
+      }
+
+      const fallbackName = user
+        ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
+        : `${staffMember.firstName || ""} ${staffMember.lastName || ""}`.trim();
+
+      return fallbackName || `Staff #${staffId}`;
+    };
     try {
       const allStaffSubjectsList = await db.select({
         staffId: staffSubjects.staffId,
@@ -8496,12 +8537,8 @@ export async function registerRoutes(
         classId: staffSubjects.classId,
       }).from(staffSubjects).where(eq(staffSubjects.classId, classInfo.id));
       for (const ss of allStaffSubjectsList) {
-        const staffMember = await storage.getStaff(ss.staffId);
-        if (staffMember) {
-          const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
-          const tName = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : `Staff #${ss.staffId}`;
-          teacherMap.set(`${ss.subjectId}-${ss.classId}`, tName);
-        }
+        const tName = await getTeacherDisplayName(ss.staffId);
+        teacherMap.set(`${ss.subjectId}-${ss.classId}`, tName);
       }
     } catch (e) {}
 
