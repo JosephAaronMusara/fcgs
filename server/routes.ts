@@ -31,7 +31,7 @@ import {
   insertPermissionSchema, insertAccessGroupSchema,
   type User, type InsertStudent, type InsertActivityLog
 } from "@shared/schema";
-import { ECD_DOMAIN_SEEDS, getGradingProfilesForSchool, getGradeProfileLabel, getSubjectTypeOptionsForSchool, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, type GradeProfileKey } from "@shared/academic-profiles";
+import { ECD_DOMAIN_SEEDS, filterItemsByGradeProfileKey, getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, getSubjectTypeOptionsForSchool, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, type GradeProfileKey } from "@shared/academic-profiles";
 
 function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -59,21 +59,8 @@ const PASSWORD_RULES = {
   requireSpecial: true,
 };
 
-const LEGACY_PROFILE_FALLBACKS: Record<string, string[]> = {
-  SEC_ZIM_A: ["A_Level"],
-  SEC_CAM_A: ["A_Level"],
-  SEC_ZIM_O: ["O_Level"],
-  SEC_CAM_O: ["O_Level"],
-  SEC_CAM_IGCSE: ["IGCSE"],
-};
-
 function getGradesForProfile(grades: any[], profileKey: string | null | undefined) {
-  if (!profileKey) return grades;
-  const fallbacks = LEGACY_PROFILE_FALLBACKS[profileKey] || [];
-  const exact = grades.filter((grade) => grade.gradeLevel === profileKey);
-  if (exact.length > 0) return exact;
-  if (fallbacks.length === 0) return exact;
-  return grades.filter((grade) => fallbacks.includes(grade.gradeLevel));
+  return filterItemsByGradeProfileKey(grades, profileKey);
 }
 
 async function resolveGradeProfileContext(args: {
@@ -2886,7 +2873,7 @@ export async function registerRoutes(
         : gradeList;
       
       if (gradeLevel) {
-        filtered = filtered.filter(g => g.gradeLevel === gradeLevel);
+        filtered = filterItemsByGradeProfileKey(filtered, gradeLevel);
       }
       
       if (search) {
@@ -6885,6 +6872,38 @@ export async function registerRoutes(
     return comment.commentGrade === commentGrade && (comment.gradeLevel || null) === (gradeLevel || null);
   };
 
+  function resolveReportCommentGradeForAverage(grades: any[], averagePercentage: number | null) {
+    if (averagePercentage === null) return null;
+    const roundedAverage = Math.round(averagePercentage);
+    const orderedGrades = [...grades].sort((a, b) => (Number(b.upperLimit) || 0) - (Number(a.upperLimit) || 0));
+    return orderedGrades.find((grade) => roundedAverage >= Number(grade.lowerLimit) && roundedAverage <= Number(grade.upperLimit)) || null;
+  }
+
+  function findReportCommentForConfiguredGrade(args: {
+    comments: any[];
+    commentType: "principal" | "class_teacher";
+    grade: any | null;
+    profileKey?: string | null;
+    classId?: number | null;
+  }) {
+    if (!args.grade) return "";
+    const compatibleKeys = new Set(getCompatibleGradeProfileKeys(args.profileKey));
+    const matches = args.comments.filter((comment) => {
+      if (comment.commentType !== args.commentType) return false;
+      if (args.commentType === "class_teacher" && args.classId && comment.classId && Number(comment.classId) !== Number(args.classId)) return false;
+      if (comment.gradeId && Number(comment.gradeId) === Number(args.grade.id)) return true;
+      if ((comment.commentGrade || "") !== (args.grade.gradeName || "")) return false;
+      if (!comment.gradeLevel) return true;
+      if (compatibleKeys.size === 0) return comment.gradeLevel === args.profileKey;
+      return compatibleKeys.has(comment.gradeLevel);
+    });
+
+    const exactClass = args.commentType === "class_teacher" && args.classId
+      ? matches.find((comment) => Number(comment.classId) === Number(args.classId))
+      : undefined;
+    return (exactClass || matches.find((comment) => !comment.classId) || matches[0] || {}).commentText || "";
+  }
+
   app.get("/api/report-comments", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
@@ -7950,20 +7969,34 @@ export async function registerRoutes(
         };
       }));
       
-      const { getCommentGradeForAverage } = await import("@shared/schema");
       const allReportComments = await storage.getReportComments(schoolId);
-      const principalComments = allReportComments.filter(c => c.commentType === "principal");
-      const classTeacherComments = allReportComments.filter(c => c.commentType === "class_teacher");
+      const allGrades = (await storage.getAllGrades()).filter((grade) => grade.schoolId === schoolId);
 
       for (const rc of reportCards) {
         const avg = rc.summary.averagePercentage;
-        if (avg !== null) {
-          const commentGrade = getCommentGradeForAverage(Math.round(avg));
-          const pComment = principalComments.find(c => c.commentGrade === commentGrade);
-          if (pComment) (rc as any).principalComment = pComment.commentText;
-          const ctComment = classTeacherComments.find(c => c.commentGrade === commentGrade && (!c.classId || c.classId === classId));
-          if (ctComment) (rc as any).classTeacherComment = ctComment.commentText;
-        }
+        const studentInfo = students.find((student) => student.id === rc.student.id);
+        let streamId = studentInfo?.streamId ?? classInfo?.streamId ?? null;
+        const stream = streamId ? await storage.getStream(streamId) : null;
+        const profileKey = resolveGradeProfileKey({
+          schoolType: school?.schoolType,
+          examinationBoard: school?.examinationBoard,
+          streamName: stream?.name,
+        });
+        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
+        const configuredGrade = resolveReportCommentGradeForAverage(applicableGrades, avg);
+        (rc as any).principalComment = findReportCommentForConfiguredGrade({
+          comments: allReportComments,
+          commentType: "principal",
+          grade: configuredGrade,
+          profileKey,
+        });
+        (rc as any).classTeacherComment = findReportCommentForConfiguredGrade({
+          comments: allReportComments,
+          commentType: "class_teacher",
+          grade: configuredGrade,
+          profileKey,
+          classId,
+        });
       }
 
       const studentsWithMarks = reportCards.filter(r => r.summary.averagePercentage !== null);
@@ -8321,13 +8354,28 @@ export async function registerRoutes(
     let principalComment = '';
     let classTeacherComment = '';
     if (avgPct !== null) {
-      const { getCommentGradeForAverage: getGrade } = await import("@shared/schema");
-      const commentGradeVal = getGrade(Math.round(avgPct));
       const allComments = await storage.getReportComments(schoolId);
-      const pCmt = allComments.find(c => c.commentType === "principal" && c.commentGrade === commentGradeVal);
-      if (pCmt) principalComment = pCmt.commentText;
-      const ctCmt = allComments.find(c => c.commentType === "class_teacher" && c.commentGrade === commentGradeVal && (!c.classId || c.classId === classInfo.id));
-      if (ctCmt) classTeacherComment = ctCmt.commentText;
+      const allGrades = (await storage.getAllGrades()).filter((grade) => grade.schoolId === schoolId);
+      const profileKey = resolveGradeProfileKey({
+        schoolType: schoolInfo?.schoolType,
+        examinationBoard: schoolInfo?.examinationBoard,
+        streamName: studentStream?.name || classStream?.name,
+      });
+      const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId: classInfo.id });
+      const configuredGrade = resolveReportCommentGradeForAverage(applicableGrades, avgPct);
+      principalComment = findReportCommentForConfiguredGrade({
+        comments: allComments,
+        commentType: "principal",
+        grade: configuredGrade,
+        profileKey,
+      });
+      classTeacherComment = findReportCommentForConfiguredGrade({
+        comments: allComments,
+        commentType: "class_teacher",
+        grade: configuredGrade,
+        profileKey,
+        classId: classInfo.id,
+      });
     }
 
     return {
