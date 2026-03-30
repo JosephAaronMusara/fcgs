@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, ne, desc, and, or, sql, count as drizzleCount, like, gte, lte, isNull, inArray } from "drizzle-orm";
+import { eq, ne, desc, and, or, sql, count as drizzleCount, like, gte, lte, isNull, inArray, notLike } from "drizzle-orm";
 import {
   users, staff, streams, classes, parents, students, subjects,
   staffSubjects, studentSubjects, classSubjects, grades, assessments, marks, attendanceRecords,
@@ -2609,17 +2609,28 @@ export class DatabaseStorage implements IStorage {
 
   // Report Comments methods
   async getReportComments(schoolId: number, commentType?: string): Promise<ReportComment[]> {
-    const conditions = [eq(reportComments.schoolId, schoolId)];
+    const conditions = [
+      eq(reportComments.schoolId, schoolId),
+      notLike(reportComments.commentGrade, "__REPORT_CARD_OVERRIDE__:%"),
+    ];
     if (commentType) conditions.push(eq(reportComments.commentType, commentType as any));
     return db.select().from(reportComments).where(and(...conditions));
   }
 
   async getEcdAssessmentDomains(): Promise<EcdAssessmentDomain[]> {
-    return db.select().from(ecdAssessmentDomains).orderBy(ecdAssessmentDomains.sortOrder);
+    return db
+      .select()
+      .from(ecdAssessmentDomains)
+      .where(eq(ecdAssessmentDomains.isActive, true))
+      .orderBy(ecdAssessmentDomains.sortOrder);
   }
 
   async getEcdAssessmentItems(): Promise<EcdAssessmentItem[]> {
-    return db.select().from(ecdAssessmentItems).orderBy(ecdAssessmentItems.domainId, ecdAssessmentItems.sortOrder);
+    return db
+      .select()
+      .from(ecdAssessmentItems)
+      .where(eq(ecdAssessmentItems.isActive, true))
+      .orderBy(ecdAssessmentItems.domainId, ecdAssessmentItems.sortOrder);
   }
 
   async getEcdAssessmentRecord(studentId: number, examId: number): Promise<EcdAssessmentRecord | undefined> {
