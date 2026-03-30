@@ -249,6 +249,22 @@ interface ReportCardData {
   reportCards: ReportStudent[];
 }
 
+
+
+type ReportCommentGradeOption = {
+  id: number;
+  gradeName: string;
+  gradeLevel: string;
+  lowerLimit: number;
+  upperLimit: number;
+  gradePoints: number;
+  gradeStatus: string;
+  gradeType: string;
+};
+
+function formatReportCommentGradeLabel(grade: Pick<ReportCommentGradeOption, "gradeName" | "gradeStatus" | "lowerLimit" | "upperLimit">) {
+  return `${grade.gradeName} (${grade.gradeStatus}) • ${grade.lowerLimit}% - ${grade.upperLimit}%`;
+}
 function DevCell({ dev }: { dev: string }) {
   if (dev === "0" || dev === "0%") {
     return (
@@ -2824,7 +2840,7 @@ function ReportCommentsModal({
   const [duplicates, setDuplicates] = useState<any[]>([]);
   const [missingTargets, setMissingTargets] = useState<any[]>([]);
   const [pendingText, setPendingText] = useState("");
-  const [pendingGradeId, setPendingGradeId] = useState<number | null>(null);
+  const [pendingGradeOption, setPendingGradeOption] = useState<ReportCommentGradeOption | null>(null);
   const isClassTeacher = commentType === "class_teacher";
 
   const { data: comments = [], isLoading } = useQuery<ReportComment[]>({
@@ -2860,10 +2876,12 @@ function ReportCommentsModal({
   });
 
   const { data: gradesResponse } = useQuery<{ items: Grade[] } | Grade[]>({
-    queryKey: ["/api/grades", currentSchoolId, "report-comments"],
-    enabled: open && !!currentSchoolId,
+    queryKey: ["/api/grades", currentSchoolId, "report-comments", activeTab],
+    enabled: open && !!currentSchoolId && !!activeTab,
     queryFn: async () => {
-      const res = await schoolFetch("/api/grades");
+      const params = new URLSearchParams({ page: "1", perPage: "200" });
+      if (activeTab) params.set("gradeLevel", activeTab);
+      const res = await schoolFetch(`/api/grades?${params.toString()}`);
       if (!res.ok) throw new Error("Failed to load grades");
       return res.json();
     },
@@ -2932,32 +2950,80 @@ function ReportCommentsModal({
     return m;
   }, [allClasses]);
 
-  const gradeMap = useMemo(() => {
+  const fetchedGradeMap = useMemo(() => {
     const m = new Map<number, Grade>();
     gradesData.forEach((grade) => m.set(grade.id, grade));
     return m;
   }, [gradesData]);
 
-  const filteredGrades = useMemo(
-    () => gradesData.filter((grade) => !activeTab || grade.gradeLevel === activeTab),
-    [gradesData, activeTab],
-  );
+  const gradeRankMap: Record<string, number> = { "A*": 0, A: 1, B: 2, C: 3, D: 4, E: 5, U: 6 };
+  const sortedGrades = useMemo(() => {
+    return [...gradesData].sort((a, b) => {
+      const rankA = gradeRankMap[a.gradeName.toUpperCase().replace(/\s/g, "")] ?? 999;
+      const rankB = gradeRankMap[b.gradeName.toUpperCase().replace(/\s/g, "")] ?? 999;
+      if (rankA !== rankB) return rankA - rankB;
+      return (b.upperLimit ?? 0) - (a.upperLimit ?? 0);
+    });
+  }, [gradesData]);
+
+  const filteredGrades = useMemo<ReportCommentGradeOption[]>(() => {
+    return sortedGrades.map((grade) => ({
+      id: grade.id,
+      gradeName: grade.gradeName,
+      gradeLevel: grade.gradeLevel,
+      lowerLimit: Number(grade.lowerLimit ?? 0),
+      upperLimit: Number(grade.upperLimit ?? 0),
+      gradePoints: Number(grade.gradePoints ?? 0),
+      gradeStatus: grade.gradeStatus,
+      gradeType: grade.gradeType,
+    }));
+  }, [sortedGrades]);
+
+  const selectableGradeMap = useMemo(() => {
+    const m = new Map<number, ReportCommentGradeOption>();
+    filteredGrades.forEach((grade) => m.set(grade.id, grade));
+    return m;
+  }, [filteredGrades]);
+
+  const findCommentGradeOption = useMemo(() => {
+    return (comment: ReportComment) => {
+      const linkedGrade = comment.gradeId ? fetchedGradeMap.get(comment.gradeId) : undefined;
+      if (linkedGrade) {
+        return {
+          id: linkedGrade.id,
+          gradeName: linkedGrade.gradeName,
+          gradeLevel: linkedGrade.gradeLevel,
+          lowerLimit: Number(linkedGrade.lowerLimit ?? 0),
+          upperLimit: Number(linkedGrade.upperLimit ?? 0),
+          gradePoints: Number(linkedGrade.gradePoints ?? 0),
+          gradeStatus: linkedGrade.gradeStatus,
+          gradeType: linkedGrade.gradeType,
+        } as ReportCommentGradeOption;
+      }
+      return filteredGrades.find((grade) => grade.gradeName === comment.commentGrade) || null;
+    };
+  }, [fetchedGradeMap, filteredGrades]);
 
   const filteredComments = useMemo(() => {
     return comments.filter((comment) => {
-      if (activeTab && comment.gradeLevel && comment.gradeLevel !== activeTab) return false;
+      if (comment.commentType !== commentType) return false;
+      if (activeTab) {
+        const linkedGrade = comment.gradeId ? fetchedGradeMap.get(comment.gradeId) : undefined;
+        const commentProfile = linkedGrade?.gradeLevel || comment.gradeLevel || null;
+        if (commentProfile !== activeTab) return false;
+      }
       if (isClassTeacher && selectedClassIds.length > 0 && !selectedClassIds.includes(comment.classId || -1)) return false;
-      return comment.commentType === commentType;
+      return true;
     });
-  }, [comments, activeTab, selectedClassIds, isClassTeacher, commentType]);
+  }, [comments, activeTab, selectedClassIds, isClassTeacher, commentType, fetchedGradeMap]);
 
   const sortedComments = useMemo(() => {
     return [...filteredComments].sort((a, b) => {
-      const gradeA = a.gradeId ? gradeMap.get(a.gradeId) : undefined;
-      const gradeB = b.gradeId ? gradeMap.get(b.gradeId) : undefined;
+      const gradeA = findCommentGradeOption(a);
+      const gradeB = findCommentGradeOption(b);
       return (gradeB?.upperLimit ?? 0) - (gradeA?.upperLimit ?? 0);
     });
-  }, [filteredComments, gradeMap]);
+  }, [filteredComments, findCommentGradeOption]);
 
   const refreshComments = async () => {
     await queryClient.invalidateQueries({ queryKey: ["/api/report-comments", currentSchoolId, commentType] });
@@ -2966,7 +3032,8 @@ function ReportCommentsModal({
 
   const createMutation = useMutation({
     mutationFn: async (data: {
-      gradeId: number;
+      gradeId?: number | null;
+      commentGrade?: string;
       gradeLevel: string;
       commentText: string;
       commentType: string;
@@ -3002,7 +3069,7 @@ function ReportCommentsModal({
 
   const overwriteMutation = useMutation({
     mutationFn: async () => {
-      if (!pendingGradeId) throw new Error("No pending grade selected");
+      if (!pendingGradeOption) throw new Error("No pending grade selected");
 
       const selectedDuplicates = duplicates.filter((item) => item.selected);
       for (const item of selectedDuplicates) {
@@ -3018,7 +3085,8 @@ function ReportCommentsModal({
         if (classIdsToCreate.length > 0) {
           for (const classId of classIdsToCreate) {
             const res = await apiRequest("POST", "/api/report-comments", {
-              gradeId: pendingGradeId,
+              gradeId: pendingGradeOption.id,
+              commentGrade: pendingGradeOption.gradeName,
               gradeLevel: activeTab,
               commentText: pendingText,
               commentType,
@@ -3031,7 +3099,8 @@ function ReportCommentsModal({
         }
       } else if (selectedDuplicates.length > 0 || missingTargets.length > 0) {
         const res = await apiRequest("POST", "/api/report-comments", {
-          gradeId: pendingGradeId,
+          gradeId: pendingGradeOption.id,
+          commentGrade: pendingGradeOption.gradeName,
           gradeLevel: activeTab,
           commentText: pendingText,
           commentType,
@@ -3048,7 +3117,7 @@ function ReportCommentsModal({
       setDuplicates([]);
       setMissingTargets([]);
       setPendingText("");
-      setPendingGradeId(null);
+      setPendingGradeOption(null);
       setCommentText("");
       setSelectedGradeId("");
       setSelectedClassIds([]);
@@ -3086,22 +3155,41 @@ function ReportCommentsModal({
       return;
     }
 
-    const gradeIdNum = parseInt(selectedGradeId);
-    const selectedGrade = gradeMap.get(gradeIdNum);
+    const gradeIdNum = parseInt(selectedGradeId, 10);
+    const selectedGrade = selectableGradeMap.get(gradeIdNum);
     const matchesGrade = (comment: any) => {
+      if (!selectedGrade) return false;
       if (comment.gradeId && comment.gradeId === gradeIdNum) return true;
-      if (selectedGrade && comment.commentGrade === selectedGrade.gradeName && (comment.gradeLevel || null) === (activeTab || null)) return true;
+      const commentProfile = comment.gradeLevel || findCommentGradeOption(comment)?.gradeLevel || null;
+      if (
+        selectedGrade &&
+        comment.commentGrade === selectedGrade.gradeName &&
+        (!activeTab || commentProfile === activeTab)
+      ) {
+        return true;
+      }
       return false;
     };
 
+    if (!selectedGrade) {
+      toast({ title: "Error", description: "Select a grade", variant: "destructive" });
+      return;
+    }
+
     const payload = {
       gradeId: gradeIdNum,
+      commentGrade: selectedGrade.gradeName,
       gradeLevel: activeTab,
       commentType,
       ...(isClassTeacher ? { classIds: selectedClassIds, classId: selectedClassIds[0] } : {}),
     };
 
-    const scopedComments = comments.filter((comment) => comment.commentType === commentType && (!activeTab || (comment.gradeLevel || null) === (activeTab || null)));
+    const scopedComments = comments.filter((comment) => {
+      if (comment.commentType !== commentType) return false;
+      if (!activeTab) return true;
+      const commentProfile = comment.gradeLevel || findCommentGradeOption(comment)?.gradeLevel || null;
+      return commentProfile === activeTab;
+    });
 
     if (isClassTeacher) {
       const duplicateItems: any[] = [];
@@ -3125,7 +3213,7 @@ function ReportCommentsModal({
         setDuplicates(duplicateItems);
         setMissingTargets(newTargets);
         setPendingText(commentText.trim());
-        setPendingGradeId(gradeIdNum);
+        setPendingGradeOption(selectedGrade);
         setDupModalOpen(true);
         return;
       }
@@ -3143,7 +3231,7 @@ function ReportCommentsModal({
       }]);
       setMissingTargets([]);
       setPendingText(commentText.trim());
-      setPendingGradeId(gradeIdNum);
+      setPendingGradeOption(selectedGrade);
       setDupModalOpen(true);
       return;
     }
@@ -3156,7 +3244,7 @@ function ReportCommentsModal({
   };
 
   const handleOverwrite = () => {
-    if (!pendingGradeId) return;
+    if (!pendingGradeOption) return;
     overwriteMutation.mutate();
   };
 
@@ -3185,13 +3273,14 @@ function ReportCommentsModal({
             <div className={`mt-4 grid grid-cols-1 ${isClassTeacher ? "md:grid-cols-3" : "md:grid-cols-2"} gap-3`}>
               <div>
                 <Label className="text-xs text-muted-foreground mb-1 block">Grade</Label>
-                <Select value={selectedGradeId} onValueChange={setSelectedGradeId}>
+                <Select value={selectedGradeId || "none"} onValueChange={(value) => setSelectedGradeId(value === "none" ? "" : value)}>
                   <SelectTrigger data-testid="select-report-comment-grade">
-                    <SelectValue placeholder="Select grade" />
+                    <SelectValue placeholder="Select Grade" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="none">Select Grade</SelectItem>
                     {filteredGrades.map((grade) => (
-                      <SelectItem key={grade.id} value={String(grade.id)}>{grade.gradeName}</SelectItem>
+                      <SelectItem key={grade.id} value={String(grade.id)}>{formatReportCommentGradeLabel(grade)}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -3246,7 +3335,7 @@ function ReportCommentsModal({
                   </TableHeader>
                   <TableBody>
                     {sortedComments.map((comment) => {
-                      const grade = comment.gradeId ? gradeMap.get(comment.gradeId) : undefined;
+                      const grade = findCommentGradeOption(comment);
                       return (
                         <TableRow key={comment.id}>
                           {isClassTeacher && <TableCell className="text-center">{comment.classId ? classMap[comment.classId] || "—" : "—"}</TableCell>}
@@ -3268,7 +3357,7 @@ function ReportCommentsModal({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={dupModalOpen} onOpenChange={(open) => { if (!open) { setDupModalOpen(false); setDuplicates([]); setMissingTargets([]); } }}>
+      <Dialog open={dupModalOpen} onOpenChange={(open) => { if (!open) { setDupModalOpen(false); setDuplicates([]); setMissingTargets([]); setPendingText(""); setPendingGradeOption(null); } }}>
         <DialogContent className="max-w-xl max-h-[88vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Existing Comments Found</DialogTitle>

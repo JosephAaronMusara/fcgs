@@ -57,6 +57,39 @@ export const GRADING_PROFILES: GradingProfileDefinition[] = [
   { key: "PRI_CAM_G37", label: "Grade 3 - 7 Level", schoolType: "primary", board: "Cambridge", sortOrder: 30 },
 ];
 
+
+const PROFILE_KEY_COMPATIBILITY: Partial<Record<GradeProfileKey, GradeProfileKey[]>> = {
+  SEC_ZIM_A: ["A_Level", "SEC_CAM_A"],
+  SEC_CAM_A: ["A_Level", "SEC_ZIM_A"],
+  SEC_ZIM_O: ["O_Level", "SEC_CAM_O", "SEC_CAM_IGCSE"],
+  SEC_CAM_O: ["O_Level", "SEC_ZIM_O"],
+  SEC_CAM_IGCSE: ["IGCSE", "SEC_CAM_O", "SEC_ZIM_O"],
+  PRI_ZIM_ECD: ["PRI_CAM_ECD"],
+  PRI_CAM_ECD: ["PRI_ZIM_ECD"],
+  PRI_ZIM_G12: ["PRI_CAM_G12"],
+  PRI_CAM_G12: ["PRI_ZIM_G12"],
+  PRI_ZIM_G37: ["PRI_CAM_G37"],
+  PRI_CAM_G37: ["PRI_ZIM_G37"],
+};
+
+export function getCompatibleGradeProfileKeys(profileKey?: string | null): string[] {
+  if (!profileKey) return [];
+  const key = profileKey as GradeProfileKey;
+  return Array.from(new Set([profileKey, ...(PROFILE_KEY_COMPATIBILITY[key] || [])]));
+}
+
+export function filterItemsByGradeProfileKey<T extends { gradeLevel?: string | null }>(
+  items: T[],
+  profileKey?: string | null,
+): T[] {
+  if (!profileKey) return items;
+  const exact = items.filter((item) => (item.gradeLevel || null) === profileKey);
+  if (exact.length > 0) return exact;
+  const compatibleKeys = new Set(getCompatibleGradeProfileKeys(profileKey).filter((key) => key !== profileKey));
+  if (compatibleKeys.size === 0) return exact;
+  return items.filter((item) => !!item.gradeLevel && compatibleKeys.has(item.gradeLevel));
+}
+
 export const ECD_RATINGS = ["YES", "NO", "ALMOST"] as const;
 export type EcdRating = (typeof ECD_RATINGS)[number];
 

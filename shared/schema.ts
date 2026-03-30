@@ -1217,32 +1217,6 @@ export const ecdAssessmentResponses = pgTable("ecd_assessment_responses", {
 
 export const reportCommentTypeEnum = pgEnum("report_comment_type", ["principal", "class_teacher"]);
 
-/**
- * COMMENT GRADING SCALE (hardcoded, used ONLY for Principal's & Class Teacher's comments)
- * Edit these values to change the grade boundaries for auto-assigning comments.
- * The grade is determined by comparing the student's average mark against these ranges.
- */
-export const COMMENT_GRADE_SCALE = [
-  { grade: "A*", min: 90, max: 100 },
-  { grade: "A",  min: 80, max: 89 },
-  { grade: "B",  min: 70, max: 79 },
-  { grade: "C",  min: 60, max: 69 },
-  { grade: "D",  min: 50, max: 59 },
-  { grade: "E",  min: 40, max: 49 },
-  { grade: "F",  min: 30, max: 39 },
-  { grade: "G",  min: 20, max: 29 },
-  { grade: "U",  min: 0,  max: 19 },
-] as const;
-
-export const COMMENT_GRADE_OPTIONS = COMMENT_GRADE_SCALE.map(g => g.grade);
-
-export function getCommentGradeForAverage(avgPercent: number): string {
-  for (const { grade, min, max } of COMMENT_GRADE_SCALE) {
-    if (avgPercent >= min && avgPercent <= max) return grade;
-  }
-  return "U";
-}
-
 export const reportComments = pgTable("report_comments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
