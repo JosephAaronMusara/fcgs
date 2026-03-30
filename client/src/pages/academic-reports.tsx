@@ -178,6 +178,7 @@ interface StreamAnalyticsData {
 }
 
 interface ReportSubject {
+  assessmentId?: number;
   subjectId: number;
   subjectName: string;
   mark: string;
@@ -186,6 +187,7 @@ interface ReportSubject {
   grade: string;
   rank: string;
   comment: string;
+  commentPool?: string;
   teacher: string;
   gradePoints: number;
 }
@@ -231,6 +233,7 @@ interface ReportStudent {
 
 type ReportCardCommentType = "principal" | "class_teacher";
 type ReportCardCommentDraftMap = Record<number, { principal: string; class_teacher: string }>;
+type ReportCardSubjectCommentDraftMap = Record<string, string>;
 type ReportCardCommentStatus = "idle" | "saving" | "saved" | "error";
 
 interface ReportCardData {
@@ -445,6 +448,9 @@ function ReportCardSlip({
   commentValues,
   commentSaveStates,
   onCommentChange,
+  subjectCommentValues,
+  subjectCommentSaveStates,
+  onSubjectCommentChange,
 }: {
   data: ReportCardData;
   studentReport: ReportStudent;
@@ -455,6 +461,13 @@ function ReportCardSlip({
   commentValues?: { principal: string; class_teacher: string };
   commentSaveStates?: { principal: ReportCardCommentStatus; class_teacher: ReportCardCommentStatus };
   onCommentChange?: (studentId: number, commentType: ReportCardCommentType, value: string) => void;
+  subjectCommentValues?: ReportCardSubjectCommentDraftMap;
+  subjectCommentSaveStates?: Record<string, ReportCardCommentStatus>;
+  onSubjectCommentChange?: (
+    studentId: number,
+    subject: Pick<ReportSubject, "assessmentId" | "subjectId">,
+    value: string,
+  ) => void;
 }) {
   const { student, subjects, summary } = studentReport;
   const { school } = data;
@@ -486,6 +499,19 @@ function ReportCardSlip({
     commentValues?.class_teacher ?? studentReport.classTeacherComment ?? "";
   const displayedPrincipalComment =
     commentValues?.principal ?? studentReport.principalComment ?? "";
+
+  const getSubjectCommentKey = (subject: Pick<ReportSubject, "assessmentId" | "subjectId">) =>
+    `${student.id}:${subject.assessmentId ?? `subject-${subject.subjectId}`}`;
+
+  const getSubjectCommentValue = (subject: ReportSubject) => {
+    const key = getSubjectCommentKey(subject);
+    return subjectCommentValues?.[key] ?? subject.comment ?? "";
+  };
+
+  const getSubjectCommentSaveState = (subject: ReportSubject) => {
+    const key = getSubjectCommentKey(subject);
+    return subjectCommentSaveStates?.[key] || "idle";
+  };
 
   const getSaveStateLabel = (state?: ReportCardCommentStatus) => {
     if (state === "saving") return "Saving...";
@@ -735,7 +761,22 @@ function ReportCardSlip({
                       {subj.rank}
                     </td>
                     <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left whitespace-normal break-words align-top">
-                      {subj.comment}
+                      {editableComments ? (
+                        <>
+                          <Textarea
+                            value={getSubjectCommentValue(subj)}
+                            onChange={(e) => onSubjectCommentChange?.(student.id, subj, e.target.value)}
+                            rows={3}
+                            className="min-h-[68px] border-0 p-0 text-[10px] leading-snug resize-none bg-transparent shadow-none focus-visible:ring-0"
+                            data-testid={`textarea-subject-comment-${student.id}-${subj.assessmentId ?? subj.subjectId}`}
+                          />
+                          <div className="text-[9px] text-gray-500 mt-1 text-right min-h-[12px]">
+                            {getSaveStateLabel(getSubjectCommentSaveState(subj))}
+                          </div>
+                        </>
+                      ) : (
+                        <span className="whitespace-pre-wrap">{getSubjectCommentValue(subj)}</span>
+                      )}
                     </td>
                     <td className="border border-gray-300 dark:border-gray-600 px-1 py-1 text-left whitespace-normal break-words">
                       {subj.teacher}
@@ -1973,6 +2014,12 @@ export default function AcademicReportsPage() {
     useState<Record<string, ReportCardCommentStatus>>({});
   const reportCardCommentPoolsRef = useRef<ReportCardCommentDraftMap>({});
   const reportCardCommentTimeoutsRef = useRef<Record<string, number>>({});
+  const [reportCardSubjectCommentDrafts, setReportCardSubjectCommentDrafts] =
+    useState<ReportCardSubjectCommentDraftMap>({});
+  const [reportCardSubjectCommentStatuses, setReportCardSubjectCommentStatuses] =
+    useState<Record<string, ReportCardCommentStatus>>({});
+  const reportCardSubjectCommentPoolsRef = useRef<ReportCardSubjectCommentDraftMap>({});
+  const reportCardSubjectCommentTimeoutsRef = useRef<Record<string, number>>({});
 
   const [missingMarksOpen, setMissingMarksOpen] = useState(false);
   const [meritOpen, setMeritOpen] = useState(false);
@@ -2049,11 +2096,16 @@ export default function AcademicReportsPage() {
       setReportCardCommentPools({});
       setReportCardCommentStatuses({});
       reportCardCommentPoolsRef.current = {};
+      setReportCardSubjectCommentDrafts({});
+      setReportCardSubjectCommentStatuses({});
+      reportCardSubjectCommentPoolsRef.current = {};
       return;
     }
 
     const nextDrafts: ReportCardCommentDraftMap = {};
     const nextPools: ReportCardCommentDraftMap = {};
+    const nextSubjectDrafts: ReportCardSubjectCommentDraftMap = {};
+    const nextSubjectPools: ReportCardSubjectCommentDraftMap = {};
     for (const rc of reportCardData.reportCards) {
       nextDrafts[rc.student.id] = {
         principal: rc.principalComment || "",
@@ -2063,16 +2115,27 @@ export default function AcademicReportsPage() {
         principal: rc.principalCommentPool || "",
         class_teacher: rc.classTeacherCommentPool || "",
       };
+      for (const subject of rc.subjects) {
+        const key = `${rc.student.id}:${subject.assessmentId ?? `subject-${subject.subjectId}`}`;
+        nextSubjectDrafts[key] = subject.comment || "";
+        nextSubjectPools[key] = subject.commentPool || "";
+      }
     }
     setReportCardCommentDrafts(nextDrafts);
     setReportCardCommentPools(nextPools);
     reportCardCommentPoolsRef.current = nextPools;
     setReportCardCommentStatuses({});
+    setReportCardSubjectCommentDrafts(nextSubjectDrafts);
+    setReportCardSubjectCommentStatuses({});
+    reportCardSubjectCommentPoolsRef.current = nextSubjectPools;
   }, [reportCardData]);
 
   useEffect(() => {
     return () => {
       Object.values(reportCardCommentTimeoutsRef.current).forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
+      Object.values(reportCardSubjectCommentTimeoutsRef.current).forEach((timeoutId) => {
         window.clearTimeout(timeoutId);
       });
     };
@@ -2126,6 +2189,87 @@ export default function AcademicReportsPage() {
         variant: "destructive",
       });
     }
+  };
+
+  const getSubjectDraftKey = (
+    studentId: number,
+    subject: Pick<ReportSubject, "assessmentId" | "subjectId">,
+  ) => `${studentId}:${subject.assessmentId ?? `subject-${subject.subjectId}`}`;
+
+  const saveReportCardSubjectComment = async (
+    studentId: number,
+    subject: Pick<ReportSubject, "assessmentId" | "subjectId">,
+    value: string,
+  ) => {
+    const statusKey = getSubjectDraftKey(studentId, subject);
+    setReportCardSubjectCommentStatuses((prev) => ({
+      ...prev,
+      [statusKey]: "saving",
+    }));
+
+    try {
+      const response = await apiRequest("POST", "/api/report-card-subject-comments", {
+        studentId,
+        assessmentId: subject.assessmentId ?? null,
+        subjectId: subject.subjectId,
+        examId: selectedExamId ? Number(selectedExamId) : null,
+        classId: selectedClassId ? Number(selectedClassId) : null,
+        commentText: value,
+      });
+      const result = await response.json();
+      const resolvedComment = typeof result?.commentText === "string" ? result.commentText : "";
+      const resolvedPool = typeof result?.commentPool === "string" ? result.commentPool : "";
+
+      reportCardSubjectCommentPoolsRef.current = {
+        ...reportCardSubjectCommentPoolsRef.current,
+        [statusKey]: resolvedPool,
+      };
+
+      setReportCardSubjectCommentDrafts((prev) => ({
+        ...prev,
+        [statusKey]: resolvedComment,
+      }));
+      setReportCardSubjectCommentStatuses((prev) => ({
+        ...prev,
+        [statusKey]: "saved",
+      }));
+    } catch (error: any) {
+      setReportCardSubjectCommentStatuses((prev) => ({
+        ...prev,
+        [statusKey]: "error",
+      }));
+      toast({
+        title: "Autosave failed",
+        description: error?.message || "Failed to save subject comment.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleReportCardSubjectCommentChange = (
+    studentId: number,
+    subject: Pick<ReportSubject, "assessmentId" | "subjectId">,
+    value: string,
+  ) => {
+    const statusKey = getSubjectDraftKey(studentId, subject);
+
+    setReportCardSubjectCommentDrafts((prev) => ({
+      ...prev,
+      [statusKey]: value,
+    }));
+    setReportCardSubjectCommentStatuses((prev) => ({
+      ...prev,
+      [statusKey]: "idle",
+    }));
+
+    const existingTimeout = reportCardSubjectCommentTimeoutsRef.current[statusKey];
+    if (existingTimeout) {
+      window.clearTimeout(existingTimeout);
+    }
+
+    reportCardSubjectCommentTimeoutsRef.current[statusKey] = window.setTimeout(() => {
+      void saveReportCardSubjectComment(studentId, subject, value);
+    }, 700);
   };
 
   const handleReportCardCommentChange = (
@@ -2771,6 +2915,9 @@ export default function AcademicReportsPage() {
                       reportCardCommentStatuses[`${rc.student.id}:class_teacher`] || "idle",
                   }}
                   onCommentChange={handleReportCardCommentChange}
+                  subjectCommentValues={reportCardSubjectCommentDrafts}
+                  subjectCommentSaveStates={reportCardSubjectCommentStatuses}
+                  onSubjectCommentChange={handleReportCardSubjectCommentChange}
                 />
               ))}
             </div>
@@ -2787,6 +2934,8 @@ export default function AcademicReportsPage() {
                     editableComments={false}
                     commentValues={reportCardCommentDrafts[rc.student.id]}
                     commentSaveStates={{ principal: "idle", class_teacher: "idle" }}
+                    subjectCommentValues={reportCardSubjectCommentDrafts}
+                    subjectCommentSaveStates={reportCardSubjectCommentStatuses}
                   />
                 ))}
               </div>,
