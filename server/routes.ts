@@ -7230,6 +7230,105 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/report-card-subject-comments", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const studentId = Number(req.body?.studentId);
+      const assessmentId =
+        req.body?.assessmentId === null || req.body?.assessmentId === undefined || req.body?.assessmentId === ""
+          ? null
+          : Number(req.body.assessmentId);
+      const examId =
+        req.body?.examId === null || req.body?.examId === undefined || req.body?.examId === ""
+          ? null
+          : Number(req.body.examId);
+      const classId =
+        req.body?.classId === null || req.body?.classId === undefined || req.body?.classId === ""
+          ? null
+          : Number(req.body.classId);
+      const subjectId =
+        req.body?.subjectId === null || req.body?.subjectId === undefined || req.body?.subjectId === ""
+          ? null
+          : Number(req.body.subjectId);
+      const commentText = typeof req.body?.commentText === "string" ? req.body.commentText : "";
+
+      if (!Number.isFinite(studentId)) {
+        return res.status(400).json({ message: "studentId is required" });
+      }
+
+      let assessment =
+        assessmentId !== null && Number.isFinite(assessmentId)
+          ? await storage.getAssessment(assessmentId)
+          : null;
+
+      if (!assessment && Number.isFinite(examId) && Number.isFinite(classId) && Number.isFinite(subjectId)) {
+        const examAssessments = await storage.getAssessmentsByExam(Number(examId));
+        const matchingAssessments = examAssessments
+          .filter(
+            (candidate) =>
+              Number(candidate.classId) === Number(classId) &&
+              Number(candidate.subjectId) === Number(subjectId),
+          )
+          .sort((a, b) => Number(b.id) - Number(a.id));
+        assessment = matchingAssessments[0] || null;
+      }
+
+      if (!assessment || Number(assessment.schoolId) !== Number(schoolId)) {
+        return res.status(404).json({ message: "Assessment not found" });
+      }
+
+      const student = await ensureStudentInSchool(studentId, schoolId, res);
+      if (!student) return;
+      if (Number(student.classId) !== Number(assessment.classId)) {
+        return res.status(400).json({ message: "Student does not belong to the assessment class" });
+      }
+
+      const existingMark = await storage.getAssessmentMarkByStudentAssessment(studentId, Number(assessment.id));
+      if (!existingMark || Number(existingMark.schoolId) !== Number(schoolId)) {
+        return res.status(404).json({ message: "Assessment mark not found" });
+      }
+
+      let poolCommentId: number | null = null;
+      let poolCommentText: string | null = null;
+      if (existingMark.gradeId) {
+        const poolComment = await storage.findAssessmentComment(
+          Number(assessment.classId),
+          Number(assessment.subjectId),
+          Number(existingMark.gradeId),
+        );
+        if (poolComment) {
+          poolCommentId = poolComment.id;
+          poolCommentText = poolComment.commentText;
+        }
+      }
+
+      const trimmed = commentText.trim();
+      const usePool = trimmed.length === 0;
+      const updated = await storage.updateAssessmentMark(existingMark.id, {
+        commentId: usePool ? poolCommentId : null,
+        customCommentText: usePool ? null : trimmed,
+        autoCommentSnapshot: poolCommentText,
+        commentSource: usePool ? "pool" : "custom",
+      });
+
+      if (!updated) {
+        return res.status(500).json({ message: "Failed to save subject comment" });
+      }
+
+      return res.json({
+        ok: true,
+        assessmentId: Number(assessment.id),
+        commentText: usePool ? (poolCommentText || "") : trimmed,
+        commentPool: poolCommentText || "",
+        commentSource: usePool ? "pool" : "custom",
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/report-card-comment-overrides", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
@@ -7899,10 +7998,12 @@ export async function registerRoutes(
       const bySubject: Record<number, Record<number, number>> = {};
       
       const studentSubjectRows: Record<number, Record<number, {
+        assessmentId: number;
         percentage: number | null;
         grade: string;
         gradePoints: number;
         comment: string;
+        commentPool: string;
         teacher: string;
         subjectId: number;
         subjectName: string;
@@ -7943,10 +8044,12 @@ export async function registerRoutes(
           
           if (!studentSubjectRows[student.id]) studentSubjectRows[student.id] = {};
           studentSubjectRows[student.id][subject.id] = {
+            assessmentId: assessment.id,
             percentage: pctRaw,
             grade: gradeName,
             gradePoints,
             comment,
+            commentPool: mark.autoCommentSnapshot || "",
             teacher,
             subjectId: subject.id,
             subjectName: subject.name,
@@ -8093,6 +8196,7 @@ export async function registerRoutes(
           }
           
           subjectResults.push({
+            assessmentId: row.assessmentId,
             subjectId: row.subjectId,
             subjectName: row.subjectName,
             mark: markStr,
@@ -8101,6 +8205,7 @@ export async function registerRoutes(
             grade: row.grade,
             rank: rankStr,
             comment: row.comment,
+            commentPool: row.commentPool,
             teacher: row.teacher,
             gradePoints: row.gradePoints,
           });
