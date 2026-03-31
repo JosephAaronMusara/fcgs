@@ -500,6 +500,27 @@ function ReportCardSlip({
   const displayedPrincipalComment =
     commentValues?.principal ?? studentReport.principalComment ?? "";
 
+  const principalInfoItems = [
+    school.principalName,
+    school.principalPhone ? `Mobile: ${school.principalPhone}` : null,
+    school.email ? `Email: ${school.email}` : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const totalCommentCharacters = (
+    `${displayedClassTeacherComment} ${displayedPrincipalComment}`.trim().length
+  );
+  const layoutPressure =
+    Math.max(subjects.length - 6, 0) * 7 +
+    Math.max(Math.ceil(totalCommentCharacters / 140) - 1, 0) * 6 +
+    Math.max(principalInfoItems.length - 4, 0) * 4;
+
+  const graphPlotHeight = Math.max(70, 92 - layoutPressure);
+  const graphLabelHeight = Math.max(33, 55 - Math.floor(layoutPressure / 2));
+  const footerBlockHeight = Math.max(88, 34 + principalInfoItems.length * 18);
+  const stampImageMaxHeight = Math.max(64, footerBlockHeight - 16);
+  const qrCodeSize = Math.max(78, footerBlockHeight - 18);
+  const qrCaptionWidth = Math.max(qrCodeSize + 16, 138);
+
   const getSubjectCommentKey = (subject: Pick<ReportSubject, "assessmentId" | "subjectId">) =>
     `${student.id}:${subject.assessmentId ?? `subject-${subject.subjectId}`}`;
 
@@ -526,8 +547,8 @@ function ReportCardSlip({
       style={{ pageBreakInside: "avoid", pageBreakAfter: "always" }}
     >
       <div
-        className="report-slip-inner report-slip-page report-slip-page--main border border-gray-300 dark:border-gray-600 py-3 px-1.5 relative overflow-hidden flex flex-col"
-        style={{ fontSize: "12px", minHeight: "calc(297mm - 10mm - 16px)" }}
+        className="report-slip-inner report-slip-page report-slip-page--main border border-gray-300 dark:border-gray-600 py-2.5 px-1.5 relative overflow-hidden flex flex-col"
+        style={{ fontSize: "12px", minHeight: "calc(287mm - 2px)" }}
       >
         {school.logo && (
           <img
@@ -600,10 +621,10 @@ function ReportCardSlip({
             style={{ borderTop: "1px dashed #999" }}
           />
 
-          <div className="font-bold mb-2 text-[18px] uppercase">
+          <div className="font-bold mb-1 text-[15.5px] uppercase leading-tight">
             Academic Results Slip for
           </div>
-          <div className="mb-1 w-full text-[15.5px] flex justify-between flex-wrap gap-1">
+          <div className="mb-0.5 w-full text-[15.5px] flex justify-between flex-wrap gap-x-2 gap-y-0.5 leading-tight">
             <span>
               <strong>Name:</strong> {name}
               &nbsp;&nbsp;
@@ -616,37 +637,37 @@ function ReportCardSlip({
             </span>
           </div>
 
-          <div className="h-3" />
+          <div className="h-1" />
 
-          <div className="flex gap-3 mb-2 flex-wrap">
+          <div className="flex gap-2 mb-1.5 flex-wrap">
             <div className="flex-1 min-w-[45%] pt-0">
-              <div className="mb-0.5 text-center font-extrabold">
+              <div className="mb-0 text-center font-extrabold text-[15.5px] leading-tight">
                 <strong>Exam:</strong> {data.exam.examName}
               </div>
               <table
-                className="w-full border-collapse text-[11px] mt-1.5"
+                className="w-full border-collapse text-[9px] mt-0.5"
                 data-testid="table-summary"
               >
                 <thead>
                   <tr>
-                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] leading-tight">
                       Total Marks
                     </th>
-                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] leading-tight">
                       Average Mark
                     </th>
-                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] leading-tight">
                       Subject Passed
                     </th>
-                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] leading-tight">
                       Points
                     </th>
                     {data.school.showClassPositionOnReports && (
-                      <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                      <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] leading-tight">
                         Class Position
                       </th>
                     )}
-                    <th className="border-b border-gray-400 dark:border-gray-500 px-3 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px]">
+                    <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] leading-tight">
                       Overall Position
                     </th>
                   </tr>
@@ -654,39 +675,39 @@ function ReportCardSlip({
                 <tbody>
                   <tr className="bg-gray-100/75 dark:bg-gray-800/75">
                     <td
-                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
                       data-testid="text-total-marks"
                     >
                       {summary.totalMark}
                     </td>
                     <td
-                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
                       data-testid="text-avg-mark"
                     >
                       {summary.avgMark}
                     </td>
                     <td
-                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
                       data-testid="text-subjects-passed"
                     >
                       {summary.subjectsPassed}
                     </td>
                     <td
-                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
                       data-testid="text-points"
                     >
                       {summary.points}
                     </td>
                     {data.school.showClassPositionOnReports && (
                       <td
-                        className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                        className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
                         data-testid="text-class-position"
                       >
                         {summary.classPosition || "–"}
                       </td>
                     )}
                     <td
-                      className="px-3 py-1.5 text-center text-gray-700 dark:text-gray-300 font-bold text-[12px]"
+                      className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
                       data-testid="text-position"
                     >
                       {summary.overallPosition || "–"}
@@ -698,33 +719,33 @@ function ReportCardSlip({
           </div>
 
           <table
-            className="w-full table-fixed border-collapse mt-1.5 text-[10px]"
+            className="w-full table-fixed border-collapse mt-1 text-[9px]"
             data-testid={`table-subjects-${student.id}`}
           >
             <thead>
               <tr>
-                <th className="w-[20%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                <th className="w-[22%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[9px]">
                   Subject
                 </th>
-                <th className="w-[7%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[7%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] whitespace-nowrap">
                   Mark %
                 </th>
-                <th className="w-[8%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[8%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] whitespace-nowrap">
                   Dev.
                 </th>
-                <th className="w-[10%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[10%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] whitespace-nowrap">
                   Class Avg %
                 </th>
-                <th className="w-[7%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[5%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] whitespace-nowrap">
                   Grade
                 </th>
-                <th className="w-[8%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] whitespace-nowrap">
+                <th className="w-[6%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[9px] whitespace-nowrap">
                   Rank
                 </th>
-                <th className="w-[35%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
+                <th className="w-[45%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[9px]">
                   Comment
                 </th>
-                <th className="w-[15%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px] whitespace-nowrap">
+                <th className="w-[13%] border-b border-gray-400 dark:border-gray-500 px-1 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[9px] whitespace-nowrap">
                   Teacher
                 </th>
               </tr>
@@ -787,7 +808,7 @@ function ReportCardSlip({
             </tbody>
           </table>
 
-          <div className="mt-1.5 text-[11px] flex flex-wrap gap-4 justify-center">
+          <div className="mt-1 text-[10.5px] flex flex-wrap gap-3 justify-center leading-tight">
             <span className="text-green-600 dark:text-green-400">
               <TrendingUp className="w-3 h-3 inline" /> Positive Performance
             </span>
@@ -799,16 +820,16 @@ function ReportCardSlip({
             </span>
           </div>
 
-          <div className="grid grid-cols-2 gap-2.5 mt-2.5">
+          <div className="report-graphs-row grid grid-cols-2 gap-2 mt-2">
             <div
-              className="border border-gray-300 dark:border-gray-600 rounded-sm p-1.5"
+              className="report-graph-card border border-gray-300 dark:border-gray-600 rounded-sm p-1"
               style={{ background: "rgba(0,0,0,0.04)" }}
             >
-              <div className="flex items-center justify-center gap-8 mb-1">
-                <div className="text-[11px] font-semibold text-center">
+              <div className="flex items-center justify-center gap-5 mb-0.5 leading-tight">
+                <div className="text-[10.5px] font-semibold text-center leading-tight">
                   Subject Performance vs Class
                 </div>
-                <div className="flex gap-3 text-[8px] items-center">
+                <div className="flex gap-2 text-[7.5px] items-center leading-tight">
                   <span className="flex items-center gap-1">
                     <span
                       className="w-2 h-2 inline-block rounded-sm"
@@ -833,7 +854,7 @@ function ReportCardSlip({
               </div>
 
               <div className="flex flex-col overflow-hidden">
-                <div className="flex" style={{ height: "100px" }}>
+                <div className="flex" style={{ height: `${graphPlotHeight}px` }}>
                   <div
                     className="flex flex-col justify-between py-0.5 pr-0.5 flex-shrink-0"
                     style={{ width: "22px" }}
@@ -883,7 +904,7 @@ function ReportCardSlip({
                                             "linear-gradient(180deg, #7CB9F7 0%, #5B9FE8 100%)",
                                         }}
                                       >
-                                        <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-[6px] font-semibold text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                                        <span className="absolute top-0.5 left-1/2 -translate-x-1/2 text-[6px] font-semibold text-white whitespace-nowrap z-10">
                                           {studentMark}
                                         </span>
                                       </div>
@@ -951,7 +972,7 @@ function ReportCardSlip({
               <div
                 style={{
                   marginLeft: "22px",
-                  height: "55px",
+                  height: `${graphLabelHeight}px`,
                   position: "relative",
                   overflow: "visible",
                 }}
@@ -977,7 +998,7 @@ function ReportCardSlip({
                         className="flex-shrink-0"
                         style={{
                           width: barWidth,
-                          height: "55px",
+                          height: `${graphLabelHeight}px`,
                           position: "relative",
                           overflow: "visible",
                         }}
@@ -986,7 +1007,7 @@ function ReportCardSlip({
                           className="text-[5.5px] leading-[1.2] text-gray-500"
                           style={{
                             position: "absolute",
-                            top: "8px",
+                            top: "3px",
                             left: "50%",
                             transform: "rotate(-90deg) translateX(-100%)",
                             transformOrigin: "top left",
@@ -1010,14 +1031,14 @@ function ReportCardSlip({
             </div>
 
             <div
-              className="border border-gray-300 dark:border-gray-600 rounded-sm p-1.5"
+              className="report-graph-card border border-gray-300 dark:border-gray-600 rounded-sm p-1"
               style={{ background: "rgba(0,0,0,0.04)" }}
             >
-              <div className="flex items-center justify-center gap-8 mb-1">
-                <div className="text-[11px] font-semibold text-center">
+              <div className="flex items-center justify-center gap-5 mb-0.5 leading-tight">
+                <div className="text-[10.5px] font-semibold text-center leading-tight">
                   Term Average Trend
                 </div>
-                <div className="flex gap-3 text-[8px] items-center">
+                <div className="flex gap-2 text-[7.5px] items-center leading-tight">
                   <span className="flex items-center gap-1">
                     <span
                       className="w-2 h-2 inline-block rounded-sm"
@@ -1031,7 +1052,7 @@ function ReportCardSlip({
               </div>
 
               <div className="flex flex-col overflow-hidden">
-                <div className="flex" style={{ height: "100px" }}>
+                <div className="flex" style={{ height: `${graphPlotHeight}px` }}>
                   <div
                     className="flex flex-col justify-between py-0.5 pr-0.5 flex-shrink-0"
                     style={{ width: "22px" }}
@@ -1082,7 +1103,7 @@ function ReportCardSlip({
                                       "linear-gradient(180deg, #A8B5C8 0%, #8D9BB0 100%)",
                                   }}
                                 >
-                                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-[6px] font-semibold text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                                  <span className="absolute top-0.5 left-1/2 -translate-x-1/2 text-[6px] font-semibold text-white whitespace-nowrap z-10">
                                     {avg}
                                   </span>
                                 </div>
@@ -1098,7 +1119,7 @@ function ReportCardSlip({
               <div
                 style={{
                   marginLeft: "22px",
-                  height: "55px",
+                  height: `${graphLabelHeight}px`,
                   position: "relative",
                   overflow: "visible",
                 }}
@@ -1125,7 +1146,7 @@ function ReportCardSlip({
                         className="flex-shrink-0"
                         style={{
                           width: barWidth,
-                          height: "55px",
+                          height: `${graphLabelHeight}px`,
                           position: "relative",
                           overflow: "visible",
                         }}
@@ -1134,7 +1155,7 @@ function ReportCardSlip({
                           className="text-[5.5px] leading-[1.2] text-gray-500"
                           style={{
                             position: "absolute",
-                            top: "8px",
+                            top: "3px",
                             left: "50%",
                             transform: "rotate(-90deg) translateX(-100%)",
                             transformOrigin: "top left",
@@ -1158,16 +1179,16 @@ function ReportCardSlip({
             </div>
           </div>
 
-          <div className="mt-2.5 text-[11px] space-y-2">
+          <div className="mt-1.5 text-[9px] space-y-1.5 leading-snug">
             <div>
-              <div className="font-semibold mb-1">Class Teacher's comment:</div>
               {editableComments ? (
                 <>
+                  <div className="font-semibold mb-0.5">Class Teacher's Comment:</div>
                   <Textarea
                     value={displayedClassTeacherComment}
                     onChange={(e) => onCommentChange?.(student.id, "class_teacher", e.target.value)}
                     rows={2}
-                    className="min-h-[56px] text-[11px] leading-snug resize-none bg-white"
+                    className="min-h-[56px] text-[9px] leading-snug resize-none bg-white"
                     data-testid={`textarea-class-teacher-comment-${student.id}`}
                   />
                   <div className="text-[10px] text-gray-500 mt-1 text-right min-h-[14px]">
@@ -1175,18 +1196,21 @@ function ReportCardSlip({
                   </div>
                 </>
               ) : (
-                <p className="my-0.5 whitespace-pre-wrap">{displayedClassTeacherComment}</p>
+                <p className="my-0.5 leading-snug">
+                  <span className="font-semibold">Class Teacher's Comment: </span>
+                  <span className="whitespace-pre-wrap">{displayedClassTeacherComment}</span>
+                </p>
               )}
             </div>
             <div>
-              <div className="font-semibold mb-1">Head/Principal's comment:</div>
               {editableComments ? (
                 <>
+                  <div className="font-semibold mb-0.5">Head/Principal's Comment:</div>
                   <Textarea
                     value={displayedPrincipalComment}
                     onChange={(e) => onCommentChange?.(student.id, "principal", e.target.value)}
                     rows={2}
-                    className="min-h-[56px] text-[11px] leading-snug resize-none bg-white"
+                    className="min-h-[56px] text-[9px] leading-snug resize-none bg-white"
                     data-testid={`textarea-principal-comment-${student.id}`}
                   />
                   <div className="text-[10px] text-gray-500 mt-1 text-right min-h-[14px]">
@@ -1194,48 +1218,64 @@ function ReportCardSlip({
                   </div>
                 </>
               ) : (
-                <p className="my-0.5 whitespace-pre-wrap">{displayedPrincipalComment}</p>
+                <p className="my-0.5 leading-snug">
+                  <span className="font-semibold">Head/Principal's Comment: </span>
+                  <span className="whitespace-pre-wrap">{displayedPrincipalComment}</span>
+                </p>
               )}
             </div>
           </div>
 
-          <div className="grid grid-cols-[0.85fr_1.7fr_0.85fr] gap-4 mt-auto pt-3 text-[11px] items-stretch">
-            <div className="flex flex-col justify-start">
+          <div className="grid grid-cols-[0.9fr_1.55fr_0.95fr] gap-3 mt-auto pt-2 text-[11px] items-stretch report-footer-row">
+            <div className="flex">
               {school.stamp ? (
-                <div className="border border-gray-300 dark:border-gray-600 p-2 min-h-[120px] flex items-center justify-center">
+                <div
+                  className="border border-gray-300 dark:border-gray-600 p-2 h-full w-full flex items-center justify-center report-footer-box"
+                  style={{ minHeight: `${footerBlockHeight}px` }}
+                >
                   <img
                     src={school.stamp}
                     alt="School Stamp & Principal's Signature"
-                    className="max-w-[168px] max-h-[110px] w-auto h-auto block"
+                    className="max-w-[168px] w-auto h-auto block"
+                    style={{ maxHeight: `${stampImageMaxHeight}px` }}
                     data-testid="img-stamp"
                   />
                 </div>
               ) : (
-                <div className="border border-gray-300 dark:border-gray-600 p-2 min-h-[120px] flex items-center justify-center text-[10px] text-gray-500">
+                <div
+                  className="border border-gray-300 dark:border-gray-600 p-2 h-full w-full flex items-center justify-center text-[10px] text-gray-500 report-footer-box"
+                  style={{ minHeight: `${footerBlockHeight}px` }}
+                >
                   Stamp/Signature not set in School Settings.
                 </div>
               )}
             </div>
 
-            <div className="flex flex-col justify-start pt-2 min-h-[120px]">
+            <div
+              className="flex flex-col justify-start gap-1 report-principal-info"
+              style={{ minHeight: `${footerBlockHeight}px` }}
+            >
               <strong>School Principal</strong>
-              {school.principalName && <div>{school.principalName}</div>}
-              {school.principalPhone && (
-                <div>Mobile: {school.principalPhone}</div>
-              )}
-              {school.phone && <div>Call Centre: {school.phone}</div>}
-              {school.email && <div>Email: {school.email}</div>}
+              {principalInfoItems.map((item) => (
+                <div key={item}>{item}</div>
+              ))}
             </div>
 
-            <div className="flex flex-col items-end justify-center min-h-[120px] gap-1.5">
-              <img
-                className="w-[120px] h-[120px] object-contain"
-                alt="QR Code"
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent("https://www.firstchoicegroup.co.zw")}`}
-                data-testid="img-qr-code"
-              />
-              <div className="text-[9px] text-gray-600 dark:text-gray-400 text-center w-[120px] leading-tight">
-                www.firstchoicegroup.co.zw
+            <div className="flex justify-end pr-2">
+              <div
+                className="flex flex-col items-center justify-between h-full report-qr-block"
+                style={{ minHeight: `${footerBlockHeight}px`, width: `${qrCaptionWidth}px` }}
+              >
+                <img
+                  className="object-contain"
+                  style={{ width: `${qrCodeSize}px`, height: `${qrCodeSize}px` }}
+                  alt="QR Code"
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent("https://www.firstchoicegroup.co.zw")}`}
+                  data-testid="img-qr-code"
+                />
+                <div className="text-[9px] text-gray-600 dark:text-gray-400 text-center leading-none whitespace-nowrap w-full">
+                  www.firstchoicegroup.co.zw
+                </div>
               </div>
             </div>
           </div>
@@ -2479,6 +2519,10 @@ export default function AcademicReportsPage() {
           .print-hide-for-print { display: none !important; }
           @page { size: A4; margin: 5mm; }
           .report-slip { box-shadow: none !important; border-radius: 0 !important; margin-bottom: 0 !important; page-break-after: always; background: white !important; color: black !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .report-slip-page--main { min-height: calc(287mm - 2px) !important; height: calc(287mm - 2px) !important; }
+          .report-graphs-row { align-items: stretch !important; }
+          .report-footer-row { align-items: stretch !important; }
+          .report-footer-box, .report-principal-info, .report-qr-block { height: 100% !important; }
           .report-slip th { background: #6b7280 !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
           .report-slip tbody tr[class*="bg-gray-100"] { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
           .report-slip tbody tr[class*="bg-gray-100"] td { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; }
