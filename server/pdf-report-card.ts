@@ -178,10 +178,6 @@ export async function generateReportCardPdf(data: ReportCardPdfData): Promise<Bu
       doc.fontSize(16).font('Helvetica-Bold')
         .text(data.school.name, pageOneSideMargin, 40, { align: 'center', width: pageOneWidth });
       
-      if (data.school.phone) {
-        doc.fontSize(9).font('Helvetica')
-          .text(`Call Centre: ${data.school.phone}`, pageOneSideMargin, doc.y + 2, { align: 'center', width: pageOneWidth });
-      }
       if (data.school.email) {
         doc.fontSize(9).font('Helvetica')
           .text(`Email: ${data.school.email}`, pageOneSideMargin, doc.y + 1, { align: 'center', width: pageOneWidth });
@@ -351,7 +347,6 @@ export async function generateReportCardPdf(data: ReportCardPdfData): Promise<Bu
         doc.font('Helvetica').fontSize(9);
         if (data.school.principalName) doc.text(data.school.principalName, pageOneSideMargin, doc.y + 2);
         if (data.school.principalPhone) doc.text(`Mobile: ${data.school.principalPhone}`, pageOneSideMargin, doc.y + 1);
-        if (data.school.phone) doc.text(`Call Centre: ${data.school.phone}`, pageOneSideMargin, doc.y + 1);
         if (data.school.email) doc.text(`Email: ${data.school.email}`, pageOneSideMargin, doc.y + 1);
       }
 
