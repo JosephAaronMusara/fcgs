@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { InfiniteYearPicker } from "@/components/ui/infinite-year-picker";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -317,7 +318,6 @@ export default function OrgDashboard() {
     }
   }, [orgData, currentYear]);
 
-  const academicYears = Array.from({ length: 2100 - 2021 + 1 }, (_, i) => 2021 + i);
 
   const { data: assessmentTypes } = useQuery<AssessmentType[]>({
     queryKey: ["/api/assessment-types"],
@@ -2256,23 +2256,16 @@ export default function OrgDashboard() {
                 )}
               </div>
 
-              <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label className="text-sm font-semibold">Current Academic Year</Label>
-                  <Select
+                  <InfiniteYearPicker
                     value={orgAcademicYear.toString()}
                     onValueChange={(v) => setOrgAcademicYear(parseInt(v))}
+                    placeholder="Select year"
                     disabled={!isEditingAcademic}
-                  >
-                    <SelectTrigger data-testid="select-org-academic-year">
-                      <SelectValue placeholder="Select year" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {academicYears.map((year) => (
-                        <SelectItem key={year} value={year.toString()}>{year}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    dataTestId="select-org-academic-year"
+                  />
                 </div>
 
                 <div className="space-y-2">

@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { InfiniteYearPicker } from "@/components/ui/infinite-year-picker";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -54,6 +55,16 @@ interface StaffAssignment {
   classId: number | null;
 }
 
+const TERM_OPTIONS = [
+  { value: "none", label: "All Terms" },
+  { value: "term1", label: "Term 1" },
+  { value: "vac1", label: "Vacation 1" },
+  { value: "term2", label: "Term 2" },
+  { value: "vac2", label: "Vacation 2" },
+  { value: "term3", label: "Term 3" },
+];
+
+
 export default function AssessmentsPage() {
   const { toast } = useToast();
   const { currentSchoolId, user } = useAuth();
@@ -63,8 +74,12 @@ export default function AssessmentsPage() {
   const [perPage] = useState(10);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingAssessment, setEditingAssessment] = useState<AssessmentWithPapers | null>(null);
+  const [filterAcademicYear, setFilterAcademicYear] = useState<string>(String(new Date().getFullYear()));
   const [filterClassId, setFilterClassId] = useState<string>("all");
   const [filterSubjectId, setFilterSubjectId] = useState<string>("all");
+  const [filterTerm, setFilterTerm] = useState<string>("none");
+  const [filterDateFrom, setFilterDateFrom] = useState<string>("");
+  const [filterDateTo, setFilterDateTo] = useState<string>("");
   const schoolScopeId = currentSchoolId || user?.schoolId || null;
   
   // Exam, Assessment Types, and Comments dialog state
@@ -179,6 +194,14 @@ export default function AssessmentsPage() {
     ? classSubjectRowsResponse
     : (classSubjectRowsResponse?.items ?? []);
 
+  const filteredSubjects = useMemo(() => {
+    if (filterClassId === "all") return subjects || [];
+    const subjectIds = new Set((classSubjectRows || []).filter((row) => row.classId === Number(filterClassId)).map((row) => row.subjectId));
+    return subjectIds.size > 0
+      ? (subjects || []).filter((subject) => subjectIds.has(subject.id))
+      : (subjects || []);
+  }, [filterClassId, classSubjectRows, subjects]);
+
   const schoolType = normalizeSchoolType(currentSchool?.schoolType);
 
   const { data: streamsResponse } = useQuery<any>({
@@ -223,14 +246,24 @@ export default function AssessmentsPage() {
     : (currentStaffAssignmentsResponse?.items ?? []);
 
   const { data: assessmentsResponse, isLoading } = useQuery<any>({
-    queryKey: ["/api/assessments", schoolScopeId, filterClassId, filterSubjectId, debouncedSearch],
+    queryKey: ["/api/assessments", schoolScopeId, filterAcademicYear, filterClassId, filterSubjectId, filterTerm, filterDateFrom, filterDateTo, debouncedSearch],
     queryFn: async () => {
       const params = new URLSearchParams();
+      params.set("academicYear", filterAcademicYear);
       if (filterClassId && filterClassId !== "all") {
         params.set("classId", filterClassId);
       }
       if (filterSubjectId && filterSubjectId !== "all") {
         params.set("subjectId", filterSubjectId);
+      }
+      if (filterTerm !== "none") {
+        params.set("termFilter", filterTerm);
+      }
+      if (filterDateFrom) {
+        params.set("dateFrom", filterDateFrom);
+      }
+      if (filterDateTo) {
+        params.set("dateTo", filterDateTo);
       }
       if (debouncedSearch) {
         params.set("search", debouncedSearch);
@@ -363,29 +396,66 @@ export default function AssessmentsPage() {
               data-testid="input-search"
             />
           </div>
-          <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:flex xl:w-auto xl:flex-wrap">
-            <Select value={filterClassId} onValueChange={setFilterClassId}>
-              <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-filter-class">
-                <SelectValue placeholder="All Classes" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Classes</SelectItem>
-                {classes?.map((c) => (
-                  <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={filterSubjectId} onValueChange={setFilterSubjectId}>
-              <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-filter-subject">
-                <SelectValue placeholder="All Subjects" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Subjects</SelectItem>
-                {subjects?.map((s) => (
-                  <SelectItem key={s.id} value={s.id.toString()}>{s.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="flex w-full flex-wrap items-end gap-2">
+            <div className="space-y-1">
+              <Label className="block">Academic Year</Label>
+              <InfiniteYearPicker
+                value={filterAcademicYear}
+                onValueChange={(value) => { setFilterAcademicYear(value); setPage(1); }}
+                placeholder="Academic Year"
+                className="w-[150px]"
+                dataTestId="select-filter-academic-year"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="block">Class</Label>
+              <Select value={filterClassId} onValueChange={(value) => { setFilterClassId(value); setFilterSubjectId("all"); setPage(1); }}>
+                <SelectTrigger className="w-[180px]" data-testid="select-filter-class">
+                  <SelectValue placeholder="All Classes" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Classes</SelectItem>
+                  {classes?.map((c) => (
+                    <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label className="block">Subject</Label>
+              <Select value={filterSubjectId} onValueChange={(value) => { setFilterSubjectId(value); setPage(1); }}>
+                <SelectTrigger className="w-[200px]" data-testid="select-filter-subject">
+                  <SelectValue placeholder="All Subjects" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Subjects</SelectItem>
+                  {filteredSubjects?.map((s) => (
+                    <SelectItem key={s.id} value={s.id.toString()}>{s.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label className="block">School Term</Label>
+              <Select value={filterTerm} onValueChange={(value) => { setFilterTerm(value); setPage(1); }}>
+                <SelectTrigger className="w-[170px]" data-testid="select-filter-term">
+                  <SelectValue placeholder="All Terms" />
+                </SelectTrigger>
+                <SelectContent>
+                  {TERM_OPTIONS.map((term) => (
+                    <SelectItem key={term.value} value={term.value}>{term.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label className="block">Date From</Label>
+              <Input type="date" value={filterDateFrom} onChange={(e) => { setFilterDateFrom(e.target.value); setPage(1); }} className="w-[160px]" data-testid="input-filter-date-from" />
+            </div>
+            <div className="space-y-1">
+              <Label className="block">Date To</Label>
+              <Input type="date" value={filterDateTo} onChange={(e) => { setFilterDateTo(e.target.value); setPage(1); }} className="w-[160px]" data-testid="input-filter-date-to" />
+            </div>
           </div>
         </CardHeader>
         <CardContent>

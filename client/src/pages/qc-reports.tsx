@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { InfiniteYearPicker } from "@/components/ui/infinite-year-picker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -53,8 +54,6 @@ export default function QCReportsPage() {
     queryKey: [queryUrl],
   });
 
-  const currentYear = new Date().getFullYear();
-  const years = Array.from({ length: 2100 - 2021 + 1 }, (_, i) => (2021 + i).toString());
 
   return (
     <div className="qc-wrap p-4 md:p-6 max-w-7xl mx-auto" data-testid="qc-reports-landing">
@@ -80,16 +79,13 @@ export default function QCReportsPage() {
               </SelectContent>
             </Select>
 
-            <Select value={selectedYear || (data?.year || "")} onValueChange={setSelectedYear}>
-              <SelectTrigger className="w-[100px]" data-testid="select-year">
-                <SelectValue placeholder="Year" />
-              </SelectTrigger>
-              <SelectContent>
-                {years.map(y => (
-                  <SelectItem key={y} value={y}>{y}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <InfiniteYearPicker
+              value={selectedYear || (data?.year || "")}
+              onValueChange={setSelectedYear}
+              placeholder="Year"
+              className="w-[100px]"
+              dataTestId="select-year"
+            />
           </div>
         </div>
 

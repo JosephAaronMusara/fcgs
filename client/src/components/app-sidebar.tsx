@@ -116,7 +116,7 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Grading System", url: "/grades", icon: FileText, requiredPermissions: ["grades.view"] },
       { title: "Assessments Manager", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
       { title: "Marks Entry", url: "/marks-entry", icon: FileText, requiredPermissions: ["marks.view", "marks.create"] },
-      { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"], badge: "In Production" },
+      { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"] },
     ],
   },
   {
