@@ -289,8 +289,11 @@ export interface IStorage {
   // Staff Attendance
   getStaffAttendanceLogs(schoolId: number, filters?: { staffId?: number; date?: string; dateFrom?: string; dateTo?: string; status?: string }): Promise<StaffAttendanceLog[]>;
   getStaffAttendanceLogByUserAndDate(userId: number, date: string): Promise<StaffAttendanceLog | undefined>;
+  getStaffAttendanceLogById(id: number): Promise<StaffAttendanceLog | undefined>;
+  getStaffAttendanceLogByUserWithPendingReason(userId: number): Promise<StaffAttendanceLog | undefined>;
   createStaffAttendanceLog(log: InsertStaffAttendanceLog): Promise<StaffAttendanceLog>;
   updateStaffAttendanceLog(id: number, log: Partial<InsertStaffAttendanceLog>): Promise<StaffAttendanceLog | undefined>;
+  autoClockOutOverdueStaffAttendanceLogs(): Promise<number>;
 
   // POS
   getPosItems(schoolId?: number): Promise<PosItem[]>;
@@ -1666,6 +1669,19 @@ export class DatabaseStorage implements IStorage {
     return log;
   }
 
+  async getStaffAttendanceLogById(id: number): Promise<StaffAttendanceLog | undefined> {
+    const [log] = await db.select().from(staffAttendanceLogs).where(eq(staffAttendanceLogs.id, id));
+    return log;
+  }
+
+  async getStaffAttendanceLogByUserWithPendingReason(userId: number): Promise<StaffAttendanceLog | undefined> {
+    const [log] = await db.select().from(staffAttendanceLogs)
+      .where(and(eq(staffAttendanceLogs.userId, userId), eq(staffAttendanceLogs.reasonRequired, true)))
+      .orderBy(desc(staffAttendanceLogs.date), desc(staffAttendanceLogs.clockOut), desc(staffAttendanceLogs.clockIn))
+      .limit(1);
+    return log;
+  }
+
   async createStaffAttendanceLog(logData: InsertStaffAttendanceLog): Promise<StaffAttendanceLog> {
     const [newLog] = await db.insert(staffAttendanceLogs).values(logData).returning();
     return newLog;
@@ -1674,6 +1690,26 @@ export class DatabaseStorage implements IStorage {
   async updateStaffAttendanceLog(id: number, logData: Partial<InsertStaffAttendanceLog>): Promise<StaffAttendanceLog | undefined> {
     const [updated] = await db.update(staffAttendanceLogs).set(logData).where(eq(staffAttendanceLogs.id, id)).returning();
     return updated;
+  }
+
+  async autoClockOutOverdueStaffAttendanceLogs(): Promise<number> {
+    const today = new Date().toISOString().split("T")[0];
+    const overdueLogs = await db.select().from(staffAttendanceLogs).where(and(isNull(staffAttendanceLogs.clockOut), lte(staffAttendanceLogs.date, today)));
+
+    let updatedCount = 0;
+    for (const log of overdueLogs) {
+      const logDate = new Date(`${log.date}T00:00:00`);
+      const autoClockOutAt = new Date(logDate);
+      autoClockOutAt.setHours(23, 59, 0, 0);
+      if (autoClockOutAt.getTime() > Date.now()) continue;
+
+      await db.update(staffAttendanceLogs)
+        .set({ clockOut: autoClockOutAt, autoClockedOut: true })
+        .where(eq(staffAttendanceLogs.id, log.id));
+      updatedCount += 1;
+    }
+
+    return updatedCount;
   }
 
   // POS methods

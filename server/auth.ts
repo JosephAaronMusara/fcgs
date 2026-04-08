@@ -69,7 +69,7 @@ const LEGACY_ROUTE_PERMISSION_RULES: Array<{
   { method: "PUT", pattern: /^\/api\/staff\/\d+$/, requirement: "staff.edit" },
   { method: "DELETE", pattern: /^\/api\/staff\/\d+$/, requirement: "staff.delete" },
   { method: "POST", pattern: /^\/api\/staff\/import$/, requirement: "staff.create" },
-  { method: "POST", pattern: /^\/api\/staff\/\d+\/reset-mobile-id$/, requirement: "staff.edit" },
+  { method: "POST", pattern: /^\/api\/staff\/\d+\/reset-mobile-id$/, requirement: "staff_attendance.reset_device_id" },
   { method: "GET", pattern: /^\/api\/staff\/\d+\/subject-assignments$/, requirement: "staff.assign_subjects" },
   { method: "GET", pattern: /^\/api\/staff-subject-assignment-conflict$/, requirement: "staff.assign_subjects" },
   { method: "PUT", pattern: /^\/api\/staff\/\d+\/subject-assignments$/, requirement: "staff.assign_subjects" },

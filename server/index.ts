@@ -162,6 +162,17 @@ app.use((req, res, next) => {
           console.error("School cleanup job error:", err);
         }
       }, 5 * 60 * 1000);
+
+      setInterval(async () => {
+        try {
+          const updatedCount = await storage.autoClockOutOverdueStaffAttendanceLogs();
+          if (updatedCount > 0) {
+            log(`Auto clocked out ${updatedCount} overdue staff attendance session(s)`, "attendance");
+          }
+        } catch (err) {
+          console.error("Staff attendance auto clock-out job error:", err);
+        }
+      }, 60 * 1000);
     },
   );
 })();

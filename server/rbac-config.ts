@@ -80,6 +80,15 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "logbook.create", name: "Create Logbook Entry", description: "Record lesson documentation", category: "Logbook" },
   { code: "logbook.edit", name: "Edit Logbook Entry", description: "Modify logbook entries", category: "Logbook" },
   { code: "logbook.delete", name: "Delete Logbook Entry", description: "Remove logbook entries", category: "Logbook" },
+
+  // Staff Attendance
+  { code: "staff_attendance.view_own", name: "View Own Staff Attendance", description: "View your own staff attendance records", category: "Staff Attendance" },
+  { code: "staff_attendance.view_all", name: "View All Staff Attendance", description: "View all staff attendance records for the active school", category: "Staff Attendance" },
+  { code: "staff_attendance.view_overview", name: "View Staff Attendance Overview", description: "View the staff attendance overview grid", category: "Staff Attendance" },
+  { code: "staff_attendance.view_logs", name: "View Staff Attendance Logs", description: "View the staff attendance logs tab", category: "Staff Attendance" },
+  { code: "staff_attendance.clock_in", name: "Clock In for Staff Attendance", description: "Clock in to staff attendance", category: "Staff Attendance" },
+  { code: "staff_attendance.clock_out", name: "Clock Out for Staff Attendance", description: "Clock out of staff attendance", category: "Staff Attendance" },
+  { code: "staff_attendance.reset_device_id", name: "Reset Staff Attendance Device ID", description: "Reset a staff member's attendance device binding", category: "Staff Attendance" },
   
   // E-Schemes
   { code: "schemes.view", name: "View Schemes of Work", description: "View lesson plans and schemes", category: "Schemes" },

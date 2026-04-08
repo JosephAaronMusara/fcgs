@@ -84,7 +84,7 @@ const staffMenuGroups: MenuGroup[] = [
     items: [
       { title: "School Staff", url: "/staff", icon: Users, requiredPermissions: ["staff.view"] },
       { title: "Timetable", url: "/timetable", icon: Calendar, requiredPermissions: ["timetable.view"], comingSoon: true },
-      { title: "Staff Attendance", url: "/logbook", icon: Clock, requiredPermissions: ["logbook.view"], featureKey: "enableELogbook", badge: "In Production" },
+      { title: "Staff Attendance", url: "/logbook", icon: Clock, requiredPermissions: ["staff_attendance.view_own", "staff_attendance.view_all", "staff_attendance.view_logs", "staff_attendance.view_overview", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"], featureKey: "enableELogbook" },
     ],
   },
   {

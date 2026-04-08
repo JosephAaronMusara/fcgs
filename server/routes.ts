@@ -24,7 +24,7 @@ import {
   insertOrganizationSchema, insertSchoolSchema, insertLibraryResourceSchema, insertLibraryCategorySchema, insertLibraryBookSchema, insertLibraryLoanSchema, insertLibraryFineSchema, insertLibraryReservationSchema,
   libraryBooks as libraryBooksTable,
   insertTimetableSlotSchema, insertLogbookEntrySchema, insertStaffAttendanceLogSchema, insertPosItemSchema,
-  schools as schoolsTable,
+  schools as schoolsTable, staff,
   insertPosSaleSchema, insertNewsletterSchema, insertSchemeSchema,
   insertHostelSchema, insertHostelRollCallSchema, insertStudentApplicationSchema,
   hostels as hostelsTable,
@@ -1137,13 +1137,28 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/staff/:id/reset-mobile-id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/staff/:id/reset-mobile-id", requireAuth, requirePermission("staff_attendance.reset_device_id"), async (req, res, next) => {
     try {
-      const updated = await storage.updateStaff(parseInt(req.params.id), { mobileId: null });
+      const targetStaffId = parseInt(req.params.id);
+      const existingStaff = await storage.getStaff(targetStaffId);
+      const updated = await storage.updateStaff(targetStaffId, { mobileId: null });
       if (!updated) {
         return res.status(404).json({ message: "Staff not found" });
       }
-      res.json({ message: "Mobile ID reset successfully", staff: updated });
+      logActivity(req, {
+        action: "reset_device_id",
+        category: "staff_attendance",
+        description: "Reset staff attendance device binding",
+        targetType: "staff",
+        targetId: updated.id,
+        targetName: `${updated.firstName} ${updated.lastName}`,
+        schoolId: updated.schoolId ?? undefined,
+        metadata: {
+          previousDeviceId: existingStaff?.mobileId ?? null,
+          newDeviceId: null,
+        },
+      });
+      res.json({ message: "Device ID reset successfully", staff: updated });
     } catch (error) {
       next(error);
     }
@@ -4857,9 +4872,225 @@ export async function registerRoutes(
   });
 
   // Staff Attendance routes
+  const ATTENDANCE_GPS_ACCURACY_THRESHOLD_METERS = 150;
+
+  function getAttendanceDeviceSignature(req: Request): string | null {
+    const raw = typeof req.body?.deviceSignature === "string" ? req.body.deviceSignature.trim() : "";
+    if (raw) return raw.slice(0, 255);
+    return null;
+  }
+
+  function getAttendanceRadiusMeters(school: { schoolRadiusMeters?: number | null } | undefined | null): number {
+    return school?.schoolRadiusMeters && school.schoolRadiusMeters > 0 ? school.schoolRadiusMeters : 100;
+  }
+
+  function expectedEndForAttendanceDate(date: string): { hour: number; minute: number } | null {
+    const day = new Date(`${date}T00:00:00`).getDay();
+    if (day === 0 || day === 6) return null;
+    return { hour: 16, minute: 0 };
+  }
+
+  async function findStaffByRegisteredDeviceId(deviceId: string) {
+    if (!deviceId) return null;
+    const matches = await db.select({
+      id: users.id,
+      schoolId: users.schoolId,
+      userId: staff.userId,
+      staffId: staff.id,
+      firstName: staff.firstName,
+      lastName: staff.lastName,
+      mobileId: staff.mobileId,
+    }).from(staff).leftJoin(users, eq(users.id, staff.userId)).where(eq(staff.mobileId, deviceId)).limit(1);
+    return matches[0] ?? null;
+  }
+
+  async function validateAttendanceLocation(req: Request, schoolId: number, stage: "clock_in" | "clock_out") {
+    const latitude = typeof req.body?.latitude === "string" ? req.body.latitude : null;
+    const longitude = typeof req.body?.longitude === "string" ? req.body.longitude : null;
+    const accuracyRaw = req.body?.accuracy;
+    const accuracy = typeof accuracyRaw === "number" ? accuracyRaw : typeof accuracyRaw === "string" && accuracyRaw.trim() ? Number(accuracyRaw) : null;
+    const attemptCountRaw = req.body?.attemptCount;
+    const attemptCount = typeof attemptCountRaw === "number" ? attemptCountRaw : typeof attemptCountRaw === "string" && attemptCountRaw.trim() ? Number(attemptCountRaw) : 1;
+    const deviceSignature = getAttendanceDeviceSignature(req);
+
+    const school = await storage.getSchool(schoolId);
+    if (!school) {
+      return { ok: false as const, status: 400, message: "School not found" };
+    }
+
+    if (!latitude || !longitude) {
+      logActivity(req, {
+        action: stage === "clock_in" ? "clock_in_location_missing" : "clock_out_location_missing",
+        category: "staff_attendance",
+        description: `Denied ${stage.replace("_", " ")} because location coordinates were missing`,
+        targetType: "school",
+        targetId: school.id,
+        targetName: school.name,
+        schoolId: school.id,
+        metadata: { stage, attemptCount, accuracy, deviceSignature },
+      });
+      return { ok: false as const, status: 400, message: "Location coordinates are required" };
+    }
+
+    if (accuracy == null || Number.isNaN(accuracy) || accuracy > ATTENDANCE_GPS_ACCURACY_THRESHOLD_METERS) {
+      logActivity(req, {
+        action: stage === "clock_in" ? "clock_in_accuracy_denied" : "clock_out_accuracy_denied",
+        category: "staff_attendance",
+        description: `Denied ${stage.replace("_", " ")} because GPS accuracy was too low`,
+        targetType: "school",
+        targetId: school.id,
+        targetName: school.name,
+        schoolId: school.id,
+        metadata: { stage, accuracy, threshold: ATTENDANCE_GPS_ACCURACY_THRESHOLD_METERS, attemptCount, deviceSignature },
+      });
+      return { ok: false as const, status: 400, message: `Location accuracy is too low (${accuracy == null || Number.isNaN(accuracy) ? "unknown" : `${Math.round(accuracy)}m`}). Please retry in an open area.` };
+    }
+
+    if (school.latitude && school.longitude) {
+      const distance = getDistanceMeters(
+        parseFloat(latitude), parseFloat(longitude),
+        parseFloat(school.latitude), parseFloat(school.longitude)
+      );
+      const radiusMeters = getAttendanceRadiusMeters(school);
+      if (distance > radiusMeters) {
+        logActivity(req, {
+          action: stage === "clock_in" ? "clock_in_geofence_denied" : "clock_out_geofence_denied",
+          category: "staff_attendance",
+          description: `Denied ${stage.replace("_", " ")} outside school radius`,
+          targetType: "school",
+          targetId: school.id,
+          targetName: school.name,
+          schoolId: school.id,
+          metadata: { stage, distanceMeters: Math.round(distance), radiusMeters, accuracy, attemptCount, deviceSignature },
+        });
+        return { ok: false as const, status: 400, message: `You are ${Math.round(distance)}m away from school. You must be within ${radiusMeters}m to ${stage === "clock_in" ? "clock in" : "clock out"}.` };
+      }
+
+      logActivity(req, {
+        action: stage === "clock_in" ? "clock_in_geofence_pass" : "clock_out_geofence_pass",
+        category: "staff_attendance",
+        description: `${stage === "clock_in" ? "Clock in" : "Clock out"} passed geofence validation`,
+        targetType: "school",
+        targetId: school.id,
+        targetName: school.name,
+        schoolId: school.id,
+        metadata: { stage, distanceMeters: Math.round(distance), radiusMeters, accuracy, attemptCount, deviceSignature },
+      });
+    }
+
+    return { ok: true as const, latitude, longitude, accuracy: Math.round(accuracy), attemptCount, deviceSignature, school };
+  }
+
+  async function hasAnyAttendancePermission(userId: number, permissions: string[]): Promise<boolean> {
+    for (const permission of permissions) {
+      if (await storage.userHasPermission(userId, permission)) return true;
+    }
+    return false;
+  }
+
+  function getTodayLocalIso(): string {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function combineAttendanceReasons(log: { lateReason?: string | null; earlyClockOutReason?: string | null }): string | null {
+    const parts: string[] = [];
+    if (log.lateReason?.trim()) parts.push(`Late clock-in: ${log.lateReason.trim()}`);
+    if (log.earlyClockOutReason?.trim()) parts.push(`Early clock-out: ${log.earlyClockOutReason.trim()}`);
+    return parts.length ? parts.join(' | ') : null;
+  }
+
+  function getAttendanceReasonPrompt(reasonType: string | null | undefined): { title: string; message: string } {
+    if (reasonType === 'early_clock_out') {
+      return {
+        title: 'Early Clock-Out Reason Required',
+        message: 'You clocked out before 16:00 on a weekday. Enter the reason before continuing.',
+      };
+    }
+    return {
+      title: 'Late Clock-In Reason Required',
+      message: 'You clocked in late. Enter the reason before continuing.',
+    };
+  }
+
+  app.get("/api/staff-attendance/pending-reason", requireAuth, async (req, res, next) => {
+    try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
+      const user = req.user as User;
+      const pending = await storage.getStaffAttendanceLogByUserWithPendingReason(user.id);
+      if (!pending) return res.json(null);
+      res.json({
+        ...pending,
+        prompt: getAttendanceReasonPrompt(pending.reasonType),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/staff-attendance/:id/submit-reason", requireAuth, async (req, res, next) => {
+    try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
+      const user = req.user as User;
+      const attendanceId = parseInt(req.params.id, 10);
+      if (Number.isNaN(attendanceId)) return res.status(400).json({ message: "Invalid attendance record" });
+
+      const existing = await storage.getStaffAttendanceLogById(attendanceId);
+      if (!existing || existing.userId !== user.id) return res.status(404).json({ message: "Attendance record not found" });
+      if (!existing.reasonRequired || !existing.reasonType) return res.status(400).json({ message: "No pending reason is required for this record" });
+
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+      if (!reason) return res.status(400).json({ message: "A reason is required" });
+
+      const updates: Partial<InsertStaffAttendanceLog> = {
+        reasonRequired: false,
+        reasonSubmittedAt: new Date(),
+      };
+      if (existing.reasonType === 'early_clock_out') {
+        updates.earlyClockOutReason = reason;
+        updates.notes = combineAttendanceReasons({ lateReason: existing.lateReason, earlyClockOutReason: reason });
+      } else {
+        updates.lateReason = reason;
+        updates.notes = combineAttendanceReasons({ lateReason: reason, earlyClockOutReason: existing.earlyClockOutReason });
+      }
+
+      const updated = await storage.updateStaffAttendanceLog(existing.id, updates);
+
+      logActivity(req, {
+        action: existing.reasonType === 'early_clock_out' ? 'early_clock_out_reason_submitted' : 'late_clock_in_reason_submitted',
+        category: 'staff_attendance',
+        description: existing.reasonType === 'early_clock_out' ? 'Submitted required early clock-out reason' : 'Submitted required late clock-in reason',
+        targetType: 'staff_attendance',
+        targetId: existing.id,
+        targetName: `Attendance ${existing.id}`,
+        schoolId: existing.schoolId,
+        metadata: {
+          attendanceId: existing.id,
+          reasonType: existing.reasonType,
+          reason,
+        },
+      });
+
+      res.json(updated);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/staff-attendance", requireAuth, async (req, res, next) => {
     try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
       const user = req.user as User;
+      const canViewOwn = await hasAnyAttendancePermission(user.id, ["staff_attendance.view_own", "logbook.view"]);
+      const canViewAll = await hasAnyAttendancePermission(user.id, ["staff_attendance.view_all"]);
+      const canViewLogs = await hasAnyAttendancePermission(user.id, ["staff_attendance.view_logs", "logbook.view"]);
+      if (!canViewLogs || (!canViewOwn && !canViewAll)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
       const schoolId = req.query.schoolId ? parseInt(req.query.schoolId as string) : user.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School ID required" });
 
@@ -4871,9 +5102,8 @@ export async function registerRoutes(
       if (req.query.status) filters.status = req.query.status as string;
 
       let logs = await storage.getStaffAttendanceLogs(schoolId, filters);
-
-      if (user.role !== "org_admin" && user.role !== "school_admin") {
-        logs = logs.filter(l => l.userId === user.id);
+      if (!canViewAll) {
+        logs = logs.filter((l) => l.userId === user.id);
       }
 
       res.json(logs);
@@ -4884,8 +5114,14 @@ export async function registerRoutes(
 
   app.get("/api/staff-attendance/today", requireAuth, async (req, res, next) => {
     try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
       const user = req.user as User;
-      const today = new Date().toISOString().split("T")[0];
+      const canViewToday = await hasAnyAttendancePermission(user.id, ["staff_attendance.view_own", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"]);
+      if (!canViewToday) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const today = getTodayLocalIso();
       const log = await storage.getStaffAttendanceLogByUserAndDate(user.id, today);
       res.json(log || null);
     } catch (error) {
@@ -4895,38 +5131,97 @@ export async function registerRoutes(
 
   app.post("/api/staff-attendance/clock-in", requireAuth, async (req, res, next) => {
     try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
       const user = req.user as User;
+      const canClockIn = await hasAnyAttendancePermission(user.id, ["staff_attendance.clock_in", "logbook.view"]);
+      if (!canClockIn) {
+        return res.status(403).json({ message: "Access denied" });
+      }
       if (!user.schoolId) return res.status(400).json({ message: "No school assigned" });
 
-      const today = new Date().toISOString().split("T")[0];
+      const today = getTodayLocalIso();
       const existing = await storage.getStaffAttendanceLogByUserAndDate(user.id, today);
       if (existing) return res.status(400).json({ message: "Already clocked in today" });
 
-      const { latitude, longitude } = req.body;
-
-      const [school] = await db.select().from(schoolsTable).where(eq(schoolsTable.id, user.schoolId));
-      if (school?.latitude && school?.longitude && latitude && longitude) {
-        const distance = getDistanceMeters(
-          parseFloat(latitude), parseFloat(longitude),
-          parseFloat(school.latitude), parseFloat(school.longitude)
-        );
-        if (distance > 100) {
-          return res.status(400).json({ message: `You are ${Math.round(distance)}m away from school. You must be within 100m to clock in.` });
-        }
+      const locationCheck = await validateAttendanceLocation(req, user.schoolId, "clock_in");
+      if (!locationCheck.ok) {
+        return res.status(locationCheck.status).json({ message: locationCheck.message });
       }
 
-      const staffMembers = await storage.getStaff(user.schoolId);
+      const staffMembers = await storage.getStaffBySchool(user.schoolId);
       const staffRecord = staffMembers.find(s => s.userId === user.id);
       if (!staffRecord) return res.status(400).json({ message: "Staff record not found" });
 
+      const currentDeviceId = locationCheck.deviceSignature;
+      if (!currentDeviceId) {
+        return res.status(400).json({ message: "Device signature not available for attendance." });
+      }
+
+      const registeredOwner = await findStaffByRegisteredDeviceId(currentDeviceId);
+      if (registeredOwner && registeredOwner.staffId !== staffRecord.id) {
+        logActivity(req, {
+          action: "wrong_device_clock_in_attempt",
+          category: "staff_attendance",
+          description: "Denied clock-in attempt from a device registered to another staff member",
+          targetType: "staff_attendance",
+          targetId: staffRecord.id,
+          targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
+          schoolId: user.schoolId,
+          metadata: {
+            attemptedStaffId: staffRecord.id,
+            attemptedUserId: user.id,
+            deviceId: currentDeviceId,
+            registeredToStaffId: registeredOwner.staffId,
+            registeredToName: `${registeredOwner.firstName} ${registeredOwner.lastName}`,
+          },
+        });
+        return res.status(403).json({ message: `This device is not registered to your account. It is currently registered to ${registeredOwner.firstName} ${registeredOwner.lastName}. Please contact an administrator if this device needs to be reassigned.` });
+      }
+
+      if (staffRecord.mobileId && staffRecord.mobileId !== currentDeviceId) {
+        logActivity(req, {
+          action: "wrong_device_clock_in_attempt",
+          category: "staff_attendance",
+          description: "Denied clock-in attempt from an unregistered device for this staff member",
+          targetType: "staff_attendance",
+          targetId: staffRecord.id,
+          targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
+          schoolId: user.schoolId,
+          metadata: {
+            attemptedStaffId: staffRecord.id,
+            attemptedUserId: user.id,
+            deviceId: currentDeviceId,
+            registeredDeviceId: staffRecord.mobileId,
+          },
+        });
+        return res.status(403).json({ message: "This device is not registered to your account. Please use your registered device or ask an administrator to reset your device ID." });
+      }
+
+      if (!staffRecord.mobileId) {
+        await storage.updateStaff(staffRecord.id, { mobileId: currentDeviceId });
+        logActivity(req, {
+          action: "attendance_device_registered",
+          category: "staff_attendance",
+          description: "Registered attendance device for staff member",
+          targetType: "staff",
+          targetId: staffRecord.id,
+          targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
+          schoolId: user.schoolId,
+          metadata: {
+            deviceId: currentDeviceId,
+          },
+        });
+      }
+
       const now = new Date();
       const day = now.getDay();
-      const isWeekend = day === 0 || day === 6;
-      const startHour = isWeekend ? 8 : 7;
-      const startMinute = isWeekend ? 0 : 20;
+      const weekend = day === 0 || day === 6;
+      const startHour = weekend ? 8 : 7;
+      const startMinute = weekend ? 0 : 20;
       const startTime = new Date(now);
       startTime.setHours(startHour, startMinute, 0, 0);
       const status = now > startTime ? "late" : "on_time";
+      const reasonRequired = status === "late";
 
       const log = await storage.createStaffAttendanceLog({
         schoolId: user.schoolId,
@@ -4935,9 +5230,46 @@ export async function registerRoutes(
         date: today,
         clockIn: now,
         status,
-        clockInLatitude: latitude || null,
-        clockInLongitude: longitude || null,
+        reasonRequired,
+        reasonType: reasonRequired ? "late_clock_in" : null,
+        notes: null,
+        deviceSignature: locationCheck.deviceSignature,
+        clockInAccuracy: locationCheck.accuracy,
+        clockInLatitude: locationCheck.latitude,
+        clockInLongitude: locationCheck.longitude,
       });
+
+      logActivity(req, {
+        action: "clock_in",
+        category: "staff_attendance",
+        description: `${status === "late" ? "Late" : "On-time"} clock in recorded`,
+        targetType: "staff_attendance",
+        targetId: log.id,
+        targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
+        schoolId: user.schoolId,
+        metadata: {
+          attendanceId: log.id,
+          status,
+          accuracy: locationCheck.accuracy,
+          attemptCount: locationCheck.attemptCount,
+          deviceSignature: locationCheck.deviceSignature,
+          weekend,
+          reasonRequired,
+        },
+      });
+
+      if (status === "late") {
+        logActivity(req, {
+          action: "late_clock_in",
+          category: "staff_attendance",
+          description: "Late clock in noted",
+          targetType: "staff_attendance",
+          targetId: log.id,
+          targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
+          schoolId: user.schoolId,
+          metadata: { attendanceId: log.id, reasonRequired: true, accuracy: locationCheck.accuracy },
+        });
+      }
 
       res.status(201).json(log);
     } catch (error) {
@@ -4947,20 +5279,87 @@ export async function registerRoutes(
 
   app.post("/api/staff-attendance/clock-out", requireAuth, async (req, res, next) => {
     try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
       const user = req.user as User;
-      const today = new Date().toISOString().split("T")[0];
+      const canClockOut = await hasAnyAttendancePermission(user.id, ["staff_attendance.clock_out", "logbook.view"]);
+      if (!canClockOut) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      if (!user.schoolId) return res.status(400).json({ message: "No school assigned" });
+      const today = getTodayLocalIso();
       const existing = await storage.getStaffAttendanceLogByUserAndDate(user.id, today);
       if (!existing) return res.status(400).json({ message: "You haven't clocked in today" });
-      if (existing.clockOut) return res.status(400).json({ message: "Already clocked out today" });
+      if (existing.clockOut) return res.status(400).json({ message: existing.autoClockedOut ? "Today was already auto clocked out" : "Already clocked out today" });
 
-      const { latitude, longitude } = req.body;
+      const locationCheck = await validateAttendanceLocation(req, user.schoolId, "clock_out");
+      if (!locationCheck.ok) {
+        return res.status(locationCheck.status).json({ message: locationCheck.message });
+      }
+
+      if (existing.deviceSignature && locationCheck.deviceSignature && existing.deviceSignature !== locationCheck.deviceSignature) {
+        logActivity(req, {
+          action: "device_signature_mismatch",
+          category: "staff_attendance",
+          description: "Clock-out device signature differs from clock-in signature",
+          targetType: "staff_attendance",
+          targetId: existing.id,
+          targetName: `Attendance ${existing.id}`,
+          schoolId: user.schoolId,
+          metadata: {
+            attendanceId: existing.id,
+            clockInDeviceSignature: existing.deviceSignature,
+            clockOutDeviceSignature: locationCheck.deviceSignature,
+          },
+        });
+      }
+
       const now = new Date();
+      const weekdayExpectedEnd = expectedEndForAttendanceDate(today);
+      const requiresEarlyClockOutReason = !!weekdayExpectedEnd && now.getHours() * 60 + now.getMinutes() < weekdayExpectedEnd.hour * 60 + weekdayExpectedEnd.minute;
 
       const updated = await storage.updateStaffAttendanceLog(existing.id, {
         clockOut: now,
-        clockOutLatitude: latitude || null,
-        clockOutLongitude: longitude || null,
+        autoClockedOut: false,
+        reasonRequired: requiresEarlyClockOutReason,
+        reasonType: requiresEarlyClockOutReason ? "early_clock_out" : existing.reasonType,
+        clockOutAccuracy: locationCheck.accuracy,
+        clockOutLatitude: locationCheck.latitude,
+        clockOutLongitude: locationCheck.longitude,
+        deviceSignature: existing.deviceSignature || locationCheck.deviceSignature,
       });
+
+      logActivity(req, {
+        action: "clock_out",
+        category: "staff_attendance",
+        description: "Clock out recorded",
+        targetType: "staff_attendance",
+        targetId: existing.id,
+        targetName: `Attendance ${existing.id}`,
+        schoolId: user.schoolId,
+        metadata: {
+          attendanceId: existing.id,
+          accuracy: locationCheck.accuracy,
+          attemptCount: locationCheck.attemptCount,
+          deviceSignature: locationCheck.deviceSignature,
+          reasonRequired: requiresEarlyClockOutReason,
+        },
+      });
+
+      if (requiresEarlyClockOutReason) {
+        logActivity(req, {
+          action: "early_clock_out",
+          category: "staff_attendance",
+          description: "Early clock out reason required",
+          targetType: "staff_attendance",
+          targetId: existing.id,
+          targetName: `Attendance ${existing.id}`,
+          schoolId: user.schoolId,
+          metadata: {
+            attendanceId: existing.id,
+            clockOut: now.toISOString(),
+          },
+        });
+      }
 
       res.json(updated);
     } catch (error) {
@@ -4970,24 +5369,37 @@ export async function registerRoutes(
 
   app.get("/api/staff-attendance/grid", requireAuth, async (req, res, next) => {
     try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
       const user = req.user as User;
+      const canViewOverview = await hasAnyAttendancePermission(user.id, ["staff_attendance.view_overview", "staff_attendance.view_all"]);
+      if (!canViewOverview) return res.status(403).json({ message: "Access denied" });
+
       const schoolId = user.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School ID required" });
 
-      const dateFrom = (req.query.dateFrom as string) || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0];
-      const dateTo = (req.query.dateTo as string) || new Date().toISOString().split("T")[0];
+      const dateFrom = (req.query.dateFrom as string) || getTodayLocalIso().slice(0, 8) + "01";
+      const dateTo = (req.query.dateTo as string) || getTodayLocalIso();
+      const selectedStaffId = req.query.staffId ? parseInt(req.query.staffId as string) : null;
 
-      const logs = await storage.getStaffAttendanceLogs(schoolId, { dateFrom, dateTo });
-      const staffMembers = await storage.getStaff(schoolId);
+      const logs = await storage.getStaffAttendanceLogs(schoolId, {
+        dateFrom,
+        dateTo,
+        ...(selectedStaffId ? { staffId: selectedStaffId } : {}),
+      });
+      const staffMembers = await storage.getStaffBySchool(schoolId);
+      const scopedStaffMembers = selectedStaffId ? staffMembers.filter((staffMember) => staffMember.id === selectedStaffId) : staffMembers;
 
       const dates: string[] = [];
-      const start = new Date(dateFrom + "T00:00:00");
-      const end = new Date(dateTo + "T00:00:00");
+      const start = new Date(`${dateFrom}T00:00:00`);
+      const end = new Date(`${dateTo}T00:00:00`);
       for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-        dates.push(d.toISOString().split("T")[0]);
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        dates.push(`${year}-${month}-${day}`);
       }
 
-      const staffGrid = staffMembers.map(s => {
+      const staffGrid = scopedStaffMembers.map(s => {
         const staffLogs = logs.filter(l => l.staffId === s.id);
         const statuses: Record<string, string> = {};
         staffLogs.forEach(l => {
