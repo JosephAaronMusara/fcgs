@@ -56,6 +56,7 @@ export default function SchoolSettingsPage() {
     address: "",
     latitude: "",
     longitude: "",
+    schoolRadiusMeters: "100",
     principalName: "",
     principalEmail: "",
     principalPhone: "",
@@ -105,6 +106,7 @@ export default function SchoolSettingsPage() {
         address: school.address || "",
         latitude: school.latitude || "",
         longitude: school.longitude || "",
+        schoolRadiusMeters: school.schoolRadiusMeters?.toString() || "100",
         principalName: school.principalName || "",
         principalEmail: school.principalEmail || "",
         principalPhone: school.principalPhone || "",
@@ -186,6 +188,7 @@ export default function SchoolSettingsPage() {
       address: formValues.address,
       latitude: formValues.latitude || null,
       longitude: formValues.longitude || null,
+      schoolRadiusMeters: formValues.schoolRadiusMeters ? parseInt(formValues.schoolRadiusMeters, 10) : 100,
       phone: formValues.phone,
       email: formValues.email,
       principalName: formValues.principalName,
@@ -209,6 +212,7 @@ export default function SchoolSettingsPage() {
         address: school.address || "",
         latitude: school.latitude || "",
         longitude: school.longitude || "",
+        schoolRadiusMeters: school.schoolRadiusMeters?.toString() || "100",
         principalName: school.principalName || "",
         principalEmail: school.principalEmail || "",
         principalPhone: school.principalPhone || "",
@@ -465,7 +469,7 @@ export default function SchoolSettingsPage() {
                         data-testid="input-school-address"
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div className="space-y-2">
                         <Label htmlFor="latitude">Latitude</Label>
                         <Input
@@ -488,6 +492,20 @@ export default function SchoolSettingsPage() {
                           onChange={(e) => setFormValues({ ...formValues, longitude: e.target.value })}
                           disabled={!isEditing}
                           data-testid="input-school-longitude"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="schoolRadiusMeters">School Radius (m)</Label>
+                        <Input
+                          id="schoolRadiusMeters"
+                          name="schoolRadiusMeters"
+                          type="number"
+                          min="1"
+                          placeholder="e.g., 100"
+                          value={formValues.schoolRadiusMeters}
+                          onChange={(e) => setFormValues({ ...formValues, schoolRadiusMeters: e.target.value })}
+                          disabled={!isEditing}
+                          data-testid="input-school-radius-meters"
                         />
                       </div>
                     </div>

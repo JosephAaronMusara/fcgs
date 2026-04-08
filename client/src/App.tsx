@@ -8,6 +8,7 @@ import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -111,7 +112,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/library$/, permissions: ["library.view"] },
   { pattern: /^\/calendar$/, permissions: ["calendar.view"] },
   { pattern: /^\/timetable$/, permissions: ["timetable.view"] },
-  { pattern: /^\/logbook$/, permissions: ["logbook.view"] },
+  { pattern: /^\/logbook$/, permissions: ["staff_attendance.view_own", "staff_attendance.view_all", "staff_attendance.view_logs", "staff_attendance.view_overview", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"] },
   { pattern: /^\/pos$/, permissions: ["pos.view"] },
   { pattern: /^\/newsletters$/, permissions: ["newsletters.view"] },
   { pattern: /^\/schemes$/, permissions: ["schemes.view"] },
@@ -199,6 +200,18 @@ interface Notification {
   actorUserId: number | null;
   readAt: Date | null;
   createdAt: Date | null;
+}
+
+interface PendingAttendanceReason {
+  id: number;
+  date: string;
+  clockIn: string | null;
+  clockOut: string | null;
+  reasonType: string | null;
+  prompt: {
+    title: string;
+    message: string;
+  };
 }
 
 function getTimeAgo(dateStr: string | Date | null): string {
@@ -514,6 +527,13 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   const { data: unreadCount } = useQuery<{ count: number }>({
     queryKey: ['/api/notifications/unread-count'],
   });
+  const [attendanceReasonText, setAttendanceReasonText] = useState("");
+
+  const { data: pendingAttendanceReason, isFetching: pendingAttendanceReasonLoading } = useQuery<PendingAttendanceReason | null>({
+    queryKey: ['/api/staff-attendance/pending-reason'],
+    enabled: !!user,
+    refetchInterval: user ? 15000 : false,
+  });
 
   const { data: notifications } = useQuery<Notification[]>({
     queryKey: ['/api/notifications'],
@@ -524,6 +544,10 @@ function AppLayout({ children }: { children: React.ReactNode }) {
     queryKey: ['/api/public/schools'],
     enabled: notificationsOpen && user?.role === "org_admin",
   });
+
+  useEffect(() => {
+    setAttendanceReasonText("");
+  }, [pendingAttendanceReason?.id]);
 
   const markReadMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -542,6 +566,18 @@ function AppLayout({ children }: { children: React.ReactNode }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/notifications'] });
       queryClient.invalidateQueries({ queryKey: ['/api/notifications/unread-count'] });
+    },
+  });
+
+  const submitAttendanceReasonMutation = useMutation({
+    mutationFn: async () => {
+      if (!pendingAttendanceReason?.id) throw new Error('No pending attendance reason');
+      await apiRequest('POST', `/api/staff-attendance/${pendingAttendanceReason.id}/submit-reason`, { reason: attendanceReasonText.trim() });
+    },
+    onSuccess: () => {
+      setAttendanceReasonText('');
+      queryClient.invalidateQueries({ queryKey: ['/api/staff-attendance/pending-reason'] });
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith('/api/staff-attendance') });
     },
   });
 
@@ -705,6 +741,44 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           </main>
         </div>
       </div>
+      <Dialog open={!!pendingAttendanceReason} onOpenChange={() => {}}>
+        <DialogContent
+          className="sm:max-w-lg [&>button]:hidden"
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onEscapeKeyDown={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle>{pendingAttendanceReason?.prompt.title || 'Attendance Reason Required'}</DialogTitle>
+            <DialogDescription>
+              {pendingAttendanceReason?.prompt.message || 'Enter the required reason before continuing.'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="rounded-md border bg-muted/40 p-3 text-sm">
+              <div><strong>Date:</strong> {pendingAttendanceReason?.date || '-'}</div>
+              {pendingAttendanceReason?.clockIn && <div><strong>Clock In:</strong> {new Date(pendingAttendanceReason.clockIn).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })}</div>}
+              {pendingAttendanceReason?.clockOut && <div><strong>Clock Out:</strong> {new Date(pendingAttendanceReason.clockOut).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })}</div>}
+            </div>
+            <Textarea
+              value={attendanceReasonText}
+              onChange={(e) => setAttendanceReasonText(e.target.value)}
+              placeholder="Enter reason"
+              className="min-h-[120px]"
+              data-testid="input-attendance-reason-modal"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => submitAttendanceReasonMutation.mutate()}
+              disabled={!attendanceReasonText.trim() || submitAttendanceReasonMutation.isPending || pendingAttendanceReasonLoading}
+              data-testid="button-submit-attendance-reason"
+            >
+              {submitAttendanceReasonMutation.isPending ? 'Submitting...' : 'Submit'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <AutoLogoutWarning />
     </SidebarProvider>
   );

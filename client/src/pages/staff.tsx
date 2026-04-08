@@ -27,6 +27,7 @@ export default function StaffPage() {
   const { toast } = useToast();
   const { currentSchoolId, hasAnyPermission } = useAuth();
   const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
+  const canResetDeviceId = hasAnyPermission("staff_attendance.reset_device_id");
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [viewingStaff, setViewingStaff] = useState<Staff | null>(null);
@@ -108,14 +109,14 @@ export default function StaffPage() {
     },
   });
 
-  const resetMobileIdMutation = useMutation({
+  const resetDeviceIdMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await apiRequest("POST", `/api/staff/${id}/reset-mobile-id`);
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/staff"] });
-      toast({ title: "Success", description: "Mobile ID has been reset. Staff member can now log in from a new device." });
+      toast({ title: "Success", description: "Device ID has been reset. Staff member can now clock in from a new device to register it." });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -532,18 +533,20 @@ export default function StaffPage() {
                           </Button>
                         )}
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            if (confirm("This will reset the mobile device ID for this staff member. They will need to log in again from their device to re-register it.")) {
-                              resetMobileIdMutation.mutate(s.id);
-                            }
-                          }}
-                          data-testid={`button-reset-mobile-${s.id}`}
-                        >
-                          Reset Mobile ID
-                        </Button>
+                        {canResetDeviceId && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              if (confirm("This will reset the device ID for this staff member. Their next successful clock-in from a new device will register that device.")) {
+                                resetDeviceIdMutation.mutate(s.id);
+                              }
+                            }}
+                            data-testid={`button-reset-device-${s.id}`}
+                          >
+                            Reset Device ID
+                          </Button>
+                        )}
 
                         <Button
                           variant="ghost"
