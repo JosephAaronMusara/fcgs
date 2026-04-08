@@ -6,7 +6,7 @@ import { db } from "./db";
 import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
-import { eq, and, sql, like } from "drizzle-orm";
+import { eq, and, or, inArray, sql, like } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
@@ -504,6 +504,143 @@ function parseTermNumber(termStr: string | number | null | undefined): number {
 function termLabel(termStr: string): string {
   const labels: Record<string, string> = { term1: "Term 1", term2: "Term 2", term3: "Term 3", vac1: "Vacation 1", vac2: "Vacation 2" };
   return labels[termStr] || termStr;
+}
+
+function rebaseDateToAcademicYear(dateStr: string, academicYear: number): string {
+  if (!dateStr) return dateStr;
+  const parts = dateStr.split("-");
+  if (parts.length !== 3) return dateStr;
+  return `${academicYear}-${parts[1]}-${parts[2]}`;
+}
+
+function getAcademicTermDateRanges(entity: { term1StartDate?: string | null; term1EndDate?: string | null; vac1StartDate?: string | null; vac1EndDate?: string | null; term2StartDate?: string | null; term2EndDate?: string | null; vac2StartDate?: string | null; vac2EndDate?: string | null; term3StartDate?: string | null; term3EndDate?: string | null }, academicYear: number | null | undefined): Record<string, { start: string; end: string }> {
+  const ranges = getTermDateRanges(entity);
+  if (!academicYear) return ranges;
+  return Object.fromEntries(
+    Object.entries(ranges).map(([key, value]) => [
+      key,
+      {
+        start: rebaseDateToAcademicYear(value.start, academicYear),
+        end: rebaseDateToAcademicYear(value.end, academicYear),
+      },
+    ])
+  );
+}
+
+function mergeAcademicCalendarSources(
+  primary?: { term1StartDate?: string | null; term1EndDate?: string | null; vac1StartDate?: string | null; vac1EndDate?: string | null; term2StartDate?: string | null; term2EndDate?: string | null; vac2StartDate?: string | null; vac2EndDate?: string | null; term3StartDate?: string | null; term3EndDate?: string | null } | null,
+  secondary?: { term1StartDate?: string | null; term1EndDate?: string | null; vac1StartDate?: string | null; vac1EndDate?: string | null; term2StartDate?: string | null; term2EndDate?: string | null; vac2StartDate?: string | null; vac2EndDate?: string | null; term3StartDate?: string | null; term3EndDate?: string | null } | null,
+) {
+  return {
+    term1StartDate: primary?.term1StartDate ?? secondary?.term1StartDate ?? null,
+    term1EndDate: primary?.term1EndDate ?? secondary?.term1EndDate ?? null,
+    vac1StartDate: primary?.vac1StartDate ?? secondary?.vac1StartDate ?? null,
+    vac1EndDate: primary?.vac1EndDate ?? secondary?.vac1EndDate ?? null,
+    term2StartDate: primary?.term2StartDate ?? secondary?.term2StartDate ?? null,
+    term2EndDate: primary?.term2EndDate ?? secondary?.term2EndDate ?? null,
+    vac2StartDate: primary?.vac2StartDate ?? secondary?.vac2StartDate ?? null,
+    vac2EndDate: primary?.vac2EndDate ?? secondary?.vac2EndDate ?? null,
+    term3StartDate: primary?.term3StartDate ?? secondary?.term3StartDate ?? null,
+    term3EndDate: primary?.term3EndDate ?? secondary?.term3EndDate ?? null,
+  };
+}
+
+function assessmentMatchesAcademicYear(assessment: { year?: number | null; assessmentDate?: string | null }, academicYear: number): boolean {
+  if (assessment.year) return assessment.year === academicYear;
+  if (assessment.assessmentDate) return assessment.assessmentDate.startsWith(`${academicYear}-`);
+  return true;
+}
+
+function applyAssessmentFilters<T extends { schoolId?: number | null; classId?: number | null; subjectId?: number | null; year?: number | null; assessmentDate?: string | null }>(
+  assessments: T[],
+  {
+    schoolId,
+    classId,
+    subjectId,
+    academicYear,
+    dateFrom,
+    dateTo,
+    termFilter,
+    calendarConfig,
+  }: {
+    schoolId?: number | null;
+    classId?: number;
+    subjectId?: number;
+    academicYear?: number | null;
+    dateFrom?: string | null;
+    dateTo?: string | null;
+    termFilter?: string | null;
+    calendarConfig?: any;
+  }
+): T[] {
+  let filtered = [...assessments];
+
+  if (schoolId) filtered = filtered.filter((a) => a.schoolId === schoolId);
+  if (classId) filtered = filtered.filter((a) => a.classId === classId);
+  if (subjectId) filtered = filtered.filter((a) => a.subjectId === subjectId);
+  if (academicYear) filtered = filtered.filter((a) => assessmentMatchesAcademicYear(a, academicYear));
+
+  if (termFilter && termFilter !== "none") {
+    if (!calendarConfig) return [];
+    const termDateRanges = getAcademicTermDateRanges(calendarConfig, academicYear);
+    const range = termDateRanges[termFilter];
+    if (!range?.start || !range?.end) return [];
+    filtered = filtered.filter((a) => !!a.assessmentDate && a.assessmentDate >= range.start && a.assessmentDate <= range.end);
+  }
+
+  if (dateFrom) filtered = filtered.filter((a) => !!a.assessmentDate && a.assessmentDate >= dateFrom);
+  if (dateTo) filtered = filtered.filter((a) => !!a.assessmentDate && a.assessmentDate <= dateTo);
+
+  return filtered;
+}
+
+async function getHistoricalStudentsForAssessments(params: {
+  schoolId: number;
+  classId: number;
+  subjectId: number;
+  assessmentIds: number[];
+  includeSiblingAssessmentHistory?: boolean;
+  academicYear?: number | null;
+}) {
+  const { schoolId, classId, subjectId, assessmentIds, includeSiblingAssessmentHistory = false, academicYear = null } = params;
+
+  const currentClassStudents = (await storage.getStudentsByClass(classId)).filter((s) => s.schoolId === schoolId);
+  const studentMap = new Map(currentClassStudents.map((student) => [student.id, student]));
+
+  const subjectRows = await db.select().from(studentSubjectsSchema).where(eq(studentSubjectsSchema.subjectId, subjectId));
+  const subjectStudentIds = new Set(subjectRows.map((row) => row.studentId));
+
+  let historyAssessmentIds = [...assessmentIds];
+  if (includeSiblingAssessmentHistory) {
+    const siblingAssessments = applyAssessmentFilters(await storage.getAssessmentsByClass(classId), {
+      schoolId,
+      classId,
+      subjectId,
+      academicYear,
+    });
+    historyAssessmentIds = Array.from(new Set([...historyAssessmentIds, ...siblingAssessments.map((a) => a.id)]));
+  }
+
+  if (historyAssessmentIds.length > 0) {
+    const historyMarks = await storage.getAssessmentMarksByAssessments(historyAssessmentIds);
+    const historicalStudentIds = Array.from(new Set(historyMarks.map((mark) => mark.studentId)));
+    if (historicalStudentIds.length > 0) {
+      const historicalStudents = await db
+        .select()
+        .from(studentsTable)
+        .where(and(eq(studentsTable.schoolId, schoolId), inArray(studentsTable.id, historicalStudentIds)));
+      for (const student of historicalStudents) {
+        studentMap.set(student.id, student as any);
+      }
+    }
+  }
+
+  const students = Array.from(studentMap.values()).filter((student: any) =>
+    subjectStudentIds.size === 0 || subjectStudentIds.has(student.id) || assessmentIds.length === 0
+  );
+
+  students.sort((a: any, b: any) => `${a.lastName}${a.firstName}`.localeCompare(`${b.lastName}${b.firstName}`));
+  return students;
 }
 
 // Helper to get school context from request
@@ -6928,12 +7065,13 @@ export async function registerRoutes(
 
       const classId = parseInt(req.query.classId as string);
       const subjectId = parseInt(req.query.subjectId as string);
+      const academicYear = req.query.academicYear ? parseInt(req.query.academicYear as string) : null;
       const dateFrom = req.query.dateFrom as string || null;
       const dateTo = req.query.dateTo as string || null;
       const termFilter = req.query.termFilter as string || null;
 
-      if (!classId || !subjectId) {
-        return res.status(400).json({ message: "classId and subjectId are required" });
+      if (!classId || !subjectId || !academicYear) {
+        return res.status(400).json({ message: "academicYear, classId and subjectId are required" });
       }
 
       const classInfo = await storage.getClass(classId);
@@ -6947,29 +7085,20 @@ export async function registerRoutes(
       }
 
       const school = await storage.getSchool(schoolId);
+      const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : null;
+      const calendarConfig = mergeAcademicCalendarSources(school, org);
 
       const allAssessments = await storage.getAssessmentsByClass(classId);
-      let filtered = allAssessments.filter(a => a.subjectId === subjectId && a.schoolId === schoolId);
-
-      if (dateFrom) {
-        filtered = filtered.filter(a => a.assessmentDate && a.assessmentDate >= dateFrom);
-      }
-      if (dateTo) {
-        filtered = filtered.filter(a => a.assessmentDate && a.assessmentDate <= dateTo);
-      }
-
-      if (termFilter && termFilter !== "none" && school) {
-        const termDateRanges = getTermDateRanges(school);
-        const range = termDateRanges[termFilter];
-        if (range && range.start && range.end) {
-          filtered = filtered.filter(a => {
-            if (!a.assessmentDate) return false;
-            return a.assessmentDate >= range.start && a.assessmentDate <= range.end;
-          });
-        }
-      }
-
-      filtered.sort((a, b) => (a.assessmentDate || "").localeCompare(b.assessmentDate || ""));
+      const filtered = applyAssessmentFilters(allAssessments, {
+        schoolId,
+        classId,
+        subjectId,
+        academicYear,
+        dateFrom,
+        dateTo,
+        termFilter,
+        calendarConfig,
+      }).sort((a, b) => (a.assessmentDate || "").localeCompare(b.assessmentDate || ""));
 
       const assessmentTypes = await storage.getAssessmentTypes();
       const typeMap = new Map(assessmentTypes.map(t => [t.id, t.name]));
@@ -6991,16 +7120,14 @@ export async function registerRoutes(
         allMarkPapers[m.id] = paperMarks;
       }
 
-      const studentsInClass = await storage.getStudentsByClass(classId);
-      const studentSubjectRows = await db.select().from(studentSubjectsSchema).where(
-        eq(studentSubjectsSchema.subjectId, subjectId)
-      );
-      const enrolledStudentIdsForSubject = new Set(studentSubjectRows.map(r => r.studentId));
-      const classStudentIds = new Set(studentsInClass.filter(s => s.schoolId === schoolId).map(s => s.id));
-      const students = (enrolledStudentIdsForSubject.size > 0
-        ? studentsInClass.filter(s => classStudentIds.has(s.id) && enrolledStudentIdsForSubject.has(s.id))
-        : studentsInClass.filter(s => s.schoolId === schoolId)
-      ).sort((a, b) => `${a.lastName}${a.firstName}`.localeCompare(`${b.lastName}${b.firstName}`));
+      const students = await getHistoricalStudentsForAssessments({
+        schoolId,
+        classId,
+        subjectId,
+        assessmentIds,
+        includeSiblingAssessmentHistory: false,
+        academicYear,
+      });
 
       const grouped: Record<string, { typeName: string; assessments: any[] }> = {};
 
@@ -7053,11 +7180,12 @@ export async function registerRoutes(
       res.json({
         className: classInfo.className,
         subjectName: subjectInfo?.name || "",
+        academicYear,
         dateFrom,
         dateTo,
         termFilter,
         groups: Object.values(grouped),
-        students: students.map(s => ({
+        students: students.map((s: any) => ({
           id: s.id,
           name: `${s.firstName} ${s.lastName}`,
           admissionNo: s.admissionNo || "",
@@ -7816,6 +7944,10 @@ export async function registerRoutes(
 
       const classId = req.query.classId ? Number(req.query.classId) : undefined;
       const subjectId = req.query.subjectId ? Number(req.query.subjectId) : undefined;
+      const academicYear = req.query.academicYear ? Number(req.query.academicYear) : undefined;
+      const dateFrom = req.query.dateFrom as string | undefined;
+      const dateTo = req.query.dateTo as string | undefined;
+      const termFilter = req.query.termFilter as string | undefined;
       const search = req.query.search as string | undefined;
 
       if (classId) {
@@ -7827,6 +7959,10 @@ export async function registerRoutes(
         if (!subjectInfo) return;
       }
 
+      const school = await storage.getSchool(schoolId);
+      const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : null;
+      const calendarConfig = mergeAcademicCalendarSources(school, org);
+
       let assessmentList;
       if (classId) {
         assessmentList = await storage.getAssessmentsByClass(classId);
@@ -7834,11 +7970,16 @@ export async function registerRoutes(
         assessmentList = await storage.getAllAssessments();
       }
 
-      assessmentList = assessmentList.filter((a) => a.schoolId === schoolId);
-
-      if (subjectId) {
-        assessmentList = assessmentList.filter((a) => a.subjectId === subjectId);
-      }
+      assessmentList = applyAssessmentFilters(assessmentList, {
+        schoolId,
+        classId,
+        subjectId,
+        academicYear,
+        dateFrom,
+        dateTo,
+        termFilter,
+        calendarConfig,
+      });
 
       if (search) {
         const lowerSearch = search.toLowerCase();
@@ -7962,27 +8103,28 @@ export async function registerRoutes(
       const assessmentId = scoped.assessment.id;
       const assessment = scoped.assessment;
 
-      // Get assessment papers
       const papers = await storage.getAssessmentPapers(assessmentId);
 
-      // Get students in the class
-      const students = await storage.getStudentsByClass(assessment.classId);
+      const students = await getHistoricalStudentsForAssessments({
+        schoolId: scoped.schoolId,
+        classId: assessment.classId,
+        subjectId: assessment.subjectId,
+        assessmentIds: [assessmentId],
+        includeSiblingAssessmentHistory: true,
+        academicYear: assessment.year || null,
+      });
 
-      // Get all marks for this assessment
       const marks = await storage.getAssessmentMarks(assessmentId);
-      
-      // Get paper marks for each assessment mark
       const marksWithPapers = await Promise.all(marks.map(async (mark) => {
         const paperMarks = await storage.getMarkPapers(mark.id);
         return { ...mark, paperMarks };
       }));
-      
-      // Build a map of studentId -> mark data
+
       const marksByStudent: Record<number, any> = {};
       for (const mark of marksWithPapers) {
         marksByStudent[mark.studentId] = mark;
       }
-      
+
       const allGrades = await storage.getGradesBySchool(assessment.schoolId || 0);
       const { profileKey } = await resolveGradeProfileContext({
         schoolId: assessment.schoolId || scoped.schoolId,
@@ -7991,9 +8133,8 @@ export async function registerRoutes(
       });
       const grades = getApplicableGradesForContext(allGrades, { profileKey, classId: assessment.classId });
 
-      // Get comments for auto-comment lookup
       const comments = await storage.getAssessmentComments(assessment.schoolId || undefined, assessment.classId, assessment.subjectId);
-      
+
       res.json({
         assessment,
         papers,
@@ -8049,8 +8190,18 @@ export async function registerRoutes(
 
       const student = await ensureStudentInSchool(Number(studentId), schoolId, res);
       if (!student) return;
-      if (student.classId !== classId) {
-        return res.status(400).json({ message: "Student does not belong to the assessment class" });
+
+      const historicalStudents = await getHistoricalStudentsForAssessments({
+        schoolId,
+        classId,
+        subjectId,
+        assessmentIds: [assessment.id],
+        includeSiblingAssessmentHistory: true,
+        academicYear: assessment.year || null,
+      });
+      const historicalStudentIds = new Set(historicalStudents.map((item: any) => item.id));
+      if (student.classId !== classId && !historicalStudentIds.has(student.id)) {
+        return res.status(400).json({ message: "Student does not belong to the assessment class history" });
       }
 
       // Get assessment papers to calculate weighted percentage

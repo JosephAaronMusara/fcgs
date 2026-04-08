@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { InfiniteYearPicker } from "@/components/ui/infinite-year-picker";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
@@ -66,10 +67,29 @@ interface ValidationWarning {
   message: string;
 }
 
+interface ClassSubjectRow {
+  id: number;
+  classId: number;
+  subjectId: number;
+}
+
+const TERM_OPTIONS = [
+  { value: "none", label: "All Terms" },
+  { value: "term1", label: "Term 1" },
+  { value: "vac1", label: "Vacation 1" },
+  { value: "term2", label: "Term 2" },
+  { value: "vac2", label: "Vacation 2" },
+  { value: "term3", label: "Term 3" },
+];
+
+
 export default function MarksEntryPage() {
   const { toast } = useToast();
+  const currentYear = new Date().getFullYear();
+  const [selectedAcademicYear, setSelectedAcademicYear] = useState<string>(String(currentYear));
   const [selectedClassId, setSelectedClassId] = useState<string>("");
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
+  const [selectedTermFilter, setSelectedTermFilter] = useState<string>("none");
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string>("");
   const [studentMarks, setStudentMarks] = useState<Record<number, StudentMarkState>>({});
   const studentMarksRef = useRef<Record<number, StudentMarkState>>({});
@@ -89,13 +109,32 @@ export default function MarksEntryPage() {
   });
   const subjects = subjectsData?.items;
 
+  const { data: classSubjectRows } = useQuery<ClassSubjectRow[]>({
+    queryKey: ["/api/class-subjects/all", "marks-entry"],
+    queryFn: async () => {
+      const res = await schoolFetch("/api/class-subjects/all");
+      if (!res.ok) throw new Error("Failed to fetch class subjects");
+      return res.json();
+    },
+  });
+
+  const filteredSubjects = useMemo(() => {
+    if (!selectedClassId || !subjects) return [];
+    const subjectIds = new Set((classSubjectRows || []).filter((row) => row.classId === Number(selectedClassId)).map((row) => row.subjectId));
+    return subjectIds.size > 0
+      ? subjects.filter((subject) => subjectIds.has(subject.id))
+      : subjects;
+  }, [selectedClassId, subjects, classSubjectRows]);
+
   const { data: assessments } = useQuery<Assessment[]>({
-    queryKey: ["/api/assessments", selectedClassId, selectedSubjectId],
+    queryKey: ["/api/assessments", selectedAcademicYear, selectedClassId, selectedSubjectId, selectedTermFilter],
     queryFn: async () => {
       if (!selectedClassId || !selectedSubjectId) return [];
       const params = new URLSearchParams();
+      params.set("academicYear", selectedAcademicYear);
       params.set("classId", selectedClassId);
       params.set("subjectId", selectedSubjectId);
+      if (selectedTermFilter !== "none") params.set("termFilter", selectedTermFilter);
       const res = await schoolFetch(`/api/assessments?${params}`);
       if (!res.ok) throw new Error("Failed to fetch assessments");
       return res.json();
@@ -720,7 +759,7 @@ export default function MarksEntryPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }}>Marks Entry</h1>
           <p className="text-muted-foreground">
-            Enter student marks for assessments. Select a class, subject, and assessment to begin.
+            Enter student marks for assessments. Select academic year, class, subject, term, and assessment to begin.
           </p>
         </div>
       </div>
@@ -745,9 +784,23 @@ export default function MarksEntryPage() {
           <CardDescription>Choose which assessment you want to enter marks for</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="flex flex-wrap items-end gap-4">
             <div className="space-y-2">
-              <Label>Class</Label>
+              <Label className="block">Academic Year</Label>
+              <InfiniteYearPicker
+                value={selectedAcademicYear}
+                onValueChange={(value) => {
+                  setSelectedAcademicYear(value);
+                  setSelectedAssessmentId("");
+                }}
+                placeholder="Academic year..."
+                className="w-[150px]"
+                dataTestId="select-academic-year"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="block">Class</Label>
               <Select
                 value={selectedClassId}
                 onValueChange={(value) => {
@@ -756,7 +809,7 @@ export default function MarksEntryPage() {
                   setSelectedAssessmentId("");
                 }}
               >
-                <SelectTrigger data-testid="select-class">
+                <SelectTrigger className="w-[200px]" data-testid="select-class">
                   <SelectValue placeholder="Select class..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -770,7 +823,7 @@ export default function MarksEntryPage() {
             </div>
 
             <div className="space-y-2">
-              <Label>Subject</Label>
+              <Label className="block">Subject</Label>
               <Select
                 value={selectedSubjectId}
                 onValueChange={(value) => {
@@ -779,11 +832,11 @@ export default function MarksEntryPage() {
                 }}
                 disabled={!selectedClassId}
               >
-                <SelectTrigger data-testid="select-subject">
-                  <SelectValue placeholder="Select subject..." />
+                <SelectTrigger className="w-[240px]" data-testid="select-subject">
+                  <SelectValue placeholder={!selectedClassId ? "Select class first" : "Select subject..."} />
                 </SelectTrigger>
                 <SelectContent>
-                  {subjects?.map((sub) => (
+                  {filteredSubjects?.map((sub) => (
                     <SelectItem key={sub.id} value={sub.id.toString()}>
                       {sub.name}
                     </SelectItem>
@@ -793,19 +846,37 @@ export default function MarksEntryPage() {
             </div>
 
             <div className="space-y-2">
-              <Label>Assessment</Label>
+              <Label className="block">School Term</Label>
               <Select
-                value={selectedAssessmentId}
-                onValueChange={setSelectedAssessmentId}
-                disabled={!selectedSubjectId}
+                value={selectedTermFilter}
+                onValueChange={(value) => {
+                  setSelectedTermFilter(value);
+                  setSelectedAssessmentId("");
+                }}
               >
-                <SelectTrigger data-testid="select-assessment">
+                <SelectTrigger className="w-[170px]" data-testid="select-term-filter">
+                  <SelectValue placeholder="School term..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {TERM_OPTIONS.map((term) => (
+                    <SelectItem key={term.value} value={term.value}>
+                      {term.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="block">Assessment</Label>
+              <Select value={selectedAssessmentId} onValueChange={setSelectedAssessmentId} disabled={!selectedSubjectId}>
+                <SelectTrigger className="w-[280px]" data-testid="select-assessment">
                   <SelectValue placeholder="Select assessment..." />
                 </SelectTrigger>
                 <SelectContent>
                   {assessments?.map((assessment) => (
                     <SelectItem key={assessment.id} value={assessment.id.toString()}>
-                      {assessment.name}
+                      {assessment.name}{assessment.assessmentDate ? ` • ${assessment.assessmentDate}` : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
