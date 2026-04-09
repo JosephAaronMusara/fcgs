@@ -3,10 +3,10 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments } from "@shared/schema";
+import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, libraryShelves as libraryShelvesTable } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
-import { eq, and, or, inArray, sql, like } from "drizzle-orm";
+import { eq, and, or, inArray, sql, like, desc } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
@@ -21,8 +21,8 @@ import {
   insertClassSchema, insertSubjectSchema, insertGradeSchema,
   insertAssessmentSchema, insertMarkSchema, insertAttendanceRecordSchema,
   insertDisciplineRecordSchema, insertClinicRecordSchema, insertFeesPaymentSchema, insertStreamSchema,
-  insertOrganizationSchema, insertSchoolSchema, insertLibraryResourceSchema, insertLibraryCategorySchema, insertLibraryBookSchema, insertLibraryLoanSchema, insertLibraryFineSchema, insertLibraryReservationSchema,
-  libraryBooks as libraryBooksTable,
+  insertOrganizationSchema, insertSchoolSchema, insertLibraryResourceSchema, insertLibraryCategorySchema, insertLibraryShelfSchema, insertLibraryBookSchema, insertLibraryLoanSchema, insertLibraryFineSchema, insertLibraryReservationSchema,
+  libraryBooks as libraryBooksTable, libraryBookCopies as libraryBookCopiesTable, libraryFines as libraryFinesTable, libraryReservations as libraryReservationsTable,
   insertTimetableSlotSchema, insertLogbookEntrySchema, insertStaffAttendanceLogSchema, insertPosItemSchema,
   schools as schoolsTable, staff,
   insertPosSaleSchema, insertNewsletterSchema, insertSchemeSchema,
@@ -4447,10 +4447,185 @@ export async function registerRoutes(
     }
   });
 
+
   // E-Library routes (digital resources)
-  app.get("/api/library/resources", requireAuth, async (req, res, next) => {
+  const libraryLoanCreateSchema = insertLibraryLoanSchema.partial({ dueDate: true }).extend({
+    bookId: z.number(),
+    borrowerType: z.enum(["student", "staff"]),
+    borrowerId: z.number(),
+    copyId: z.number().optional().nullable(),
+    dueDate: z.string().optional(),
+    notes: z.string().optional().nullable(),
+    conditionOnBorrow: z.string().optional().nullable(),
+  });
+
+  const libraryFineUpdateSchema = z.object({
+    status: z.enum(["unpaid", "paid", "waived"]).optional(),
+    amount: z.string().optional(),
+    reason: z.string().optional().nullable(),
+  });
+
+  const libraryReservationUpdateSchema = z.object({
+    status: z.enum(["pending", "ready", "fulfilled", "cancelled", "expired"]).optional(),
+    notifiedAt: z.union([z.string(), z.date()]).optional().nullable(),
+    expiresAt: z.union([z.string(), z.date()]).optional().nullable(),
+  });
+
+  function parseIdParam(value: string): number {
+    return parseInt(value, 10);
+  }
+
+  function getRequiredLibrarySchoolId(req: Request, res: Response): number | null {
+    const schoolId = getSchoolContext(req);
+    if (!schoolId) {
+      res.status(400).json({ message: "School context required" });
+      return null;
+    }
+    return schoolId;
+  }
+
+  async function resolveCurrentStaffRecord(userId: number) {
+    const [staffRecord] = await db.select().from(staff).where(eq(staff.userId, userId)).limit(1);
+    return staffRecord;
+  }
+
+  async function getScopedLibraryResource(resourceId: number, schoolId: number) {
+    const resource = await storage.getLibraryResource(resourceId);
+    if (!resource || resource.schoolId !== schoolId) return null;
+    return resource;
+  }
+
+  async function getScopedLibraryCategory(categoryId: number, schoolId: number) {
+    const categories = await storage.getLibraryCategories(schoolId);
+    return categories.find((category) => category.id === categoryId) ?? null;
+  }
+
+  async function getScopedLibraryShelf(shelfId: number, schoolId: number) {
+    const shelves = await storage.getLibraryShelves(schoolId);
+    return shelves.find((shelf) => shelf.id === shelfId) ?? null;
+  }
+
+  async function getScopedLibraryBook(bookId: number, schoolId: number) {
+    const book = await storage.getLibraryBook(bookId);
+    if (!book || book.schoolId !== schoolId) return null;
+    return book;
+  }
+
+  async function getScopedLibraryCopy(copyId: number, schoolId: number) {
+    const copy = await storage.getLibraryBookCopy(copyId);
+    if (!copy || copy.schoolId !== schoolId) return null;
+    return copy;
+  }
+
+  async function recalculateLibraryBookCounters(bookId: number) {
+    const copies = await db.select().from(libraryBookCopiesTable).where(eq(libraryBookCopiesTable.bookId, bookId));
+    const activeCopies = copies.filter((copy) => copy.status !== "lost");
+    const availableCopies = activeCopies.filter((copy) => copy.status === "available").length;
+    const damagedCopies = activeCopies.filter((copy) => copy.status === "damaged").length;
+    const lostStolenCopies = copies.filter((copy) => copy.status === "lost").length;
+
+    await db.update(libraryBooksTable).set({
+      totalCopies: activeCopies.length,
+      availableCopies,
+      damagedCopies,
+      lostStolenCopies,
+    }).where(eq(libraryBooksTable.id, bookId));
+  }
+
+  async function getScopedLibraryLoan(loanId: number, schoolId: number) {
+    const loan = await storage.getLibraryLoan(loanId);
+    if (!loan || loan.schoolId !== schoolId) return null;
+    return loan;
+  }
+
+  async function getScopedLibraryFine(fineId: number, schoolId: number) {
+    const fines = await storage.getLibraryFines(schoolId);
+    return fines.find((fine) => fine.id === fineId) ?? null;
+  }
+
+  async function getScopedLibraryReservation(reservationId: number, schoolId: number) {
+    const reservations = await storage.getLibraryReservations(schoolId);
+    return reservations.find((reservation) => reservation.id === reservationId) ?? null;
+  }
+
+  async function expireLibraryReservations(bookId: number, schoolId: number) {
+    await db
+      .update(libraryReservationsTable)
+      .set({ status: "expired" as any })
+      .where(
+        and(
+          eq(libraryReservationsTable.schoolId, schoolId),
+          eq(libraryReservationsTable.bookId, bookId),
+          eq(libraryReservationsTable.status, "pending" as any),
+          sql`${libraryReservationsTable.expiresAt} IS NOT NULL`,
+          sql`${libraryReservationsTable.expiresAt} < NOW()`
+        )
+      );
+  }
+
+  async function moveNextReservationToReady(bookId: number, schoolId: number) {
+    await expireLibraryReservations(bookId, schoolId);
+    const pendingReservations = await storage.getLibraryReservationsForBook(bookId, "pending");
+    const nextReservation = pendingReservations.find((reservation) => reservation.schoolId === schoolId);
+    if (!nextReservation) return null;
+
+    const readyUntil = new Date();
+    readyUntil.setDate(readyUntil.getDate() + 3);
+
+    const [updated] = await db
+      .update(libraryReservationsTable)
+      .set({
+        status: "ready" as any,
+        notifiedAt: new Date(),
+        expiresAt: readyUntil,
+      })
+      .where(eq(libraryReservationsTable.id, nextReservation.id))
+      .returning();
+
+    return updated;
+  }
+
+  async function getBorrowerForLibraryLoan(schoolId: number, borrowerType: "student" | "staff", borrowerId: number) {
+    if (borrowerType === "student") {
+      const borrower = await storage.getStudent(borrowerId);
+      if (!borrower || borrower.schoolId !== schoolId) return null;
+      return {
+        borrowerName: `${borrower.firstName} ${borrower.lastName}`.trim(),
+        schoolId: borrower.schoolId,
+      };
+    }
+
+    const borrower = await storage.getStaff(borrowerId);
+    if (!borrower || borrower.schoolId !== schoolId) return null;
+    return {
+      borrowerName: `${borrower.firstName} ${borrower.lastName}`.trim(),
+      schoolId: borrower.schoolId,
+    };
+  }
+
+  async function enforceLibraryLoanPolicy(schoolId: number, borrowerType: "student" | "staff", borrowerId: number) {
+    const policy = await storage.getLibraryPolicy(schoolId);
+    const maxAllowed = borrowerType === "student"
+      ? (policy?.maxBooksStudent ?? 1)
+      : (policy?.maxBooksTeacher ?? 500);
+    const activeLoans = await storage.getLibraryLoans(schoolId);
+    const activeCount = activeLoans.filter((loan) =>
+      loan.borrowerType === borrowerType &&
+      loan.borrowerId === borrowerId &&
+      ["active", "overdue"].includes(String(loan.status))
+    ).length;
+
+    if (activeCount >= maxAllowed) {
+      return { ok: false, message: `Borrower has already reached the maximum of ${maxAllowed} active book(s).` };
+    }
+
+    return { ok: true, policy };
+  }
+
+  app.get("/api/library/resources", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req) || (req.query.schoolId ? parseInt(req.query.schoolId as string) : undefined);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const resources = await storage.getLibraryResources(schoolId);
       res.json(resources);
     } catch (error) {
@@ -4458,9 +4633,11 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/library/resources/:id", requireAuth, async (req, res, next) => {
+  app.get("/api/library/resources/:id", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const resource = await storage.getLibraryResource(parseInt(req.params.id));
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const resource = await getScopedLibraryResource(parseIdParam(req.params.id), schoolId);
       if (!resource) return res.status(404).json({ message: "Resource not found" });
       res.json(resource);
     } catch (error) {
@@ -4468,19 +4645,31 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/library/resources", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/library/resources", requireAuth, requirePermission("library.resources.manage"), async (req, res, next) => {
     try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId || !req.user) return;
       const data = insertLibraryResourceSchema.parse(req.body);
-      const newResource = await storage.createLibraryResource(data);
+      const staffRecord = await resolveCurrentStaffRecord(req.user.id);
+      const newResource = await storage.createLibraryResource({
+        ...data,
+        schoolId,
+        uploadedBy: staffRecord?.id,
+      });
       res.status(201).json(newResource);
     } catch (error) {
       next(error);
     }
   });
 
-  app.put("/api/library/resources/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.put("/api/library/resources/:id", requireAuth, requirePermission("library.resources.manage"), async (req, res, next) => {
     try {
-      const updated = await storage.updateLibraryResource(parseInt(req.params.id), req.body);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const resourceId = parseIdParam(req.params.id);
+      const resource = await getScopedLibraryResource(resourceId, schoolId);
+      if (!resource) return res.status(404).json({ message: "Resource not found" });
+      const updated = await storage.updateLibraryResource(resourceId, { ...req.body, schoolId });
       if (!updated) return res.status(404).json({ message: "Resource not found" });
       res.json(updated);
     } catch (error) {
@@ -4488,9 +4677,14 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/library/resources/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.delete("/api/library/resources/:id", requireAuth, requirePermission("library.catalogue.delete"), async (req, res, next) => {
     try {
-      await storage.deleteLibraryResource(parseInt(req.params.id));
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const resourceId = parseIdParam(req.params.id);
+      const resource = await getScopedLibraryResource(resourceId, schoolId);
+      if (!resource) return res.status(404).json({ message: "Resource not found" });
+      await storage.deleteLibraryResource(resourceId);
       res.json({ message: "Resource deleted successfully" });
     } catch (error) {
       next(error);
@@ -4498,320 +4692,792 @@ export async function registerRoutes(
   });
 
   // Library - Categories
-  app.get("/api/library/categories", requireAuth, async (req, res, next) => {
+  app.get("/api/library/categories", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const categories = await storage.getLibraryCategories(schoolId);
       res.json(categories);
     } catch (error) { next(error); }
   });
 
-  app.post("/api/library/categories", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/library/categories", requireAuth, requirePermission("library.catalog.manage"), async (req, res, next) => {
     try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const data = insertLibraryCategorySchema.parse(req.body);
-      const category = await storage.createLibraryCategory(data);
+      const category = await storage.createLibraryCategory({ ...data, schoolId });
       res.status(201).json(category);
     } catch (error) { next(error); }
   });
 
-  app.put("/api/library/categories/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.put("/api/library/categories/:id", requireAuth, requirePermission("library.catalog.manage"), async (req, res, next) => {
     try {
-      const updated = await storage.updateLibraryCategory(parseInt(req.params.id), req.body);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const categoryId = parseIdParam(req.params.id);
+      const category = await getScopedLibraryCategory(categoryId, schoolId);
+      if (!category) return res.status(404).json({ message: "Category not found" });
+      const updated = await storage.updateLibraryCategory(categoryId, { ...req.body, schoolId });
       if (!updated) return res.status(404).json({ message: "Category not found" });
       res.json(updated);
     } catch (error) { next(error); }
   });
 
-  app.delete("/api/library/categories/:id", requireAuth, requireRole("school_admin"), async (req, res, next) => {
+  app.delete("/api/library/categories/:id", requireAuth, requirePermission("library.catalogue.delete"), async (req, res, next) => {
     try {
-      await storage.deleteLibraryCategory(parseInt(req.params.id));
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const categoryId = parseIdParam(req.params.id);
+      const category = await getScopedLibraryCategory(categoryId, schoolId);
+      if (!category) return res.status(404).json({ message: "Category not found" });
+      await storage.deleteLibraryCategory(categoryId);
       res.json({ message: "Category deleted" });
     } catch (error) { next(error); }
   });
 
-  // Library - Books
-  app.get("/api/library/books", requireAuth, async (req, res, next) => {
+  // Library - Shelves
+  app.get("/api/library/shelves", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const shelves = await storage.getLibraryShelves(schoolId);
+      res.json(shelves);
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/library/shelves", requireAuth, requirePermission("library.catalog.manage"), async (req, res, next) => {
+    try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const parsed = insertLibraryShelfSchema.parse({ ...req.body, schoolId });
+      const existing = await storage.getLibraryShelves(schoolId);
+      const duplicate = existing.find((shelf) => shelf.name.trim().toLowerCase() === parsed.name.trim().toLowerCase());
+      if (duplicate) return res.status(400).json({ message: "A shelf with this name already exists." });
+      const shelf = await storage.createLibraryShelf({ ...parsed, schoolId });
+      res.status(201).json(shelf);
+    } catch (error) { next(error); }
+  });
+
+  app.put("/api/library/shelves/:id", requireAuth, requirePermission("library.catalog.manage"), async (req, res, next) => {
+    try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const shelfId = parseIdParam(req.params.id);
+      const shelf = await getScopedLibraryShelf(shelfId, schoolId);
+      if (!shelf) return res.status(404).json({ message: "Shelf not found" });
+      const nextName = String(req.body?.name || "").trim();
+      if (!nextName) return res.status(400).json({ message: "Shelf name is required" });
+      const existing = await storage.getLibraryShelves(schoolId);
+      const duplicate = existing.find((item) => item.id !== shelfId && item.name.trim().toLowerCase() === nextName.toLowerCase());
+      if (duplicate) return res.status(400).json({ message: "A shelf with this name already exists." });
+      const updated = await db.transaction(async (tx) => {
+        const [updatedShelf] = await tx.update(libraryShelvesTable).set({
+          name: nextName,
+          description: req.body?.description ?? null,
+        }).where(and(eq(libraryShelvesTable.id, shelfId), eq(libraryShelvesTable.schoolId, schoolId))).returning();
+        if (shelf.name !== nextName) {
+          await tx.update(libraryBooksTable).set({ shelfLocation: nextName }).where(and(eq(libraryBooksTable.schoolId, schoolId), eq(libraryBooksTable.shelfLocation, shelf.name)));
+        }
+        return updatedShelf;
+      });
+      res.json(updated);
+    } catch (error) { next(error); }
+  });
+
+  app.delete("/api/library/shelves/:id", requireAuth, requirePermission("library.catalog.manage"), async (req, res, next) => {
+    try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const shelfId = parseIdParam(req.params.id);
+      const shelf = await getScopedLibraryShelf(shelfId, schoolId);
+      if (!shelf) return res.status(404).json({ message: "Shelf not found" });
+      const replacement = typeof req.query.replacement === "string" ? req.query.replacement.trim() : "N/A";
+      await db.transaction(async (tx) => {
+        await tx.update(libraryBooksTable).set({ shelfLocation: replacement || "N/A" }).where(and(eq(libraryBooksTable.schoolId, schoolId), eq(libraryBooksTable.shelfLocation, shelf.name)));
+        await tx.delete(libraryShelvesTable).where(and(eq(libraryShelvesTable.id, shelfId), eq(libraryShelvesTable.schoolId, schoolId)));
+      });
+      res.json({ message: "Shelf deleted" });
+    } catch (error) { next(error); }
+  });
+
+  // Library - Books
+  app.get("/api/library/books", requireAuth, requirePermission("library.view"), async (req, res, next) => {
+    try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const books = await storage.getLibraryBooks(schoolId);
       res.json(books);
     } catch (error) { next(error); }
   });
 
-  app.get("/api/library/books/:id", requireAuth, async (req, res, next) => {
+  app.get("/api/library/books/:id", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const book = await storage.getLibraryBook(parseInt(req.params.id));
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const book = await getScopedLibraryBook(parseIdParam(req.params.id), schoolId);
       if (!book) return res.status(404).json({ message: "Book not found" });
       res.json(book);
     } catch (error) { next(error); }
   });
 
-  app.post("/api/library/books", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/library/books", requireAuth, requirePermission("library.catalog.manage"), async (req, res, next) => {
     try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const data = insertLibraryBookSchema.parse(req.body);
-      if (data.schoolId && data.title && data.classId) {
-        const existingBooks = await storage.getLibraryBooks(data.schoolId);
-        const duplicate = existingBooks.find(
-          (b) => b.title.toLowerCase() === data.title.toLowerCase() && b.classId === data.classId
-        );
-        if (duplicate) {
-          return res.status(400).json({ message: "A book with this title already exists for this class/level. Please select a different class." });
-        }
+      const existingBooks = await storage.getLibraryBooks(schoolId);
+      const duplicate = existingBooks.find((existingBook) =>
+        existingBook.title.toLowerCase().trim() === data.title.toLowerCase().trim() &&
+        (existingBook.classId ?? null) === (data.classId ?? null) &&
+        ((existingBook.isbn ?? "").trim()) === ((data.isbn ?? "").trim())
+      );
+
+      if (duplicate) {
+        return res.status(400).json({ message: "A matching book already exists in this school catalog." });
       }
-      const book = await storage.createLibraryBook(data);
+
+      const book = await storage.createLibraryBook({ ...data, schoolId });
       res.status(201).json(book);
     } catch (error) { next(error); }
   });
 
-  app.put("/api/library/books/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.put("/api/library/books/:id", requireAuth, requirePermission("library.catalog.manage"), async (req, res, next) => {
     try {
-      const updated = await storage.updateLibraryBook(parseInt(req.params.id), req.body);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+
+      const bookId = parseIdParam(req.params.id);
+      const book = await getScopedLibraryBook(bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+
+      const incomingTitle = String(req.body?.title ?? book.title ?? "").trim();
+      const incomingClassId =
+        req.body?.classId !== undefined ? (req.body.classId ?? null) : (book.classId ?? null);
+      const incomingIsbn = String(req.body?.isbn ?? book.isbn ?? "").trim();
+
+      const existingBooks = await storage.getLibraryBooks(schoolId);
+      const duplicate = existingBooks.find((existingBook) =>
+        existingBook.id !== bookId &&
+        existingBook.title.toLowerCase().trim() === incomingTitle.toLowerCase() &&
+        (existingBook.classId ?? null) === incomingClassId &&
+        ((existingBook.isbn ?? "").trim()) === incomingIsbn
+      );
+
+      if (duplicate) {
+        return res.status(400).json({ message: "A matching book already exists in this school catalog." });
+      }
+
+      const updated = await storage.updateLibraryBook(bookId, { ...req.body, schoolId });
       if (!updated) return res.status(404).json({ message: "Book not found" });
+
       res.json(updated);
-    } catch (error) { next(error); }
+    } catch (error) {
+      next(error);
+    }
   });
 
-  app.delete("/api/library/books/:id", requireAuth, requireRole("school_admin"), async (req, res, next) => {
+  app.delete("/api/library/books/:id", requireAuth, requirePermission("library.catalogue.delete"), async (req, res, next) => {
     try {
-      await storage.deleteLibraryBook(parseInt(req.params.id));
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const bookId = parseIdParam(req.params.id);
+      const book = await getScopedLibraryBook(bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+
+      const loans = await storage.getLibraryLoans(schoolId);
+      const activeLoanExists = loans.some((loan) => loan.bookId === bookId && ["active", "overdue"].includes(String(loan.status)));
+      if (activeLoanExists) {
+        return res.status(400).json({ message: "Cannot delete a book with active or overdue loans." });
+      }
+
+      await db.transaction(async (tx) => {
+        const closedLoans = loans.filter((loan) => loan.bookId === bookId).map((loan) => loan.id);
+        if (closedLoans.length) {
+          await tx.delete(libraryFinesTable).where(inArray(libraryFinesTable.loanId, closedLoans));
+          await tx.delete(libraryLoansTable).where(inArray(libraryLoansTable.id, closedLoans));
+        }
+        await tx.delete(libraryReservationsTable).where(and(eq(libraryReservationsTable.schoolId, schoolId), eq(libraryReservationsTable.bookId, bookId)));
+        await tx.delete(libraryBookCopiesTable).where(and(eq(libraryBookCopiesTable.schoolId, schoolId), eq(libraryBookCopiesTable.bookId, bookId)));
+        await tx.delete(libraryBooksTable).where(and(eq(libraryBooksTable.schoolId, schoolId), eq(libraryBooksTable.id, bookId)));
+      });
+
       res.json({ message: "Book deleted" });
     } catch (error) { next(error); }
   });
 
   // Library - Book Copies
-  app.get("/api/library/books/:bookId/copies", requireAuth, async (req, res, next) => {
+  app.get("/api/library/books/:bookId/copies", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const copies = await storage.getLibraryBookCopies(parseInt(req.params.bookId));
-      res.json(copies);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const bookId = parseIdParam(req.params.bookId);
+      const book = await getScopedLibraryBook(bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+      const copies = await storage.getLibraryBookCopies(bookId);
+      res.json(copies.filter((copy) => copy.schoolId === schoolId));
     } catch (error) { next(error); }
   });
 
-  app.get("/api/library/copies", requireAuth, async (req, res, next) => {
+  app.get("/api/library/copies", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const copies = await storage.getLibraryBookCopiesBySchool(schoolId);
       res.json(copies);
     } catch (error) { next(error); }
   });
 
-  app.get("/api/library/copies/qr/:qrCode", requireAuth, async (req, res, next) => {
+  app.get("/api/library/copies/qr/:qrCode", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const copy = await storage.getLibraryBookCopyByQr(req.params.qrCode);
-      if (!copy) return res.status(404).json({ message: "No book copy found with this QR code" });
-      const book = await storage.getLibraryBook(copy.bookId);
+      if (!copy || copy.schoolId !== schoolId) return res.status(404).json({ message: "No book copy found with this QR code" });
+      const book = await getScopedLibraryBook(copy.bookId, schoolId);
       let activeLoan = null;
       if (copy.status === "borrowed" && book?.schoolId) {
         const allLoans = await storage.getLibraryLoans(book.schoolId, "active");
-        activeLoan = allLoans.find(l => l.copyId === copy.id) || null;
+        activeLoan = allLoans.find((loan) => loan.copyId === copy.id) || null;
       }
       res.json({ copy, book, activeLoan });
     } catch (error) { next(error); }
   });
 
-  app.post("/api/library/books/:bookId/copies", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/library/books/:bookId/copies", requireAuth, requirePermission("library.copies.manage"), async (req, res, next) => {
     try {
-      const bookId = parseInt(req.params.bookId);
-      const book = await storage.getLibraryBook(bookId);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const bookId = parseIdParam(req.params.bookId);
+      const book = await getScopedLibraryBook(bookId, schoolId);
       if (!book) return res.status(404).json({ message: "Book not found" });
-      const { qrCode, condition } = req.body;
+      const { qrCode, condition, notes } = req.body as { qrCode?: string; condition?: string; notes?: string };
       if (!qrCode) return res.status(400).json({ message: "QR code is required" });
       const existing = await storage.getLibraryBookCopyByQr(qrCode);
       if (existing) return res.status(400).json({ message: "This QR code is already assigned to another book copy" });
-      const copy = await storage.createLibraryBookCopy({
+
+      const normalizedCondition = String(condition || "Good");
+      const normalizedStatus = normalizedCondition.toLowerCase() === "damaged" ? "damaged" : normalizedCondition.toLowerCase() === "lost" ? "lost" : "available";
+
+      const createdCopy = await storage.createLibraryBookCopy({
         bookId,
-        schoolId: book.schoolId,
+        schoolId,
         qrCode,
-        condition: condition || "Good",
+        condition: normalizedCondition,
+        status: normalizedStatus as any,
+        notes: notes || null,
+        attachmentUrls: [],
       });
-      await storage.updateLibraryBook(bookId, {
-        totalCopies: (book.totalCopies || 0) + 1,
-        availableCopies: (book.availableCopies || 0) + 1,
-      });
-      res.status(201).json(copy);
+      await recalculateLibraryBookCounters(bookId);
+      res.status(201).json(createdCopy);
     } catch (error) { next(error); }
   });
 
-  app.put("/api/library/copies/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.put("/api/library/copies/:id", requireAuth, requirePermission("library.copies.manage"), async (req, res, next) => {
     try {
-      const updated = await storage.updateLibraryBookCopy(parseInt(req.params.id), req.body);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const copyId = parseIdParam(req.params.id);
+      const copy = await getScopedLibraryCopy(copyId, schoolId);
+      if (!copy) return res.status(404).json({ message: "Copy not found" });
+
+      const nextQrCode = String(req.body?.qrCode ?? copy.qrCode).trim();
+      if (!nextQrCode) return res.status(400).json({ message: "QR code is required" });
+      const existing = await storage.getLibraryBookCopyByQr(nextQrCode);
+      if (existing && existing.id !== copyId) {
+        return res.status(400).json({ message: "This QR code is already assigned to another book copy" });
+      }
+
+      const nextStatus = String(req.body?.status ?? copy.status ?? "available");
+      const nextCondition = String(req.body?.condition ?? copy.condition ?? "Good");
+      const attachmentUrls = Array.isArray(req.body?.attachmentUrls)
+        ? req.body.attachmentUrls.filter((value: unknown) => typeof value === "string" && value.trim().length > 0)
+        : (copy.attachmentUrls ?? []);
+
+      if (copy.status === "borrowed" && nextStatus !== "borrowed") {
+        return res.status(400).json({ message: "Borrowed copies must be updated through circulation before changing status" });
+      }
+
+      const normalizedStatus = nextStatus === "lost"
+        ? "lost"
+        : nextStatus === "damaged" || nextCondition.toLowerCase() === "damaged"
+          ? "damaged"
+          : copy.status === "borrowed"
+            ? "borrowed"
+            : "available";
+
+      const updated = await storage.updateLibraryBookCopy(copyId, {
+        qrCode: nextQrCode,
+        condition: nextCondition,
+        status: normalizedStatus as any,
+        notes: typeof req.body?.notes === "string" ? req.body.notes : (copy.notes ?? null),
+        attachmentUrls,
+      });
+      if (!updated) return res.status(404).json({ message: "Copy not found" });
+
+      if (copy.status === "lost" && normalizedStatus !== "lost") {
+        const [latestLostLoan] = await db
+          .select()
+          .from(libraryLoansTable)
+          .where(
+            and(
+              eq(libraryLoansTable.schoolId, schoolId),
+              eq(libraryLoansTable.copyId, copyId),
+              eq(libraryLoansTable.status, "lost" as any)
+            )
+          )
+          .orderBy(desc(libraryLoansTable.markedLostAt), desc(libraryLoansTable.issuedAt))
+          .limit(1);
+
+        if (latestLostLoan && !latestLostLoan.markedRecoveredAt) {
+          await db.update(libraryLoansTable).set({
+            markedRecoveredAt: new Date(),
+          }).where(eq(libraryLoansTable.id, latestLostLoan.id));
+        }
+      }
+
+      await recalculateLibraryBookCounters(copy.bookId);
       res.json(updated);
     } catch (error) { next(error); }
   });
 
-  app.delete("/api/library/copies/:id", requireAuth, requireRole("school_admin"), async (req, res, next) => {
+  const copyAttachmentUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+  app.post("/api/library/copies/:id/attachments", requireAuth, requirePermission("library.copies.manage"), copyAttachmentUpload.single("file"), async (req, res, next) => {
     try {
-      const copyId = parseInt(req.params.id);
-      const copyToDelete = await storage.getLibraryBookCopy(copyId);
+      if (!req.file) return res.status(400).json({ message: "No attachment uploaded" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const copyId = parseIdParam(req.params.id);
+      const copy = await getScopedLibraryCopy(copyId, schoolId);
+      if (!copy) return res.status(404).json({ message: "Copy not found" });
+
+      const objectRoot = process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage";
+      const rawExt = path.extname(req.file.originalname || "").toLowerCase().replace(".", "");
+      const ext = /^[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : "jpg";
+      const objectName = `uploads/library-copy-attachments/${copyId}-${Date.now()}.${ext}`;
+      const absPath = path.join(objectRoot, objectName);
+      await fs.mkdir(path.dirname(absPath), { recursive: true });
+      await fs.writeFile(absPath, req.file.buffer);
+      const attachmentUrl = `/objects/${objectName}`;
+
+      const updated = await storage.updateLibraryBookCopy(copyId, {
+        attachmentUrls: [...(copy.attachmentUrls ?? []), attachmentUrl],
+      });
+
+      res.json({ attachmentUrl, copy: updated });
+    } catch (error) { next(error); }
+  });
+
+
+  app.delete("/api/library/copies/:id/attachments", requireAuth, requirePermission("library.catalogue.delete"), async (req, res, next) => {
+    try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const copyId = parseIdParam(req.params.id);
+      const copy = await getScopedLibraryCopy(copyId, schoolId);
+      if (!copy) return res.status(404).json({ message: "Copy not found" });
+
+      const attachmentUrl = String(req.body?.attachmentUrl ?? "").trim();
+      if (!attachmentUrl) return res.status(400).json({ message: "Attachment URL is required" });
+      if (!(copy.attachmentUrls ?? []).includes(attachmentUrl)) {
+        return res.status(404).json({ message: "Attachment not found on this copy" });
+      }
+
+      const updatedUrls = (copy.attachmentUrls ?? []).filter((url) => url !== attachmentUrl);
+      const updated = await storage.updateLibraryBookCopy(copyId, { attachmentUrls: updatedUrls });
+      if (!updated) return res.status(404).json({ message: "Copy not found" });
+      res.json(updated);
+    } catch (error) { next(error); }
+  });
+
+  app.delete("/api/library/copies/:id", requireAuth, requirePermission("library.catalogue.delete"), async (req, res, next) => {
+    try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const copyId = parseIdParam(req.params.id);
+      const copyToDelete = await getScopedLibraryCopy(copyId, schoolId);
       if (!copyToDelete) return res.status(404).json({ message: "Copy not found" });
       if (copyToDelete.status === "borrowed") {
         return res.status(400).json({ message: "Cannot delete a borrowed copy" });
       }
-      const book = await storage.getLibraryBook(copyToDelete.bookId);
-      if (book) {
-        await storage.updateLibraryBook(book.id, {
-          totalCopies: Math.max((book.totalCopies || 0) - 1, 0),
-          availableCopies: copyToDelete.status === "available"
-            ? Math.max((book.availableCopies || 0) - 1, 0)
-            : (book.availableCopies || 0),
-        });
-      }
-      await storage.deleteLibraryBookCopy(copyId);
+      const book = await getScopedLibraryBook(copyToDelete.bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+
+      await db.delete(libraryBookCopiesTable).where(eq(libraryBookCopiesTable.id, copyId));
+      await recalculateLibraryBookCounters(book.id);
+
       res.json({ message: "Copy deleted" });
     } catch (error) { next(error); }
   });
 
   // Library - Loans (Circulation)
-  app.get("/api/library/loans", requireAuth, async (req, res, next) => {
+  app.get("/api/library/loans", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const status = req.query.status as string | undefined;
       const loans = await storage.getLibraryLoans(schoolId, status);
       res.json(loans);
     } catch (error) { next(error); }
   });
 
-  app.post("/api/library/loans", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/library/loans", requireAuth, requirePermission("library.circulation.manage"), async (req, res, next) => {
     try {
-      const data = insertLibraryLoanSchema.parse(req.body);
-      const loan = await storage.createLibraryLoan(data);
-      // Decrement available copies
-      const book = await storage.getLibraryBook(data.bookId);
-      if (book && (book.availableCopies || 0) > 0) {
-        await storage.updateLibraryBook(data.bookId, { availableCopies: (book.availableCopies || 1) - 1 });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId || !req.user) return;
+      const parsed = libraryLoanCreateSchema.parse(req.body);
+      const book = await getScopedLibraryBook(parsed.bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+
+      const borrower = await getBorrowerForLibraryLoan(schoolId, parsed.borrowerType, parsed.borrowerId);
+      if (!borrower) return res.status(400).json({ message: "Borrower does not belong to the current school" });
+
+      const policyCheck = await enforceLibraryLoanPolicy(schoolId, parsed.borrowerType, parsed.borrowerId);
+      if (!policyCheck.ok) return res.status(400).json({ message: policyCheck.message });
+
+      let copy = parsed.copyId ? await getScopedLibraryCopy(parsed.copyId, schoolId) : null;
+      if (copy && copy.bookId !== book.id) {
+        return res.status(400).json({ message: "Selected copy does not belong to this book" });
       }
+      if (!copy) {
+        const availableCopies = (await storage.getLibraryBookCopies(book.id)).filter((item) => item.schoolId === schoolId && item.status === "available");
+        copy = availableCopies[0] ?? null;
+      }
+      if (!copy) return res.status(400).json({ message: "No issuable copy exists for this book" });
+      if (copy.status === "damaged") return res.status(400).json({ message: "Damaged copies cannot be issued out" });
+      if (copy.status === "lost") return res.status(400).json({ message: "Lost copies cannot be issued out" });
+      if (copy.status !== "available") return res.status(400).json({ message: "Selected copy is not available for borrowing" });
+
+      const existingLoans = await storage.getLibraryLoans(schoolId);
+      const duplicateActiveLoan = existingLoans.find((loan) => loan.copyId === copy!.id && ["active", "overdue"].includes(String(loan.status)));
+      if (duplicateActiveLoan) {
+        return res.status(400).json({ message: "This copy already has an active loan" });
+      }
+
+      const staffRecord = await resolveCurrentStaffRecord(req.user.id);
+      const dueDate = parsed.dueDate
+        ? new Date(parsed.dueDate)
+        : (() => {
+            const date = new Date();
+            date.setDate(date.getDate() + (policyCheck.policy?.defaultBorrowDays ?? 14));
+            return date;
+          })();
+
+      if (Number.isNaN(dueDate.getTime())) {
+        return res.status(400).json({ message: "A valid due date and time is required" });
+      }
+
+      const loan = await db.transaction(async (tx) => {
+        const copyConditionOnBorrow = parsed.conditionOnBorrow ?? copy!.condition ?? "Good";
+
+        const [createdLoan] = await tx.insert(libraryLoansTable).values({
+          schoolId,
+          bookId: book.id,
+          copyId: copy!.id,
+          borrowerType: parsed.borrowerType,
+          borrowerId: parsed.borrowerId,
+          borrowerName: borrower.borrowerName,
+          issuedBy: staffRecord?.id,
+          dueDate,
+          status: "active",
+          notes: parsed.notes ?? null,
+          conditionOnBorrow: copyConditionOnBorrow,
+        }).returning();
+
+        await tx.update(libraryBookCopiesTable).set({
+          status: "borrowed",
+          condition: copyConditionOnBorrow,
+          notes: parsed.notes ?? copy!.notes ?? null,
+        }).where(eq(libraryBookCopiesTable.id, copy!.id));
+        await tx.update(libraryBooksTable).set({
+          availableCopies: Math.max((book.availableCopies || 0) - 1, 0),
+        }).where(eq(libraryBooksTable.id, book.id));
+        await tx.update(libraryReservationsTable).set({ status: "fulfilled" as any }).where(and(
+          eq(libraryReservationsTable.schoolId, schoolId),
+          eq(libraryReservationsTable.bookId, book.id),
+          eq(libraryReservationsTable.reserverType, parsed.borrowerType as any),
+          eq(libraryReservationsTable.reserverId, parsed.borrowerId),
+          sql`${libraryReservationsTable.status} in ('pending','ready')`
+        ));
+
+        return createdLoan;
+      });
+
       res.status(201).json(loan);
     } catch (error) { next(error); }
   });
 
-  app.put("/api/library/loans/:id/return", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.put("/api/library/loans/:id/return", requireAuth, requirePermission("library.circulation.manage"), async (req, res, next) => {
     try {
-      const loan = await storage.getLibraryLoan(parseInt(req.params.id));
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const loan = await getScopedLibraryLoan(parseIdParam(req.params.id), schoolId);
       if (!loan) return res.status(404).json({ message: "Loan not found" });
-      const updated = await storage.updateLibraryLoan(loan.id, { status: "returned", returnedAt: new Date() });
-      // Increment available copies
-      const book = await storage.getLibraryBook(loan.bookId);
-      if (book) {
-        await storage.updateLibraryBook(loan.bookId, { availableCopies: (book.availableCopies || 0) + 1 });
+      if (!["active", "overdue"].includes(String(loan.status))) {
+        return res.status(400).json({ message: "Only active or overdue loans can be returned" });
       }
+      const book = await getScopedLibraryBook(loan.bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+      const copy = loan.copyId ? await getScopedLibraryCopy(loan.copyId, schoolId) : null;
+
+      const now = new Date();
+      const dueDate = loan.dueDate ? new Date(loan.dueDate) : null;
+      const overdueDays = dueDate && now > dueDate ? Math.ceil((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+      const policy = await storage.getLibraryPolicy(schoolId);
+      const overdueCharge = Number(policy?.overdueChargePerDay ?? "0");
+      const fineAmount = overdueDays > 0 ? (overdueDays * overdueCharge).toFixed(2) : null;
+
+      const nextCondition = typeof req.body?.condition === "string" && req.body.condition.trim().length > 0
+        ? req.body.condition.trim()
+        : (copy?.condition ?? loan.conditionOnBorrow ?? "Good");
+      const nextNotes = typeof req.body?.notes === "string"
+        ? req.body.notes
+        : (copy?.notes ?? loan.notes ?? null);
+      const returnCopyStatus = nextCondition.toLowerCase() === "damaged"
+        ? "damaged"
+        : nextCondition.toLowerCase() === "lost"
+          ? "lost"
+          : "available";
+
+      const updated = await db.transaction(async (tx) => {
+        const [returnedLoan] = await tx.update(libraryLoansTable).set({
+          status: "returned",
+          returnedAt: now,
+          notes: nextNotes,
+          conditionOnReturn: nextCondition,
+        }).where(eq(libraryLoansTable.id, loan.id)).returning();
+
+        if (copy) {
+          await tx.update(libraryBookCopiesTable).set({
+            status: returnCopyStatus as any,
+            condition: nextCondition,
+            notes: nextNotes,
+          }).where(eq(libraryBookCopiesTable.id, copy.id));
+        }
+
+        if (fineAmount && Number(fineAmount) > 0) {
+          const existingFine = (await storage.getLibraryFines(schoolId)).find((fine) => fine.loanId === loan.id);
+          if (!existingFine) {
+            await tx.insert(libraryFinesTable).values({
+              schoolId,
+              loanId: loan.id,
+              amount: fineAmount,
+              reason: `Overdue by ${overdueDays} day(s)`,
+              status: "unpaid",
+            });
+          }
+        }
+
+        return returnedLoan;
+      });
+
+      await recalculateLibraryBookCounters(book.id);
+      await moveNextReservationToReady(book.id, schoolId);
       res.json(updated);
     } catch (error) { next(error); }
   });
 
-  app.put("/api/library/loans/:id/lost", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.put("/api/library/loans/:id/extend", requireAuth, requirePermission("library.circulation.manage"), async (req, res, next) => {
     try {
-      const loan = await storage.getLibraryLoan(parseInt(req.params.id));
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const loan = await getScopedLibraryLoan(parseIdParam(req.params.id), schoolId);
       if (!loan) return res.status(404).json({ message: "Loan not found" });
-      const updated = await storage.updateLibraryLoan(loan.id, { status: "lost" });
-      // Decrement total copies
-      const book = await storage.getLibraryBook(loan.bookId);
-      if (book) {
-        await storage.updateLibraryBook(loan.bookId, { totalCopies: Math.max(0, (book.totalCopies || 1) - 1) });
+      if (String(loan.status) !== "active") {
+        return res.status(400).json({ message: "Only active loans can be extended" });
       }
+      if (!loan.dueDate) {
+        return res.status(400).json({ message: "Loan has no due date to extend" });
+      }
+      const currentDueDate = new Date(loan.dueDate);
+      const today = new Date();
+      const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const dueStart = new Date(currentDueDate.getFullYear(), currentDueDate.getMonth(), currentDueDate.getDate());
+      if (dueStart < todayStart) {
+        return res.status(400).json({ message: "Overdue loans cannot be extended" });
+      }
+      currentDueDate.setDate(currentDueDate.getDate() + 1);
+      const updated = await storage.updateLibraryLoan(loan.id, { dueDate: currentDueDate } as any);
+      if (!updated) return res.status(404).json({ message: "Loan not found" });
+      res.json(updated);
+    } catch (error) { next(error); }
+  });
+
+  app.put("/api/library/loans/:id/lost", requireAuth, requirePermission("library.circulation.manage"), async (req, res, next) => {
+    try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const loan = await getScopedLibraryLoan(parseIdParam(req.params.id), schoolId);
+      if (!loan) return res.status(404).json({ message: "Loan not found" });
+      if (!["active", "overdue"].includes(String(loan.status))) {
+        return res.status(400).json({ message: "Only active or overdue loans can be marked lost" });
+      }
+      const book = await getScopedLibraryBook(loan.bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+      const copy = loan.copyId ? await getScopedLibraryCopy(loan.copyId, schoolId) : null;
+
+      const updated = await db.transaction(async (tx) => {
+        const [lostLoan] = await tx.update(libraryLoansTable).set({
+          status: "lost",
+          markedLostAt: new Date(),
+        }).where(eq(libraryLoansTable.id, loan.id)).returning();
+        if (copy) {
+          await tx.update(libraryBookCopiesTable).set({ status: "lost", condition: "Lost" }).where(eq(libraryBookCopiesTable.id, copy.id));
+        }
+        return lostLoan;
+      });
+
+      await recalculateLibraryBookCounters(book.id);
       res.json(updated);
     } catch (error) { next(error); }
   });
 
   // Library - Fines
-  app.get("/api/library/fines", requireAuth, async (req, res, next) => {
+  app.get("/api/library/fines", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const status = req.query.status as string | undefined;
       const fines = await storage.getLibraryFines(schoolId, status);
       res.json(fines);
     } catch (error) { next(error); }
   });
 
-  app.post("/api/library/fines", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/library/fines", requireAuth, requirePermission("library.fines.manage"), async (req, res, next) => {
     try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const data = insertLibraryFineSchema.parse(req.body);
-      const fine = await storage.createLibraryFine(data);
+      const loan = await getScopedLibraryLoan(data.loanId, schoolId);
+      if (!loan) return res.status(404).json({ message: "Loan not found" });
+      const fine = await storage.createLibraryFine({ ...data, schoolId, loanId: loan.id });
       res.status(201).json(fine);
     } catch (error) { next(error); }
   });
 
-  app.put("/api/library/fines/:id", requireAuth, requireRole("school_admin"), async (req, res, next) => {
+  app.put("/api/library/fines/:id", requireAuth, requirePermission("library.fines.manage"), async (req, res, next) => {
     try {
-      const updated = await storage.updateLibraryFine(parseInt(req.params.id), req.body);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const fineId = parseIdParam(req.params.id);
+      const fine = await getScopedLibraryFine(fineId, schoolId);
+      if (!fine) return res.status(404).json({ message: "Fine not found" });
+      const payload = libraryFineUpdateSchema.parse(req.body);
+      const updatePayload: Record<string, unknown> = { ...payload };
+      if (payload.status === "paid") updatePayload.paidAt = new Date();
+      if (payload.status && payload.status !== "paid") updatePayload.paidAt = null;
+      const updated = await storage.updateLibraryFine(fineId, updatePayload as any);
       if (!updated) return res.status(404).json({ message: "Fine not found" });
       res.json(updated);
     } catch (error) { next(error); }
   });
 
   // Library - Reservations
-  app.get("/api/library/reservations", requireAuth, async (req, res, next) => {
+  app.get("/api/library/reservations", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const books = await storage.getLibraryBooks(schoolId);
+      await Promise.all(books.map((book) => expireLibraryReservations(book.id, schoolId)));
       const status = req.query.status as string | undefined;
       const reservations = await storage.getLibraryReservations(schoolId, status);
       res.json(reservations);
     } catch (error) { next(error); }
   });
 
-  app.post("/api/library/reservations", requireAuth, async (req, res, next) => {
+  app.post("/api/library/reservations", requireAuth, requirePermission("library.reservations.manage"), async (req, res, next) => {
     try {
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const data = insertLibraryReservationSchema.parse(req.body);
-      const existing = await storage.getLibraryReservationsForBook(data.bookId, "pending");
-      const alreadyReserved = existing.find(r => r.reserverId === data.reserverId && r.reserverType === data.reserverType);
+      const book = await getScopedLibraryBook(data.bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+      const borrower = await getBorrowerForLibraryLoan(schoolId, data.reserverType as any, data.reserverId);
+      if (!borrower) return res.status(400).json({ message: "Reserver does not belong to the current school" });
+      await expireLibraryReservations(book.id, schoolId);
+      const existing = await storage.getLibraryReservationsForBook(data.bookId);
+      const alreadyReserved = existing.find((reservation) =>
+        reservation.schoolId === schoolId &&
+        ["pending", "ready"].includes(String(reservation.status)) &&
+        reservation.reserverId === data.reserverId &&
+        reservation.reserverType === data.reserverType
+      );
       if (alreadyReserved) {
-        return res.status(400).json({ message: "You already have a pending reservation for this book" });
+        return res.status(400).json({ message: "You already have an open reservation for this book" });
       }
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + 7);
-      const reservation = await storage.createLibraryReservation({ ...data, expiresAt });
+      const reservation = await storage.createLibraryReservation({
+        ...data,
+        schoolId,
+        reserverName: borrower.borrowerName,
+        expiresAt,
+      });
       res.status(201).json(reservation);
     } catch (error) { next(error); }
   });
 
-  app.put("/api/library/reservations/:id", requireAuth, async (req, res, next) => {
+  app.put("/api/library/reservations/:id", requireAuth, requirePermission("library.reservations.manage"), async (req, res, next) => {
     try {
-      const updated = await storage.updateLibraryReservation(parseInt(req.params.id), req.body);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const reservationId = parseIdParam(req.params.id);
+      const reservation = await getScopedLibraryReservation(reservationId, schoolId);
+      if (!reservation) return res.status(404).json({ message: "Reservation not found" });
+      const payload = libraryReservationUpdateSchema.parse(req.body);
+      const updated = await storage.updateLibraryReservation(reservationId, payload as any);
       if (!updated) return res.status(404).json({ message: "Reservation not found" });
       res.json(updated);
     } catch (error) { next(error); }
   });
 
-  app.get("/api/library/books/:bookId/reservations", requireAuth, async (req, res, next) => {
+  app.get("/api/library/books/:bookId/reservations", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const bookId = parseInt(req.params.bookId);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const bookId = parseIdParam(req.params.bookId);
+      const book = await getScopedLibraryBook(bookId, schoolId);
+      if (!book) return res.status(404).json({ message: "Book not found" });
+      await expireLibraryReservations(bookId, schoolId);
       const status = req.query.status as string | undefined;
       const reservations = await storage.getLibraryReservationsForBook(bookId, status);
-      res.json(reservations);
+      res.json(reservations.filter((reservation) => reservation.schoolId === schoolId));
     } catch (error) { next(error); }
   });
 
   // Library - Cover image upload
   const coverUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
-  app.post("/api/library/books/:bookId/cover", requireAuth, requireRole("school_admin", "teacher"), coverUpload.single("cover"), async (req, res, next) => {
+  app.post("/api/library/books/cover-upload", requireAuth, requirePermission("library.catalog.manage"), coverUpload.single("file"), async (req, res, next) => {
     try {
       if (!req.file) return res.status(400).json({ message: "No image file uploaded" });
-      const bookId = parseInt(req.params.bookId);
-      const book = await storage.getLibraryBook(bookId);
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+
+      const objectRoot = process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage";
+      const rawExt = path.extname(req.file.originalname || "").toLowerCase().replace(".", "");
+      const ext = /^[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : "jpg";
+      const objectName = `uploads/library-covers/temp-${schoolId}-${Date.now()}.${ext}`;
+      const absPath = path.join(objectRoot, objectName);
+      await fs.mkdir(path.dirname(absPath), { recursive: true });
+      await fs.writeFile(absPath, req.file.buffer);
+      res.json({ url: `/objects/${objectName}` });
+    } catch (error) { next(error); }
+  });
+  app.post("/api/library/books/:bookId/cover", requireAuth, requirePermission("library.catalog.manage"), coverUpload.single("cover"), async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ message: "No image file uploaded" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
+      const bookId = parseIdParam(req.params.bookId);
+      const book = await getScopedLibraryBook(bookId, schoolId);
       if (!book) return res.status(404).json({ message: "Book not found" });
 
       const objectRoot = process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage";
-
-
       const rawExt = path.extname(req.file.originalname || "").toLowerCase().replace(".", "");
-
-
       const ext = /^[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : "jpg";
-
-
       const objectName = `uploads/library-covers/${bookId}-${Date.now()}.${ext}`;
-
-
       const absPath = path.join(objectRoot, objectName);
-
-
       await fs.mkdir(path.dirname(absPath), { recursive: true });
-
-
       await fs.writeFile(absPath, req.file.buffer);
 
       const coverPath = `/objects/${objectName}`;
@@ -4821,90 +5487,91 @@ export async function registerRoutes(
   });
 
   // Library - Policy routes
-  app.get("/api/library/policy", requireAuth, async (req, res, next) => {
+  app.get("/api/library/policy", requireAuth, requirePermission("library.view"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const policy = await storage.getLibraryPolicy(schoolId);
       res.json(policy || {
         bookOverdueSmsAlert: true,
         maxBooksStudent: 1,
         maxBooksTeacher: 500,
         overdueChargePerDay: "0.50",
-        defaultBorrowDays: 1,
+        defaultBorrowDays: 14,
         smsAlertWindowDays: 1,
       });
     } catch (error) { next(error); }
   });
 
-  app.post("/api/library/policy", requireAuth, requireRole("school_admin"), async (req, res, next) => {
+  app.post("/api/library/policy", requireAuth, requirePermission("library.policy.manage"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolId = getRequiredLibrarySchoolId(req, res);
+      if (!schoolId) return;
       const policy = await storage.upsertLibraryPolicy({ ...req.body, schoolId });
       res.json(policy);
     } catch (error) { next(error); }
   });
 
   // Library - Book import from Excel
-  const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
-  app.post("/api/library/books/import", requireAuth, requireRole("school_admin", "teacher"), importUpload.single("file"), async (req, res, next) => {
-    try {
-      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
-
-      const XLSX = await import("xlsx");
-      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet) as Record<string, any>[];
-
-      const subjects = await storage.getSubjects(schoolId);
-      const existingBooks = await storage.getLibraryBooks(schoolId);
-      let imported = 0;
-      let updated = 0;
-      let skipped = 0;
-
-      for (const row of rows) {
-        const title = (row["Title"] || row["title"] || "").toString().trim();
-        if (!title) { skipped++; continue; }
-
-        const isbn = (row["ISBN"] || row["isbn"] || "").toString().trim();
-        const author = (row["Author"] || row["author"] || "").toString().trim();
-        const publisher = (row["Publisher"] || row["publisher"] || "").toString().trim();
-        const shelf = (row["Shelf"] || row["shelf"] || row["Shelf Location"] || "").toString().trim();
-        const subjectName = (row["Subject"] || row["subject"] || "").toString().trim();
-        const totalRaw = parseInt(row["Total"] || row["total"] || "1");
-        const total = isNaN(totalRaw) || totalRaw < 1 ? 1 : totalRaw;
-
-        let subjectId: number | undefined;
-        if (subjectName) {
-          const match = subjects.find(s => s.name.toLowerCase() === subjectName.toLowerCase());
-          subjectId = match?.id;
+  const importUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
+  });
+  app.post(
+    "/api/library/books/import",
+    requireAuth,
+    requirePermission("library.import"),
+    importUpload.single("file"),
+    async (req, res, next) => {
+      try {
+        if (!req.file) {
+          return res.status(400).json({ message: "No file uploaded" });
         }
 
-        const existingBook = existingBooks.find(b =>
-          b.title.toLowerCase().trim() === title.toLowerCase() &&
-          (isbn ? b.isbn === isbn : true)
-        );
+        const schoolId = getSchoolContext(req);
+        if (!schoolId) {
+          return res.status(400).json({ message: "School context required" });
+        }
 
-        if (existingBook) {
-          await storage.updateLibraryBook(existingBook.id, {
-            isbn: isbn || existingBook.isbn,
-            author: author || existingBook.author,
-            publisher: publisher || existingBook.publisher,
-            shelfLocation: shelf || existingBook.shelfLocation,
-            subjectId: subjectId || existingBook.subjectId,
-            totalCopies: total,
-            availableCopies: total,
-            borrowedCopies: 0,
-            damagedCopies: 0,
-            lostStolenCopies: 0,
+        const XLSX = await import("xlsx");
+        const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(sheet) as Record<string, any>[];
+
+        const existingBooks = await storage.getLibraryBooks(schoolId);
+
+        let imported = 0;
+        let updated = 0;
+        let skipped = 0;
+
+        for (const row of rows) {
+          const title = String(row["Title"] ?? row["title"] ?? "").trim();
+          if (!title) {
+            skipped++;
+            continue;
+          }
+
+          const isbn = String(row["ISBN"] ?? row["isbn"] ?? "").trim();
+          const author = String(row["Author"] ?? row["author"] ?? "").trim();
+          const publisher = String(row["Publisher"] ?? row["publisher"] ?? "").trim();
+          const shelf = String(
+            row["Shelf"] ?? row["shelf"] ?? row["Shelf Location"] ?? ""
+          ).trim();
+          const subjectName = String(row["Subject"] ?? row["subject"] ?? "").trim();
+
+          const totalRaw = parseInt(String(row["Total"] ?? row["total"] ?? "1"), 10);
+          const total = Number.isNaN(totalRaw) || totalRaw < 1 ? 1 : totalRaw;
+
+          const subjectId: number | undefined = undefined;
+          
+          const existingBook = existingBooks.find((b) => {
+            const sameTitle = (b.title || "").toLowerCase().trim() === title.toLowerCase();
+            const sameIsbn = isbn ? (b.isbn || "").trim() === isbn : true;
+            return sameTitle && sameIsbn;
           });
-          updated++;
-        } else {
-          await storage.createLibraryBook({
+
+          const payload = {
             schoolId,
             title,
             isbn: isbn || undefined,
@@ -4914,17 +5581,41 @@ export async function registerRoutes(
             subjectId: subjectId || undefined,
             totalCopies: total,
             availableCopies: total,
-            borrowedCopies: 0,
             damagedCopies: 0,
             lostStolenCopies: 0,
-          } as any);
-          imported++;
-        }
-      }
+          };
 
-      res.json({ imported, updated, skipped, total: rows.length });
-    } catch (error) { next(error); }
-  });
+          if (existingBook) {
+            await storage.updateLibraryBook(existingBook.id, {
+              isbn: payload.isbn ?? existingBook.isbn ?? undefined,
+              author: payload.author ?? existingBook.author ?? undefined,
+              publisher: payload.publisher ?? existingBook.publisher ?? undefined,
+              shelfLocation: payload.shelfLocation ?? existingBook.shelfLocation ?? undefined,
+              subjectId: payload.subjectId ?? existingBook.subjectId ?? undefined,
+              totalCopies: payload.totalCopies,
+              availableCopies: payload.availableCopies,
+              damagedCopies: payload.damagedCopies,
+              lostStolenCopies: payload.lostStolenCopies,
+            });
+            updated++;
+          } else {
+            await storage.createLibraryBook(payload as any);
+            imported++;
+          }
+        }
+
+        return res.json({
+          imported,
+          updated,
+          skipped,
+          total: rows.length,
+        });
+      } catch (error) {
+        console.error("[LIBRARY_IMPORT_ERROR]", error);
+        next(error);
+      }
+    }
+  );
 
   // Timetable routes
   app.get("/api/timetable", requireAuth, async (req, res, next) => {
