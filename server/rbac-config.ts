@@ -63,11 +63,19 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "fees.delete", name: "Delete Fee Payments", description: "Remove payment records", category: "Fees" },
   { code: "fees.manage_structure", name: "Manage Fee Structure", description: "Create and modify fee structures", category: "Fees" },
   
-  // E-Library
-  { code: "library.view", name: "View Library Resources", description: "View E-Library resources", category: "Library" },
-  { code: "library.upload", name: "Upload Library Resources", description: "Add resources to E-Library", category: "Library" },
-  { code: "library.download", name: "Download Library Resources", description: "Download E-Library resources", category: "Library" },
-  { code: "library.delete", name: "Delete Library Resources", description: "Remove library resources", category: "Library" },
+  // Library
+  { code: "library.view", name: "View Library", description: "View library catalog, circulation, resources, fines, reservations and policy", category: "Library" },
+  { code: "library.resources.manage", name: "Manage Digital Resources", description: "Create and update digital library resources", category: "Library" },
+  { code: "library.catalog.manage", name: "Manage Catalog", description: "Create and update library books, categories and cover images", category: "Library" },
+  { code: "library.copies.manage", name: "Manage Book Copies", description: "Add and update physical book copies and QR assignments", category: "Library" },
+  { code: "library.circulation.manage", name: "Manage Circulation", description: "Issue, return and mark loans as lost", category: "Library" },
+  { code: "library.fines.manage", name: "Manage Fines", description: "Create and update library fines", category: "Library" },
+  { code: "library.reservations.manage", name: "Manage Reservations", description: "Create and update library reservations", category: "Library" },
+  { code: "library.policy.manage", name: "Manage Library Policy", description: "Update library borrowing policy settings", category: "Library" },
+  { code: "library.import", name: "Import Library Books", description: "Import library catalog data from spreadsheets", category: "Library" },
+  { code: "library.download", name: "Download Library Resources", description: "Download digital library resources", category: "Library" },
+  { code: "library.catalogue.delete", name: "Delete Library Records", description: "Delete library resources, copies, categories and books", category: "Library" },
+  { code: "library.upload", name: "Legacy Library Upload", description: "Legacy compatibility permission for old library upload flows", category: "Library" },
   
   // Timetable
   { code: "timetable.view", name: "View Timetable", description: "View class schedules", category: "Timetable" },

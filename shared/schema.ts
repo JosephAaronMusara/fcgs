@@ -397,6 +397,16 @@ export const libraryCategories = pgTable("library_categories", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const libraryShelves = pgTable("library_shelves", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  name: text("name").notNull(),
+  description: text("description"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  schoolShelfNameUnique: uniqueIndex("library_shelves_school_name_unique").on(table.schoolId, table.name),
+}));
+
 export const libraryBooks = pgTable("library_books", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id),
@@ -411,6 +421,7 @@ export const libraryBooks = pgTable("library_books", {
   subjectId: integer("subject_id").references(() => subjects.id),
   classId: integer("class_id").references(() => classes.id),
   streamId: integer("stream_id").references(() => streams.id),
+  streamIds: integer("stream_ids").array(),
   description: text("description"),
   totalCopies: integer("total_copies").default(1),
   availableCopies: integer("available_copies").default(1),
@@ -430,6 +441,8 @@ export const libraryBookCopies = pgTable("library_book_copies", {
   qrCode: text("qr_code").notNull().unique(),
   status: libraryCopyStatusEnum("status").default("available"),
   condition: text("condition").default("Good"),
+  notes: text("notes"),
+  attachmentUrls: text("attachment_urls").array().default(sql`ARRAY[]::text[]`),
   addedAt: timestamp("added_at").defaultNow(),
 });
 
@@ -443,9 +456,12 @@ export const libraryLoans = pgTable("library_loans", {
   borrowerName: text("borrower_name"),
   issuedBy: integer("issued_by").references(() => staff.id),
   issuedAt: timestamp("issued_at").defaultNow(),
-  dueDate: date("due_date").notNull(),
+  dueDate: timestamp("due_date").notNull(),
   returnedAt: timestamp("returned_at"),
   conditionOnBorrow: text("condition_on_borrow").default("good"),
+  conditionOnReturn: text("condition_on_return"),
+  markedLostAt: timestamp("marked_lost_at"),
+  markedRecoveredAt: timestamp("marked_recovered_at"),
   status: libraryLoanStatusEnum("status").default("active"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow(),
@@ -462,7 +478,7 @@ export const libraryFines = pgTable("library_fines", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const libraryReservationStatusEnum = pgEnum("library_reservation_status", ["pending", "ready", "fulfilled", "cancelled"]);
+export const libraryReservationStatusEnum = pgEnum("library_reservation_status", ["pending", "ready", "fulfilled", "cancelled", "expired"]);
 
 export const libraryReservations = pgTable("library_reservations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -733,9 +749,10 @@ export const insertClinicRecordSchema = createInsertSchema(clinicRecords).omit({
 export const insertFeesPaymentSchema = createInsertSchema(feesPayments).omit({ id: true, createdAt: true });
 export const insertLibraryResourceSchema = createInsertSchema(libraryResources).omit({ id: true, createdAt: true });
 export const insertLibraryCategorySchema = createInsertSchema(libraryCategories).omit({ id: true, createdAt: true });
+export const insertLibraryShelfSchema = createInsertSchema(libraryShelves).omit({ id: true, createdAt: true });
 export const insertLibraryBookSchema = createInsertSchema(libraryBooks).omit({ id: true, createdAt: true });
 export const insertLibraryBookCopySchema = createInsertSchema(libraryBookCopies).omit({ id: true, addedAt: true });
-export const insertLibraryLoanSchema = createInsertSchema(libraryLoans).omit({ id: true, createdAt: true, issuedAt: true, returnedAt: true });
+export const insertLibraryLoanSchema = createInsertSchema(libraryLoans).omit({ id: true, createdAt: true, issuedAt: true, returnedAt: true, markedLostAt: true, markedRecoveredAt: true });
 export const insertLibraryFineSchema = createInsertSchema(libraryFines).omit({ id: true, createdAt: true, paidAt: true });
 export const insertLibraryReservationSchema = createInsertSchema(libraryReservations).omit({ id: true, createdAt: true, reservedAt: true, notifiedAt: true });
 export const insertLibraryPolicySchema = createInsertSchema(libraryPolicies).omit({ id: true, updatedAt: true });
@@ -799,6 +816,8 @@ export type InsertLibraryResource = z.infer<typeof insertLibraryResourceSchema>;
 export type LibraryResource = typeof libraryResources.$inferSelect;
 export type InsertLibraryCategory = z.infer<typeof insertLibraryCategorySchema>;
 export type LibraryCategory = typeof libraryCategories.$inferSelect;
+export type InsertLibraryShelf = z.infer<typeof insertLibraryShelfSchema>;
+export type LibraryShelf = typeof libraryShelves.$inferSelect;
 export type InsertLibraryBook = z.infer<typeof insertLibraryBookSchema>;
 export type LibraryBook = typeof libraryBooks.$inferSelect;
 export type InsertLibraryBookCopy = z.infer<typeof insertLibraryBookCopySchema>;

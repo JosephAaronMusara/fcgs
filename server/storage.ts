@@ -3,7 +3,7 @@ import { eq, ne, desc, and, or, sql, count as drizzleCount, like, gte, lte, isNu
 import {
   users, staff, streams, classes, parents, students, subjects,
   staffSubjects, studentSubjects, classSubjects, grades, assessments, marks, attendanceRecords,
-  disciplineRecords, clinicRecords, feesPayments, organizations, schools, libraryResources, libraryCategories, libraryBooks, libraryBookCopies, libraryLoans, libraryFines, libraryReservations, libraryPolicies,
+  disciplineRecords, clinicRecords, feesPayments, organizations, schools, libraryResources, libraryCategories, libraryShelves, libraryBooks, libraryBookCopies, libraryLoans, libraryFines, libraryReservations, libraryPolicies,
   timetableSlots, logbookEntries, posItems, posSales, posSaleItems,
   newsletters, schemes, hostels, hostelRollCall, studentApplications, staffAttendanceLogs,
   permissions, accessGroups, accessGroupPermissions, userAccessGroups, userPermissionOverrides, userSchoolAccess,
@@ -31,6 +31,7 @@ import {
   type School, type InsertSchool,
   type LibraryResource, type InsertLibraryResource,
   type LibraryCategory, type InsertLibraryCategory,
+  type LibraryShelf, type InsertLibraryShelf,
   type LibraryBook, type InsertLibraryBook,
   type LibraryLoan, type InsertLibraryLoan,
   type LibraryFine, type InsertLibraryFine,
@@ -237,6 +238,12 @@ export interface IStorage {
   createLibraryCategory(category: InsertLibraryCategory): Promise<LibraryCategory>;
   updateLibraryCategory(id: number, category: Partial<InsertLibraryCategory>): Promise<LibraryCategory | undefined>;
   deleteLibraryCategory(id: number): Promise<boolean>;
+
+  // Library - Shelves
+  getLibraryShelves(schoolId: number): Promise<LibraryShelf[]>;
+  createLibraryShelf(shelf: InsertLibraryShelf): Promise<LibraryShelf>;
+  updateLibraryShelf(id: number, shelf: Partial<InsertLibraryShelf>): Promise<LibraryShelf | undefined>;
+  deleteLibraryShelf(id: number): Promise<boolean>;
 
   // Library - Books
   getLibraryBooks(schoolId: number): Promise<LibraryBook[]>;
@@ -1456,6 +1463,32 @@ export class DatabaseStorage implements IStorage {
 
   async deleteLibraryCategory(id: number): Promise<boolean> {
     await db.delete(libraryCategories).where(eq(libraryCategories.id, id));
+    return true;
+  }
+
+  // Library - Shelves
+  getLibraryShelves(schoolId: number): Promise<LibraryShelf[]>;
+  createLibraryShelf(shelf: InsertLibraryShelf): Promise<LibraryShelf>;
+  updateLibraryShelf(id: number, shelf: Partial<InsertLibraryShelf>): Promise<LibraryShelf | undefined>;
+  deleteLibraryShelf(id: number): Promise<boolean>;
+
+  // Library - Shelves
+  async getLibraryShelves(schoolId: number): Promise<LibraryShelf[]> {
+    return db.select().from(libraryShelves).where(eq(libraryShelves.schoolId, schoolId)).orderBy(libraryShelves.name);
+  }
+
+  async createLibraryShelf(data: InsertLibraryShelf): Promise<LibraryShelf> {
+    const [shelf] = await db.insert(libraryShelves).values(data).returning();
+    return shelf;
+  }
+
+  async updateLibraryShelf(id: number, data: Partial<InsertLibraryShelf>): Promise<LibraryShelf | undefined> {
+    const [updated] = await db.update(libraryShelves).set(data).where(eq(libraryShelves.id, id)).returning();
+    return updated;
+  }
+
+  async deleteLibraryShelf(id: number): Promise<boolean> {
+    await db.delete(libraryShelves).where(eq(libraryShelves.id, id));
     return true;
   }
 

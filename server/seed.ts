@@ -1,7 +1,7 @@
 import { db } from "./db";
-import { users, organizations, schools, permissions, accessGroups, accessGroupPermissions, userAccessGroups, userSchoolAccess, staffRoles } from "@shared/schema";
+import { users, organizations, schools, permissions, accessGroups, accessGroupPermissions, userAccessGroups, userSchoolAccess, staffRoles, userPermissionOverrides } from "@shared/schema";
 import bcrypt from "bcrypt";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 import { RBAC_PERMISSIONS_DATA } from "./rbac-config";
 
@@ -30,7 +30,7 @@ const ACCESS_GROUPS_DATA = [
       "attendance.view", "attendance.create", "attendance.edit",
       "discipline.view", "discipline.create",
       "fees.view",
-      "library.view", "library.upload", "library.download",
+      "library.view", "library.download",
       "timetable.view",
       "logbook.view", "logbook.create", "logbook.edit",
       "staff_attendance.view_own", "staff_attendance.view_logs", "staff_attendance.clock_in", "staff_attendance.clock_out",
@@ -83,7 +83,7 @@ const ACCESS_GROUPS_DATA = [
       "attendance.view", "attendance.create", "attendance.edit",
       "discipline.view", "discipline.create",
       "fees.view",
-      "library.view", "library.upload", "library.download",
+      "library.view", "library.download",
       "timetable.view",
       "logbook.view", "logbook.create", "logbook.edit",
       "staff_attendance.view_own", "staff_attendance.view_logs", "staff_attendance.clock_in", "staff_attendance.clock_out",
@@ -122,7 +122,7 @@ const ACCESS_GROUPS_DATA = [
       "staff.view",
       "classes.view",
       "subjects.view",
-      "library.view", "library.upload", "library.download", "library.delete",
+      "library.view", "library.resources.manage", "library.catalog.manage", "library.copies.manage", "library.circulation.manage", "library.fines.manage", "library.reservations.manage", "library.policy.manage", "library.import", "library.download", "library.catalogue.delete",
       "settings.view",
       "newsletters.view",
       "communication.view",
@@ -284,6 +284,15 @@ async function seed() {
   // Seed permissions
   console.log("Seeding permissions...");
   const permissionMap = new Map<string, number>();
+
+  const legacyLibraryDeleteCodes = ["library.catalog.delete", "library.delete"];
+  const legacyDeletePermissions = await db.select().from(permissions).where(inArray(permissions.code, legacyLibraryDeleteCodes));
+  if (legacyDeletePermissions.length > 0) {
+    const legacyIds = legacyDeletePermissions.map((perm) => perm.id);
+    await db.delete(accessGroupPermissions).where(inArray(accessGroupPermissions.permissionId, legacyIds));
+    await db.delete(userPermissionOverrides).where(inArray(userPermissionOverrides.permissionId, legacyIds));
+    await db.delete(permissions).where(inArray(permissions.id, legacyIds));
+  }
   
   for (const perm of PERMISSIONS_DATA) {
     const existing = await db.select().from(permissions).where(eq(permissions.code, perm.code));
