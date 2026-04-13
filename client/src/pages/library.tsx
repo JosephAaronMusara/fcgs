@@ -509,102 +509,102 @@ function DashboardTab({
 
   if (booksLoading || loansLoading) {
     return (
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:flex lg:flex-nowrap lg:justify-between lg:gap-3">
         {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
-          <Skeleton key={i} className="h-20 w-full" />
+          <Skeleton key={i} className="h-[76px] w-full lg:h-[84px] lg:w-[175px] lg:flex-none" />
         ))}
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
-              <BookOpen className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:flex lg:flex-nowrap lg:justify-between lg:gap-3">
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
+              <BookOpen className="h-5 w-5 text-blue-600 dark:text-blue-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Total Books</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Total Books</p>
               <p className="text-sm font-bold" data-testid="stat-total-books">{totalBooks}</p>
             </div>
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
-              <BookCopy className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
+              <BookCopy className="h-5 w-5 text-green-600 dark:text-green-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Available Copies</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Available Copies</p>
               <p className="text-sm font-bold" data-testid="stat-available-copies">{availableCopies}</p>
             </div>
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center">
-              <Users className="h-3.5 w-3.5 text-yellow-600 dark:text-yellow-400" />
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center">
+              <Users className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Currently Borrowed</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Borrowed Copies</p>
               <p className="text-sm font-bold" data-testid="stat-borrowed">{activeLoans}</p>
             </div>
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
-              <AlertTriangle className="h-3.5 w-3.5 text-red-600 dark:text-red-400" />
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+              <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Overdue Books</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Overdue Copies</p>
               <p className="text-sm font-bold" data-testid="stat-overdue">{overdueLoans}</p>
             </div>
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center">
-              <BookMarked className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400" />
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center">
+              <BookMarked className="h-5 w-5 text-rose-600 dark:text-rose-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Damaged Copies</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Damaged Copies</p>
               <p className="text-sm font-bold" data-testid="stat-damaged-copies">{damagedCopies}</p>
             </div>
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-slate-100 dark:bg-slate-900/30 flex items-center justify-center">
-              <XCircle className="h-3.5 w-3.5 text-slate-600 dark:text-slate-400" />
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-slate-100 dark:bg-slate-900/30 flex items-center justify-center">
+              <XCircle className="h-5 w-5 text-slate-600 dark:text-slate-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Lost/Stolen Books</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Lost/Stolen Copies</p>
               <p className="text-sm font-bold" data-testid="stat-lost-stolen-copies">{lostStolenCopies}</p>
             </div>
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-orange-100 dark:bg-orange-900/30 flex items-center justify-center">
-              <DollarSign className="h-3.5 w-3.5 text-orange-600 dark:text-orange-400" />
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-orange-100 dark:bg-orange-900/30 flex items-center justify-center">
+              <DollarSign className="h-5 w-5 text-orange-600 dark:text-orange-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Unpaid Fines</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Unpaid Fines</p>
               <p className="text-sm font-bold" data-testid="stat-unpaid-fines">
                 {unpaidFines.length} (${unpaidTotal.toFixed(2)})
               </p>
@@ -612,14 +612,14 @@ function DashboardTab({
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardContent className="px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="h-7 w-7 rounded-full bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+      <Card className="lg:w-[200px] lg:flex-none">
+        <CardContent className="px-3.5 py-2.5">
+          <div className="flex items-center gap-3.5">
+            <div className="h-10 w-10 rounded-full bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
+              <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
             </div>
             <div>
-              <p className="text-[11px] leading-tight text-muted-foreground">Paid Fines</p>
+              <p className="text-[13px] leading-tight text-muted-foreground">Paid Fines</p>
               <p className="text-sm font-bold" data-testid="stat-paid-fines">
                 {paidFines.length} (${paidTotal.toFixed(2)})
               </p>
