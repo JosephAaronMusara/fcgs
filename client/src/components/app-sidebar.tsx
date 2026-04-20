@@ -51,6 +51,7 @@ import {
   CreditCard,
   User,
   Bell,
+  Package,
 } from "lucide-react";
 import type { School as SchoolType } from "@shared/schema";
 
@@ -69,6 +70,19 @@ type MenuGroup = {
   items: MenuItem[];
 };
 
+const POS_MENU_PERMISSIONS = ["pos.view", "products.view"];
+const SCHOOL_FINANCE_MENU_PERMISSIONS = [
+  "fees.view",
+  "arrears.view",
+  "school_expenses.view",
+  "school_incomes.view",
+  "financial_statements.view",
+];
+const ASSETS_INVENTORY_MENU_PERMISSIONS = [
+  ...POS_MENU_PERMISSIONS,
+  ...SCHOOL_FINANCE_MENU_PERMISSIONS,
+];
+
 const staffMenuGroups: MenuGroup[] = [
   {
     label: "Operations",
@@ -76,7 +90,7 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
       { title: "Calendar", url: "/calendar", icon: Calendar, requiredPermissions: ["calendar.view"] },
       { title: "Applications", url: "/applications", icon: FileText, requiredPermissions: ["applications.view"] },
-      { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport", comingSoon: true },
+      { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport", badge: "In Production" },
     ],
   },
   {
@@ -90,10 +104,9 @@ const staffMenuGroups: MenuGroup[] = [
   {
     label: "Library & E-Learning",
     items: [
-      { title: "Library", url: "/library", icon: Library, requiredPermissions: ["library.view"], featureKey: "enableELibrary", badge: "In Production" },
-      { title: "kundAi", url: "/kundai", icon: Bot, requiredPermissions: ["kundai.view"], badge: "In Production" },
-      { title: "Discussion Forum", url: "/discussion-forum", icon: MessageSquare, requiredPermissions: ["discussion_forum.view"], comingSoon: true },
-      { title: "Learning Materials", url: "/learning-materials", icon: BookMarked, requiredPermissions: ["learning_materials.view"], comingSoon: true },
+      { title: "Kund-Ai", url: "/kundai", icon: Bot, requiredPermissions: ["kundai.view"], comingSoon: true },
+      { title: "Library", url: "/library", icon: Library, requiredPermissions: ["library.view"], featureKey: "enableELibrary" },
+      { title: "Learning Materials", url: "/learning-materials", icon: BookMarked, requiredPermissions: ["learning_materials.view"], comingSoon: true  },
     ],
   },
   {
@@ -101,42 +114,39 @@ const staffMenuGroups: MenuGroup[] = [
     items: [
       { title: "Student Records", url: "/students", icon: GraduationCap, requiredPermissions: ["students.view"] },
       { title: "Parent Records", url: "/parents", icon: UserCheck, requiredPermissions: ["parents.view"] },
+      { title: "Clinic Records", url: "/clinic", icon: Stethoscope, requiredPermissions: ["clinic.view"], featureKey: "enableHostel" },
+      { title: "Disciplinary Records", url: "/discipline", icon: Shield, requiredPermissions: ["discipline.view"] },
+      { title: "Quality Control Records", url: "/qc-reports", icon: ClipboardList, requiredPermissions: ["qc_reports.view"] },
       { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view"] },
       { title: "Hostel Attendance Register", url: "/hostel", icon: Building, requiredPermissions: ["hostel.view"], featureKey: "enableHostel" },
-      { title: "Clinic Records", url: "/clinic", icon: Stethoscope, requiredPermissions: ["clinic.view"], featureKey: "enableHostel" },
-      { title: "Disciplinary Reports", url: "/discipline", icon: Shield, requiredPermissions: ["discipline.view"] },
-      { title: "Academic Reports", url: "/academic-reports", icon: FileText, requiredPermissions: ["reports.view"] },
-      { title: "Quality Control Reports", url: "/qc-reports", icon: ClipboardList, requiredPermissions: ["qc_reports.view"] },
     ],
   },
   {
     label: "Academics",
     items: [
+      { title: "Grading", url: "/grades", icon: FileText, requiredPermissions: ["grades.view"] },
       { title: "Subjects", url: "/subjects", icon: BookOpen, requiredPermissions: ["subjects.view"] },
-      { title: "Grading System", url: "/grades", icon: FileText, requiredPermissions: ["grades.view"] },
-      { title: "Assessments Manager", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
+      { title: "Assessments", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
       { title: "Marks Entry", url: "/marks-entry", icon: FileText, requiredPermissions: ["marks.view", "marks.create"] },
       { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"] },
+      { title: "Academic Reports", url: "/academic-reports", icon: FileText, requiredPermissions: ["reports.view"] },
     ],
   },
   {
     label: "Accounting & Finance",
     items: [
-      { title: "Student Payments", url: "/fees", icon: DollarSign, requiredPermissions: ["fees.view"], featureKey: "enableFinance" },
-      { title: "Parents With Arrears", url: "/arrears", icon: Banknote, requiredPermissions: ["arrears.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "School Expenses", url: "/school-expenses", icon: Receipt, requiredPermissions: ["school_expenses.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "School Incomes", url: "/school-incomes", icon: TrendingUp, requiredPermissions: ["school_incomes.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "Products", url: "/products", icon: ShoppingCart, requiredPermissions: ["products.view"], featureKey: "enableFinance", comingSoon: true },
-      { title: "Financial Statements", url: "/financial-statements", icon: BarChart3, requiredPermissions: ["financial_statements.view"], featureKey: "enableFinance", comingSoon: true },
+      { title: "Point of Sale", url: "/pos", icon: ShoppingCart, requiredPermissions: POS_MENU_PERMISSIONS, featureKey: "enableFinance", badge: "In Production" },
+      { title: "School Finance", url: "/school-finance", icon: DollarSign, requiredPermissions: SCHOOL_FINANCE_MENU_PERMISSIONS, featureKey: "enableFinance" },
+      { title: "Assets & Inventory", url: "/assets-inventory", icon: Package, requiredPermissions: ASSETS_INVENTORY_MENU_PERMISSIONS, featureKey: "enableFinance", badge: "In Production" },
     ],
   },
   {
     label: "Our School",
     items: [
       { title: "Newsletters", url: "/newsletters", icon: FileText, requiredPermissions: ["newsletters.view"] },
-      { title: "Messages History", url: "/messages", icon: Mail, requiredPermissions: ["communication.view"] },
       { title: "Classrooms", url: "/classes", icon: School, requiredPermissions: ["classes.view"] },
       { title: "Boarding Hostels", url: "/hostels", icon: Building, requiredPermissions: ["hostels.view"], featureKey: "enableHostel" },
+      { title: "Communication History", url: "/messages", icon: Mail, requiredPermissions: ["communication.view"] },
       { title: "School Configuration", url: "/settings", icon: Settings, requiredPermissions: ["settings.view"] },
     ],
   },

@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, libraryShelves as libraryShelvesTable } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, libraryShelves as libraryShelvesTable } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc } from "drizzle-orm";
@@ -499,6 +499,21 @@ function parseTermNumber(termStr: string | number | null | undefined): number {
   if (typeof termStr === "number") return termStr;
   const match = termStr.match(/term(\d+)/);
   return match ? parseInt(match[1]) : 1;
+}
+
+function normalizeQcTermValue(termStr: string | number | null | undefined): "term1" | "term2" | "term3" {
+  if (typeof termStr === "number") {
+    return termStr === 2 ? "term2" : termStr === 3 ? "term3" : "term1";
+  }
+
+  const normalized = String(termStr ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+
+  if (["2", "term2", "t2"].includes(normalized)) return "term2";
+  if (["3", "term3", "t3"].includes(normalized)) return "term3";
+  return "term1";
 }
 
 function termLabel(termStr: string): string {
@@ -10954,6 +10969,311 @@ export async function registerRoutes(
         .sort((a, b) => a.name.localeCompare(b.name));
 
       res.json(streamClasses);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // =============================================
+  // QC RECORDS ENDPOINTS (REBUILT PAGE)
+  // =============================================
+
+  const qcRecordMutationSchema = z.object({
+    studentId: z.coerce.number().int().positive(),
+    classId: z.coerce.number().int().positive(),
+    subjectId: z.coerce.number().int().positive(),
+    academicYear: z.string().trim().min(1),
+    term: z.enum(["term1", "term2", "term3"]),
+    recordDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    descriptionComment: z.string().trim().min(1),
+    actionTaken: z.string().trim().optional().nullable(),
+  });
+
+  app.get("/api/qc-records/bootstrap", requireAuth, requirePermission("qc_reports.view"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const school = await storage.getSchool(schoolId);
+      if (!school) return res.status(404).json({ message: "School not found" });
+
+      const classes = (await storage.getClassesBySchool(schoolId))
+        .map((cls) => ({ id: cls.id, className: cls.className }))
+        .sort((a, b) => a.className.localeCompare(b.className));
+
+      res.json({
+        currentAcademicYear: school.currentAcademicYear || new Date().getFullYear().toString(),
+        currentTerm: normalizeQcTermValue(school.currentTerm),
+        classes,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/qc-records/students", requireAuth, requirePermission("qc_reports.view"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const classId = Number(req.query.classId);
+      if (!Number.isFinite(classId)) return res.json([]);
+
+      const classRecord = await ensureClassInSchool(classId, schoolId, res);
+      if (!classRecord) return;
+
+      const rows = (await storage.getStudentsByClass(classId))
+        .filter((student) => student.schoolId === schoolId)
+        .map((student) => ({
+          id: student.id,
+          fullName: `${student.firstName} ${student.lastName}`.trim(),
+          admissionNo: student.admissionNo,
+        }))
+        .sort((a, b) => a.fullName.localeCompare(b.fullName));
+
+      res.json(rows);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/qc-records/subjects", requireAuth, requirePermission("qc_reports.view"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const studentId = Number(req.query.studentId);
+      if (!Number.isFinite(studentId)) return res.json([]);
+
+      const student = await ensureStudentInSchool(studentId, schoolId, res);
+      if (!student) return;
+
+      const selectedSubjectIds = (
+        await db
+          .select({ subjectId: studentSubjectsSchema.subjectId })
+          .from(studentSubjectsSchema)
+          .where(eq(studentSubjectsSchema.studentId, student.id))
+      ).map((row) => row.subjectId);
+
+      const fallbackSubjectIds = student.classId
+        ? (
+            await db
+              .select({ subjectId: classSubjectsSchema.subjectId })
+              .from(classSubjectsSchema)
+              .where(eq(classSubjectsSchema.classId, student.classId))
+          ).map((row) => row.subjectId)
+        : [];
+
+      const subjectIds = Array.from(new Set((selectedSubjectIds.length > 0 ? selectedSubjectIds : fallbackSubjectIds).filter(Boolean)));
+      if (subjectIds.length === 0) return res.json([]);
+
+      const subjects = await storage.getAllSubjects();
+      const rows = subjects
+        .filter((subject) => subject.schoolId === schoolId && subjectIds.includes(subject.id))
+        .map((subject) => ({ id: subject.id, name: subject.name }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      res.json(rows);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/qc-records", requireAuth, requirePermission("qc_reports.view"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const studentId = Number(req.query.studentId);
+      const academicYear = String(req.query.academicYear || "").trim();
+      const term = normalizeQcTermValue(req.query.term as string | undefined);
+
+      if (!Number.isFinite(studentId) || !academicYear) {
+        return res.json([]);
+      }
+
+      const student = await ensureStudentInSchool(studentId, schoolId, res);
+      if (!student) return;
+
+      const rows = await db
+        .select()
+        .from(qcRecords)
+        .where(
+          and(
+            eq(qcRecords.schoolId, schoolId),
+            eq(qcRecords.studentId, studentId),
+            eq(qcRecords.academicYear, academicYear),
+            eq(qcRecords.term, term),
+          )
+        )
+        .orderBy(desc(qcRecords.recordDate), desc(qcRecords.createdAt));
+
+      res.json(rows);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/qc-records", requireAuth, requirePermission("qc_reports.create"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const currentUser = req.user as User;
+      const payload = qcRecordMutationSchema.parse(req.body);
+
+      const student = await ensureStudentInSchool(payload.studentId, schoolId, res);
+      if (!student) return;
+
+      const classRecord = await ensureClassInSchool(payload.classId, schoolId, res);
+      if (!classRecord) return;
+
+      if (student.classId !== payload.classId) {
+        return res.status(400).json({ message: "Selected student does not belong to the selected class" });
+      }
+
+      const subject = await ensureSubjectInSchool(payload.subjectId, schoolId, res);
+      if (!subject) return;
+
+      const studentSubjectIds = (
+        await db
+          .select({ subjectId: studentSubjectsSchema.subjectId })
+          .from(studentSubjectsSchema)
+          .where(eq(studentSubjectsSchema.studentId, payload.studentId))
+      ).map((row) => row.subjectId);
+
+      const classSubjectIds = (
+        await db
+          .select({ subjectId: classSubjectsSchema.subjectId })
+          .from(classSubjectsSchema)
+          .where(eq(classSubjectsSchema.classId, payload.classId))
+      ).map((row) => row.subjectId);
+
+      const allowedSubjectIds = new Set((studentSubjectIds.length > 0 ? studentSubjectIds : classSubjectIds).filter(Boolean));
+      if (allowedSubjectIds.size > 0 && !allowedSubjectIds.has(payload.subjectId)) {
+        return res.status(400).json({ message: "Selected subject is not assigned to this student" });
+      }
+
+      const [created] = await db
+        .insert(qcRecords)
+        .values({
+          schoolId,
+          classId: payload.classId,
+          studentId: payload.studentId,
+          subjectId: payload.subjectId,
+          academicYear: payload.academicYear,
+          term: payload.term,
+          recordDate: payload.recordDate,
+          descriptionComment: payload.descriptionComment,
+          actionTaken: payload.actionTaken?.trim() || null,
+          createdBy: currentUser.id,
+          updatedBy: currentUser.id,
+          updatedAt: new Date(),
+        })
+        .returning();
+
+      res.status(201).json(created);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/qc-records/:id", requireAuth, requirePermission("qc_reports.edit"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const recordId = Number(req.params.id);
+      if (!Number.isFinite(recordId)) return res.status(400).json({ message: "Invalid record id" });
+
+      const currentUser = req.user as User;
+      const payload = qcRecordMutationSchema.parse(req.body);
+
+      const existing = await db
+        .select()
+        .from(qcRecords)
+        .where(and(eq(qcRecords.id, recordId), eq(qcRecords.schoolId, schoolId)))
+        .limit(1);
+
+      if (!existing[0]) {
+        return res.status(404).json({ message: "Record not found" });
+      }
+
+      const student = await ensureStudentInSchool(payload.studentId, schoolId, res);
+      if (!student) return;
+
+      const classRecord = await ensureClassInSchool(payload.classId, schoolId, res);
+      if (!classRecord) return;
+
+      if (student.classId !== payload.classId) {
+        return res.status(400).json({ message: "Selected student does not belong to the selected class" });
+      }
+
+      const subject = await ensureSubjectInSchool(payload.subjectId, schoolId, res);
+      if (!subject) return;
+
+      const studentSubjectIds = (
+        await db
+          .select({ subjectId: studentSubjectsSchema.subjectId })
+          .from(studentSubjectsSchema)
+          .where(eq(studentSubjectsSchema.studentId, payload.studentId))
+      ).map((row) => row.subjectId);
+
+      const classSubjectIds = (
+        await db
+          .select({ subjectId: classSubjectsSchema.subjectId })
+          .from(classSubjectsSchema)
+          .where(eq(classSubjectsSchema.classId, payload.classId))
+      ).map((row) => row.subjectId);
+
+      const allowedSubjectIds = new Set((studentSubjectIds.length > 0 ? studentSubjectIds : classSubjectIds).filter(Boolean));
+      if (allowedSubjectIds.size > 0 && !allowedSubjectIds.has(payload.subjectId)) {
+        return res.status(400).json({ message: "Selected subject is not assigned to this student" });
+      }
+
+      const [updated] = await db
+        .update(qcRecords)
+        .set({
+          classId: payload.classId,
+          studentId: payload.studentId,
+          subjectId: payload.subjectId,
+          academicYear: payload.academicYear,
+          term: payload.term,
+          recordDate: payload.recordDate,
+          descriptionComment: payload.descriptionComment,
+          actionTaken: payload.actionTaken?.trim() || null,
+          updatedBy: currentUser.id,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(qcRecords.id, recordId), eq(qcRecords.schoolId, schoolId)))
+        .returning();
+
+      res.json(updated);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete("/api/qc-records/:id", requireAuth, requirePermission("qc_reports.delete"), async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const recordId = Number(req.params.id);
+      if (!Number.isFinite(recordId)) return res.status(400).json({ message: "Invalid record id" });
+
+      const existing = await db
+        .select({ id: qcRecords.id })
+        .from(qcRecords)
+        .where(and(eq(qcRecords.id, recordId), eq(qcRecords.schoolId, schoolId)))
+        .limit(1);
+
+      if (!existing[0]) {
+        return res.status(404).json({ message: "Record not found" });
+      }
+
+      await db.delete(qcRecords).where(and(eq(qcRecords.id, recordId), eq(qcRecords.schoolId, schoolId)));
+      res.status(204).send();
     } catch (error) {
       next(error);
     }

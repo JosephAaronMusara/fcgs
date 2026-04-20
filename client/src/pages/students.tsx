@@ -1362,8 +1362,12 @@ function AssignSubjectsDialog({
     mutationFn: async (subjectIds: number[]) => {
       await apiRequest("PUT", `/api/students/${studentId}/subjects`, { subjectIds });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/students", studentId, "subjects"] });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/students", studentId, "subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/qc-records/subjects"] }),
+      ]);
+
       toast({ title: "Success", description: "Subjects updated successfully" });
       onClose();
     },
