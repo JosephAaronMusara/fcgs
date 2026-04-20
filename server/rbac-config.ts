@@ -157,6 +157,7 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "qc_reports.view", name: "View QC Reports", description: "View quality control assessment reports", category: "QC Reports" },
   { code: "qc_reports.create", name: "Create QC Reports", description: "Create quality control reports for students", category: "QC Reports" },
   { code: "qc_reports.edit", name: "Edit QC Reports", description: "Modify quality control reports", category: "QC Reports" },
+  { code: "qc_reports.delete", name: "Delete QC Reports", description: "Delete quality control records", category: "QC Reports" },
 
   // Communication
   { code: "communication.view", name: "View Communications", description: "View communication logs and messages", category: "Communication" },

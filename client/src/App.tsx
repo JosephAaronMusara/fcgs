@@ -40,6 +40,8 @@ import TimetablePage from "@/pages/timetable";
 import CalendarPage from "@/pages/calendar";
 import LogbookPage from "@/pages/logbook";
 import POSPage from "@/pages/pos";
+import SchoolFinancePage from "@/pages/school-finance";
+import AssetsInventoryPage from "@/pages/assets-inventory";
 import NewslettersPage from "@/pages/newsletters";
 import SchemesPage from "@/pages/schemes";
 import HostelPage from "@/pages/hostel";
@@ -48,8 +50,6 @@ import ApplicationsPage from "@/pages/applications";
 import MessagesPage from "@/pages/messages";
 import ApplyPage from "@/pages/apply";
 import QCReportsPage from "@/pages/qc-reports";
-import QCReportsClassPage from "@/pages/qc-reports-class";
-import QCReportsStudentPage from "@/pages/qc-reports-student";
 import RecordOfMarksPage from "@/pages/record-of-marks";
 import MyClassesPage from "@/pages/my-classes";
 import MyAttendancePage from "@/pages/my-attendance";
@@ -68,7 +68,6 @@ import SchoolExpensesPage from "@/pages/school-expenses";
 import SchoolIncomesPage from "@/pages/school-incomes";
 import ProductsPage from "@/pages/products";
 import FinancialStatementsPage from "@/pages/financial-statements";
-import DiscussionForumPage from "@/pages/discussion-forum";
 import LearningMaterialsPage from "@/pages/learning-materials";
 import NotFound from "@/pages/not-found";
 
@@ -78,6 +77,19 @@ type RoutePermissionRule = {
   permissions?: string[];
   allowRoles?: string[];
 };
+
+const POS_ROUTE_PERMISSIONS = ["pos.view", "products.view"];
+const SCHOOL_FINANCE_ROUTE_PERMISSIONS = [
+  "fees.view",
+  "arrears.view",
+  "school_expenses.view",
+  "school_incomes.view",
+  "financial_statements.view",
+];
+const ASSETS_INVENTORY_ROUTE_PERMISSIONS = [
+  ...POS_ROUTE_PERMISSIONS,
+  ...SCHOOL_FINANCE_ROUTE_PERMISSIONS,
+];
 
 const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/dashboard$/, permissions: ["dashboard.view"] },
@@ -102,9 +114,11 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/kundai$/, permissions: ["kundai.view"] },
   { pattern: /^\/transport$/, permissions: ["transport.view"] },
   { pattern: /^\/arrears$/, permissions: ["arrears.view"] },
+  { pattern: /^\/school-finance$/, permissions: SCHOOL_FINANCE_ROUTE_PERMISSIONS },
+  { pattern: /^\/assets-inventory$/, permissions: ASSETS_INVENTORY_ROUTE_PERMISSIONS },
   { pattern: /^\/school-expenses$/, permissions: ["school_expenses.view"] },
   { pattern: /^\/school-incomes$/, permissions: ["school_incomes.view"] },
-  { pattern: /^\/products$/, permissions: ["products.view"] },
+  { pattern: /^\/products$/, permissions: POS_ROUTE_PERMISSIONS },
   { pattern: /^\/financial-statements$/, permissions: ["financial_statements.view"] },
   { pattern: /^\/discussion-forum$/, permissions: ["discussion_forum.view"] },
   { pattern: /^\/learning-materials$/, permissions: ["learning_materials.view"] },
@@ -113,7 +127,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/calendar$/, permissions: ["calendar.view"] },
   { pattern: /^\/timetable$/, permissions: ["timetable.view"] },
   { pattern: /^\/logbook$/, permissions: ["staff_attendance.view_own", "staff_attendance.view_all", "staff_attendance.view_logs", "staff_attendance.view_overview", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"] },
-  { pattern: /^\/pos$/, permissions: ["pos.view"] },
+  { pattern: /^\/pos$/, permissions: POS_ROUTE_PERMISSIONS },
   { pattern: /^\/newsletters$/, permissions: ["newsletters.view"] },
   { pattern: /^\/schemes$/, permissions: ["schemes.view"] },
   { pattern: /^\/hostel$/, permissions: ["hostel.view"] },
@@ -184,6 +198,36 @@ function ProtectedRoute({
   }
 
   return <Component />;
+}
+
+function FeesRoutePage() {
+  const { user } = useAuth();
+
+  if (user?.role === "parent") {
+    return <FeesPage />;
+  }
+
+  return <Redirect to="/school-finance?tab=student-payments" />;
+}
+
+function ParentsWithArrearsRedirectPage() {
+  return <Redirect to="/school-finance?tab=parents-with-arrears" />;
+}
+
+function SchoolExpensesRedirectPage() {
+  return <Redirect to="/school-finance?tab=school-expenses" />;
+}
+
+function SchoolIncomesRedirectPage() {
+  return <Redirect to="/school-finance?tab=school-incomes" />;
+}
+
+function FinancialStatementsRedirectPage() {
+  return <Redirect to="/school-finance?tab=financial-statements" />;
+}
+
+function ProductsRedirectPage() {
+  return <Redirect to="/pos" />;
 }
 
 interface Notification {
@@ -801,22 +845,24 @@ function AuthenticatedRoutes() {
         <Route path="/marks-entry" component={() => <ProtectedRoute component={MarksEntryPage} />} />
         <Route path="/academic-reports" component={() => <ProtectedRoute component={AcademicReportsPage} />} />
         <Route path="/qc-reports" component={() => <ProtectedRoute component={QCReportsPage} />} />
-        <Route path="/qc-reports/class/:classId" component={() => <ProtectedRoute component={QCReportsClassPage} />} />
-        <Route path="/qc-reports/student/:studentId" component={() => <ProtectedRoute component={QCReportsStudentPage} />} />
+        <Route path="/qc-reports/class/:classId" component={() => <Redirect to="/qc-reports" />} />
+        <Route path="/qc-reports/student/:studentId" component={() => <Redirect to="/qc-reports" />} />
         <Route path="/attendance" component={() => <ProtectedRoute component={AttendancePage} />} />
-        <Route path="/fees" component={() => <ProtectedRoute component={FeesPage} />} />
+        <Route path="/fees" component={() => <ProtectedRoute component={FeesRoutePage} />} />
         <Route path="/clinic" component={() => <ProtectedRoute component={ClinicPage} />} />
         <Route path="/discipline" component={() => <ProtectedRoute component={DisciplinePage} />} />
         <Route path="/marks" component={() => <ProtectedRoute component={MarksPage} />} />
         <Route path="/record-of-marks" component={() => <ProtectedRoute component={RecordOfMarksPage} />} />
         <Route path="/kundai" component={() => <ProtectedRoute component={KundAiPage} />} />
         <Route path="/transport" component={() => <ProtectedRoute component={TransportPage} />} />
-        <Route path="/arrears" component={() => <ProtectedRoute component={ArrearsPage} />} />
-        <Route path="/school-expenses" component={() => <ProtectedRoute component={SchoolExpensesPage} />} />
-        <Route path="/school-incomes" component={() => <ProtectedRoute component={SchoolIncomesPage} />} />
-        <Route path="/products" component={() => <ProtectedRoute component={ProductsPage} />} />
-        <Route path="/financial-statements" component={() => <ProtectedRoute component={FinancialStatementsPage} />} />
-        <Route path="/discussion-forum" component={() => <ProtectedRoute component={DiscussionForumPage} />} />
+        <Route path="/school-finance" component={() => <ProtectedRoute component={SchoolFinancePage} />} />
+        <Route path="/arrears" component={() => <ProtectedRoute component={ParentsWithArrearsRedirectPage} />} />
+        <Route path="/school-expenses" component={() => <ProtectedRoute component={SchoolExpensesRedirectPage} />} />
+        <Route path="/school-incomes" component={() => <ProtectedRoute component={SchoolIncomesRedirectPage} />} />
+        <Route path="/products" component={() => <ProtectedRoute component={ProductsRedirectPage} />} />
+        <Route path="/assets-inventory" component={() => <ProtectedRoute component={AssetsInventoryPage} />} />
+        <Route path="/financial-statements" component={() => <ProtectedRoute component={FinancialStatementsRedirectPage} />} />
+          <Route path="/discussion-forum" component={() => <ProtectedRoute component={DiscussionForumPage} />} />
         <Route path="/learning-materials" component={() => <ProtectedRoute component={LearningMaterialsPage} />} />
         <Route path="/children" component={() => <ProtectedRoute component={MyChildrenPage} />} />
         <Route path="/settings" component={() => <ProtectedRoute component={SchoolSettingsPage} />} />

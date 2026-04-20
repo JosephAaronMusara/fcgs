@@ -1199,6 +1199,27 @@ export const insertQcReportSchema = createInsertSchema(qcReports).omit({ id: tru
 export type InsertQcReport = z.infer<typeof insertQcReportSchema>;
 export type QcReport = typeof qcReports.$inferSelect;
 
+export const qcRecords = pgTable("qc_records", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  classId: integer("class_id").references(() => classes.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  subjectId: integer("subject_id").references(() => subjects.id).notNull(),
+  academicYear: text("academic_year").notNull(),
+  term: text("term").notNull(),
+  recordDate: date("record_date").notNull(),
+  descriptionComment: text("description_comment").notNull(),
+  actionTaken: text("action_taken"),
+  createdBy: integer("created_by").references(() => users.id),
+  updatedBy: integer("updated_by").references(() => users.id),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertQcRecordSchema = createInsertSchema(qcRecords).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertQcRecord = z.infer<typeof insertQcRecordSchema>;
+export type QcRecord = typeof qcRecords.$inferSelect;
+
 export const ecdRatingEnum = pgEnum("ecd_rating", ["YES", "NO", "ALMOST"]);
 
 export const ecdAssessmentDomains = pgTable("ecd_assessment_domains", {
