@@ -219,7 +219,7 @@ export function ApplicationFormModal({ open, onOpenChange }: ApplicationFormModa
               </div>
               <div className="space-y-2">
                 <Label htmlFor="nationalIdNumber">National ID Number</Label>
-                <Input id="nationalIdNumber" name="nationalIdNumber" placeholder="National ID number" required data-testid="input-birth-entry" />
+                <Input id="nationalIdNumber" name="nationalIdNumber" placeholder="e.g. 00-000000A00" required data-testid="input-birth-entry" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="religion">Religion</Label>
