@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, ne, desc, and, or, sql, count as drizzleCount, like, gte, lte, isNull, inArray, notLike } from "drizzle-orm";
+import { eq, ne, desc, and, or, sql, count as drizzleCount, like, gte, lte, lt, isNull, inArray, notLike } from "drizzle-orm";
 import {
   users, staff, streams, classes, parents, students, subjects,
   staffSubjects, studentSubjects, classSubjects, grades, assessments, marks, attendanceRecords,
@@ -95,7 +95,7 @@ export interface IStorage {
   createStaff(staffData: InsertStaff): Promise<Staff>;
   updateStaff(id: number, staffData: Partial<InsertStaff>): Promise<Staff | undefined>;
   deleteStaff(id: number): Promise<boolean>;
-  getNextStaffNo(): Promise<string>;
+  getNextStaffNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string>;
 
   getAllStreams(): Promise<Stream[]>;
   getStreamsBySchoolType(schoolType: string): Promise<Stream[]>;
@@ -133,7 +133,7 @@ export interface IStorage {
   createStudent(student: InsertStudent): Promise<Student>;
   updateStudent(id: number, student: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(id: number): Promise<boolean>;
-  getNextAdmissionNo(): Promise<string>;
+  getNextAdmissionNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string>;
 
   getAllSubjects(): Promise<Subject[]>;
   getSubjectsBySchool(schoolId: number): Promise<Subject[]>;
@@ -488,6 +488,78 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
+  private subjectMatchesStream(subject: Subject, streamId: number | null | undefined): boolean {
+    if (streamId == null) {
+      return false;
+    }
+
+    const scopedStreamIds = subject.streamIds ?? [];
+
+    if (subject.streamId != null) {
+      return subject.streamId === streamId;
+    }
+
+    if (scopedStreamIds.length > 0) {
+      return scopedStreamIds.includes(streamId);
+    }
+
+    return false;
+  }
+
+  private async getClassSubjectOverrides(classId: number): Promise<ClassSubject[]> {
+    return db.select().from(classSubjects).where(eq(classSubjects.classId, classId));
+  }
+
+  private async getStudentSubjectOverrides(studentId: number): Promise<StudentSubject[]> {
+    return db.select().from(studentSubjects).where(eq(studentSubjects.studentId, studentId));
+  }
+
+  private async getInheritedSubjectIdsForClass(classId: number): Promise<number[]> {
+    const classData = await this.getClass(classId);
+    if (!classData) {
+      return [];
+    }
+
+    const schoolSubjects = classData.schoolId
+      ? await this.getSubjectsBySchool(classData.schoolId)
+      : await this.getAllSubjects();
+
+    return schoolSubjects
+      .filter((subject) => this.subjectMatchesStream(subject, classData.streamId))
+      .map((subject) => subject.id);
+  }
+
+  private async getResolvedClassSubjectIds(classId: number): Promise<number[]> {
+    const resolved = new Set(await this.getInheritedSubjectIdsForClass(classId));
+    const overrides = await this.getClassSubjectOverrides(classId);
+
+    for (const row of overrides) {
+      if (row.assignmentMode === "remove") {
+        resolved.delete(row.subjectId);
+      } else {
+        resolved.add(row.subjectId);
+      }
+    }
+
+    return Array.from(resolved);
+  }
+
+  private async getResolvedStudentSubjectIds(studentId: number): Promise<number[]> {
+    const student = await this.getStudent(studentId);
+    const resolved = new Set<number>(student?.classId ? await this.getResolvedClassSubjectIds(student.classId) : []);
+    const overrides = await this.getStudentSubjectOverrides(studentId);
+
+    for (const row of overrides) {
+      if (row.assignmentMode === "remove") {
+        resolved.delete(row.subjectId);
+      } else {
+        resolved.add(row.subjectId);
+      }
+    }
+
+    return Array.from(resolved);
+  }
+
   async getUser(id: number): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
     return user;
@@ -595,10 +667,69 @@ export class DatabaseStorage implements IStorage {
     return true;
   }
 
-  async getNextStaffNo(): Promise<string> {
-    const [result] = await db.select({ count: drizzleCount() }).from(staff);
-    const num = (result?.count || 0) + 1;
-    return `FCGST${num.toString().padStart(4, '0')}`;
+  private getSchoolSequenceCode(schoolId?: number | null): string {
+    const value = Number(schoolId || 0);
+    if (!Number.isFinite(value) || value <= 0) return "A";
+    let remaining = Math.floor(value);
+    let result = "";
+    while (remaining > 0) {
+      const offset = (remaining - 1) % 26;
+      result = String.fromCharCode(65 + offset) + result;
+      remaining = Math.floor((remaining - 1) / 26);
+    }
+    return result;
+  }
+
+  private normalizeReferenceDate(referenceDate?: string | Date | null): Date {
+    if (referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())) {
+      return referenceDate;
+    }
+    if (typeof referenceDate === "string" && referenceDate.trim()) {
+      const parsed = new Date(referenceDate);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed;
+      }
+    }
+    return new Date();
+  }
+
+  private buildFormattedSequenceNumber(prefix: "S" | "E", schoolId?: number | null, referenceDate?: string | Date | null, sequence: number = 1): string {
+    const refDate = this.normalizeReferenceDate(referenceDate);
+    const year = String(refDate.getFullYear()).slice(-2);
+    const sequencePart = String(sequence).padStart(4, "0");
+    const schoolCode = this.getSchoolSequenceCode(schoolId);
+    return `FCGS${year}${prefix}${sequencePart}${schoolCode}`.toUpperCase();
+  }
+
+  async getNextStaffNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string> {
+    const referenceDate = this.normalizeReferenceDate(options?.referenceDate);
+    const schoolId = options?.schoolId || null;
+    const year = referenceDate.getFullYear();
+    const start = new Date(year, 0, 1);
+    const end = new Date(year + 1, 0, 1);
+
+    const conditions = [gte(staff.createdAt, start), lt(staff.createdAt, end)];
+    if (schoolId) {
+      conditions.push(eq(staff.schoolId, schoolId));
+    }
+
+    const rows = await db
+      .select({ staffNo: staff.staffNo })
+      .from(staff)
+      .where(and(...conditions));
+
+    let maxSequence = 0;
+    const pattern = new RegExp(`^FCGS${String(year).slice(-2)}E(\\d{4})${this.getSchoolSequenceCode(schoolId)}$`, "i");
+    for (const row of rows) {
+      const match = (row.staffNo || "").match(pattern);
+      if (!match) continue;
+      const sequence = Number(match[1]);
+      if (Number.isFinite(sequence) && sequence > maxSequence) {
+        maxSequence = sequence;
+      }
+    }
+
+    return this.buildFormattedSequenceNumber("E", schoolId, referenceDate, maxSequence + 1);
   }
 
   async getAllStreams(): Promise<Stream[]> {
@@ -664,76 +795,58 @@ export class DatabaseStorage implements IStorage {
   }
   
   async getClassSubjects(classId: number): Promise<ClassSubject[]> {
-    return db.select().from(classSubjects).where(eq(classSubjects.classId, classId));
+    const resolvedSubjectIds = await this.getResolvedClassSubjectIds(classId);
+    return resolvedSubjectIds.map((subjectId, index) => ({
+      id: -1 * (index + 1),
+      classId,
+      subjectId,
+      assignmentMode: "add",
+    } as ClassSubject));
   }
   
   async addClassSubject(classId: number, subjectId: number): Promise<ClassSubject> {
-    const existing = await db.select().from(classSubjects)
-      .where(and(eq(classSubjects.classId, classId), eq(classSubjects.subjectId, subjectId)));
-    if (existing.length > 0) {
-      return existing[0];
-    }
-    const [newClassSubject] = await db.insert(classSubjects).values({ classId, subjectId }).returning();
-    
-    const studentsInClass = await db.select().from(students).where(eq(students.classId, classId));
-    for (const student of studentsInClass) {
-      const existingStudentSubject = await db.select().from(studentSubjects)
-        .where(and(eq(studentSubjects.studentId, student.id), eq(studentSubjects.subjectId, subjectId)));
-      if (existingStudentSubject.length === 0) {
-        await db.insert(studentSubjects).values({ studentId: student.id, subjectId });
-      }
-    }
-    
-    return newClassSubject;
+    const resolved = new Set((await this.getClassSubjects(classId)).map((row) => row.subjectId));
+    resolved.add(subjectId);
+    await this.setClassSubjects(classId, Array.from(resolved));
+
+    return {
+      id: -1 * (resolved.size + 1),
+      classId,
+      subjectId,
+      assignmentMode: "add",
+    } as ClassSubject;
   }
   
   async removeClassSubject(classId: number, subjectId: number): Promise<boolean> {
-    await db.delete(classSubjects)
-      .where(and(eq(classSubjects.classId, classId), eq(classSubjects.subjectId, subjectId)));
-    
-    const studentsInClass = await db.select().from(students).where(eq(students.classId, classId));
-    for (const student of studentsInClass) {
-      await db.delete(studentSubjects)
-        .where(and(eq(studentSubjects.studentId, student.id), eq(studentSubjects.subjectId, subjectId)));
-    }
-    
+    const resolved = new Set((await this.getClassSubjects(classId)).map((row) => row.subjectId));
+    resolved.delete(subjectId);
+    await this.setClassSubjects(classId, Array.from(resolved));
     return true;
   }
   
   async setClassSubjects(classId: number, subjectIds: number[]): Promise<void> {
-    const oldClassSubjects = await db.select().from(classSubjects).where(eq(classSubjects.classId, classId));
-    const oldSubjectIds = oldClassSubjects.map(cs => cs.subjectId);
-    
-    await db.delete(classSubjects).where(eq(classSubjects.classId, classId));
-    if (subjectIds.length > 0) {
-      const values = subjectIds.map(subjectId => ({ classId, subjectId }));
-      await db.insert(classSubjects).values(values);
-    }
-    
-    const studentsInClass = await db.select().from(students).where(eq(students.classId, classId));
-    
-    for (const student of studentsInClass) {
-      const removedSubjects = oldSubjectIds.filter(id => !subjectIds.includes(id));
-      for (const subjectId of removedSubjects) {
-        await db.delete(studentSubjects)
-          .where(and(eq(studentSubjects.studentId, student.id), eq(studentSubjects.subjectId, subjectId)));
+    const inheritedSubjectIds = new Set(await this.getInheritedSubjectIdsForClass(classId));
+    const uniqueSubjectIds = Array.from(new Set(subjectIds));
+    const desiredSubjectIds = new Set(uniqueSubjectIds);
+
+    const inserts = [
+      ...uniqueSubjectIds
+        .filter((subjectId) => !inheritedSubjectIds.has(subjectId))
+        .map((subjectId) => ({ classId, subjectId, assignmentMode: "add" as const })),
+      ...Array.from(inheritedSubjectIds)
+        .filter((subjectId) => !desiredSubjectIds.has(subjectId))
+        .map((subjectId) => ({ classId, subjectId, assignmentMode: "remove" as const })),
+    ];
+
+    await db.transaction(async (tx) => {
+      await tx.delete(classSubjects).where(eq(classSubjects.classId, classId));
+      if (inserts.length > 0) {
+        await tx.insert(classSubjects).values(inserts);
       }
-      
-      const addedSubjects = subjectIds.filter(id => !oldSubjectIds.includes(id));
-      for (const subjectId of addedSubjects) {
-        const existing = await db.select().from(studentSubjects)
-          .where(and(eq(studentSubjects.studentId, student.id), eq(studentSubjects.subjectId, subjectId)));
-        if (existing.length === 0) {
-          await db.insert(studentSubjects).values({ studentId: student.id, subjectId });
-        }
-      }
-    }
+    });
   }
   
   async migrateStudents(fromClassId: number, toClassId: number, studentIds?: number[]): Promise<number> {
-    const toClassSubjectsData = await db.select().from(classSubjects).where(eq(classSubjects.classId, toClassId));
-    const toClassSubjectIds = toClassSubjectsData.map(cs => cs.subjectId);
-    
     let studentsToMigrate: typeof students.$inferSelect[];
     if (studentIds && studentIds.length > 0) {
       studentsToMigrate = await db.select().from(students)
@@ -744,12 +857,7 @@ export class DatabaseStorage implements IStorage {
     
     for (const student of studentsToMigrate) {
       await db.update(students).set({ classId: toClassId }).where(eq(students.id, student.id));
-      
       await db.delete(studentSubjects).where(eq(studentSubjects.studentId, student.id));
-      
-      for (const subjectId of toClassSubjectIds) {
-        await db.insert(studentSubjects).values({ studentId: student.id, subjectId });
-      }
     }
     
     return studentsToMigrate.length;
@@ -819,10 +927,38 @@ export class DatabaseStorage implements IStorage {
     return true;
   }
 
-  async getNextAdmissionNo(): Promise<string> {
-    const [result] = await db.select({ count: drizzleCount() }).from(students);
-    const num = (result?.count || 0) + 1;
-    return `FCGSM${num.toString().padStart(4, '0')}`;
+  async getNextAdmissionNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string> {
+    const referenceDate = this.normalizeReferenceDate(options?.referenceDate);
+    const schoolId = options?.schoolId || null;
+    const year = referenceDate.getFullYear();
+    const start = new Date(year, 0, 1);
+    const end = new Date(year + 1, 0, 1);
+
+    const conditions = [
+      gte(sql`COALESCE(${students.enrollmentDate}::timestamp, ${students.createdAt})`, start),
+      lt(sql`COALESCE(${students.enrollmentDate}::timestamp, ${students.createdAt})`, end),
+    ];
+    if (schoolId) {
+      conditions.push(eq(students.schoolId, schoolId));
+    }
+
+    const rows = await db
+      .select({ admissionNo: students.admissionNo })
+      .from(students)
+      .where(and(...conditions));
+
+    let maxSequence = 0;
+    const pattern = new RegExp(`^FCGS${String(year).slice(-2)}S(\\d{4})${this.getSchoolSequenceCode(schoolId)}$`, "i");
+    for (const row of rows) {
+      const match = (row.admissionNo || "").match(pattern);
+      if (!match) continue;
+      const sequence = Number(match[1]);
+      if (Number.isFinite(sequence) && sequence > maxSequence) {
+        maxSequence = sequence;
+      }
+    }
+
+    return this.buildFormattedSequenceNumber("S", schoolId, referenceDate, maxSequence + 1);
   }
 
   async getSubjectsBySchool(schoolId: number): Promise<Subject[]> {
@@ -893,16 +1029,36 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getStudentSubjects(studentId: number): Promise<StudentSubject[]> {
-    return db.select().from(studentSubjects).where(eq(studentSubjects.studentId, studentId));
+    const resolvedSubjectIds = await this.getResolvedStudentSubjectIds(studentId);
+    return resolvedSubjectIds.map((subjectId, index) => ({
+      id: -1 * (index + 1),
+      studentId,
+      subjectId,
+      assignmentMode: "add",
+    } as StudentSubject));
   }
 
   async updateStudentSubjects(studentId: number, subjectIds: number[]): Promise<void> {
-    await db.delete(studentSubjects).where(eq(studentSubjects.studentId, studentId));
-    if (subjectIds.length > 0) {
-      await db.insert(studentSubjects).values(
-        subjectIds.map(subjectId => ({ studentId, subjectId }))
-      );
-    }
+    const student = await this.getStudent(studentId);
+    const inheritedSubjectIds = new Set<number>(student?.classId ? await this.getResolvedClassSubjectIds(student.classId) : []);
+    const uniqueSubjectIds = Array.from(new Set(subjectIds));
+    const desiredSubjectIds = new Set(uniqueSubjectIds);
+
+    const inserts = [
+      ...uniqueSubjectIds
+        .filter((subjectId) => !inheritedSubjectIds.has(subjectId))
+        .map((subjectId) => ({ studentId, subjectId, assignmentMode: "add" as const })),
+      ...Array.from(inheritedSubjectIds)
+        .filter((subjectId) => !desiredSubjectIds.has(subjectId))
+        .map((subjectId) => ({ studentId, subjectId, assignmentMode: "remove" as const })),
+    ];
+
+    await db.transaction(async (tx) => {
+      await tx.delete(studentSubjects).where(eq(studentSubjects.studentId, studentId));
+      if (inserts.length > 0) {
+        await tx.insert(studentSubjects).values(inserts);
+      }
+    });
   }
 
   async getAllGrades(): Promise<Grade[]> {

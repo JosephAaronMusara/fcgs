@@ -15,6 +15,8 @@ export const staffStatusEnum = pgEnum("staff_status", ["active", "inactive"]);
 
 export const studentStatusEnum = pgEnum("student_status", ["active", "inactive", "transferred", "graduated"]);
 
+export const subjectAssignmentModeEnum = pgEnum("subject_assignment_mode", ["add", "remove"]);
+
 export const hostelStatusEnum = pgEnum("hostel_status", ["present", "absent", "leave", "sick"]);
 
 export const calendarScopeEnum = pgEnum("calendar_scope", [
@@ -148,6 +150,8 @@ export const staff = pgTable("staff", {
   staffNo: text("staff_no").notNull().unique(),
   firstName: text("first_name").notNull(),
   lastName: text("last_name").notNull(),
+  nationalIdNumber: text("national_id_number"),
+  passportNumber: text("passport_number"),
   email: text("email"),
   phone: text("phone"),
   gender: genderEnum("gender"),
@@ -185,6 +189,7 @@ export const classSubjects = pgTable("class_subjects", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   classId: integer("class_id").references(() => classes.id).notNull(),
   subjectId: integer("subject_id").references(() => subjects.id).notNull(),
+  assignmentMode: subjectAssignmentModeEnum("assignment_mode").notNull().default("add"),
 });
 
 export const parents = pgTable("parents", {
@@ -210,6 +215,8 @@ export const students = pgTable("students", {
   admissionNo: text("admission_no").notNull().unique(),
   firstName: text("first_name").notNull(),
   lastName: text("last_name").notNull(),
+  nationalIdNumber: text("national_id_number"),
+  passportNumber: text("passport_number"),
   email: text("email"),
   phone: text("phone"),
   gender: genderEnum("gender"),
@@ -260,6 +267,7 @@ export const studentSubjects = pgTable("student_subjects", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   studentId: integer("student_id").references(() => students.id).notNull(),
   subjectId: integer("subject_id").references(() => subjects.id).notNull(),
+  assignmentMode: subjectAssignmentModeEnum("assignment_mode").notNull().default("add"),
 });
 
 export const gradeLevelEnum = pgEnum("grade_level", ["A_Level", "O_Level", "IGCSE", "SEC_ZIM_A", "SEC_ZIM_O", "SEC_CAM_A", "SEC_CAM_O", "SEC_CAM_IGCSE", "PRI_ZIM_ECD", "PRI_ZIM_G12", "PRI_ZIM_G37", "PRI_CAM_ECD", "PRI_CAM_G12", "PRI_CAM_G37"]);
@@ -670,7 +678,7 @@ export const studentApplications = pgTable("student_applications", {
   parentEmail: text("parent_email"),
   parentRelationship: text("parent_relationship"),
   address: text("address"),
-  birthEntryNumber: text("birth_entry_number"),
+  nationalIdNumber: text("birth_entry_number"),
   dreamJob: text("dream_job"),
   expectedStartDate: date("expected_start_date"),
   documents: text("documents"),

@@ -24,7 +24,7 @@ import {
   insertOrganizationSchema, insertSchoolSchema, insertLibraryResourceSchema, insertLibraryCategorySchema, insertLibraryShelfSchema, insertLibraryBookSchema, insertLibraryLoanSchema, insertLibraryFineSchema, insertLibraryReservationSchema,
   libraryBooks as libraryBooksTable, libraryBookCopies as libraryBookCopiesTable, libraryFines as libraryFinesTable, libraryReservations as libraryReservationsTable,
   insertTimetableSlotSchema, insertLogbookEntrySchema, insertStaffAttendanceLogSchema, insertPosItemSchema,
-  schools as schoolsTable, staff,
+  schools as schoolsTable, staff, parents as parentsTable,
   insertPosSaleSchema, insertNewsletterSchema, insertSchemeSchema,
   insertHostelSchema, insertHostelRollCallSchema, insertStudentApplicationSchema,
   hostels as hostelsTable,
@@ -622,8 +622,13 @@ async function getHistoricalStudentsForAssessments(params: {
   const currentClassStudents = (await storage.getStudentsByClass(classId)).filter((s) => s.schoolId === schoolId);
   const studentMap = new Map(currentClassStudents.map((student) => [student.id, student]));
 
-  const subjectRows = await db.select().from(studentSubjectsSchema).where(eq(studentSubjectsSchema.subjectId, subjectId));
-  const subjectStudentIds = new Set(subjectRows.map((row) => row.studentId));
+  const subjectStudentIds = new Set<number>();
+  for (const student of currentClassStudents) {
+    const resolvedSubjects = await storage.getStudentSubjects(student.id);
+    if (resolvedSubjects.some((row) => row.subjectId === subjectId)) {
+      subjectStudentIds.add(student.id);
+    }
+  }
 
   let historyAssessmentIds = [...assessmentIds];
   if (includeSiblingAssessmentHistory) {
@@ -636,14 +641,17 @@ async function getHistoricalStudentsForAssessments(params: {
     historyAssessmentIds = Array.from(new Set([...historyAssessmentIds, ...siblingAssessments.map((a) => a.id)]));
   }
 
+  const historicalStudentIds = new Set<number>();
   if (historyAssessmentIds.length > 0) {
     const historyMarks = await storage.getAssessmentMarksByAssessments(historyAssessmentIds);
-    const historicalStudentIds = Array.from(new Set(historyMarks.map((mark) => mark.studentId)));
-    if (historicalStudentIds.length > 0) {
+    for (const mark of historyMarks) {
+      historicalStudentIds.add(mark.studentId);
+    }
+    if (historicalStudentIds.size > 0) {
       const historicalStudents = await db
         .select()
         .from(studentsTable)
-        .where(and(eq(studentsTable.schoolId, schoolId), inArray(studentsTable.id, historicalStudentIds)));
+        .where(and(eq(studentsTable.schoolId, schoolId), inArray(studentsTable.id, Array.from(historicalStudentIds))));
       for (const student of historicalStudents) {
         studentMap.set(student.id, student as any);
       }
@@ -651,11 +659,84 @@ async function getHistoricalStudentsForAssessments(params: {
   }
 
   const students = Array.from(studentMap.values()).filter((student: any) =>
-    subjectStudentIds.size === 0 || subjectStudentIds.has(student.id) || assessmentIds.length === 0
+    subjectStudentIds.has(student.id) || historicalStudentIds.has(student.id)
   );
 
   students.sort((a: any, b: any) => `${a.lastName}${a.firstName}`.localeCompare(`${b.lastName}${b.firstName}`));
   return students;
+}
+
+function subjectMatchesHierarchyStream(subject: any, streamId: number | null | undefined): boolean {
+  if (streamId == null) {
+    return false;
+  }
+
+  const scopedStreamIds = Array.isArray(subject?.streamIds) ? subject.streamIds : [];
+
+  if (subject?.streamId != null) {
+    return subject.streamId === streamId;
+  }
+
+  if (scopedStreamIds.length > 0) {
+    return scopedStreamIds.includes(streamId);
+  }
+
+  return false;
+}
+
+async function getSchoolScopedSubjects(schoolId: number | null | undefined) {
+  const allSubjects = await storage.getAllSubjects();
+  if (schoolId == null) {
+    return allSubjects;
+  }
+  return allSubjects.filter((subject) => subject.schoolId === schoolId);
+}
+
+async function getInheritedClassSubjectIds(classData: any): Promise<number[]> {
+  const schoolSubjects = await getSchoolScopedSubjects(classData?.schoolId ?? null);
+  return schoolSubjects
+    .filter((subject) => subjectMatchesHierarchyStream(subject, classData?.streamId))
+    .map((subject) => subject.id);
+}
+
+async function buildClassSubjectManagementPayload(classId: number) {
+  const classData = await storage.getClass(classId);
+  if (!classData) {
+    return null;
+  }
+
+  const allSubjects = await getSchoolScopedSubjects(classData.schoolId);
+  const overrideRows = await db.select().from(classSubjectsSchema).where(eq(classSubjectsSchema.classId, classId));
+  const selectedRows = await storage.getClassSubjects(classId);
+  const inheritedSelected = await getInheritedClassSubjectIds(classData);
+
+  return {
+    all: allSubjects,
+    selected: selectedRows.map((row) => row.subjectId.toString()),
+    directSelected: overrideRows.filter((row) => row.assignmentMode === "add").map((row) => row.subjectId.toString()),
+    removed: overrideRows.filter((row) => row.assignmentMode === "remove").map((row) => row.subjectId.toString()),
+    inheritedSelected: inheritedSelected.map((id) => id.toString()),
+  };
+}
+
+async function buildStudentSubjectManagementPayload(studentId: number) {
+  const student = await storage.getStudent(studentId);
+  if (!student) {
+    return null;
+  }
+
+  const allSubjects = await getSchoolScopedSubjects(student.schoolId);
+  const overrideRows = await db.select().from(studentSubjectsSchema).where(eq(studentSubjectsSchema.studentId, studentId));
+  const selectedRows = await storage.getStudentSubjects(studentId);
+  const inheritedSelected = student.classId ? (await storage.getClassSubjects(student.classId)).map((row) => row.subjectId) : [];
+
+  return {
+    all: allSubjects,
+    selected: selectedRows.map((row) => row.subjectId.toString()),
+    directSelected: overrideRows.filter((row) => row.assignmentMode === "add").map((row) => row.subjectId.toString()),
+    removed: overrideRows.filter((row) => row.assignmentMode === "remove").map((row) => row.subjectId.toString()),
+    inheritedSelected: inheritedSelected.map((id) => id.toString()),
+  };
 }
 
 // Helper to get school context from request
@@ -674,6 +755,178 @@ async function getSystemUrl(schoolId?: number | null): Promise<string> {
     if (orgs[0]?.systemUrl) return orgs[0].systemUrl;
   } catch {}
   return "";
+}
+
+
+function buildSchoolSequenceCode(schoolId?: number | null): string {
+  const value = Number(schoolId || 0);
+  if (!Number.isFinite(value) || value <= 0) return "A";
+  let remaining = Math.floor(value);
+  let result = "";
+  while (remaining > 0) {
+    const offset = (remaining - 1) % 26;
+    result = String.fromCharCode(65 + offset) + result;
+    remaining = Math.floor((remaining - 1) / 26);
+  }
+  return result;
+}
+
+function buildFormattedPersonNumber(prefix: "S" | "E", schoolId?: number | null, referenceDate?: string | Date | null, sequence: number = 1) {
+  const date = referenceDate ? new Date(referenceDate) : new Date();
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  const yearPart = String(safeDate.getFullYear()).slice(-2);
+  return `FCGS${yearPart}${prefix}${String(sequence).padStart(4, "0")}${buildSchoolSequenceCode(schoolId)}`.toUpperCase();
+}
+
+type ExternalChannel = { type: "email" | "sms"; value: string };
+
+function dedupeExternalChannels(channels: ExternalChannel[]) {
+  const seen = new Set<string>();
+  return channels.filter((channel) => {
+    const key = `${channel.type}:${channel.value.trim().toLowerCase()}`;
+    if (!channel.value?.trim() || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function getUserExternalChannels(user: User): Promise<ExternalChannel[]> {
+  const channels: ExternalChannel[] = [];
+  const pushIfPresent = (type: "email" | "sms", value?: string | null) => {
+    if (value && value.trim()) channels.push({ type, value: value.trim() });
+  };
+
+  pushIfPresent("email", user.email);
+  pushIfPresent("sms", user.phone);
+
+  const [linkedStaff] = await db.select({
+    email: staff.email,
+    phone: staff.phone,
+  }).from(staff).where(eq(staff.userId, user.id)).limit(1);
+
+  if (linkedStaff) {
+    pushIfPresent("email", linkedStaff.email);
+    pushIfPresent("sms", linkedStaff.phone);
+  }
+
+  const [linkedParent] = await db.select({
+    email: parentsTable.email,
+    phone: parentsTable.phone,
+  }).from(parentsTable).where(eq(parentsTable.userId, user.id)).limit(1);
+
+  if (linkedParent) {
+    pushIfPresent("email", linkedParent.email);
+    pushIfPresent("sms", linkedParent.phone);
+  }
+
+  const [linkedStudent] = await db.select({
+    email: studentsTable.email,
+    phone: studentsTable.phone,
+    parentId: studentsTable.parentId,
+  }).from(studentsTable).where(eq(studentsTable.userId, user.id)).limit(1);
+
+  if (linkedStudent) {
+    pushIfPresent("email", linkedStudent.email);
+    pushIfPresent("sms", linkedStudent.phone);
+
+    if (linkedStudent.parentId) {
+      const [studentParent] = await db.select({
+        email: parentsTable.email,
+        phone: parentsTable.phone,
+      }).from(parentsTable).where(eq(parentsTable.id, linkedStudent.parentId)).limit(1);
+
+      if (studentParent) {
+        pushIfPresent("email", studentParent.email);
+        pushIfPresent("sms", studentParent.phone);
+      }
+    }
+  }
+
+  return dedupeExternalChannels(channels);
+}
+
+async function issuePasswordSetupLink(user: User, options?: {
+  schoolId?: number | null;
+  recipientType?: string;
+  recipientId?: number | null;
+  recipientName?: string;
+  sentBy?: number;
+  usernameOverride?: string;
+  subjectPrefix?: string;
+}) {
+  const resetToken = crypto.randomBytes(24).toString("hex");
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+  await storage.updateUser(user.id, {
+    passwordResetToken: resetToken,
+    passwordResetTokenExpiry: expiresAt,
+    mustResetPassword: true,
+  });
+
+  const systemUrl = await getSystemUrl(options?.schoolId);
+  const baseUrl = systemUrl?.trim() || process.env.APP_BASE_URL || "";
+  const resetPath = `/reset-password?token=${encodeURIComponent(resetToken)}`;
+  const resetLink = baseUrl ? `${baseUrl.replace(/\/$/, "")}${resetPath}` : resetPath;
+
+  const displayName = options?.recipientName || [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username;
+  const username = options?.usernameOverride || user.username;
+  const messageText = `Dear ${displayName},\nYour account is ready.\nUsername: ${username}\nUse this one-time link to set or reset your password (valid for 1 hour):\n${resetLink}\n\nHardwork - Discipline - Changing Lives`;
+  const messageHtml = messageText.replace(/\n/g, "<br>");
+  const subject = `${options?.subjectPrefix || "Password Setup"} Link`;
+
+  const channels = await getUserExternalChannels(user);
+  const results = await Promise.all(channels.map((channel) => {
+    if (channel.type === "email") {
+      return communicationService.sendEmail({
+        to: channel.value,
+        subject,
+        text: messageText,
+        html: messageHtml,
+        schoolId: options?.schoolId || 0,
+        recipientType: options?.recipientType,
+        recipientId: options?.recipientId || undefined,
+        recipientName: displayName,
+        category: "account",
+        sentBy: options?.sentBy,
+      });
+    }
+    return communicationService.sendSms({
+      to: channel.value,
+      message: messageText,
+      schoolId: options?.schoolId || 0,
+      recipientType: options?.recipientType,
+      recipientId: options?.recipientId || undefined,
+      recipientName: displayName,
+      category: "account",
+      sentBy: options?.sentBy,
+    });
+  }));
+
+  return { resetToken, resetLink, channels, results };
+}
+
+async function findReusableParentForApplication(options: {
+  schoolId?: number | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+}) {
+  const schoolId = options.schoolId || undefined;
+  const normalize = (value?: string | null) => (value || "").trim().toLowerCase();
+  const email = normalize(options.email);
+  const phoneDigits = (options.phone || "").replace(/\D+/g, "");
+  const firstName = normalize(options.firstName);
+  const lastName = normalize(options.lastName);
+
+  const pool = schoolId ? await storage.getParentsBySchool(schoolId) : await storage.getAllParents();
+
+  return pool.find((parent) => {
+    const parentEmail = normalize(parent.email);
+    const parentPhone = (parent.phone || "").replace(/\D+/g, "");
+    const namesMatch = normalize(parent.firstName) === firstName && normalize(parent.lastName) === lastName;
+    return (!!email && parentEmail === email) || (!!phoneDigits && parentPhone === phoneDigits) || (namesMatch && !!phoneDigits && parentPhone === phoneDigits);
+  });
 }
 
 function getSchoolContext(req: Request): number | null {
@@ -867,6 +1120,30 @@ export async function registerRoutes(
   });
 
   setupAuth(app);
+
+  app.post("/api/auth/request-password-reset", async (req, res, next) => {
+    try {
+      const username = String(req.body?.username || "").trim();
+      if (!username) {
+        return res.status(400).json({ message: "Username is required" });
+      }
+
+      const user = await storage.getUserByUsername(username);
+      if (user && user.isActive) {
+        await issuePasswordSetupLink(user, {
+          schoolId: user.schoolId || undefined,
+          recipientType: user.role,
+          recipientName: [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username,
+          usernameOverride: user.username,
+          subjectPrefix: "Password Reset",
+        });
+      }
+
+      return res.json({ message: "If an account exists, password reset instructions have been sent." });
+    } catch (error) {
+      next(error);
+    }
+  });
   registerObjectStorageRoutes(app);
   registerCalendarRoutes(app);
   await ensureEcdSeedData();
@@ -875,6 +1152,7 @@ export async function registerRoutes(
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/register",
+    "/api/auth/request-password-reset",
     "/api/auth/reset-password-with-token",
     "/api/auth/force-reset-password",
     "/api/notifications",
@@ -1149,7 +1427,10 @@ export async function registerRoutes(
 
   app.get("/api/staff/next-no", requireAuth, async (req, res, next) => {
     try {
-      const staffNo = await storage.getNextStaffNo();
+      const staffNo = await storage.getNextStaffNo({
+        schoolId: getSchoolContext(req),
+        referenceDate: new Date(),
+      });
       res.json({ staffNo });
     } catch (error) {
       next(error);
@@ -1219,9 +1500,18 @@ export async function registerRoutes(
     try {
       const schoolId = getSchoolContext(req);
       const data = insertStaffSchema.parse(req.body);
+      if (!data.nationalIdNumber?.trim()) {
+        return res.status(400).json({ message: "National ID Number is required" });
+      }
+      const effectiveSchoolId = data.schoolId || schoolId || undefined;
+      const referenceDate = new Date();
+      const staffNo = (data.staffNo || (await storage.getNextStaffNo({ schoolId: effectiveSchoolId, referenceDate }))).toUpperCase();
       const newStaff = await storage.createStaff({
         ...data,
-        schoolId: schoolId || undefined,
+        staffNo,
+        nationalIdNumber: data.nationalIdNumber.trim(),
+        passportNumber: data.passportNumber?.trim() || null,
+        schoolId: effectiveSchoolId,
       });
       logActivity(req, { action: "create", category: "staff", description: `Added staff member: ${newStaff.firstName} ${newStaff.lastName}`, targetType: "staff", targetId: newStaff.id, targetName: `${newStaff.firstName} ${newStaff.lastName}` });
       res.status(201).json(newStaff);
@@ -1232,7 +1522,14 @@ export async function registerRoutes(
 
   app.put("/api/staff/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateStaff(parseInt(req.params.id), req.body);
+      const payload: any = { ...req.body };
+      if (typeof payload.staffNo === "string") payload.staffNo = payload.staffNo.toUpperCase();
+      if (typeof payload.nationalIdNumber === "string") payload.nationalIdNumber = payload.nationalIdNumber.trim();
+      if (typeof payload.passportNumber === "string") payload.passportNumber = payload.passportNumber.trim() || null;
+      if ("nationalIdNumber" in payload && !payload.nationalIdNumber) {
+        return res.status(400).json({ message: "National ID Number is required" });
+      }
+      const updated = await storage.updateStaff(parseInt(req.params.id), payload);
       if (!updated) {
         return res.status(404).json({ message: "Staff not found" });
       }
@@ -1595,15 +1892,12 @@ export async function registerRoutes(
       if (sendResetToken) {
         const tempPwd = crypto.randomBytes(16).toString("hex");
         hashedPassword = await bcrypt.hash(tempPwd, 10);
-        const resetToken = generateResetToken();
         tokenData = {
-          passwordResetToken: resetToken,
-          passwordResetTokenExpiry: new Date(Date.now() + 60 * 60 * 1000),
           mustResetPassword: true,
         };
       } else {
         if (!password) {
-          return res.status(400).json({ message: "Password is required when not sending reset token" });
+          return res.status(400).json({ message: "Password is required when not sending a password setup link" });
         }
         const pwdCheck = validatePassword(password);
         if (!pwdCheck.valid) {
@@ -1633,18 +1927,20 @@ export async function registerRoutes(
       const name = `${staffMember.firstName} ${staffMember.lastName}`;
       const schoolId = staffMember.schoolId;
       const userId = (req.user as User).id;
-      const sysUrl = await getSystemUrl(schoolId);
-      const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
 
-      if (sendResetToken && tokenData.passwordResetToken) {
-        const resetMsg = `Dear ${name},\nYour account has been created.\nUsername: ${username}\nPlease use this token to set your password (valid for 1 hour):\n${tokenData.passwordResetToken}${loginLink}\n\nHardwork - Discipline - Changing Lives`;
-        if (staffMember.phone) {
-          await communicationService.sendSms({ to: staffMember.phone, message: resetMsg, schoolId: schoolId || 0, recipientType: "staff", recipientId: staffId, sentBy: userId, category: "account", recipientName: name });
-        }
-        if (staffMember.email) {
-          await communicationService.sendEmail({ to: staffMember.email, subject: "Account Created - Password Reset Required", html: resetMsg.replace(/\n/g, '<br>'), text: resetMsg, schoolId: schoolId || 0, recipientType: "staff", recipientId: staffId, sentBy: userId, category: "account", recipientName: name });
-        }
+      if (sendResetToken) {
+        await issuePasswordSetupLink(newUser, {
+          schoolId: schoolId || undefined,
+          recipientType: "staff",
+          recipientId: staffId,
+          recipientName: name,
+          sentBy: userId,
+          usernameOverride: username,
+          subjectPrefix: "Password Setup",
+        });
       } else if (passwordToSend) {
+        const sysUrl = await getSystemUrl(schoolId);
+        const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
         const credMsg = `Dear ${name},\nYour account has been created.\nUsername: ${username}\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.${loginLink}\n\nHardwork - Discipline - Changing Lives`;
         if (staffMember.phone) {
           await communicationService.sendSms({ to: staffMember.phone, message: credMsg, schoolId: schoolId || 0, recipientType: "staff", recipientId: staffId, sentBy: userId, category: "account", recipientName: name });
@@ -1794,8 +2090,20 @@ export async function registerRoutes(
 
   app.get("/api/class-subjects/all", requireAuth, async (req, res, next) => {
     try {
-      const allRecords = await db.select().from(classSubjectsSchema);
-      res.json(allRecords);
+      const schoolId = getSchoolContext(req);
+      const classList = schoolId ? await storage.getClassesBySchool(schoolId) : await storage.getAllClasses();
+      const resolvedRows = await Promise.all(
+        classList.map(async (classItem) => {
+          const subjectRows = await storage.getClassSubjects(classItem.id);
+          return subjectRows.map((row, index) => ({
+            id: row.id ?? (-1 * (index + 1)),
+            classId: classItem.id,
+            subjectId: row.subjectId,
+            assignmentMode: row.assignmentMode,
+          }));
+        }),
+      );
+      res.json(resolvedRows.flat());
     } catch (error) {
       next(error);
     }
@@ -1803,8 +2111,17 @@ export async function registerRoutes(
 
   app.get("/api/classes/:id/subjects", requireAuth, async (req, res, next) => {
     try {
-      const classSubjectsList = await storage.getClassSubjects(parseInt(req.params.id));
-      res.json(classSubjectsList);
+      const classId = parseInt(req.params.id);
+      const classData = await storage.getClass(classId);
+      if (!classData) {
+        return res.status(404).json({ message: "Class not found" });
+      }
+      const schoolId = getSchoolContext(req);
+      if (schoolId && classData.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      const payload = await buildClassSubjectManagementPayload(classId);
+      res.json(payload);
     } catch (error) {
       next(error);
     }
@@ -1825,14 +2142,28 @@ export async function registerRoutes(
       if (!subjectId) {
         return res.status(400).json({ message: "subjectId is required" });
       }
-      const subject = await storage.getSubject(subjectId);
-      if (subject && subject.streamIds && subject.streamIds.length > 0) {
-        if (!classData.streamId || !subject.streamIds.includes(classData.streamId)) {
-          return res.status(400).json({ message: `${subject.name} is not available for this stream` });
-        }
+      const schoolSubjects = await getSchoolScopedSubjects(classData.schoolId);
+      if (!schoolSubjects.some((subject) => subject.id === Number(subjectId))) {
+        return res.status(400).json({ message: "Invalid subject" });
       }
-      const classSubject = await storage.addClassSubject(classId, subjectId);
-      res.status(201).json(classSubject);
+      const payload = await buildClassSubjectManagementPayload(classId);
+      const selected = new Set((payload?.selected ?? []).map(Number));
+      const directSelected = new Set((payload?.directSelected ?? []).map(Number));
+      const removed = new Set((payload?.removed ?? []).map(Number));
+      selected.add(Number(subjectId));
+      directSelected.add(Number(subjectId));
+      removed.delete(Number(subjectId));
+      await db.transaction(async (tx) => {
+        await tx.delete(classSubjectsSchema).where(eq(classSubjectsSchema.classId, classId));
+        const inserts = [
+          ...Array.from(directSelected).map((id) => ({ classId, subjectId: id, assignmentMode: "add" as const })),
+          ...Array.from(removed).map((id) => ({ classId, subjectId: id, assignmentMode: "remove" as const })),
+        ];
+        if (inserts.length > 0) {
+          await tx.insert(classSubjectsSchema).values(inserts);
+        }
+      });
+      res.status(201).json(await buildClassSubjectManagementPayload(classId));
     } catch (error) {
       next(error);
     }
@@ -1849,8 +2180,28 @@ export async function registerRoutes(
       if (schoolId && classData.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      await storage.removeClassSubject(classId, parseInt(req.params.subjectId));
-      res.json({ message: "Subject removed from class" });
+      const subjectId = parseInt(req.params.subjectId);
+      const payload = await buildClassSubjectManagementPayload(classId);
+      const inherited = new Set((payload?.inheritedSelected ?? []).map(Number));
+      const directSelected = new Set((payload?.directSelected ?? []).map(Number));
+      const removed = new Set((payload?.removed ?? []).map(Number));
+      directSelected.delete(subjectId);
+      if (inherited.has(subjectId)) {
+        removed.add(subjectId);
+      } else {
+        removed.delete(subjectId);
+      }
+      await db.transaction(async (tx) => {
+        await tx.delete(classSubjectsSchema).where(eq(classSubjectsSchema.classId, classId));
+        const inserts = [
+          ...Array.from(directSelected).map((id) => ({ classId, subjectId: id, assignmentMode: "add" as const })),
+          ...Array.from(removed).map((id) => ({ classId, subjectId: id, assignmentMode: "remove" as const })),
+        ];
+        if (inserts.length > 0) {
+          await tx.insert(classSubjectsSchema).values(inserts);
+        }
+      });
+      res.json({ message: "Subject removed from class", data: await buildClassSubjectManagementPayload(classId) });
     } catch (error) {
       next(error);
     }
@@ -1867,28 +2218,35 @@ export async function registerRoutes(
       if (schoolId && classData.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const { subjectIds } = req.body;
+      const { subjectIds, directSubjectIds, removedSubjectIds } = req.body as {
+        subjectIds?: number[];
+        directSubjectIds?: number[];
+        removedSubjectIds?: number[];
+      };
       if (!Array.isArray(subjectIds)) {
         return res.status(400).json({ message: "subjectIds must be an array" });
       }
-      if (subjectIds.length > 0) {
-        const allSubjects = await storage.getAllSubjects();
-        const schoolSubjects = allSubjects.filter(s => s.schoolId === classData.schoolId);
-        const invalidSubjects: string[] = [];
-        for (const sid of subjectIds) {
-          const subject = schoolSubjects.find(s => s.id === sid);
-          if (subject && subject.streamIds && subject.streamIds.length > 0) {
-            if (!classData.streamId || !subject.streamIds.includes(classData.streamId)) {
-              invalidSubjects.push(subject.name);
-            }
-          }
+      const schoolSubjects = await getSchoolScopedSubjects(classData.schoolId);
+      const validSubjectIds = new Set(schoolSubjects.map((subject) => subject.id));
+      const selected = Array.from(new Set(subjectIds.map(Number))).filter((id) => validSubjectIds.has(id));
+      const inherited = new Set(await getInheritedClassSubjectIds(classData));
+      const normalizedDirect = Array.isArray(directSubjectIds)
+        ? Array.from(new Set(directSubjectIds.map(Number))).filter((id) => validSubjectIds.has(id) && selected.includes(id))
+        : selected.filter((id) => !inherited.has(id));
+      const normalizedRemoved = Array.isArray(removedSubjectIds)
+        ? Array.from(new Set(removedSubjectIds.map(Number))).filter((id) => validSubjectIds.has(id) && !selected.includes(id))
+        : Array.from(inherited).filter((id) => !selected.includes(id));
+      await db.transaction(async (tx) => {
+        await tx.delete(classSubjectsSchema).where(eq(classSubjectsSchema.classId, classId));
+        const inserts = [
+          ...normalizedDirect.map((id) => ({ classId, subjectId: id, assignmentMode: "add" as const })),
+          ...normalizedRemoved.map((id) => ({ classId, subjectId: id, assignmentMode: "remove" as const })),
+        ];
+        if (inserts.length > 0) {
+          await tx.insert(classSubjectsSchema).values(inserts);
         }
-        if (invalidSubjects.length > 0) {
-          return res.status(400).json({ message: `${invalidSubjects.join(", ")} ${invalidSubjects.length === 1 ? "is" : "are"} not available for this stream` });
-        }
-      }
-      await storage.setClassSubjects(classId, subjectIds);
-      res.json({ message: "Class subjects updated" });
+      });
+      res.json({ message: "Class subjects updated", data: await buildClassSubjectManagementPayload(classId) });
     } catch (error) {
       next(error);
     }
@@ -2163,15 +2521,12 @@ export async function registerRoutes(
       if (sendResetToken) {
         const tempPwd = crypto.randomBytes(16).toString("hex");
         hashedPassword = await bcrypt.hash(tempPwd, 10);
-        const resetToken = generateResetToken();
         tokenData = {
-          passwordResetToken: resetToken,
-          passwordResetTokenExpiry: new Date(Date.now() + 60 * 60 * 1000),
           mustResetPassword: true,
         };
       } else {
         if (!password) {
-          return res.status(400).json({ message: "Password is required when not sending reset token" });
+          return res.status(400).json({ message: "Password is required when not sending a password setup link" });
         }
         const pwdCheck = validatePassword(password);
         if (!pwdCheck.valid) {
@@ -2198,18 +2553,20 @@ export async function registerRoutes(
 
       const name = `${parent.firstName} ${parent.lastName}`;
       const userId = (req.user as User).id;
-      const sysUrl = await getSystemUrl(effectiveSchoolId);
-      const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
 
-      if (sendResetToken && tokenData.passwordResetToken) {
-        const resetMsg = `Dear ${name},\nYour account has been created.\nUsername: ${username}\nPlease use this token to set your password (valid for 1 hour):\n${tokenData.passwordResetToken}${loginLink}\n\nHardwork - Discipline - Changing Lives`;
-        if (parent.phone) {
-          await communicationService.sendSms({ to: parent.phone, message: resetMsg, schoolId: effectiveSchoolId, recipientType: "parent", recipientId: parentId, sentBy: userId, category: "account", recipientName: name });
-        }
-        if (parent.email) {
-          await communicationService.sendEmail({ to: parent.email, subject: "Account Created - Password Reset Required", html: resetMsg.replace(/\n/g, '<br>'), text: resetMsg, schoolId: effectiveSchoolId, recipientType: "parent", recipientId: parentId, sentBy: userId, category: "account", recipientName: name });
-        }
+      if (sendResetToken) {
+        await issuePasswordSetupLink(newUser, {
+          schoolId: effectiveSchoolId,
+          recipientType: "parent",
+          recipientId: parentId,
+          recipientName: name,
+          sentBy: userId,
+          usernameOverride: username,
+          subjectPrefix: "Password Setup",
+        });
       } else if (passwordToSend) {
+        const sysUrl = await getSystemUrl(effectiveSchoolId);
+        const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
         const credMsg = `Dear ${name},\nYour account has been created.\nUsername: ${username}\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.${loginLink}\n\nHardwork - Discipline - Changing Lives`;
         if (parent.phone) {
           await communicationService.sendSms({ to: parent.phone, message: credMsg, schoolId: effectiveSchoolId, recipientType: "parent", recipientId: parentId, sentBy: userId, category: "account", recipientName: name });
@@ -2350,7 +2707,10 @@ export async function registerRoutes(
 
   app.get("/api/students/next-admission-no", requireAuth, async (req, res, next) => {
     try {
-      const admissionNo = await storage.getNextAdmissionNo();
+      const admissionNo = await storage.getNextAdmissionNo({
+        schoolId: getSchoolContext(req),
+        referenceDate: new Date(),
+      });
       res.json({ admissionNo });
     } catch (error) {
       next(error);
@@ -2408,9 +2768,16 @@ export async function registerRoutes(
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const data = insertStudentSchema.parse(req.body);
+      if (!data.nationalIdNumber?.trim()) {
+        return res.status(400).json({ message: "National ID Number is required" });
+      }
       const effectiveSchoolId = data.schoolId || schoolId || currentUser.schoolId || undefined;
+      const enrollmentReferenceDate = data.enrollmentDate || new Date();
       const normalizedData: any = {
         ...data,
+        admissionNo: (data.admissionNo || (await storage.getNextAdmissionNo({ schoolId: effectiveSchoolId, referenceDate: enrollmentReferenceDate }))).toUpperCase(),
+        nationalIdNumber: data.nationalIdNumber.trim(),
+        passportNumber: data.passportNumber?.trim() || null,
         schoolId: effectiveSchoolId,
       };
       if (normalizedData.isDayScholar) {
@@ -2447,6 +2814,12 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Student not found" });
       }
       const normalizedData: any = { ...req.body };
+      if (typeof normalizedData.admissionNo === "string") normalizedData.admissionNo = normalizedData.admissionNo.toUpperCase();
+      if (typeof normalizedData.nationalIdNumber === "string") normalizedData.nationalIdNumber = normalizedData.nationalIdNumber.trim();
+      if (typeof normalizedData.passportNumber === "string") normalizedData.passportNumber = normalizedData.passportNumber.trim() || null;
+      if ("nationalIdNumber" in normalizedData && !normalizedData.nationalIdNumber) {
+        return res.status(400).json({ message: "National ID Number is required" });
+      }
       if (Object.prototype.hasOwnProperty.call(normalizedData, "isDayScholar")) {
         if (normalizedData.isDayScholar) {
           normalizedData.isBoarding = false;
@@ -2523,13 +2896,8 @@ export async function registerRoutes(
       if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const studentSubjectList = await storage.getStudentSubjects(studentId);
-      const allSubjects = await storage.getAllSubjects();
-      const filteredSubjects = schoolId ? allSubjects.filter(s => s.schoolId === schoolId) : allSubjects;
-      res.json({
-        all: filteredSubjects,
-        selected: studentSubjectList.map(ss => ss.subjectId.toString())
-      });
+      const payload = await buildStudentSubjectManagementPayload(studentId);
+      res.json(payload);
     } catch (error) {
       next(error);
     }
@@ -2634,10 +3002,35 @@ export async function registerRoutes(
       if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const { subjectIds } = req.body as { subjectIds: number[] };
-      const uniqueSubjectIds = [...new Set(subjectIds || [])];
-      await storage.updateStudentSubjects(studentId, uniqueSubjectIds);
-      res.json({ message: "Student subjects updated successfully" });
+      const { subjectIds, directSubjectIds, removedSubjectIds } = req.body as {
+        subjectIds?: number[];
+        directSubjectIds?: number[];
+        removedSubjectIds?: number[];
+      };
+      if (!Array.isArray(subjectIds)) {
+        return res.status(400).json({ message: "subjectIds must be an array" });
+      }
+      const schoolSubjects = await getSchoolScopedSubjects(student.schoolId);
+      const validSubjectIds = new Set(schoolSubjects.map((subject) => subject.id));
+      const selected = Array.from(new Set(subjectIds.map(Number))).filter((id) => validSubjectIds.has(id));
+      const inherited = new Set(student.classId ? (await storage.getClassSubjects(student.classId)).map((row) => row.subjectId) : []);
+      const normalizedDirect = Array.isArray(directSubjectIds)
+        ? Array.from(new Set(directSubjectIds.map(Number))).filter((id) => validSubjectIds.has(id) && selected.includes(id))
+        : selected.filter((id) => !inherited.has(id));
+      const normalizedRemoved = Array.isArray(removedSubjectIds)
+        ? Array.from(new Set(removedSubjectIds.map(Number))).filter((id) => validSubjectIds.has(id) && !selected.includes(id))
+        : Array.from(inherited).filter((id) => !selected.includes(id));
+      await db.transaction(async (tx) => {
+        await tx.delete(studentSubjectsSchema).where(eq(studentSubjectsSchema.studentId, studentId));
+        const inserts = [
+          ...normalizedDirect.map((id) => ({ studentId, subjectId: id, assignmentMode: "add" as const })),
+          ...normalizedRemoved.map((id) => ({ studentId, subjectId: id, assignmentMode: "remove" as const })),
+        ];
+        if (inserts.length > 0) {
+          await tx.insert(studentSubjectsSchema).values(inserts);
+        }
+      });
+      res.json({ message: "Student subjects updated successfully", data: await buildStudentSubjectManagementPayload(studentId) });
     } catch (error) {
       next(error);
     }
@@ -2871,15 +3264,12 @@ export async function registerRoutes(
       if (parsed.sendResetToken) {
         const tempPwd = crypto.randomBytes(16).toString("hex");
         hashedPassword = await bcrypt.hash(tempPwd, 10);
-        const resetToken = generateResetToken();
         tokenData = {
-          passwordResetToken: resetToken,
-          passwordResetTokenExpiry: new Date(Date.now() + 60 * 60 * 1000),
           mustResetPassword: true,
         };
       } else {
         if (!parsed.password) {
-          return res.status(400).json({ message: "Password is required when not sending reset token" });
+          return res.status(400).json({ message: "Password is required when not sending a password setup link" });
         }
         const pwdCheck = validatePassword(parsed.password);
         if (!pwdCheck.valid) {
@@ -2907,24 +3297,23 @@ export async function registerRoutes(
       const name = `${student.firstName} ${student.lastName}`;
       const userId = currentUser.id;
       const effSchoolId = student.schoolId || 0;
-      const sysUrl = await getSystemUrl(effSchoolId);
-      const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
 
-      if (parsed.sendResetToken && tokenData.passwordResetToken) {
-        const parentRecord = student.parentId ? await storage.getParent(student.parentId) : null;
-        const contactPhone = student.phone || parentRecord?.phone;
-        const contactEmail = student.email || parentRecord?.email;
-        const resetMsg = `Dear ${name},\nYour account has been created.\nUsername: ${parsed.username}\nPlease use this token to set your password (valid for 1 hour):\n${tokenData.passwordResetToken}${loginLink}\n\nHardwork - Discipline - Changing Lives`;
-        if (contactPhone) {
-          await communicationService.sendSms({ to: contactPhone, message: resetMsg, schoolId: effSchoolId, recipientType: "student", recipientId: studentId, sentBy: userId, category: "account", recipientName: name });
-        }
-        if (contactEmail) {
-          await communicationService.sendEmail({ to: contactEmail, subject: "Account Created - Password Reset Required", html: resetMsg.replace(/\n/g, '<br>'), text: resetMsg, schoolId: effSchoolId, recipientType: "student", recipientId: studentId, sentBy: userId, category: "account", recipientName: name });
-        }
+      if (parsed.sendResetToken) {
+        await issuePasswordSetupLink(newUser, {
+          schoolId: effSchoolId,
+          recipientType: "student",
+          recipientId: studentId,
+          recipientName: name,
+          sentBy: userId,
+          usernameOverride: parsed.username,
+          subjectPrefix: "Password Setup",
+        });
       } else if (passwordToSend) {
         const parentRecord = student.parentId ? await storage.getParent(student.parentId) : null;
         const contactPhone = student.phone || parentRecord?.phone;
         const contactEmail = student.email || parentRecord?.email;
+        const sysUrl = await getSystemUrl(effSchoolId);
+        const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
         const credMsg = `Dear ${name},\nYour account has been created.\nUsername: ${parsed.username}\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.${loginLink}\n\nHardwork - Discipline - Changing Lives`;
         if (contactPhone) {
           await communicationService.sendSms({ to: contactPhone, message: credMsg, schoolId: effSchoolId, recipientType: "student", recipientId: studentId, sentBy: userId, category: "account", recipientName: name });
@@ -11048,23 +11437,7 @@ export async function registerRoutes(
       const student = await ensureStudentInSchool(studentId, schoolId, res);
       if (!student) return;
 
-      const selectedSubjectIds = (
-        await db
-          .select({ subjectId: studentSubjectsSchema.subjectId })
-          .from(studentSubjectsSchema)
-          .where(eq(studentSubjectsSchema.studentId, student.id))
-      ).map((row) => row.subjectId);
-
-      const fallbackSubjectIds = student.classId
-        ? (
-            await db
-              .select({ subjectId: classSubjectsSchema.subjectId })
-              .from(classSubjectsSchema)
-              .where(eq(classSubjectsSchema.classId, student.classId))
-          ).map((row) => row.subjectId)
-        : [];
-
-      const subjectIds = Array.from(new Set((selectedSubjectIds.length > 0 ? selectedSubjectIds : fallbackSubjectIds).filter(Boolean)));
+      const subjectIds = Array.from(new Set((await storage.getStudentSubjects(student.id)).map((row) => row.subjectId).filter(Boolean)));
       if (subjectIds.length === 0) return res.json([]);
 
       const subjects = await storage.getAllSubjects();
@@ -11135,21 +11508,8 @@ export async function registerRoutes(
       const subject = await ensureSubjectInSchool(payload.subjectId, schoolId, res);
       if (!subject) return;
 
-      const studentSubjectIds = (
-        await db
-          .select({ subjectId: studentSubjectsSchema.subjectId })
-          .from(studentSubjectsSchema)
-          .where(eq(studentSubjectsSchema.studentId, payload.studentId))
-      ).map((row) => row.subjectId);
-
-      const classSubjectIds = (
-        await db
-          .select({ subjectId: classSubjectsSchema.subjectId })
-          .from(classSubjectsSchema)
-          .where(eq(classSubjectsSchema.classId, payload.classId))
-      ).map((row) => row.subjectId);
-
-      const allowedSubjectIds = new Set((studentSubjectIds.length > 0 ? studentSubjectIds : classSubjectIds).filter(Boolean));
+      const studentSubjectIds = (await storage.getStudentSubjects(payload.studentId)).map((row) => row.subjectId);
+      const allowedSubjectIds = new Set(studentSubjectIds.filter(Boolean));
       if (allowedSubjectIds.size > 0 && !allowedSubjectIds.has(payload.subjectId)) {
         return res.status(400).json({ message: "Selected subject is not assigned to this student" });
       }
@@ -11212,21 +11572,8 @@ export async function registerRoutes(
       const subject = await ensureSubjectInSchool(payload.subjectId, schoolId, res);
       if (!subject) return;
 
-      const studentSubjectIds = (
-        await db
-          .select({ subjectId: studentSubjectsSchema.subjectId })
-          .from(studentSubjectsSchema)
-          .where(eq(studentSubjectsSchema.studentId, payload.studentId))
-      ).map((row) => row.subjectId);
-
-      const classSubjectIds = (
-        await db
-          .select({ subjectId: classSubjectsSchema.subjectId })
-          .from(classSubjectsSchema)
-          .where(eq(classSubjectsSchema.classId, payload.classId))
-      ).map((row) => row.subjectId);
-
-      const allowedSubjectIds = new Set((studentSubjectIds.length > 0 ? studentSubjectIds : classSubjectIds).filter(Boolean));
+      const studentSubjectIds = (await storage.getStudentSubjects(payload.studentId)).map((row) => row.subjectId);
+      const allowedSubjectIds = new Set(studentSubjectIds.filter(Boolean));
       if (allowedSubjectIds.size > 0 && !allowedSubjectIds.has(payload.subjectId)) {
         return res.status(400).json({ message: "Selected subject is not assigned to this student" });
       }
@@ -11386,7 +11733,7 @@ export async function registerRoutes(
       if (!cls || cls.schoolId !== schoolId) return res.status(404).json({ message: "Class not found" });
 
       // Get subjects assigned to this class
-      const allClassSubjects = await db.select().from(classSubjectsSchema).where(eq(classSubjectsSchema.classId, classId));
+      const allClassSubjects = await storage.getClassSubjects(classId);
       const allSubjects = await storage.getAllSubjects();
       const subjectMap = new Map(allSubjects.filter(s => s.schoolId === schoolId).map(s => [s.id, s]));
 
@@ -11586,14 +11933,9 @@ export async function registerRoutes(
       const allSubjects = await storage.getAllSubjects();
       const schoolSubjects = allSubjects.filter(s => s.schoolId === schoolId);
 
-      // Get student's subjects (via student_subjects or class_subjects fallback)
-      const studentSubjectRows = await db.select().from(studentSubjectsSchema).where(eq(studentSubjectsSchema.studentId, studentId));
-      let subjectIds: number[] = studentSubjectRows.map(ss => ss.subjectId);
-
-      if (subjectIds.length === 0) {
-        const classSubjectRows = await db.select().from(classSubjectsSchema).where(eq(classSubjectsSchema.classId, activeClassId));
-        subjectIds = classSubjectRows.map(cs => cs.subjectId);
-      }
+      // Get student's resolved subjects
+      const studentSubjectRows = await storage.getStudentSubjects(studentId);
+      const subjectIds: number[] = studentSubjectRows.map(ss => ss.subjectId);
 
       const studentSubjectList = schoolSubjects.filter(s => subjectIds.includes(s.id));
 
@@ -12184,7 +12526,7 @@ export async function registerRoutes(
 
       const parent = student.parentId ? await storage.getParent(student.parentId) : null;
 
-      const studentSubjectRows = await db.select().from(studentSubjectsSchema).where(eq(studentSubjectsSchema.studentId, studentId));
+      const studentSubjectRows = await storage.getStudentSubjects(studentId);
       const allSubjects = await storage.getSubjectsBySchool(schoolId);
       const subjectMap = new Map(allSubjects.map(s => [s.id, s]));
       const enrolledSubjects = studentSubjectRows.map(ss => subjectMap.get(ss.subjectId)).filter(Boolean);

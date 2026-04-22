@@ -114,9 +114,17 @@ export default function SubjectsPage() {
       const res = await apiRequest("POST", "/api/subjects", subjectData);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/subjects"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/classes"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/class-subjects/all"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/students"] }),
+        queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "/api/classes" && query.queryKey[2] === "subjects" }),
+        queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "/api/students" && query.queryKey[2] === "subjects" }),
+        queryClient.invalidateQueries({ queryKey: ["/api/qc-records/subjects"] }),
+      ]);
       setIsAddOpen(false);
       toast({ title: "Success", description: "Subject added successfully" });
     },
@@ -130,8 +138,16 @@ export default function SubjectsPage() {
       const res = await apiRequest("PUT", `/api/subjects/${id}`, subjectData);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/subjects"] });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/classes"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/class-subjects/all"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/students"] }),
+        queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "/api/classes" && query.queryKey[2] === "subjects" }),
+        queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "/api/students" && query.queryKey[2] === "subjects" }),
+        queryClient.invalidateQueries({ queryKey: ["/api/qc-records/subjects"] }),
+      ]);
       setEditingSubject(null);
       toast({ title: "Success", description: "Subject updated successfully" });
     },
@@ -144,9 +160,17 @@ export default function SubjectsPage() {
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/subjects/${id}`);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/subjects"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/classes"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/class-subjects/all"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/students"] }),
+        queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "/api/classes" && query.queryKey[2] === "subjects" }),
+        queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "/api/students" && query.queryKey[2] === "subjects" }),
+        queryClient.invalidateQueries({ queryKey: ["/api/qc-records/subjects"] }),
+      ]);
       toast({ title: "Success", description: "Subject deleted successfully" });
     },
     onError: (error: Error) => {

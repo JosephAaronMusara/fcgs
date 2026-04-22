@@ -260,7 +260,7 @@ export default function ApplicationsPage() {
                     <p><span className="text-muted-foreground">Gender:</span> {selectedApp.gender || "-"}</p>
                     <p><span className="text-muted-foreground">Grade Applied:</span> {getGradeName(selectedApp.gradeApplyingFor)}</p>
                     <p><span className="text-muted-foreground">Religion:</span> {selectedApp.religion || "-"}</p>
-                    <p><span className="text-muted-foreground">National ID / Birth Entry No:</span> {selectedApp.birthEntryNumber || "-"}</p>
+                    <p><span className="text-muted-foreground">National ID Number:</span> {selectedApp.nationalIdNumber || "-"}</p>
                     <p><span className="text-muted-foreground">Dream Job:</span> {selectedApp.dreamJob || "-"}</p>
                     <p><span className="text-muted-foreground">Subjects of Interest:</span> {selectedApp.subjectsOfInterest || "-"}</p>
                     {selectedApp.expectedStartDate && (

@@ -126,6 +126,7 @@ const staffMenuGroups: MenuGroup[] = [
     items: [
       { title: "Grading", url: "/grades", icon: FileText, requiredPermissions: ["grades.view"] },
       { title: "Subjects", url: "/subjects", icon: BookOpen, requiredPermissions: ["subjects.view"] },
+      { title: "Classrooms", url: "/classes", icon: School, requiredPermissions: ["classes.view"] },
       { title: "Assessments", url: "/assessments", icon: ClipboardList, requiredPermissions: ["assessments.view"] },
       { title: "Marks Entry", url: "/marks-entry", icon: FileText, requiredPermissions: ["marks.view", "marks.create"] },
       { title: "Record of Marks", url: "/record-of-marks", icon: CalendarClock, requiredPermissions: ["record_of_marks.view"] },
@@ -144,7 +145,6 @@ const staffMenuGroups: MenuGroup[] = [
     label: "Our School",
     items: [
       { title: "Newsletters", url: "/newsletters", icon: FileText, requiredPermissions: ["newsletters.view"] },
-      { title: "Classrooms", url: "/classes", icon: School, requiredPermissions: ["classes.view"] },
       { title: "Boarding Hostels", url: "/hostels", icon: Building, requiredPermissions: ["hostels.view"], featureKey: "enableHostel" },
       { title: "Communication History", url: "/messages", icon: Mail, requiredPermissions: ["communication.view"] },
       { title: "School Configuration", url: "/settings", icon: Settings, requiredPermissions: ["settings.view"] },
