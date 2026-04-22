@@ -30,6 +30,7 @@ export default function ClassroomsPage() {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingClass, setEditingClass] = useState<ClassWithDetails | null>(null);
   const [isMigrateOpen, setIsMigrateOpen] = useState(false);
+  const [migrateSourceClassId, setMigrateSourceClassId] = useState<number | null>(null);
   const [deleteClass, setDeleteClass] = useState<ClassWithDetails | null>(null);
 
   const { data: schools } = useQuery<SchoolType[]>({
@@ -140,6 +141,7 @@ export default function ClassroomsPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/classes"] });
       queryClient.invalidateQueries({ queryKey: ["/api/students"] });
       setIsMigrateOpen(false);
+      setMigrateSourceClassId(null);
       toast({ title: "Success", description: data.message });
     },
     onError: (error: Error) => {
@@ -232,7 +234,7 @@ export default function ClassroomsPage() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Button onClick={() => setIsMigrateOpen(true)} variant="outline" data-testid="button-migrate-students">
+          <Button onClick={() => { setMigrateSourceClassId(null); setIsMigrateOpen(true); }} variant="outline" data-testid="button-migrate-students">
             <ArrowRightLeft className="w-4 h-4 mr-2" />
             Migrate Students
           </Button>
@@ -316,6 +318,10 @@ export default function ClassroomsPage() {
                     classStudents={getStudentsInClass(classItem.id)}
                     onEdit={() => setEditingClass(classItem)}
                     onDelete={() => setDeleteClass(classItem)}
+                    onMigrate={() => {
+                      setMigrateSourceClassId(classItem.id);
+                      setIsMigrateOpen(true);
+                    }}
                   />
                 ))}
               </div>
@@ -350,7 +356,11 @@ export default function ClassroomsPage() {
 
       <MigrateStudentsDialog
         open={isMigrateOpen}
-        onOpenChange={setIsMigrateOpen}
+        onOpenChange={(open) => {
+          setIsMigrateOpen(open);
+          if (!open) setMigrateSourceClassId(null);
+        }}
+        initialFromClassId={migrateSourceClassId}
         classList={classList}
         allStudents={allStudents}
         onMigrate={(fromClassId, toClassId, studentIds) => migrateMutation.mutate({ fromClassId, toClassId, studentIds })}
@@ -391,6 +401,14 @@ export default function ClassroomsPage() {
   );
 }
 
+interface SubjectManagementResponse {
+  all: Subject[];
+  selected: string[];
+  directSelected: string[];
+  removed: string[];
+  inheritedSelected: string[];
+}
+
 function ClassCard({
   classItem,
   streamName,
@@ -401,6 +419,7 @@ function ClassCard({
   classStudents,
   onEdit,
   onDelete,
+  onMigrate,
 }: {
   classItem: ClassType;
   streamName: string;
@@ -411,117 +430,299 @@ function ClassCard({
   classStudents: Student[];
   onEdit: () => void;
   onDelete: () => void;
+  onMigrate: () => void;
 }) {
   const [showSubjects, setShowSubjects] = useState(false);
   const [showStudents, setShowStudents] = useState(false);
 
   return (
-    <Card className="hover-elevate" data-testid={`card-class-${classItem.id}`}>
-      <CardContent className="p-6">
-        <div className="flex items-start justify-between mb-4">
-          <div>
-            <h3 className="font-semibold text-lg">
-              {classItem.className}
-              {classItem.shortCode && (
-                <span className="text-muted-foreground ml-2">({classItem.shortCode})</span>
-              )}
-            </h3>
-            <p className="text-sm text-muted-foreground">{streamName}</p>
+    <>
+      <Card className="hover-elevate" data-testid={`card-class-${classItem.id}`}>
+        <CardContent className="p-6">
+          <div className="flex items-start justify-between mb-4 gap-4">
+            <div>
+              <h3 className="font-semibold text-lg" data-testid={`text-class-name-${classItem.id}`}>
+                {classItem.className}
+                {classItem.shortCode ? (
+                  <span className="text-muted-foreground ml-2">({classItem.shortCode})</span>
+                ) : null}
+              </h3>
+              <p className="text-sm text-muted-foreground">{streamName}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Badge
+                variant="secondary"
+                className="cursor-pointer"
+                onClick={() => setShowSubjects(true)}
+                data-testid={`badge-subjects-${classItem.id}`}
+              >
+                <BookOpen className="w-3 h-3 mr-1" />
+                {subjectCount}
+              </Badge>
+              <Badge
+                variant="secondary"
+                className="cursor-pointer"
+                onClick={() => setShowStudents(true)}
+                data-testid={`badge-students-${classItem.id}`}
+              >
+                <Users className="w-3 h-3 mr-1" />
+                {studentCount}
+              </Badge>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge
-              variant="secondary"
-              className="cursor-pointer"
-              onClick={() => setShowSubjects(true)}
-              data-testid={`badge-subjects-${classItem.id}`}
-            >
-              <BookOpen className="w-3 h-3 mr-1" />
-              {subjectCount}
-            </Badge>
-            <Badge
-              variant="secondary"
-              className="cursor-pointer"
-              onClick={() => setShowStudents(true)}
-              data-testid={`badge-students-${classItem.id}`}
-            >
-              <Users className="w-3 h-3 mr-1" />
-              {studentCount}
-            </Badge>
+
+          <div className="text-sm text-muted-foreground mb-4 space-y-1">
+            <p>Teacher: {teacherName}</p>
+            {classItem.capacity ? <p>Capacity: {classItem.capacity}</p> : null}
           </div>
-        </div>
 
-        <Dialog open={showSubjects} onOpenChange={setShowSubjects}>
-          <DialogContent className="max-w-md max-h-[80vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>
-                <BookOpen className="w-4 h-4 inline mr-2" />
-                {classItem.className} - Subjects ({subjectCount})
-              </DialogTitle>
-            </DialogHeader>
-            {classSubjects.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-4 text-center">No subjects assigned to this class.</p>
-            ) : (
-              <div className="space-y-1">
-                {classSubjects.map((subj, i) => (
-                  <div key={subj.id} className="flex items-center gap-3 py-2 px-3 rounded-md bg-muted/50" data-testid={`row-subject-${subj.id}`}>
-                    <span className="text-xs text-muted-foreground w-5">{i + 1}.</span>
-                    <span className="text-sm font-medium">{subj.name}</span>
-                    {subj.shortCode && <span className="text-xs text-muted-foreground ml-auto">{subj.shortCode}</span>}
+          <div className="flex flex-wrap gap-2 mb-5 min-h-[28px]">
+            {classSubjects.slice(0, 3).map((subject) => (
+              <Badge key={subject.id} variant="secondary">
+                {subject.shortCode || subject.name}
+              </Badge>
+            ))}
+            {classSubjects.length > 3 ? (
+              <Badge variant="outline">+{classSubjects.length - 3} more</Badge>
+            ) : null}
+          </div>
+
+          <div className="flex flex-wrap gap-4 text-sm mb-4">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="p-0 h-auto text-primary hover:bg-transparent hover:underline"
+              onClick={onEdit}
+              data-testid={`button-edit-class-${classItem.id}`}
+            >
+              <Pencil className="w-3 h-3 mr-1" />
+              Edit Details
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="p-0 h-auto text-destructive hover:bg-transparent hover:underline"
+              onClick={onDelete}
+              data-testid={`button-delete-class-${classItem.id}`}
+            >
+              <Trash2 className="w-3 h-3 mr-1" />
+              Delete
+            </Button>
+          </div>
+
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={onMigrate}
+            data-testid={`button-migrate-${classItem.id}`}
+          >
+            <ArrowRightLeft className="w-4 h-4 mr-2" />
+            Migrate
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Dialog open={showSubjects} onOpenChange={setShowSubjects}>
+        <DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{classItem.className.toUpperCase()} SUBJECTS</DialogTitle>
+          </DialogHeader>
+          <ClassSubjectsDialog
+            classId={classItem.id}
+            className={classItem.className}
+            onClose={() => setShowSubjects(false)}
+          />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showStudents} onOpenChange={setShowStudents}>
+        <DialogContent className="max-w-md max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{classItem.className} - Students ({studentCount})</DialogTitle>
+          </DialogHeader>
+          {classStudents.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4 text-center">No students in this class.</p>
+          ) : (
+            <div className="space-y-1">
+              {classStudents.map((st, i) => (
+                <div key={st.id} className="flex items-center gap-3 py-2 px-3 rounded-md bg-muted/50" data-testid={`row-student-${st.id}`}>
+                  <span className="text-xs text-muted-foreground w-5">{i + 1}.</span>
+                  <div className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-xs font-medium overflow-hidden shrink-0">
+                    {st.photo ? (
+                      <img src={st.photo} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <span>{st.firstName?.[0]}{st.lastName?.[0]}</span>
+                    )}
                   </div>
-                ))}
-              </div>
-            )}
-          </DialogContent>
-        </Dialog>
+                  <span className="text-sm font-medium">{st.firstName} {st.lastName}</span>
+                  <span className="text-xs text-muted-foreground ml-auto">{st.admissionNo}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
-        <Dialog open={showStudents} onOpenChange={setShowStudents}>
-          <DialogContent className="max-w-md max-h-[80vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>
-                <Users className="w-4 h-4 inline mr-2" />
-                {classItem.className} - Students ({studentCount})
-              </DialogTitle>
-            </DialogHeader>
-            {classStudents.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-4 text-center">No students in this class.</p>
-            ) : (
-              <div className="space-y-1">
-                {classStudents.map((st, i) => (
-                  <div key={st.id} className="flex items-center gap-3 py-2 px-3 rounded-md bg-muted/50" data-testid={`row-student-${st.id}`}>
-                    <span className="text-xs text-muted-foreground w-5">{i + 1}.</span>
-                    <div className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-xs font-medium overflow-hidden shrink-0">
-                      {st.photo ? (
-                        <img src={st.photo} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        <span>{st.firstName?.[0]}{st.lastName?.[0]}</span>
-                      )}
-                    </div>
-                    <span className="text-sm font-medium">{st.firstName} {st.lastName}</span>
-                    <span className="text-xs text-muted-foreground ml-auto">{st.admissionNo}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </DialogContent>
-        </Dialog>
-        
-        <div className="text-sm text-muted-foreground mb-4">
-          <p>Teacher: {teacherName}</p>
-          {classItem.capacity && <p>Capacity: {classItem.capacity}</p>}
-        </div>
+function ClassSubjectsDialog({
+  classId,
+  className,
+  onClose,
+}: {
+  classId: number;
+  className: string;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [selectedSubjects, setSelectedSubjects] = useState<number[]>([]);
+  const [directSubjectIds, setDirectSubjectIds] = useState<number[]>([]);
+  const [removedSubjectIds, setRemovedSubjectIds] = useState<number[]>([]);
+  const [inheritedSubjectIds, setInheritedSubjectIds] = useState<number[]>([]);
+  const [subjectSearch, setSubjectSearch] = useState("");
 
+  const { data, isLoading } = useQuery<SubjectManagementResponse>({
+    queryKey: ["/api/classes", classId, "subjects"],
+  });
+
+  useEffect(() => {
+    if (!data) return;
+    setSelectedSubjects((data.selected ?? []).map(Number));
+    setDirectSubjectIds((data.directSelected ?? []).map(Number));
+    setRemovedSubjectIds((data.removed ?? []).map(Number));
+    setInheritedSubjectIds((data.inheritedSelected ?? []).map(Number));
+    setSubjectSearch("");
+  }, [data]);
+
+  const allSubjects = data?.all ?? [];
+  const selectedSubjectObjects = allSubjects
+    .filter((subject) => selectedSubjects.includes(subject.id))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const normalizedQuery = subjectSearch.trim().toLowerCase();
+  const matchingSubjects = normalizedQuery
+    ? allSubjects
+        .filter((subject) => !selectedSubjects.includes(subject.id))
+        .filter((subject) => {
+          const haystack = `${subject.name} ${subject.shortCode ?? ""}`.toLowerCase();
+          return haystack.includes(normalizedQuery);
+        })
+        .sort((a, b) => a.name.localeCompare(b.name))
+    : [];
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("PUT", `/api/classes/${classId}/subjects`, {
+        subjectIds: selectedSubjects,
+        directSubjectIds,
+        removedSubjectIds,
+      });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/classes"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/class-subjects/all"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/classes", classId, "subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/students"] }),
+        queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "/api/students" && query.queryKey[2] === "subjects" }),
+        queryClient.invalidateQueries({ queryKey: ["/api/assessments"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/record-of-marks"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/qc-records/subjects"] }),
+      ]);
+      toast({ title: "Success", description: `Subjects updated for ${className}` });
+      onClose();
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const removeSubject = (subjectId: number) => {
+    setSelectedSubjects((prev) => prev.filter((id) => id !== subjectId));
+    setDirectSubjectIds((prev) => prev.filter((id) => id !== subjectId));
+    if (inheritedSubjectIds.includes(subjectId)) {
+      setRemovedSubjectIds((prev) => (prev.includes(subjectId) ? prev : [...prev, subjectId]));
+    } else {
+      setRemovedSubjectIds((prev) => prev.filter((id) => id !== subjectId));
+    }
+  };
+
+  const addSubject = (subjectId: number) => {
+    setSelectedSubjects((prev) => (prev.includes(subjectId) ? prev : [...prev, subjectId]));
+    if (inheritedSubjectIds.includes(subjectId)) {
+      setRemovedSubjectIds((prev) => prev.filter((id) => id !== subjectId));
+    } else {
+      setDirectSubjectIds((prev) => (prev.includes(subjectId) ? prev : [...prev, subjectId]));
+    }
+    setSubjectSearch("");
+  };
+
+  if (isLoading) {
+    return <Skeleton className="h-40 w-full" />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="border rounded-md p-3 min-h-[120px] max-h-[300px] overflow-y-auto">
         <div className="flex flex-wrap gap-2">
-          <Button variant="ghost" size="sm" className="p-0 h-auto text-primary hover:underline" onClick={onEdit} data-testid={`button-edit-class-${classItem.id}`}>
-            <Pencil className="w-3 h-3 mr-1" />
-            Edit Details
-          </Button>
-          <Button variant="ghost" size="sm" className="p-0 h-auto text-destructive hover:underline" onClick={onDelete} data-testid={`button-delete-class-${classItem.id}`}>
-            <Trash2 className="w-3 h-3 mr-1" />
-            Delete
-          </Button>
+          {selectedSubjectObjects.map((subject) => (
+            <Badge key={subject.id} variant="secondary" className="text-sm py-1.5 px-3 gap-1" data-testid={`badge-class-subject-${subject.id}`}>
+              {subject.name} {subject.shortCode ? `(${subject.shortCode})` : ""}
+              <button
+                type="button"
+                onClick={() => removeSubject(subject.id)}
+                className="ml-1 rounded-full hover:bg-muted-foreground/20 p-0.5"
+                data-testid={`button-remove-class-subject-${subject.id}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </Badge>
+          ))}
+          {selectedSubjectObjects.length === 0 && (
+            <p className="text-sm text-muted-foreground">No subjects assigned. Use the search below to add subjects.</p>
+          )}
         </div>
-      </CardContent>
-    </Card>
+      </div>
+
+      <div className="space-y-2">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            value={subjectSearch}
+            onChange={(event) => setSubjectSearch(event.target.value)}
+            placeholder="Search and add a subject..."
+            className="pl-9"
+            data-testid="input-search-class-subjects"
+          />
+        </div>
+        {subjectSearch.trim() !== "" ? (
+          <div className="border rounded-md bg-popover shadow-sm max-h-48 overflow-y-auto">
+            {matchingSubjects.length > 0 ? (
+              matchingSubjects.map((subject) => (
+                <button
+                  key={subject.id}
+                  type="button"
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-muted transition-colors"
+                  onClick={() => addSubject(subject.id)}
+                  data-testid={`button-add-class-subject-${subject.id}`}
+                >
+                  {subject.name} {subject.shortCode ? `(${subject.shortCode})` : ""}
+                </button>
+              ))
+            ) : (
+              <p className="px-3 py-2 text-sm text-muted-foreground">No matching subjects found.</p>
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-submit-class-subjects">
+          {saveMutation.isPending ? "Saving..." : "Submit"}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -790,7 +991,7 @@ function EditClassDialog({
   const [selectAll, setSelectAll] = useState(false);
   const [subjectSearch, setSubjectSearch] = useState("");
 
-  const { data: classSubjects } = useQuery<Array<{ id: number; classId: number; subjectId: number }>>({
+  const { data: classSubjects } = useQuery<SubjectManagementResponse>({
     queryKey: ["/api/classes", classItem.id, "subjects"],
     queryFn: async () => {
       const res = await schoolFetch(`/api/classes/${classItem.id}/subjects`);
@@ -799,8 +1000,8 @@ function EditClassDialog({
   });
 
   useEffect(() => {
-    if (classSubjects) {
-      setSelectedSubjects(classSubjects.map(cs => cs.subjectId));
+    if (classSubjects?.selected) {
+      setSelectedSubjects(classSubjects.selected.map(Number));
     }
   }, [classSubjects]);
 
@@ -981,6 +1182,7 @@ function EditClassDialog({
 function MigrateStudentsDialog({
   open,
   onOpenChange,
+  initialFromClassId,
   classList,
   allStudents,
   onMigrate,
@@ -988,6 +1190,7 @@ function MigrateStudentsDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  initialFromClassId?: number | null;
   classList?: ClassType[];
   allStudents?: Student[];
   onMigrate: (fromClassId: number, toClassId: number, studentIds?: number[]) => void;
@@ -997,6 +1200,14 @@ function MigrateStudentsDialog({
   const [toClassId, setToClassId] = useState("");
   const [selectedStudents, setSelectedStudents] = useState<number[]>([]);
   const [migrateAll, setMigrateAll] = useState(true);
+
+  useEffect(() => {
+    if (!open) return;
+    setFromClassId(initialFromClassId ? initialFromClassId.toString() : "");
+    setToClassId("");
+    setSelectedStudents([]);
+    setMigrateAll(true);
+  }, [open, initialFromClassId]);
 
   const studentsInSource = fromClassId
     ? (allStudents?.filter(s => s.classId === parseInt(fromClassId)) ?? [])

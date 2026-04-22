@@ -17,6 +17,7 @@ const passwordRules: PasswordRule[] = [
   { label: "At least 8 characters", test: (pw) => pw.length >= 8 },
   { label: "A lowercase letter", test: (pw) => /[a-z]/.test(pw) },
   { label: "An uppercase letter", test: (pw) => /[A-Z]/.test(pw) },
+  { label: "A numeral", test: (pw) => /\d/.test(pw) },
   { label: "A special character", test: (pw) => /[^a-zA-Z0-9]/.test(pw) },
 ];
 
@@ -100,7 +101,7 @@ export function CreateAccountForm({
       toast({
         title: "Account Created",
         description: sendResetToken
-          ? `A password reset token has been sent to ${entityName} via available channels.`
+          ? `A one-time password setup link has been sent to ${entityName} via available channels.`
           : `Account created with a temporary password (valid for 3 logins). Credentials sent to ${entityName}.`,
       });
       onSuccess();
@@ -142,13 +143,13 @@ export function CreateAccountForm({
           data-testid="checkbox-send-reset-token"
         />
         <Label htmlFor="sendResetToken" className="cursor-pointer text-sm">
-          Send Password Reset Token
+          Send Password Setup Link
         </Label>
       </div>
 
       {sendResetToken && (
         <p className="text-sm text-muted-foreground pl-6">
-          A unique reset token (valid for 1 hour) will be sent via all available channels. The user will set their own password.
+          A one-time password setup link (valid for 1 hour) will be sent via all available channels. The user will set their own password.
         </p>
       )}
 

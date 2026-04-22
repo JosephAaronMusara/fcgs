@@ -117,7 +117,7 @@ export function ApplicationFormModal({ open, onOpenChange }: ApplicationFormModa
       parentEmail: formData.get("parentEmail") as string || null,
       parentRelationship: selectedRelationship || null,
       address: formData.get("address") as string || null,
-      birthEntryNumber: formData.get("birthEntryNumber") as string || null,
+      nationalIdNumber: formData.get("nationalIdNumber") as string || null,
       dreamJob: formData.get("dreamJob") as string || null,
       expectedStartDate: formData.get("expectedStartDate") as string || null,
       notes: formData.get("notes") as string || null,
@@ -218,8 +218,8 @@ export function ApplicationFormModal({ open, onOpenChange }: ApplicationFormModa
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="birthEntryNumber">National ID / Birth Entry Number</Label>
-                <Input id="birthEntryNumber" name="birthEntryNumber" placeholder="National ID or birth certificate entry number" data-testid="input-birth-entry" />
+                <Label htmlFor="nationalIdNumber">National ID Number</Label>
+                <Input id="nationalIdNumber" name="nationalIdNumber" placeholder="National ID number" required data-testid="input-birth-entry" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="religion">Religion</Label>

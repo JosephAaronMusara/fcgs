@@ -37,6 +37,13 @@ export default function StudentsPage() {
   const [accountDialogStudent, setAccountDialogStudent] = useState<Student | null>(null);
   const [transferDialogStudent, setTransferDialogStudent] = useState<Student | null>(null);
   const [quickAddParentOpen, setQuickAddParentOpen] = useState(false);
+  const [recentQuickAddedParent, setRecentQuickAddedParent] = useState<Parent | null>(null);
+
+  useEffect(() => {
+    if (!isAddOpen) {
+      setRecentQuickAddedParent(null);
+    }
+  }, [isAddOpen]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: students, isLoading } = useQuery<Student[]>({
@@ -420,6 +427,7 @@ export default function StudentsPage() {
                 onQuickAddParent={() => setQuickAddParentOpen(true)}
                 isBoardingSchool={isBoardingSchool}
                 hostels={hostels || []}
+                quickAddedParent={recentQuickAddedParent}
               />
             </DialogContent>
           </Dialog>
@@ -631,6 +639,7 @@ export default function StudentsPage() {
                                 onQuickAddParent={() => setQuickAddParentOpen(true)}
                                 isBoardingSchool={isBoardingSchool}
                                 hostels={hostels || []}
+                                quickAddedParent={recentQuickAddedParent}
                               />
                             </DialogContent>
                           </Dialog>
@@ -845,6 +854,14 @@ function StudentView({
           <div className="rounded-md border px-3 py-2 text-sm">{student.enrollmentDate || "-"}</div>
         </div>
         <div className="space-y-1">
+          <Label>National ID Number</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.nationalIdNumber || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Passport Number</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.passportNumber || "-"}</div>
+        </div>
+        <div className="space-y-1">
           <Label>Phone</Label>
           <div className="rounded-md border px-3 py-2 text-sm">{student.phone || "-"}</div>
         </div>
@@ -869,6 +886,7 @@ function StudentForm({
   onQuickAddParent,
   isBoardingSchool,
   hostels,
+  quickAddedParent,
 }: {
   onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
   classes: Class[];
@@ -881,6 +899,7 @@ function StudentForm({
   onQuickAddParent: () => void;
   isBoardingSchool: boolean;
   hostels: Hostel[];
+  quickAddedParent?: Parent | null;
 }) {
   const defaultParent = defaultValues?.parentId
     ? parents.find(p => p.id === defaultValues.parentId)
@@ -894,6 +913,14 @@ function StudentForm({
   );
   const [showParentSuggestions, setShowParentSuggestions] = useState(false);
   const [isCreatingParentFromStaff, setIsCreatingParentFromStaff] = useState(false);
+
+  useEffect(() => {
+    if (quickAddedParent) {
+      setSelectedParentId(quickAddedParent.id);
+      setParentSearch(`${quickAddedParent.firstName} ${quickAddedParent.lastName}`);
+      setShowParentSuggestions(false);
+    }
+  }, [quickAddedParent]);
 
   const parentSuggestions = parentSearch.trim().length >= 1
     ? [
@@ -1125,6 +1152,27 @@ function StudentForm({
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
+          <Label htmlFor="nationalIdNumber">National ID Number</Label>
+          <Input
+            id="nationalIdNumber"
+            name="nationalIdNumber"
+            defaultValue={defaultValues?.nationalIdNumber}
+            required
+            data-testid="input-national-id-number"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="passportNumber">Passport Number</Label>
+          <Input
+            id="passportNumber"
+            name="passportNumber"
+            defaultValue={defaultValues?.passportNumber}
+            data-testid="input-passport-number"
+          />
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
           <Label htmlFor="gender">Gender</Label>
           <input type="hidden" name="gender" value={selectedGender} />
           <Select value={selectedGender} onValueChange={setSelectedGender}>
@@ -1331,6 +1379,14 @@ function StudentForm({
   );
 }
 
+interface SubjectManagementResponse {
+  all: Subject[];
+  selected: string[];
+  directSelected: string[];
+  removed: string[];
+  inheritedSelected: string[];
+}
+
 function AssignSubjectsDialog({
   studentId,
   studentName,
@@ -1342,33 +1398,65 @@ function AssignSubjectsDialog({
 }) {
   const { toast } = useToast();
   const [selectedSubjects, setSelectedSubjects] = useState<number[]>([]);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [directSubjectIds, setDirectSubjectIds] = useState<number[]>([]);
+  const [removedSubjectIds, setRemovedSubjectIds] = useState<number[]>([]);
+  const [inheritedSubjectIds, setInheritedSubjectIds] = useState<number[]>([]);
+  const [subjectSearch, setSubjectSearch] = useState("");
 
-  const { data, isLoading } = useQuery<{ all: Subject[]; selected: string[] }>({
+  const { data, isLoading } = useQuery<{
+    all: Subject[];
+    selected: string[];
+    directSelected: string[];
+    removed: string[];
+    inheritedSelected: string[];
+  }>({
     queryKey: ["/api/students", studentId, "subjects"],
   });
 
   useEffect(() => {
-    if (data?.selected) {
-      setSelectedSubjects(data.selected.map(Number));
-    }
-  }, [data?.selected]);
+    if (!data) return;
+    setSelectedSubjects((data.selected ?? []).map(Number));
+    setDirectSubjectIds((data.directSelected ?? []).map(Number));
+    setRemovedSubjectIds((data.removed ?? []).map(Number));
+    setInheritedSubjectIds((data.inheritedSelected ?? []).map(Number));
+    setSubjectSearch("");
+  }, [data]);
 
-  const allSubjects = data?.all || [];
-  const selectedSubjectObjects = allSubjects.filter(s => selectedSubjects.includes(s.id));
-  const availableSubjects = allSubjects.filter(s => !selectedSubjects.includes(s.id));
+  const allSubjects = data?.all ?? [];
+  const selectedSubjectObjects = allSubjects
+    .filter((subject) => selectedSubjects.includes(subject.id))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const normalizedQuery = subjectSearch.trim().toLowerCase();
+  const matchingSubjects = normalizedQuery
+    ? allSubjects
+        .filter((subject) => !selectedSubjects.includes(subject.id))
+        .filter((subject) => {
+          const haystack = `${subject.name} ${subject.shortCode ?? ""}`.toLowerCase();
+          return haystack.includes(normalizedQuery);
+        })
+        .sort((a, b) => a.name.localeCompare(b.name))
+    : [];
 
   const saveMutation = useMutation({
-    mutationFn: async (subjectIds: number[]) => {
-      await apiRequest("PUT", `/api/students/${studentId}/subjects`, { subjectIds });
+    mutationFn: async () => {
+      await apiRequest("PUT", `/api/students/${studentId}/subjects`, {
+        subjectIds: selectedSubjects,
+        directSubjectIds,
+        removedSubjectIds,
+      });
     },
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["/api/students", studentId, "subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/students"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/classes"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/class-subjects/all"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/qc-records/subjects"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/assessments"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/record-of-marks"] }),
       ]);
 
-      toast({ title: "Success", description: "Subjects updated successfully" });
+      toast({ title: "Success", description: `Subjects updated for ${studentName}` });
       onClose();
     },
     onError: (error: Error) => {
@@ -1377,12 +1465,23 @@ function AssignSubjectsDialog({
   });
 
   const removeSubject = (subjectId: number) => {
-    setSelectedSubjects(prev => prev.filter(id => id !== subjectId));
+    setSelectedSubjects((prev) => prev.filter((id) => id !== subjectId));
+    setDirectSubjectIds((prev) => prev.filter((id) => id !== subjectId));
+    if (inheritedSubjectIds.includes(subjectId)) {
+      setRemovedSubjectIds((prev) => (prev.includes(subjectId) ? prev : [...prev, subjectId]));
+    } else {
+      setRemovedSubjectIds((prev) => prev.filter((id) => id !== subjectId));
+    }
   };
 
   const addSubject = (subjectId: number) => {
-    setSelectedSubjects(prev => [...prev, subjectId]);
-    setDropdownOpen(false);
+    setSelectedSubjects((prev) => (prev.includes(subjectId) ? prev : [...prev, subjectId]));
+    if (inheritedSubjectIds.includes(subjectId)) {
+      setRemovedSubjectIds((prev) => prev.filter((id) => id !== subjectId));
+    } else {
+      setDirectSubjectIds((prev) => (prev.includes(subjectId) ? prev : [...prev, subjectId]));
+    }
+    setSubjectSearch("");
   };
 
   if (isLoading) {
@@ -1402,6 +1501,7 @@ function AssignSubjectsDialog({
             >
               {subject.name} {subject.shortCode ? `(${subject.shortCode})` : ""}
               <button
+                type="button"
                 onClick={() => removeSubject(subject.id)}
                 className="ml-1 rounded-full hover:bg-muted-foreground/20 p-0.5"
                 data-testid={`button-remove-subject-${subject.id}`}
@@ -1411,49 +1511,47 @@ function AssignSubjectsDialog({
             </Badge>
           ))}
           {selectedSubjectObjects.length === 0 && (
-            <p className="text-sm text-muted-foreground">No subjects assigned. Use the dropdown below to add subjects.</p>
+            <p className="text-sm text-muted-foreground">No subjects assigned. Use the search below to add subjects.</p>
           )}
         </div>
       </div>
 
-      {availableSubjects.length > 0 && (
+      <div className="space-y-2">
         <div className="relative">
-          <Button
-            variant="outline"
-            className="w-full justify-between"
-            onClick={() => setDropdownOpen(!dropdownOpen)}
-            data-testid="button-add-subject-dropdown"
-          >
-            <span className="text-muted-foreground">Add a subject...</span>
-            <ChevronDown className="h-4 w-4" />
-          </Button>
-          {dropdownOpen && (
-            <div className="absolute z-50 w-full mt-1 bg-popover border rounded-md shadow-md max-h-48 overflow-y-auto">
-              {availableSubjects.map((subject) => (
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            value={subjectSearch}
+            onChange={(event) => setSubjectSearch(event.target.value)}
+            placeholder="Search and add a subject..."
+            className="pl-9"
+            data-testid="input-search-student-subjects"
+          />
+        </div>
+        {subjectSearch.trim() !== "" ? (
+          <div className="border rounded-md bg-popover shadow-sm max-h-48 overflow-y-auto">
+            {matchingSubjects.length > 0 ? (
+              matchingSubjects.map((subject) => (
                 <button
                   key={subject.id}
-                  className="w-full text-left px-3 py-2 text-sm hover-elevate cursor-pointer"
+                  type="button"
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-muted transition-colors"
                   onClick={() => addSubject(subject.id)}
                   data-testid={`button-add-subject-${subject.id}`}
                 >
                   {subject.name} {subject.shortCode ? `(${subject.shortCode})` : ""}
                 </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+              ))
+            ) : (
+              <p className="px-3 py-2 text-sm text-muted-foreground">No matching subjects found.</p>
+            )}
+          </div>
+        ) : null}
+      </div>
 
       <div className="flex justify-end gap-2">
-        <Button variant="outline" onClick={onClose} data-testid="button-cancel-subjects">
-          Cancel
-        </Button>
-        <Button 
-          onClick={() => saveMutation.mutate(selectedSubjects)}
-          disabled={saveMutation.isPending}
-          data-testid="button-submit-subjects"
-        >
-          {saveMutation.isPending ? "Saving..." : "Submit"}
+        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-subjects">
+          {saveMutation.isPending ? "Saving..." : "Save Subjects"}
         </Button>
       </div>
     </div>

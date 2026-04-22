@@ -633,6 +633,8 @@ function StaffViewModal({
     { label: "Staff No", value: staff.staffNo || "-" },
     { label: "First Name", value: staff.firstName || "-" },
     { label: "Last Name", value: staff.lastName || "-" },
+    { label: "National ID Number", value: staff.nationalIdNumber || "-" },
+    { label: "Passport Number", value: staff.passportNumber || "-" },
     { label: "Email", value: staff.email || "-" },
     { label: "Phone", value: staff.phone || "-" },
     { label: "Gender", value: staff.gender ? staff.gender.toUpperCase() : "-" },
@@ -822,6 +824,27 @@ function StaffForm({
             defaultValue={defaultValues?.lastName}
             required
             data-testid="input-last-name"
+          />
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="nationalIdNumber">National ID Number</Label>
+          <Input
+            id="nationalIdNumber"
+            name="nationalIdNumber"
+            defaultValue={defaultValues?.nationalIdNumber}
+            required
+            data-testid="input-national-id-number"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="passportNumber">Passport Number</Label>
+          <Input
+            id="passportNumber"
+            name="passportNumber"
+            defaultValue={defaultValues?.passportNumber}
+            data-testid="input-passport-number"
           />
         </div>
       </div>
