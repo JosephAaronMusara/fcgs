@@ -1,7 +1,7 @@
 import { db } from "./db";
-import { eq, ne, desc, and, or, sql, count as drizzleCount, like, gte, lte, lt, isNull, inArray, notLike } from "drizzle-orm";
+import { eq, ne, desc, asc, and, or, sql, count as drizzleCount, like, gte, lte, lt, isNull, inArray, notLike } from "drizzle-orm";
 import {
-  users, staff, streams, classes, parents, students, subjects,
+  users, staff, streams, classes, classTeacherAssignments, parents, students, subjects,
   staffSubjects, studentSubjects, classSubjects, grades, assessments, marks, attendanceRecords,
   disciplineRecords, clinicRecords, feesPayments, organizations, schools, libraryResources, libraryCategories, libraryShelves, libraryBooks, libraryBookCopies, libraryLoans, libraryFines, libraryReservations, libraryPolicies,
   timetableSlots, logbookEntries, posItems, posSales, posSaleItems,
@@ -14,6 +14,7 @@ import {
   type Staff, type InsertStaff,
   type Stream, type InsertStream,
   type Class, type InsertClass,
+  type ClassTeacherAssignment, type InsertClassTeacherAssignment,
   type ClassSubject, type InsertClassSubject,
   type Parent, type InsertParent,
   type Student, type InsertStudent,
@@ -192,12 +193,12 @@ export interface IStorage {
   getFeesPayments(studentId?: number): Promise<FeesPayment[]>;
   createFeesPayment(payment: InsertFeesPayment): Promise<FeesPayment>;
 
-  getDashboardStats(schoolId?: number | null): Promise<{
+  getDashboardStats(schoolId?: number | null, options?: { fromDate?: string; toDate?: string; attendancePage?: number; attendancePageSize?: number }): Promise<{
     totalStudents: number;
     totalStaff: number;
     totalClasses: number;
     totalSubjects: number;
-    attendanceToday: { present: number; absent: number; total: number };
+    attendanceToday: { present: number; absent: number; unmarked: number; total: number; fromDate: string; toDate: string; page: number; pageSize: number; totalPages: number; totalRows: number };
     recentPayments: FeesPayment[];
     studentsGender: { male: number; female: number };
     studentsDailyStats: { approved: number; pending: number; transferred: number };
@@ -207,7 +208,7 @@ export interface IStorage {
     staffMonitoring: { present: number; absent: number; late: number; earlyExits: number };
     absentStaff: Array<{ name: string; phone: string }>;
     lateComers: Array<{ name: string; inVariance: string; outVariance: string }>;
-    studentsAttendanceByClass: Array<{ className: string; teacher: string; absent: number; present: number; total: number }>;
+    studentsAttendanceByClass: Array<{ classId: number; className: string; teacher: string; absent: number; present: number; unmarked: number; total: number; attendancePercent: number }>;
     enrollmentTrend: Array<{ month: string; count: number }>;
     transferReasons: Array<{ name: string; value: number }>;
     libraryStats: { totalBooks: number; availableCopies: number; currentlyBorrowed: number; overdueBooks: number; unpaidFines: number; unpaidFinesAmount: number; paidFines: number; paidFinesAmount: number };
@@ -487,6 +488,95 @@ export interface IStorage {
   }): Promise<{ logs: ActivityLog[]; total: number }>;
 }
 
+const DASHBOARD_ACTIVE_STUDENT_STATUSES = new Set(["", "active", "approved"]);
+
+function normalizeDashboardDate(value: unknown): Date | null {
+  if (value == null) return null;
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  const parsed = new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function generateEnrollmentTrend(
+  studentList: any[],
+): Array<{ month: string; count: number }> {
+  const now = new Date();
+
+  const buckets = Array.from({ length: 24 }, (_, index) => {
+    const monthDate = new Date(now.getFullYear(), now.getMonth() - (23 - index), 1);
+    const key = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, "0")}`;
+
+    return {
+      key,
+      label: monthDate.toLocaleString("en-US", {
+        month: "short",
+        year: "2-digit",
+      }),
+    };
+  });
+
+  const counts = new Map<string, number>(buckets.map((bucket) => [bucket.key, 0]));
+
+  for (const student of studentList ?? []) {
+    const enrolledAt = normalizeDashboardDate(
+      student?.enrollmentDate ?? student?.createdAt,
+    );
+
+    if (!enrolledAt) continue;
+
+    const key = `${enrolledAt.getFullYear()}-${String(enrolledAt.getMonth() + 1).padStart(2, "0")}`;
+    if (!counts.has(key)) continue;
+
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  return buckets.map((bucket) => ({
+    month: bucket.label,
+    count: counts.get(bucket.key) ?? 0,
+  }));
+}
+
+function computeClassroomPopulation(
+  studentList: any[],
+  classList: any[],
+): Array<{ className: string; count: number }> {
+  const activeClasses = (classList ?? []).filter((cls: any) => !cls?.archivedAt);
+
+  const counts = new Map<number, number>();
+  for (const cls of activeClasses) {
+    const classId = Number(cls?.id);
+    if (Number.isFinite(classId)) {
+      counts.set(classId, 0);
+    }
+  }
+
+  for (const student of studentList ?? []) {
+    const status = String(student?.status ?? "active").trim().toLowerCase();
+    if (!DASHBOARD_ACTIVE_STUDENT_STATUSES.has(status)) continue;
+
+    const classId = Number(student?.classId);
+    if (!counts.has(classId)) continue;
+
+    counts.set(classId, (counts.get(classId) ?? 0) + 1);
+  }
+
+  return activeClasses
+    .map((cls: any) => ({
+      className: String(cls?.shortName || cls?.name || `Class ${cls?.id}`),
+      count: counts.get(Number(cls?.id)) ?? 0,
+    }))
+    .sort((a, b) =>
+      a.className.localeCompare(b.className, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
+}
+
 export class DatabaseStorage implements IStorage {
   private subjectMatchesStream(subject: Subject, streamId: number | null | undefined): boolean {
     if (streamId == null) {
@@ -761,11 +851,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllClasses(): Promise<Class[]> {
-    return db.select().from(classes).orderBy(classes.className);
+    return db.select().from(classes).where(isNull(classes.archivedAt)).orderBy(classes.className);
   }
 
   async getClassesBySchool(schoolId: number): Promise<Class[]> {
-    return db.select().from(classes).where(eq(classes.schoolId, schoolId)).orderBy(classes.className);
+    return db.select().from(classes).where(and(eq(classes.schoolId, schoolId), isNull(classes.archivedAt))).orderBy(classes.className);
   }
 
   async getClass(id: number): Promise<Class | undefined> {
@@ -774,18 +864,58 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createClass(classData: InsertClass): Promise<Class> {
-    const [newClass] = await db.insert(classes).values(classData).returning();
-    return newClass;
+    return db.transaction(async (tx) => {
+      const [newClass] = await tx.insert(classes).values(classData).returning();
+
+      if (newClass.classTeacherId) {
+        await tx.insert(classTeacherAssignments).values({
+          classId: newClass.id,
+          teacherId: newClass.classTeacherId,
+          effectiveFrom: newClass.createdAt ?? new Date(),
+        });
+      }
+
+      return newClass;
+    });
   }
 
   async updateClass(id: number, classData: Partial<InsertClass>): Promise<Class | undefined> {
-    const [updated] = await db.update(classes).set(classData).where(eq(classes.id, id)).returning();
-    return updated;
+    return db.transaction(async (tx) => {
+      const [existingClass] = await tx.select().from(classes).where(eq(classes.id, id));
+      if (!existingClass) return undefined;
+
+      const [updated] = await tx.update(classes).set(classData).where(eq(classes.id, id)).returning();
+
+      if (Object.prototype.hasOwnProperty.call(classData, "classTeacherId") && existingClass.classTeacherId !== updated.classTeacherId) {
+        const effectiveFrom = new Date();
+        await tx.update(classTeacherAssignments)
+          .set({ effectiveTo: effectiveFrom })
+          .where(and(eq(classTeacherAssignments.classId, id), isNull(classTeacherAssignments.effectiveTo)));
+
+        if (updated.classTeacherId) {
+          await tx.insert(classTeacherAssignments).values({
+            classId: id,
+            teacherId: updated.classTeacherId,
+            effectiveFrom,
+          });
+        }
+      }
+
+      return updated;
+    });
   }
 
   async deleteClass(id: number): Promise<boolean> {
-    await db.delete(classSubjects).where(eq(classSubjects.classId, id));
-    await db.delete(classes).where(eq(classes.id, id));
+    const archivedAt = new Date();
+    await db.transaction(async (tx) => {
+      await tx.update(classTeacherAssignments)
+        .set({ effectiveTo: archivedAt })
+        .where(and(eq(classTeacherAssignments.classId, id), isNull(classTeacherAssignments.effectiveTo)));
+
+      await tx.update(classes)
+        .set({ archivedAt })
+        .where(eq(classes.id, id));
+    });
     return true;
   }
   
@@ -1015,17 +1145,38 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getStaffClasses(staffId: number): Promise<Array<{ id: number; classId: number }>> {
-    const result = await db.select().from(classes).where(eq(classes.classTeacherId, staffId));
+    const result = await db.select().from(classes).where(and(eq(classes.classTeacherId, staffId), isNull(classes.archivedAt)));
     return result.map(c => ({ id: c.id, classId: c.id }));
   }
 
   async updateStaffClasses(staffId: number, classIds: number[]): Promise<void> {
-    await db.update(classes).set({ classTeacherId: null }).where(eq(classes.classTeacherId, staffId));
-    if (classIds.length > 0) {
-      for (const classId of classIds) {
-        await db.update(classes).set({ classTeacherId: staffId }).where(eq(classes.id, classId));
+    const effectiveFrom = new Date();
+    await db.transaction(async (tx) => {
+      const currentAssignments = await tx.select().from(classes).where(and(eq(classes.classTeacherId, staffId), isNull(classes.archivedAt)));
+      const currentClassIds = new Set(currentAssignments.map((item) => item.id));
+      const requestedClassIds = new Set(classIds);
+
+      for (const currentClassId of currentClassIds) {
+        if (requestedClassIds.has(currentClassId)) continue;
+        await tx.update(classes).set({ classTeacherId: null }).where(eq(classes.id, currentClassId));
+        await tx.update(classTeacherAssignments)
+          .set({ effectiveTo: effectiveFrom })
+          .where(and(eq(classTeacherAssignments.classId, currentClassId), isNull(classTeacherAssignments.effectiveTo)));
       }
-    }
+
+      for (const classId of classIds) {
+        const [existingClass] = await tx.select().from(classes).where(and(eq(classes.id, classId), isNull(classes.archivedAt)));
+        if (!existingClass) continue;
+        if (existingClass.classTeacherId === staffId) continue;
+
+        await tx.update(classTeacherAssignments)
+          .set({ effectiveTo: effectiveFrom })
+          .where(and(eq(classTeacherAssignments.classId, classId), isNull(classTeacherAssignments.effectiveTo)));
+
+        await tx.update(classes).set({ classTeacherId: staffId }).where(eq(classes.id, classId));
+        await tx.insert(classTeacherAssignments).values({ classId, teacherId: staffId, effectiveFrom });
+      }
+    });
   }
 
   async getStudentSubjects(studentId: number): Promise<StudentSubject[]> {
@@ -1276,12 +1427,12 @@ export class DatabaseStorage implements IStorage {
     return newPayment;
   }
 
-  async getDashboardStats(schoolId?: number | null): Promise<{
+  async getDashboardStats(schoolId?: number | null, options: { fromDate?: string; toDate?: string; attendancePage?: number; attendancePageSize?: number } = {}): Promise<{
     totalStudents: number;
     totalStaff: number;
     totalClasses: number;
     totalSubjects: number;
-    attendanceToday: { present: number; absent: number; total: number };
+    attendanceToday: { present: number; absent: number; unmarked: number; total: number; fromDate: string; toDate: string; page: number; pageSize: number; totalPages: number; totalRows: number };
     recentPayments: FeesPayment[];
     studentsGender: { male: number; female: number };
     studentsDailyStats: { approved: number; pending: number; transferred: number };
@@ -1291,72 +1442,309 @@ export class DatabaseStorage implements IStorage {
     staffMonitoring: { present: number; absent: number; late: number; earlyExits: number };
     absentStaff: Array<{ name: string; phone: string }>;
     lateComers: Array<{ name: string; inVariance: string; outVariance: string }>;
-    studentsAttendanceByClass: Array<{ className: string; teacher: string; absent: number; present: number; total: number }>;
+    studentsAttendanceByClass: Array<{ classId: number; className: string; teacher: string; absent: number; present: number; unmarked: number; total: number; attendancePercent: number }>;
+    enrollmentTrend: Array<{ month: string; count: number }>;
+    transferReasons: Array<{ name: string; value: number }>;
     libraryStats: { totalBooks: number; availableCopies: number; currentlyBorrowed: number; overdueBooks: number; unpaidFines: number; unpaidFinesAmount: number; paidFines: number; paidFinesAmount: number };
   }> {
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toISOString().slice(0, 10);
+    const normalizedFromDate = /^\d{4}-\d{2}-\d{2}$/.test(options.fromDate || "") ? options.fromDate! : today;
+    const requestedToDate = /^\d{4}-\d{2}-\d{2}$/.test(options.toDate || "") ? options.toDate! : normalizedFromDate;
+    const normalizedToDate = requestedToDate < normalizedFromDate ? normalizedFromDate : requestedToDate;
+    const attendancePageSize = Math.max(1, Math.min(50, Number(options.attendancePageSize) || 10));
+    const attendancePage = Math.max(1, Number(options.attendancePage) || 1);
 
-    // Helper to compute classroom population
-    const computeClassroomPopulation = (studentsList: any[], classesList: any[]) => {
-      const classMap = new Map(classesList.map(c => [c.id, c.name]));
-      const counts = new Map<string, number>();
-      studentsList.forEach(s => {
-        if (s.classId) {
-          const className = classMap.get(s.classId) || 'Unassigned';
-          counts.set(className, (counts.get(className) || 0) + 1);
-        }
-      });
-      return Array.from(counts.entries()).map(([className, count]) => ({ className, count })).sort((a, b) => a.className.localeCompare(b.className));
+    const toIsoDate = (value: unknown): string | null => {
+      if (!value) return null;
+      const dateValue = value instanceof Date ? value : new Date(value as string);
+      if (Number.isNaN(dateValue.getTime())) return null;
+      return dateValue.toISOString().slice(0, 10);
     };
 
-    // Helper to generate enrollment trend from student enrollment dates
-    const generateEnrollmentTrend = (studentsList: any[]) => {
-      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const parseAmount = (value: string | number | null | undefined) => Number.parseFloat(String(value ?? 0)) || 0;
+
+    const generateEnrollmentTrend = (studentList: any[]) => {
       const now = new Date();
-      const trend: Array<{ month: string; count: number }> = [];
-      
-      for (let i = 11; i >= 0; i--) {
-        const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
-        const monthName = months[date.getMonth()];
-        const year = date.getFullYear().toString().slice(-2);
-        // Count students enrolled up to this month
-        const count = studentsList.filter((s: any) => {
-          if (!s.enrollmentDate) return true; // Count all if no date
-          const enrollDate = new Date(s.enrollmentDate);
-          return enrollDate <= new Date(date.getFullYear(), date.getMonth() + 1, 0);
-        }).length;
-        trend.push({ month: `${monthName}'${year}`, count });
-      }
-      return trend;
-    };
 
-    // Helper to compute attendance by class
-    const computeAttendanceByClass = (attendanceList: any[], studentsList: any[], classesList: any[], staffList: any[]) => {
-      const classMap = new Map(classesList.map(c => [c.id, c]));
-      const studentClassMap = new Map(studentsList.map(s => [s.id, s.classId]));
-      const staffMap = new Map(staffList.map(s => [s.id, `${s.firstName} ${s.lastName}`]));
-      
-      const byClass = new Map<number, { present: number; absent: number }>();
-      attendanceList.forEach(a => {
-        const classId = studentClassMap.get(a.studentId);
-        if (classId) {
-          if (!byClass.has(classId)) byClass.set(classId, { present: 0, absent: 0 });
-          const entry = byClass.get(classId)!;
-          if (a.status === 'present') entry.present++;
-          else entry.absent++;
-        }
+      const months = Array.from({ length: 24 }, (_, index) => {
+        const date = new Date(now.getFullYear(), now.getMonth() - (23 - index), 1);
+        return {
+          key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+          month: date.toLocaleString("en-US", { month: "short", year: "numeric" }),
+          value: 0,
+        };
       });
 
-      return Array.from(byClass.entries()).map(([classId, data]) => {
-        const classInfo = classMap.get(classId);
+      const monthMap = new Map(months.map((item) => [item.key, item]));
+
+      for (const student of studentList) {
+        const rawDate =
+          student.enrollmentDate ||
+          student.enrollment_date ||
+          student.createdAt ||
+          student.created_at;
+
+        if (!rawDate) continue;
+
+        const date = new Date(rawDate);
+        if (Number.isNaN(date.getTime())) continue;
+
+        const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+        const bucket = monthMap.get(key);
+        if (bucket) {
+          bucket.value += 1;
+        }
+      }
+
+      let runningTotal = 0;
+
+      return months.map((item) => {
+        runningTotal += item.value;
         return {
-          className: classInfo?.name || 'Unknown',
-          teacher: classInfo?.classTeacherId ? (staffMap.get(classInfo.classTeacherId) || '-') : '-',
-          absent: data.absent,
-          present: data.present,
-          total: data.present + data.absent
+          month: item.month,
+          students: runningTotal,
         };
-      }).sort((a, b) => a.className.localeCompare(b.className));
+      });
+    };
+
+    const enumerateDates = (startDate: string, endDate: string) => {
+      const results: string[] = [];
+      const cursor = new Date(`${startDate}T00:00:00.000Z`);
+      const stop = new Date(`${endDate}T00:00:00.000Z`);
+      while (cursor.getTime() <= stop.getTime()) {
+        results.push(cursor.toISOString().slice(0, 10));
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+      return results;
+    };
+
+    const formatTeacherName = (staffMember: any) => {
+      if (!staffMember) return "-";
+      const gender = String(staffMember.gender || "").toLowerCase();
+      const title = gender === "male" ? "Mr" : gender === "female" ? "Ms" : "";
+      const firstInitial = staffMember.firstName ? `${String(staffMember.firstName).trim().charAt(0).toUpperCase()}.` : "";
+      const surname = String(staffMember.lastName || "").trim();
+      return [title, firstInitial, surname].filter(Boolean).join(" ").trim() || "-";
+    };
+
+    const buildAttendanceStats = async (sid?: number | null) => {
+      const studentQuery = sid
+        ? db.select().from(students).where(eq(students.schoolId, sid))
+        : db.select().from(students);
+
+      const studentsList = await studentQuery;
+      const classIdsFromStudents = Array.from(new Set(
+        studentsList
+          .map((studentItem) => studentItem.classId)
+          .filter((value): value is number => typeof value === "number"),
+      ));
+
+      const attendanceList = sid
+        ? await db
+            .select({
+              id: attendanceRecords.id,
+              studentId: attendanceRecords.studentId,
+              classId: attendanceRecords.classId,
+              date: attendanceRecords.date,
+              status: attendanceRecords.status,
+              reason: attendanceRecords.reason,
+              notifyParent: attendanceRecords.notifyParent,
+              notifiedStatus: attendanceRecords.notifiedStatus,
+              notifiedReason: attendanceRecords.notifiedReason,
+              markedBy: attendanceRecords.markedBy,
+              createdAt: attendanceRecords.createdAt,
+            })
+            .from(attendanceRecords)
+            .innerJoin(students, eq(students.id, attendanceRecords.studentId))
+            .where(and(eq(students.schoolId, sid), gte(attendanceRecords.date, normalizedFromDate), lte(attendanceRecords.date, normalizedToDate)))
+        : await db
+            .select()
+            .from(attendanceRecords)
+            .where(and(gte(attendanceRecords.date, normalizedFromDate), lte(attendanceRecords.date, normalizedToDate)));
+
+      const attendanceClassIds = Array.from(new Set(
+        attendanceList
+          .map((attendanceRecord) => attendanceRecord.classId)
+          .filter((value): value is number => typeof value === "number"),
+      ));
+
+      const classScopeIds = Array.from(new Set([...classIdsFromStudents, ...attendanceClassIds]));
+      const classQuery = sid
+        ? classScopeIds.length
+          ? db.select().from(classes).where(or(eq(classes.schoolId, sid), inArray(classes.id, classScopeIds))).orderBy(classes.className)
+          : db.select().from(classes).where(eq(classes.schoolId, sid)).orderBy(classes.className)
+        : db.select().from(classes).orderBy(classes.className);
+
+      const classesList = await classQuery;
+      const relevantClasses = classesList.filter((classItem) => {
+        const createdDate = toIsoDate(classItem.createdAt) || normalizedFromDate;
+        const archivedDate = toIsoDate(classItem.archivedAt);
+        const hasAttendanceInRange = attendanceClassIds.includes(classItem.id);
+        return hasAttendanceInRange || (createdDate <= normalizedToDate && (!archivedDate || archivedDate >= normalizedFromDate));
+      });
+
+      if (!relevantClasses.length) {
+        return {
+          summary: { present: 0, absent: 0, unmarked: 0, total: 0, fromDate: normalizedFromDate, toDate: normalizedToDate, page: attendancePage, pageSize: attendancePageSize, totalPages: 0, totalRows: 0 },
+          rows: [] as Array<{ classId: number; className: string; teacher: string; absent: number; present: number; unmarked: number; total: number; attendancePercent: number }>,
+        };
+      }
+
+      const relevantClassIds = relevantClasses.map((classItem) => classItem.id);
+      const activeStudents = studentsList.filter((studentItem: any) => {
+        if (!studentItem.classId || !relevantClassIds.includes(studentItem.classId)) return false;
+        const status = String(studentItem.status || "active").toLowerCase();
+        return status === "active" || status === "approved" || status === "";
+      });
+
+      const assignmentList = relevantClassIds.length
+        ? await db
+            .select()
+            .from(classTeacherAssignments)
+            .where(inArray(classTeacherAssignments.classId, relevantClassIds))
+            .orderBy(asc(classTeacherAssignments.classId), asc(classTeacherAssignments.effectiveFrom))
+        : [];
+
+      const teacherIds = Array.from(new Set([
+        ...relevantClasses.map((classItem) => classItem.classTeacherId).filter(Boolean),
+        ...assignmentList.map((assignment) => assignment.teacherId),
+      ] as number[]));
+
+      const staffList = teacherIds.length
+        ? await db.select().from(staff).where(inArray(staff.id, teacherIds))
+        : [];
+
+      const staffById = new Map(staffList.map((staffMember) => [staffMember.id, staffMember]));
+      const classAssignments = new Map<number, ClassTeacherAssignment[]>();
+      assignmentList.forEach((assignment) => {
+        const list = classAssignments.get(assignment.classId) || [];
+        list.push(assignment);
+        classAssignments.set(assignment.classId, list);
+      });
+
+      const attendanceByDateClass = new Map<string, typeof attendanceList>();
+      const schoolHasRecordsByDate = new Set<string>();
+      attendanceList.forEach((attendanceRecord) => {
+        if (!relevantClassIds.includes(attendanceRecord.classId)) return;
+        const key = `${attendanceRecord.date}::${attendanceRecord.classId}`;
+        const list = attendanceByDateClass.get(key) || [];
+        list.push(attendanceRecord);
+        attendanceByDateClass.set(key, list);
+        schoolHasRecordsByDate.add(attendanceRecord.date);
+      });
+
+      const rosterByClass = new Map<number, number>();
+      activeStudents.forEach((studentItem) => {
+        if (!studentItem.classId) return;
+        rosterByClass.set(studentItem.classId, (rosterByClass.get(studentItem.classId) || 0) + 1);
+      });
+
+      const rangeDates = enumerateDates(normalizedFromDate, normalizedToDate);
+      const getTeacherLabelForRange = (classItem: Class) => {
+        const assignments = (classAssignments.get(classItem.id) || []).filter((assignment) => {
+          const start = toIsoDate(assignment.effectiveFrom) || normalizedFromDate;
+          const end = toIsoDate(assignment.effectiveTo) || normalizedToDate;
+          return start <= normalizedToDate && end >= normalizedFromDate;
+        });
+
+        if (normalizedFromDate === normalizedToDate) {
+          const activeAssignment = assignments.find((assignment) => {
+            const start = toIsoDate(assignment.effectiveFrom) || normalizedFromDate;
+            const end = toIsoDate(assignment.effectiveTo) || normalizedToDate;
+            return start <= normalizedFromDate && end >= normalizedFromDate;
+          });
+          if (activeAssignment) return formatTeacherName(staffById.get(activeAssignment.teacherId));
+          if ((toIsoDate(classItem.archivedAt) || today) >= normalizedFromDate && classItem.classTeacherId) {
+            return formatTeacherName(staffById.get(classItem.classTeacherId));
+          }
+          return "-";
+        }
+
+        const teacherLabels: string[] = [];
+        const seen = new Set<string>();
+        assignments.forEach((assignment) => {
+          const label = formatTeacherName(staffById.get(assignment.teacherId));
+          if (!seen.has(label)) {
+            seen.add(label);
+            teacherLabels.push(label);
+          }
+        });
+
+        if (!teacherLabels.length && classItem.classTeacherId) {
+          teacherLabels.push(formatTeacherName(staffById.get(classItem.classTeacherId)));
+        }
+
+        return teacherLabels.join(", ") || "-";
+      };
+
+      const rows = relevantClasses.map((classItem) => {
+        let present = 0;
+        let absent = 0;
+        let unmarked = 0;
+        let total = 0;
+
+        rangeDates.forEach((dateKey) => {
+          const createdDate = toIsoDate(classItem.createdAt) || dateKey;
+          const archivedDate = toIsoDate(classItem.archivedAt);
+          const hasAttendanceOnDate = attendanceByDateClass.has(`${dateKey}::${classItem.id}`);
+          if (!hasAttendanceOnDate) {
+            if (createdDate > dateKey) return;
+            if (archivedDate && archivedDate < dateKey) return;
+          }
+
+          const records = attendanceByDateClass.get(`${dateKey}::${classItem.id}`) || [];
+          if (records.length > 0) {
+            const datePresent = records.filter((record) => record.status === "present").length;
+            const dateAbsent = records.length - datePresent;
+            present += datePresent;
+            absent += dateAbsent;
+            total += records.length;
+            return;
+          }
+
+          const rosterCount = rosterByClass.get(classItem.id) || 0;
+          const shouldTreatAsUnmarked = schoolHasRecordsByDate.has(dateKey) || dateKey === today;
+          if (shouldTreatAsUnmarked && rosterCount > 0) {
+            unmarked += rosterCount;
+            total += rosterCount;
+          }
+        });
+
+        return {
+          classId: classItem.id,
+          className: classItem.shortCode?.trim() || classItem.className,
+          teacher: getTeacherLabelForRange(classItem),
+          present,
+          absent,
+          unmarked,
+          total,
+          attendancePercent: total > 0 ? Number(((present / total) * 100).toFixed(1)) : 0,
+        };
+      }).sort((left, right) => left.className.localeCompare(right.className));
+
+      const totalRows = rows.length;
+      const totalPages = totalRows === 0 ? 0 : Math.ceil(totalRows / attendancePageSize);
+      const safePage = totalPages === 0 ? 1 : Math.min(attendancePage, totalPages);
+      const paginatedRows = rows.slice((safePage - 1) * attendancePageSize, safePage * attendancePageSize);
+      const summary = rows.reduce((accumulator, row) => ({
+        present: accumulator.present + row.present,
+        absent: accumulator.absent + row.absent,
+        unmarked: accumulator.unmarked + row.unmarked,
+        total: accumulator.total + row.total,
+      }), { present: 0, absent: 0, unmarked: 0, total: 0 });
+
+      return {
+        summary: {
+          ...summary,
+          fromDate: normalizedFromDate,
+          toDate: normalizedToDate,
+          page: safePage,
+          pageSize: attendancePageSize,
+          totalPages,
+          totalRows,
+        },
+        rows: paginatedRows,
+      };
     };
 
     const computeLibraryStats = async (sid?: number | null) => {
@@ -1387,50 +1775,41 @@ export class DatabaseStorage implements IStorage {
         currentlyBorrowed,
         overdueBooks,
         unpaidFines: unpaidFinesList.length,
-        unpaidFinesAmount: unpaidFinesList.reduce((sum, f) => sum + parseFloat(f.amount), 0),
+        unpaidFinesAmount: unpaidFinesList.reduce((sum, f) => sum + parseAmount(f.amount), 0),
         paidFines: paidFinesList.length,
-        paidFinesAmount: paidFinesList.reduce((sum, f) => sum + parseFloat(f.amount), 0),
+        paidFinesAmount: paidFinesList.reduce((sum, f) => sum + parseAmount(f.amount), 0),
       };
     };
 
-    // If schoolId is provided, filter by school
     if (schoolId) {
       const schoolStudentsList = await db.select().from(students).where(eq(students.schoolId, schoolId));
       const schoolStaffList = await db.select().from(staff).where(eq(staff.schoolId, schoolId));
-      const schoolClassesList = await db.select().from(classes).where(eq(classes.schoolId, schoolId));
+      const schoolClassesList = await db.select().from(classes).where(and(eq(classes.schoolId, schoolId), isNull(classes.archivedAt)));
       const allSubjectsList = await db.select().from(subjects);
-      
       const studentIds = new Set(schoolStudentsList.map(s => s.id));
-
-      const todayAttendance = await db.select().from(attendanceRecords).where(eq(attendanceRecords.date, today));
-      const filteredAttendance = todayAttendance.filter(r => studentIds.has(r.studentId));
-      const presentCount = filteredAttendance.filter(r => r.status === 'present').length;
-      const absentCount = filteredAttendance.filter(r => r.status !== 'present').length;
-
-      const allPayments = await db.select().from(feesPayments).orderBy(desc(feesPayments.paymentDate)).limit(50);
+      const [attendanceStats, allPayments] = await Promise.all([
+        buildAttendanceStats(schoolId),
+        db.select().from(feesPayments).orderBy(desc(feesPayments.paymentDate)).limit(50),
+      ]);
       const recentPayments = allPayments.filter(p => studentIds.has(p.studentId)).slice(0, 10);
 
-      // Students daily stats (simplified - using status field if exists)
-      const activeStudents = schoolStudentsList.filter((s: any) => s.status === 'active' || !s.status);
-      const approved = activeStudents.length;
+      const activeStudentsList = schoolStudentsList.filter((studentItem: any) => {
+        const status = String(studentItem.status || "active").toLowerCase();
+        return status === "active" || status === "approved" || status === "";
+      });
+      const approved = activeStudentsList.length;
+      const maleCount = activeStudentsList.filter(s => s.gender === 'male' || s.gender === 'Male').length;
+      const femaleCount = activeStudentsList.filter(s => s.gender === 'female' || s.gender === 'Female').length;
+      const pending = schoolStudentsList.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
+      const transferred = schoolStudentsList.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
 
-      // Gender counts (only active/approved students)
-      const maleCount = activeStudents.filter(s => s.gender === 'male' || s.gender === 'Male').length;
-      const femaleCount = activeStudents.filter(s => s.gender === 'female' || s.gender === 'Female').length;
-      const pending = schoolStudentsList.filter((s: any) => s.status === 'pending').length;
-      const transferred = schoolStudentsList.filter((s: any) => s.status === 'transferred').length;
-
-      // Fees today
       const todayPayments = recentPayments.filter(p => p.paymentDate === today);
-      const cashToday = todayPayments.filter(p => p.paymentMethod === 'cash').reduce((sum, p) => sum + parseFloat(p.amount), 0);
-      const mobileToday = todayPayments.filter(p => p.paymentMethod === 'mobile_money').reduce((sum, p) => sum + parseFloat(p.amount), 0);
-      const bankToday = todayPayments.filter(p => p.paymentMethod === 'bank_transfer').reduce((sum, p) => sum + parseFloat(p.amount), 0);
-      const termTotal = allPayments.filter(p => studentIds.has(p.studentId)).reduce((sum, p) => sum + parseFloat(p.amount), 0);
+      const cashToday = todayPayments.filter(p => p.paymentMethod === 'cash').reduce((sum, p) => sum + parseAmount(p.amount), 0);
+      const mobileToday = todayPayments.filter(p => p.paymentMethod === 'mobile_money').reduce((sum, p) => sum + parseAmount(p.amount), 0);
+      const bankToday = todayPayments.filter(p => p.paymentMethod === 'bank_transfer').reduce((sum, p) => sum + parseAmount(p.amount), 0);
+      const termTotal = allPayments.filter(p => studentIds.has(p.studentId)).reduce((sum, p) => sum + parseAmount(p.amount), 0);
 
-      // Generate enrollment trend (last 12 months based on enrollment dates)
       const enrollmentTrend = generateEnrollmentTrend(schoolStudentsList);
-      
-      // Calculate transfer reasons based on student status
       const transferReasons = [
         { name: 'Fees Issues', value: Math.floor(transferred * 0.35) },
         { name: 'Relocation', value: Math.floor(transferred * 0.25) },
@@ -1443,57 +1822,54 @@ export class DatabaseStorage implements IStorage {
         totalStaff: schoolStaffList.length,
         totalClasses: schoolClassesList.length,
         totalSubjects: allSubjectsList.length,
-        attendanceToday: { present: presentCount, absent: absentCount, total: filteredAttendance.length },
+        attendanceToday: attendanceStats.summary,
         recentPayments,
         studentsGender: { male: maleCount, female: femaleCount },
         studentsDailyStats: { approved, pending, transferred },
         classroomPopulation: computeClassroomPopulation(schoolStudentsList, schoolClassesList),
         feesToday: { cash: cashToday, mobileMoney: mobileToday, bank: bankToday, total: cashToday + mobileToday + bankToday },
         termFeesCollected: termTotal,
-        staffMonitoring: { present: 0, absent: 0, late: 0, earlyExits: 0 }, // Placeholder - will be filled by clock-in app
-        absentStaff: [], // Placeholder - will be filled by clock-in app
-        lateComers: [], // Placeholder - will be filled by clock-in app
-        studentsAttendanceByClass: computeAttendanceByClass(filteredAttendance, schoolStudentsList, schoolClassesList, schoolStaffList),
+        staffMonitoring: { present: 0, absent: 0, late: 0, earlyExits: 0 },
+        absentStaff: [],
+        lateComers: [],
+        studentsAttendanceByClass: attendanceStats.rows,
         enrollmentTrend,
         transferReasons,
         libraryStats: await computeLibraryStats(schoolId)
       };
     }
 
-    // No school filter - return all data
-    const [studentCount] = await db.select({ count: drizzleCount() }).from(students);
-    const [staffCount] = await db.select({ count: drizzleCount() }).from(staff);
-    const [classCount] = await db.select({ count: drizzleCount() }).from(classes);
-    const [subjectCount] = await db.select({ count: drizzleCount() }).from(subjects);
+    const [studentCount, staffCount, classCount, subjectCount] = await Promise.all([
+      db.select({ count: drizzleCount() }).from(students),
+      db.select({ count: drizzleCount() }).from(staff),
+      db.select({ count: drizzleCount() }).from(classes).where(isNull(classes.archivedAt)),
+      db.select({ count: drizzleCount() }).from(subjects),
+    ]);
 
-    const allStudents = await db.select().from(students);
-    const allClasses = await db.select().from(classes);
-    const allStaff = await db.select().from(staff);
+    const [allStudents, allClasses, attendanceStats, recentPayments] = await Promise.all([
+      db.select().from(students),
+      db.select().from(classes).where(isNull(classes.archivedAt)),
+      buildAttendanceStats(),
+      db.select().from(feesPayments).orderBy(desc(feesPayments.paymentDate)).limit(10),
+    ]);
 
-    const todayAttendance = await db.select().from(attendanceRecords).where(eq(attendanceRecords.date, today));
-    const presentCount = todayAttendance.filter(r => r.status === 'present').length;
-    const absentCount = todayAttendance.filter(r => r.status !== 'present').length;
-
-    const recentPayments = await db.select().from(feesPayments).orderBy(desc(feesPayments.paymentDate)).limit(10);
-
-    const activeStudentsList = allStudents.filter((s: any) => s.status === 'active' || !s.status);
+    const activeStudentsList = allStudents.filter((studentItem: any) => {
+      const status = String(studentItem.status || "active").toLowerCase();
+      return status === "active" || status === "approved" || status === "";
+    });
     const approved = activeStudentsList.length;
-
     const maleCount = activeStudentsList.filter(s => s.gender === 'male' || s.gender === 'Male').length;
     const femaleCount = activeStudentsList.filter(s => s.gender === 'female' || s.gender === 'Female').length;
-    const pending = allStudents.filter((s: any) => s.status === 'pending').length;
-    const transferred = allStudents.filter((s: any) => s.status === 'transferred').length;
+    const pending = allStudents.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
+    const transferred = allStudents.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
 
     const todayPayments = recentPayments.filter(p => p.paymentDate === today);
-    const cashToday = todayPayments.filter(p => p.paymentMethod === 'cash').reduce((sum, p) => sum + parseFloat(p.amount), 0);
-    const mobileToday = todayPayments.filter(p => p.paymentMethod === 'mobile_money').reduce((sum, p) => sum + parseFloat(p.amount), 0);
-    const bankToday = todayPayments.filter(p => p.paymentMethod === 'bank_transfer').reduce((sum, p) => sum + parseFloat(p.amount), 0);
-    const termTotal = recentPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+    const cashToday = todayPayments.filter(p => p.paymentMethod === 'cash').reduce((sum, p) => sum + parseAmount(p.amount), 0);
+    const mobileToday = todayPayments.filter(p => p.paymentMethod === 'mobile_money').reduce((sum, p) => sum + parseAmount(p.amount), 0);
+    const bankToday = todayPayments.filter(p => p.paymentMethod === 'bank_transfer').reduce((sum, p) => sum + parseAmount(p.amount), 0);
+    const termTotal = recentPayments.reduce((sum, p) => sum + parseAmount(p.amount), 0);
 
-    // Generate enrollment trend
     const enrollmentTrend = generateEnrollmentTrend(allStudents);
-    
-    // Calculate transfer reasons
     const transferReasons = [
       { name: 'Fees Issues', value: Math.floor(transferred * 0.35) },
       { name: 'Relocation', value: Math.floor(transferred * 0.25) },
@@ -1502,11 +1878,11 @@ export class DatabaseStorage implements IStorage {
     ].filter(r => r.value > 0);
 
     return {
-      totalStudents: studentCount?.count || 0,
-      totalStaff: staffCount?.count || 0,
-      totalClasses: classCount?.count || 0,
-      totalSubjects: subjectCount?.count || 0,
-      attendanceToday: { present: presentCount, absent: absentCount, total: todayAttendance.length },
+      totalStudents: studentCount[0]?.count || 0,
+      totalStaff: staffCount[0]?.count || 0,
+      totalClasses: classCount[0]?.count || 0,
+      totalSubjects: subjectCount[0]?.count || 0,
+      attendanceToday: attendanceStats.summary,
       recentPayments,
       studentsGender: { male: maleCount, female: femaleCount },
       studentsDailyStats: { approved, pending, transferred },
@@ -1516,7 +1892,7 @@ export class DatabaseStorage implements IStorage {
       staffMonitoring: { present: 0, absent: 0, late: 0, earlyExits: 0 },
       absentStaff: [],
       lateComers: [],
-      studentsAttendanceByClass: computeAttendanceByClass(todayAttendance, allStudents, allClasses, allStaff),
+      studentsAttendanceByClass: attendanceStats.rows,
       enrollmentTrend,
       transferReasons,
       libraryStats: await computeLibraryStats()
@@ -1524,6 +1900,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Organization methods
+
   async getAllOrganizations(): Promise<Organization[]> {
     return db.select().from(organizations).orderBy(organizations.name);
   }

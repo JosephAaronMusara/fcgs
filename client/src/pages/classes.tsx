@@ -886,7 +886,12 @@ function AddClassDialog({
                 <SelectValue placeholder="Select teacher" />
               </SelectTrigger>
               <SelectContent>
-                {staff?.filter(s => s.role === "teacher" || s.role === "head_of_department" || s.role === "deputy_headmaster").map(s => (
+                {staff?.filter(
+                  s =>
+                      s.role === "teacher" ||
+                      s.role === "assistant_teacher" ||
+                      s.role === "quality_control_officer"
+                  ).map(s => (
                   <SelectItem key={s.id} value={s.id.toString()}>
                     {s.firstName} {s.lastName}
                   </SelectItem>
@@ -1157,7 +1162,12 @@ function EditClassDialog({
                   <SelectValue placeholder="Select teacher" />
                 </SelectTrigger>
                 <SelectContent>
-                  {staff?.filter(s => s.role === "teacher" || s.role === "head_of_department" || s.role === "deputy_headmaster").map(s => (
+                  {staff?.filter(
+                    s =>
+                        s.role === "teacher" ||
+                        s.role === "assistant_teacher" ||
+                        s.role === "quality_control_officer"
+                    ).map(s => (
                     <SelectItem key={s.id} value={s.id.toString()}>
                       {s.firstName} {s.lastName}
                     </SelectItem>
