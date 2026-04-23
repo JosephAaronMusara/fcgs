@@ -4,6 +4,7 @@ import { useLocation } from "wouter";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -17,7 +18,7 @@ interface DashboardStats {
   totalStaff: number;
   totalClasses: number;
   totalSubjects: number;
-  attendanceToday: { present: number; absent: number; total: number };
+  attendanceToday: { present: number; absent: number; unmarked: number; total: number; fromDate: string; toDate: string; page: number; pageSize: number; totalPages: number; totalRows: number };
   recentPayments: Array<{ id: number; amount: string; paymentDate: string; paymentMethod: string }>;
   studentsGender: { male: number; female: number };
   studentsDailyStats: { approved: number; pending: number; transferred: number };
@@ -27,13 +28,14 @@ interface DashboardStats {
   staffMonitoring: { present: number; absent: number; late: number; earlyExits: number };
   absentStaff: Array<{ name: string; phone: string }>;
   lateComers: Array<{ name: string; inVariance: string; outVariance: string }>;
-  studentsAttendanceByClass: Array<{ className: string; teacher: string; absent: number; present: number; total: number }>;
+  studentsAttendanceByClass: Array<{ classId: number; className: string; teacher: string; absent: number; present: number; unmarked: number; total: number; attendancePercent: number }>;
   enrollmentTrend: Array<{ month: string; count: number }>;
   transferReasons: Array<{ name: string; value: number }>;
   libraryStats: { totalBooks: number; availableCopies: number; currentlyBorrowed: number; overdueBooks: number; unpaidFines: number; unpaidFinesAmount: number; paidFines: number; paidFinesAmount: number };
 }
 
 const COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4'];
+const getTodayDateValue = () => new Date().toISOString().slice(0, 10);
 
 interface StudentSearchResult {
   id: number;
@@ -102,8 +104,23 @@ export default function Dashboard() {
     enabled: debouncedStaffSearch.length >= 2,
   });
 
+  const todayDate = getTodayDateValue();
+  const [attendanceFromDate, setAttendanceFromDate] = useState(todayDate);
+  const [attendanceToDate, setAttendanceToDate] = useState(todayDate);
+  const [attendancePage, setAttendancePage] = useState(1);
+  const attendancePageSize = 10;
+  const normalizedAttendanceToDate = attendanceToDate < attendanceFromDate ? attendanceFromDate : attendanceToDate;
+  const dashboardStatsQueryKey = `/api/dashboard/stats?fromDate=${attendanceFromDate}&toDate=${normalizedAttendanceToDate}&attendancePage=${attendancePage}&attendancePageSize=${attendancePageSize}`;
+
+  useEffect(() => {
+    setAttendancePage(1);
+  }, [attendanceFromDate, normalizedAttendanceToDate]);
+
   const { data: stats, isLoading } = useQuery<DashboardStats>({
-    queryKey: ["/api/dashboard/stats"],
+    queryKey: [dashboardStatsQueryKey],
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    refetchInterval: 15000,
   });
 
   const { data: commStats } = useQuery<{ email: { sent: number; failed: number; pending: number }; sms: { sent: number; failed: number; pending: number } }>({
@@ -134,6 +151,13 @@ export default function Dashboard() {
   const studentAttendanceRate = stats?.attendanceToday.total
     ? Math.round((stats.attendanceToday.present / stats.attendanceToday.total) * 100)
     : 0;
+  const attendanceDateLabel = stats
+    ? stats.attendanceToday.fromDate === stats.attendanceToday.toDate
+      ? stats.attendanceToday.fromDate
+      : `${stats.attendanceToday.fromDate} to ${stats.attendanceToday.toDate}`
+    : attendanceFromDate === normalizedAttendanceToDate
+      ? attendanceFromDate
+      : `${attendanceFromDate} to ${normalizedAttendanceToDate}`;
 
   const staffTotal = stats?.staffMonitoring 
     ? stats.staffMonitoring.present + stats.staffMonitoring.absent + stats.staffMonitoring.late
@@ -567,11 +591,56 @@ export default function Dashboard() {
           {/* Students Attendance */}
           <Card>
             <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-lg">Students Attendance</CardTitle>
-                <Badge variant="secondary" className={studentAttendanceRate > 80 ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}>
-                  {studentAttendanceRate}% Present
-                </Badge>
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <CardTitle className="text-lg">Students Attendance</CardTitle>
+                  <Badge
+                    variant="secondary"
+                    className={
+                      studentAttendanceRate >= 80
+                        ? "bg-green-100 text-green-700"
+                        : studentAttendanceRate < 50
+                          ? "bg-red-100 text-red-700"
+                          : "bg-yellow-100 text-yellow-700"
+                    }
+                  >
+                    {studentAttendanceRate}% Present
+                  </Badge>
+                </div>
+                <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto] items-end">
+                  <div>
+                    <Label className="text-xs text-muted-foreground">From</Label>
+                    <Input
+                      type="date"
+                      value={attendanceFromDate}
+                      onChange={(event) => setAttendanceFromDate(event.target.value || todayDate)}
+                      className="mt-1 h-9"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">To</Label>
+                    <Input
+                      type="date"
+                      value={normalizedAttendanceToDate}
+                      min={attendanceFromDate}
+                      onChange={(event) => setAttendanceToDate(event.target.value || attendanceFromDate)}
+                      className="mt-1 h-9"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9"
+                    onClick={() => {
+                      const todayValue = getTodayDateValue();
+                      setAttendanceFromDate(todayValue);
+                      setAttendanceToDate(todayValue);
+                      setAttendancePage(1);
+                    }}
+                  >
+                    Today
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent>
@@ -579,55 +648,90 @@ export default function Dashboard() {
                 <Skeleton className="h-20 w-full" />
               ) : (
                 <>
-                  <div className="flex items-center gap-4 text-sm mb-4">
-                    <span className="flex items-center gap-1">
-                      <CheckCircle className="w-4 h-4 text-green-500" />
-                      {stats?.attendanceToday.present || 0} Present
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <XCircle className="w-4 h-4 text-red-500" />
-                      {stats?.attendanceToday.absent || 0} Absent
-                    </span>
+                  <div className="mb-4">
+                    <div className="grid grid-cols-3 gap-3 text-sm">
+                      <div className="rounded bg-green-50 p-2 text-center">
+                        <div className="text-muted-foreground">Present</div>
+                        <div className="text-lg font-bold text-green-600">{stats?.attendanceToday.present || 0}</div>
+                      </div>
+                      <div className="rounded bg-red-50 p-2 text-center">
+                        <div className="text-muted-foreground">Absent</div>
+                        <div className="text-lg font-bold text-red-600">{stats?.attendanceToday.absent || 0}</div>
+                      </div>
+                      <div className="rounded bg-amber-50 p-2 text-center">
+                        <div className="text-muted-foreground">Unmarked</div>
+                        <div className="text-lg font-bold text-amber-600">{stats?.attendanceToday.unmarked || 0}</div>
+                      </div>
+                    </div>
                   </div>
 
                   <div className="text-xs text-muted-foreground mb-4">
-                    {today}
+                    {attendanceDateLabel}
                   </div>
 
-                  {/* Attendance by Class */}
                   <div className="border rounded-lg overflow-hidden">
                     <Table>
                       <TableHeader>
                         <TableRow className="bg-muted/50">
                           <TableHead className="text-xs">Class</TableHead>
-                          <TableHead className="text-xs">Teacher</TableHead>
+                          <TableHead className="text-xs">Teacher(s)</TableHead>
                           <TableHead className="text-xs text-right">Absent</TableHead>
                           <TableHead className="text-xs text-right">Present</TableHead>
-                          <TableHead className="text-xs text-right">Total(%)</TableHead>
+                          <TableHead className="text-xs text-right">Unmarked</TableHead>
+                          <TableHead className="text-xs text-right">Total (%)</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {stats?.studentsAttendanceByClass && stats.studentsAttendanceByClass.length > 0 ? (
-                          stats.studentsAttendanceByClass.slice(0, 10).map((row, i) => (
-                            <TableRow key={i}>
+                          stats.studentsAttendanceByClass.map((row) => (
+                            <TableRow key={row.classId}>
                               <TableCell className="text-xs py-2">{row.className}</TableCell>
                               <TableCell className="text-xs py-2">{row.teacher}</TableCell>
                               <TableCell className="text-xs py-2 text-right">{row.absent}</TableCell>
                               <TableCell className="text-xs py-2 text-right">{row.present}</TableCell>
-                              <TableCell className="text-xs py-2 text-right">
-                                {row.total > 0 ? Math.round((row.present / row.total) * 100) : 0}%
-                              </TableCell>
+                              <TableCell className="text-xs py-2 text-right">{row.unmarked}</TableCell>
+                              <TableCell className="text-xs py-2 text-right">{row.total} ({Math.round(row.attendancePercent)}%)</TableCell>
                             </TableRow>
                           ))
                         ) : (
                           <TableRow>
-                            <TableCell colSpan={5} className="text-center text-muted-foreground py-4">
-                              No attendance data for today
+                            <TableCell colSpan={6} className="text-center text-muted-foreground py-4">
+                              No attendance data for the selected date range
                             </TableCell>
                           </TableRow>
                         )}
                       </TableBody>
                     </Table>
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between gap-3 text-sm">
+                    <div className="text-muted-foreground">
+                      {stats?.attendanceToday.totalRows ? (
+                        <>Showing page {stats.attendanceToday.page} of {stats.attendanceToday.totalPages} ({stats.attendanceToday.totalRows} classes)</>
+                      ) : (
+                        <>No classes found for the selected date range</>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setAttendancePage((current) => Math.max(1, current - 1))}
+                        disabled={!stats || stats.attendanceToday.page <= 1}
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setAttendancePage((current) => Math.min(stats?.attendanceToday.totalPages || current, current + 1))}
+                        disabled={!stats || stats.attendanceToday.page >= stats.attendanceToday.totalPages}
+                      >
+                        Next
+                      </Button>
+                    </div>
                   </div>
                 </>
               )}
