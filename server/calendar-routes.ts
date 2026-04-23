@@ -1,5 +1,5 @@
 import type { Express, Request } from "express";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
   calendarEvents,

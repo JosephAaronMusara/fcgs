@@ -1247,7 +1247,11 @@ export async function registerRoutes(
   app.get("/api/dashboard/stats", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const stats = await storage.getDashboardStats(schoolId);
+      const fromDate = typeof req.query.fromDate === "string" ? req.query.fromDate : undefined;
+      const toDate = typeof req.query.toDate === "string" ? req.query.toDate : undefined;
+      const attendancePage = typeof req.query.attendancePage === "string" ? Number(req.query.attendancePage) : undefined;
+      const attendancePageSize = typeof req.query.attendancePageSize === "string" ? Number(req.query.attendancePageSize) : undefined;
+      const stats = await storage.getDashboardStats(schoolId, { fromDate, toDate, attendancePage, attendancePageSize });
       res.json(stats);
     } catch (error) {
       next(error);

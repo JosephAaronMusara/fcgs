@@ -182,6 +182,16 @@ export const classes = pgTable("classes", {
   streamId: integer("stream_id").references(() => streams.id),
   classTeacherId: integer("class_teacher_id").references(() => staff.id),
   capacity: integer("capacity").default(40),
+  archivedAt: timestamp("archived_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const classTeacherAssignments = pgTable("class_teacher_assignments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  classId: integer("class_id").references(() => classes.id).notNull(),
+  teacherId: integer("teacher_id").references(() => staff.id).notNull(),
+  effectiveFrom: timestamp("effective_from").notNull().defaultNow(),
+  effectiveTo: timestamp("effective_to"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -741,7 +751,8 @@ export const insertSchoolSchema = createInsertSchema(schools).omit({ id: true, c
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertStaffSchema = createInsertSchema(staff).omit({ id: true, createdAt: true });
 export const insertStreamSchema = createInsertSchema(streams).omit({ id: true });
-export const insertClassSchema = createInsertSchema(classes).omit({ id: true, createdAt: true });
+export const insertClassSchema = createInsertSchema(classes).omit({ id: true, archivedAt: true, createdAt: true });
+export const insertClassTeacherAssignmentSchema = createInsertSchema(classTeacherAssignments).omit({ id: true, createdAt: true });
 export const insertParentSchema = createInsertSchema(parents).omit({ id: true, createdAt: true });
 export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
 export const insertSubjectSchema = createInsertSchema(subjects).omit({ id: true });
@@ -794,6 +805,8 @@ export type InsertStream = z.infer<typeof insertStreamSchema>;
 export type Stream = typeof streams.$inferSelect;
 export type InsertClass = z.infer<typeof insertClassSchema>;
 export type Class = typeof classes.$inferSelect;
+export type InsertClassTeacherAssignment = z.infer<typeof insertClassTeacherAssignmentSchema>;
+export type ClassTeacherAssignment = typeof classTeacherAssignments.$inferSelect;
 export type InsertParent = z.infer<typeof insertParentSchema>;
 export type Parent = typeof parents.$inferSelect;
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
