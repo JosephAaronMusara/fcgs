@@ -3829,21 +3829,56 @@ export async function registerRoutes(
             msg = `FCGS Attendance: ${studentName} reason for absence has been updated; reason: ${(newReason || 'No Reason').toUpperCase()}. Please contact our Call Centre for any enquiries you may have.`;
           } else if (newAbsentLike) {
             const classInfo = await storage.getClass(rec.classId);
-            const className = classInfo?.className || 'Class';
+            const className = classInfo?.shortCode || classInfo?.className || 'Class';
+
+            let teacherName = '';
+            let teacherPhone = '';
+            let teacherEmail = '';
+
+            if (classInfo?.classTeacherId) {
+              const classTeacher = await storage.getStaff(classInfo.classTeacherId);
+              if (classTeacher) {
+                teacherName = `${classTeacher.firstName} ${classTeacher.lastName}`.trim();
+                teacherPhone = classTeacher.phone || '';
+                teacherEmail = classTeacher.email || '';
+              }
+            }
+
             const reasonRaw = newReason;
             const reasonLc = reasonRaw.toLowerCase();
             const isUnknown = unknownReasons.includes(reasonLc);
-            const contactLine = `Phone: ${callPhone} or WhatsApp: ${waPhone}`;
+
+            const teacherContactBits = [
+              teacherPhone ? `Phone: ${teacherPhone}` : null,
+              teacherEmail ? `Email: ${teacherEmail}` : null,
+            ].filter(Boolean);
+
+            const contactLine =
+              teacherName && teacherContactBits.length > 0
+                ? `Contact: ${teacherName} | ${teacherContactBits.join(' | ')}`
+                : teacherName
+                  ? `Contact: ${teacherName}`
+                  : (callPhone || waPhone)
+                    ? `Phone: ${callPhone}${waPhone ? ` or WhatsApp: ${waPhone}` : ''}`
+                    : '';
+
             const line1 = `FCGS Attendance: ${studentName} was marked ABSENT on ${rec.date} (${className}).`;
+
             let line2: string;
             if (isUnknown) {
-              line2 = 'Please contact our Call Centre with a reason for the absence.';
+              line2 = teacherName
+                ? 'Please contact us with a reason for the absence.'
+                : 'Please contact us with a reason for the absence.';
             } else {
-              line2 = `Reason: ${reasonRaw.toUpperCase()}. Please contact our Call Centre for any enquiries you may have.`;
+              line2 = teacherName
+                ? `Reason: ${reasonRaw.toUpperCase()}. Please contact us for any enquiries you may have.`
+                : `Reason: ${reasonRaw.toUpperCase()}. Please contact us for any enquiries you may have.`;
             }
-            msg = `${line1}\n${line2}\n${contactLine}`;
-          }
 
+            msg = contactLine
+              ? `${line1}\n${line2}\n${contactLine}`
+              : `${line1}\n${line2}`;
+          }
           if (msg) {
             const senderId = (req.user as any).id;
             console.log(`[FCGS Attendance Notify] Sending to parent of student ${rec.studentId}: baseline=${baselineStatus}→new=${newSlug}, changed=${changed}, firstTimeNotify=${firstTimeNotify}`);

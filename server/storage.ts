@@ -566,7 +566,9 @@ function computeClassroomPopulation(
 
   return activeClasses
     .map((cls: any) => ({
-      className: String(cls?.shortName || cls?.name || `Class ${cls?.id}`),
+      className: String(
+        cls?.shortCode?.trim() || cls?.className?.trim() || `Class ${cls?.id}`
+      ),
       count: counts.get(Number(cls?.id)) ?? 0,
     }))
     .sort((a, b) =>
