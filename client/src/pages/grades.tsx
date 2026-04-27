@@ -547,7 +547,7 @@ function GradeDialog({
           <p className="text-sm text-muted-foreground">{profileLabel}</p>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="gradeName">Grade Name (e.g., A, B, C or 1, 2...)</Label>
               <Input
@@ -603,7 +603,7 @@ function GradeDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="lowerLimit">Lower Limit (%)</Label>
               <Input
@@ -636,7 +636,7 @@ function GradeDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="gradePoints">Grade Points</Label>
               <Input

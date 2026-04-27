@@ -896,7 +896,7 @@ function PaymentForm({
           </SelectContent>
         </Select>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="amount">Amount (USD)</Label>
           <Input
@@ -921,7 +921,7 @@ function PaymentForm({
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="paymentMethod">Payment Method</Label>
           <Select name="paymentMethod" defaultValue="cash">
@@ -946,7 +946,7 @@ function PaymentForm({
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="term">Term</Label>
           <Select name="term">

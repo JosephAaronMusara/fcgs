@@ -55,7 +55,7 @@ export default function MyNotificationsPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-6">
         <Skeleton className="h-10 w-48" />
         {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-20 w-full" />)}
       </div>
@@ -63,7 +63,7 @@ export default function MyNotificationsPage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-3xl font-bold" data-testid="text-notifications-title">Notifications</h1>

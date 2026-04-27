@@ -637,9 +637,9 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <SidebarProvider style={style as React.CSSProperties}>
-      <div className="flex h-screen w-full overflow-hidden">
+      <div className="flex h-screen w-full min-w-0 overflow-hidden">
         <AppSidebar />
-        <div className="flex flex-col flex-1 overflow-hidden">
+        <div className="flex min-w-0 flex-col flex-1 overflow-hidden">
           <TerminationBanner />
           <header className="sticky top-0 z-50 flex flex-wrap items-center gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60 sm:gap-4 sm:px-4">
             <SidebarTrigger data-testid="button-sidebar-toggle" />
@@ -780,7 +780,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
               </Sheet>
             </div>
           </header>
-          <main className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-4 sm:px-4 sm:py-5 lg:p-6">
+          <main className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-3 py-4 sm:px-4 sm:py-5 lg:p-6">
             {children}
           </main>
         </div>

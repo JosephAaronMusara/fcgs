@@ -363,7 +363,7 @@ export default function AssessmentsPage() {
   };
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-3">
           <ClipboardList className="h-8 w-8" style={{ color: "#1b2a5c" }} />
@@ -1326,7 +1326,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
 
           <div className="flex-1 min-h-0 overflow-y-auto border rounded-md mt-3">
             {comments.length === 0 ? (
-              <div className="p-6 text-center text-muted-foreground text-sm">No comments yet.</div>
+              <div className="p-4 sm:p-6 text-center text-muted-foreground text-sm">No comments yet.</div>
             ) : (
               <div className="divide-y">
                 {filteredComments.map((c) => (
