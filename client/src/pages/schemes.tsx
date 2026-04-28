@@ -138,7 +138,7 @@ export default function SchemesPage() {
               <DialogDescription>Add a new scheme of work entry</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid gap-4 grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 <div className="space-y-2">
                   <Label htmlFor="subjectId">Subject</Label>
                   <Select name="subjectId" required>
@@ -203,7 +203,7 @@ export default function SchemesPage() {
                 <Label htmlFor="activities">Teaching/Learning Activities</Label>
                 <Textarea id="activities" name="activities" data-testid="input-activities" />
               </div>
-              <div className="grid gap-4 grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="resources">Resources</Label>
                   <Textarea id="resources" name="resources" data-testid="input-resources" />

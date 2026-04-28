@@ -68,9 +68,9 @@ export default function ChildrenAttendancePage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-6">
         <Skeleton className="h-10 w-48" />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
           {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-24" />)}
         </div>
         <Skeleton className="h-64 w-full" />
@@ -80,7 +80,7 @@ export default function ChildrenAttendancePage() {
 
   if (children.length === 0) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <h1 className="text-3xl font-bold mb-2" data-testid="text-children-attendance-title">Children's Attendance</h1>
         <Card>
           <CardContent className="py-12 text-center">
@@ -93,7 +93,7 @@ export default function ChildrenAttendancePage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div>
         <h1 className="text-3xl font-bold" data-testid="text-children-attendance-title">Children's Attendance</h1>
         <p className="text-muted-foreground">Track your children's school attendance</p>
@@ -145,7 +145,7 @@ export default function ChildrenAttendancePage() {
             </Select>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-5">
             <Card>
               <CardContent className="pt-4 pb-4">
                 <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">

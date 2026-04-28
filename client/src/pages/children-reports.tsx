@@ -87,7 +87,7 @@ export default function ChildrenReportsPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-6">
         <Skeleton className="h-10 w-48" />
         <Skeleton className="h-32 w-full" />
         <Skeleton className="h-64 w-full" />
@@ -97,7 +97,7 @@ export default function ChildrenReportsPage() {
 
   if (children.length === 0) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <h1 className="text-3xl font-bold mb-2" data-testid="text-children-reports-title">Results & Reports</h1>
         <Card>
           <CardContent className="py-12 text-center">
@@ -110,7 +110,7 @@ export default function ChildrenReportsPage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div>
         <h1 className="text-3xl font-bold" data-testid="text-children-reports-title">Results & Reports</h1>
         <p className="text-muted-foreground">Your children's academic performance</p>
@@ -146,7 +146,7 @@ export default function ChildrenReportsPage() {
             </CardContent>
           </Card>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
             <Card>
               <CardContent className="pt-4 pb-4">
                 <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">

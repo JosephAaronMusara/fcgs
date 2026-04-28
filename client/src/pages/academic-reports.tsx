@@ -1540,7 +1540,7 @@ function ClassAnalyticsDialog({
           </div>
         ) : (
           <div className="space-y-6">
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <Card>
                 <CardContent className="p-3 text-center">
                   <div className="text-2xl font-bold">{data.overallAvg}%</div>

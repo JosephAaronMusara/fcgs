@@ -161,7 +161,7 @@ export default function Staff360Page() {
 
   if (showSearch || !selectedStaffId) {
     return (
-      <div className="p-6 space-y-4 bg-background min-h-screen">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-4 bg-background min-h-screen">
         <h1 className="text-2xl font-bold" data-testid="text-360-staff-title">360 Staff Profile</h1>
         <p className="text-muted-foreground">Search for a staff member to view their comprehensive profile</p>
         <div className="relative max-w-lg">
@@ -209,7 +209,7 @@ export default function Staff360Page() {
 
   if (profileLoading) {
     return (
-      <div className="p-6 space-y-4 bg-background min-h-screen">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-4 bg-background min-h-screen">
         <div className="flex items-center gap-3">
           <Skeleton className="h-9 w-20" />
           <Skeleton className="h-7 w-64" />
@@ -230,7 +230,7 @@ export default function Staff360Page() {
 
   if (profileError) {
     return (
-      <div className="p-6 space-y-4 bg-background min-h-screen">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-4 bg-background min-h-screen">
         <Button variant="outline" size="sm" onClick={goBack} data-testid="button-back">
           <ArrowLeft className="h-4 w-4 mr-1" /> Back
         </Button>
@@ -255,7 +255,7 @@ export default function Staff360Page() {
   const joinedText = yearsAgo !== null ? (yearsAgo === 0 ? "Joined this year" : `Joined ${yearsAgo} year(s) ago`) : "";
 
   return (
-    <div className="p-6 space-y-6 bg-background min-h-screen">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6 bg-background min-h-screen">
       <div className="flex items-center gap-3 flex-wrap">
         <Button variant="outline" size="sm" onClick={goBack} data-testid="button-back">
           <ArrowLeft className="h-4 w-4 mr-1" /> Back
@@ -323,7 +323,7 @@ export default function Staff360Page() {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 mb-4">
               <div>
                 <h4 className="font-medium text-sm mb-2">Today's Lessons</h4>
                 {todayLessons.length === 0 ? (

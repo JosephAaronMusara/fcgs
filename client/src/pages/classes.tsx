@@ -224,7 +224,7 @@ export default function ClassroomsPage() {
   })();
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <School className="h-8 w-8" style={{ color: "#1b2a5c" }} />
@@ -282,7 +282,7 @@ export default function ClassroomsPage() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {[1, 2, 3].map(i => (
             <Card key={i}>
-              <CardContent className="p-6">
+              <CardContent className="p-4 sm:p-6">
                 <Skeleton className="h-6 w-48 mb-2" />
                 <Skeleton className="h-4 w-32 mb-4" />
                 <Skeleton className="h-8 w-full" />
@@ -438,7 +438,7 @@ function ClassCard({
   return (
     <>
       <Card className="hover-elevate" data-testid={`card-class-${classItem.id}`}>
-        <CardContent className="p-6">
+        <CardContent className="p-4 sm:p-6">
           <div className="flex items-start justify-between mb-4 gap-4">
             <div>
               <h3 className="font-semibold text-lg" data-testid={`text-class-name-${classItem.id}`}>
@@ -829,7 +829,7 @@ function AddClassDialog({
           <DialogTitle>Add New Class</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="className">Class Name *</Label>
               <Input
@@ -852,7 +852,7 @@ function AddClassDialog({
               />
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="streamId">Stream/Form</Label>
               <Select value={formData.streamId} onValueChange={(v) => setFormData(p => ({ ...p, streamId: v }))}>
@@ -1059,7 +1059,7 @@ function EditClassDialog({
           <DialogTitle>Class Details for #{classItem.id}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="space-y-2">
               <Label>Class Name</Label>
               <Input
@@ -1139,7 +1139,7 @@ function EditClassDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label>Stream/Form</Label>
               <Select value={formData.streamId} onValueChange={(v) => setFormData(p => ({ ...p, streamId: v }))}>

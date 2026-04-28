@@ -109,7 +109,7 @@ export default function HostelsPage() {
   }, [filteredHostels, streams]);
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <Building className="h-8 w-8" style={{ color: "#1b2a5c" }} />
@@ -164,7 +164,7 @@ export default function HostelsPage() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {[1, 2, 3].map(i => (
             <Card key={i}>
-              <CardContent className="p-6">
+              <CardContent className="p-4 sm:p-6">
                 <Skeleton className="h-6 w-48 mb-2" />
                 <Skeleton className="h-4 w-32 mb-4" />
                 <Skeleton className="h-8 w-full" />
@@ -192,7 +192,7 @@ export default function HostelsPage() {
                   const occupancyText = capacity > 0 ? `${studentCount}/${capacity}` : `${studentCount}`;
                   return (
                     <Card key={hostel.id} className="hover-elevate" data-testid={`card-hostel-${hostel.id}`}>
-                      <CardContent className="p-6">
+                      <CardContent className="p-4 sm:p-6">
                         <div className="mb-4 flex items-start justify-between gap-3">
                           <div>
                             <h3 className="font-semibold text-lg">{hostel.name}</h3>
@@ -516,7 +516,7 @@ function ManageHostelStudentsDialog({
 
         <div className="max-h-[320px] overflow-y-auto border rounded-md">
           {boarders.length === 0 ? (
-            <div className="p-6 text-center text-sm text-muted-foreground">No matching boarders found.</div>
+            <div className="p-4 sm:p-6 text-center text-sm text-muted-foreground">No matching boarders found.</div>
           ) : (
             <div className="divide-y">
               {boarders.map((student) => (

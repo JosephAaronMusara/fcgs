@@ -1033,3 +1033,64 @@
   color: var(--qc-muted);
   font-weight: 800;
 }
+
+/* Mobile responsiveness guardrails for the app shell and shared primitives. */
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  body {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  img,
+  video,
+  canvas,
+  iframe {
+    max-width: 100%;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    max-width: 100%;
+  }
+}
+
+@layer utilities {
+  .fcgs-page-shell {
+    @apply w-full min-w-0 max-w-full space-y-4 p-3 sm:space-y-6 sm:p-4 lg:p-6;
+  }
+
+  .fcgs-card-grid {
+    @apply grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4;
+  }
+
+  .fcgs-action-row {
+    @apply flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center;
+  }
+
+  .fcgs-scroll-x {
+    @apply w-full max-w-full overflow-x-auto overscroll-x-contain;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+[data-radix-popper-content-wrapper] {
+  max-width: calc(100vw - 0.5rem) !important;
+}
+
+.flex,
+.grid,
+.flex > *,
+.grid > * {
+  min-width: 0;
+}

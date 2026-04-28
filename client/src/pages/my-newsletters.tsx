@@ -24,7 +24,7 @@ export default function MyNewslettersPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-6">
         <Skeleton className="h-10 w-48" />
         {[1, 2, 3].map(i => <Skeleton key={i} className="h-32 w-full" />)}
       </div>
@@ -32,7 +32,7 @@ export default function MyNewslettersPage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div>
         <h1 className="text-3xl font-bold" data-testid="text-newsletters-title">Newsletters</h1>
         <p className="text-muted-foreground">School newsletters and announcements</p>

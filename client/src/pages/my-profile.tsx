@@ -24,7 +24,7 @@ export default function MyProfilePage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-6">
         <Skeleton className="h-10 w-48" />
         <Skeleton className="h-64 w-full" />
       </div>
@@ -33,7 +33,7 @@ export default function MyProfilePage() {
 
   if (!profile) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <Card>
           <CardContent className="py-12 text-center">
             <User className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
@@ -48,7 +48,7 @@ export default function MyProfilePage() {
   const initials = `${profile.firstName?.[0] || ""}${profile.lastName?.[0] || ""}`;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
       <div>
         <h1 className="text-3xl font-bold" data-testid="text-my-profile-title">My Profile</h1>
         <p className="text-muted-foreground">Your personal information</p>

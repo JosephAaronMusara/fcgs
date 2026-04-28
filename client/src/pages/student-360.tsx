@@ -169,7 +169,7 @@ export default function Student360Page() {
 
   if (showSearch || !selectedStudentId) {
     return (
-      <div className="p-6 space-y-4 bg-background min-h-screen">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-4 bg-background min-h-screen">
         <h1 className="text-2xl font-bold" data-testid="text-360-title">360 Student Profile</h1>
         <p className="text-muted-foreground">Search for a student to view their comprehensive profile</p>
         <div className="relative max-w-lg">
@@ -217,7 +217,7 @@ export default function Student360Page() {
 
   if (profileLoading) {
     return (
-      <div className="p-6 space-y-4 bg-background min-h-screen">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-4 bg-background min-h-screen">
         <Skeleton className="h-8 w-32" />
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <Skeleton className="h-96" />
@@ -230,7 +230,7 @@ export default function Student360Page() {
 
   if (profileError) {
     return (
-      <div className="p-6 space-y-4 bg-background min-h-screen">
+      <div className="p-3 sm:p-4 lg:p-6 space-y-4 bg-background min-h-screen">
         <Button variant="outline" size="sm" onClick={goBack} data-testid="button-back">
           <ArrowLeft className="h-4 w-4 mr-1" /> Back
         </Button>
@@ -251,7 +251,7 @@ export default function Student360Page() {
   if (!profile || !student) return null;
 
   return (
-    <div className="p-6 space-y-6 bg-background min-h-screen">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6 bg-background min-h-screen">
       <div className="flex items-center gap-3 flex-wrap">
         <Button variant="outline" size="sm" onClick={goBack} data-testid="button-back">
           <ArrowLeft className="h-4 w-4 mr-1" /> Back

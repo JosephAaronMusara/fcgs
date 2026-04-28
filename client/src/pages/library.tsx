@@ -665,8 +665,8 @@ function LibrarySetupModal({
       <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
         <DialogHeader><DialogTitle>Library Setup</DialogTitle><DialogDescription>Manage Policies, Categories and Bookshelves from one place.</DialogDescription></DialogHeader>
         <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
-          <TabsList className="mb-4 grid grid-cols-3 w-full"><TabsTrigger value="policies">Manage Policies</TabsTrigger><TabsTrigger value="categories">Manage Categories</TabsTrigger><TabsTrigger value="shelves">Manage Bookshelves</TabsTrigger></TabsList>
-          <TabsContent value="policies" className="space-y-4"><form onSubmit={(e)=>{e.preventDefault(); const fd=new FormData(e.currentTarget); savePolicy.mutate({ maxBooksStudent: parseInt(String(fd.get("maxBooksStudent")||1)) || 1, maxBooksTeacher: parseInt(String(fd.get("maxBooksTeacher")||500)) || 500, overdueChargePerDay: String(fd.get("overdueChargePerDay")||"0.50"), defaultBorrowDays: parseInt(String(fd.get("defaultBorrowDays")||1)) || 1 });}} className="space-y-4"><div className="grid grid-cols-2 gap-4"><div className="space-y-1.5"><Label htmlFor="maxBooksStudentParent">Max Books Student can Borrow</Label><Input id="maxBooksStudentParent" name="maxBooksStudent" type="number" min="1" defaultValue={libraryPolicy?.maxBooksStudent ?? 1} /></div><div className="space-y-1.5"><Label htmlFor="maxBooksTeacherParent">Max Books Teacher can Borrow</Label><Input id="maxBooksTeacherParent" name="maxBooksTeacher" type="number" min="1" defaultValue={libraryPolicy?.maxBooksTeacher ?? 500} /></div></div><div className="grid grid-cols-2 gap-4"><div className="space-y-1.5"><Label htmlFor="overdueChargeParent">Overdue Charge Per Day</Label><Input id="overdueChargeParent" name="overdueChargePerDay" type="number" step="0.01" min="0" defaultValue={libraryPolicy?.overdueChargePerDay ?? "0.50"} /></div><div className="space-y-1.5"><Label htmlFor="defaultBorrowDaysParent">Default Number of Borrow Days</Label><Input id="defaultBorrowDaysParent" name="defaultBorrowDays" type="number" min="1" defaultValue={libraryPolicy?.defaultBorrowDays ?? 1} /></div></div><div className="flex justify-end"><Button type="submit">Save Policies</Button></div></form></TabsContent>
+          <TabsList className="mb-4 grid h-auto w-full grid-cols-1 gap-2 sm:grid-cols-3"><TabsTrigger value="policies">Manage Policies</TabsTrigger><TabsTrigger value="categories">Manage Categories</TabsTrigger><TabsTrigger value="shelves">Manage Bookshelves</TabsTrigger></TabsList>
+          <TabsContent value="policies" className="space-y-4"><form onSubmit={(e)=>{e.preventDefault(); const fd=new FormData(e.currentTarget); savePolicy.mutate({ maxBooksStudent: parseInt(String(fd.get("maxBooksStudent")||1)) || 1, maxBooksTeacher: parseInt(String(fd.get("maxBooksTeacher")||500)) || 500, overdueChargePerDay: String(fd.get("overdueChargePerDay")||"0.50"), defaultBorrowDays: parseInt(String(fd.get("defaultBorrowDays")||1)) || 1 });}} className="space-y-4"><div className="grid grid-cols-1 gap-4 sm:grid-cols-2"><div className="space-y-1.5"><Label htmlFor="maxBooksStudentParent">Max Books Student can Borrow</Label><Input id="maxBooksStudentParent" name="maxBooksStudent" type="number" min="1" defaultValue={libraryPolicy?.maxBooksStudent ?? 1} /></div><div className="space-y-1.5"><Label htmlFor="maxBooksTeacherParent">Max Books Teacher can Borrow</Label><Input id="maxBooksTeacherParent" name="maxBooksTeacher" type="number" min="1" defaultValue={libraryPolicy?.maxBooksTeacher ?? 500} /></div></div><div className="grid grid-cols-1 gap-4 sm:grid-cols-2"><div className="space-y-1.5"><Label htmlFor="overdueChargeParent">Overdue Charge Per Day</Label><Input id="overdueChargeParent" name="overdueChargePerDay" type="number" step="0.01" min="0" defaultValue={libraryPolicy?.overdueChargePerDay ?? "0.50"} /></div><div className="space-y-1.5"><Label htmlFor="defaultBorrowDaysParent">Default Number of Borrow Days</Label><Input id="defaultBorrowDaysParent" name="defaultBorrowDays" type="number" min="1" defaultValue={libraryPolicy?.defaultBorrowDays ?? 1} /></div></div><div className="flex justify-end"><Button type="submit">Save Policies</Button></div></form></TabsContent>
           <TabsContent value="categories" className="space-y-4"><form onSubmit={(e)=>{e.preventDefault(); const name=newCatName.trim(); const description=newCatDesc.trim(); if (!name) return; editingCategory ? updateCategory.mutate({ id: editingCategory.id, data: { name, description: description || undefined } }) : createCategory.mutate({ name, description: description || undefined });}} className="space-y-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]"><div className="space-y-1.5"><Label htmlFor="librarySetupCategoryNameParent">Category name</Label><Input id="librarySetupCategoryNameParent" placeholder="Enter category name" value={newCatName} onChange={(e)=>setNewCatName(e.target.value)} required /></div><div className="space-y-1.5"><Label htmlFor="librarySetupCategoryDescParent">Description (optional)</Label><Input id="librarySetupCategoryDescParent" placeholder="Enter description" value={newCatDesc} onChange={(e)=>setNewCatDesc(e.target.value)} /></div><div className="flex items-end"><Button type="submit" className="w-full md:w-auto">{editingCategory ? "Update" : "Add Category"}</Button></div></div>{editingCategory && <div className="flex justify-end"><Button type="button" variant="outline" onClick={()=>{setEditingCategory(null); setNewCatName(""); setNewCatDesc("");}}>Cancel Edit</Button></div>}</form><div className="space-y-2 max-h-80 overflow-y-auto">{categories.map((cat)=><div key={cat.id} className="flex items-center justify-between gap-2 p-2 border rounded-md"><div><p className="font-medium text-sm">{cat.name}</p>{cat.description && <p className="text-xs text-muted-foreground">{cat.description}</p>}</div><div className="flex items-center gap-1"><Button variant="ghost" size="icon" onClick={()=>{setEditingCategory(cat); setNewCatName(cat.name); setNewCatDesc(cat.description || "");}}><Pencil className="w-4 h-4" /></Button><Button variant="ghost" size="icon" onClick={()=>deleteCategory.mutate(cat.id)}><Trash2 className="w-4 h-4" /></Button></div></div>)}</div></TabsContent>
           <TabsContent value="shelves" className="space-y-4"><form onSubmit={(e)=>{e.preventDefault(); const name=shelfName.trim(); const description=shelfDescription.trim(); if (!name || name === "N/A" || name === "Other") return; editingShelf ? updateShelf.mutate({ id: editingShelf.id, data: { name, description: description || undefined } }) : createShelf.mutate({ name, description: description || undefined });}} className="space-y-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]"><div className="space-y-1.5"><Label htmlFor="librarySetupShelfNameParent">Bookshelf Name</Label><Input id="librarySetupShelfNameParent" value={shelfName} onChange={(e)=>setShelfName(e.target.value)} placeholder="Enter bookshelf name" /></div><div className="space-y-1.5"><Label htmlFor="librarySetupShelfDescParent">Description (Optional)</Label><Input id="librarySetupShelfDescParent" value={shelfDescription} onChange={(e)=>setShelfDescription(e.target.value)} placeholder="Enter description" /></div><div className="flex items-end"><Button type="submit" className="w-full md:w-auto">{editingShelf ? "Update" : "Add Bookshelf"}</Button></div></div>{editingShelf && <div className="flex justify-end"><Button type="button" variant="outline" onClick={()=>{setEditingShelf(null); setShelfName(""); setShelfDescription("");}}>Cancel Edit</Button></div>}</form><div className="space-y-2 max-h-80 overflow-y-auto">{shelves.map((shelf)=><div key={shelf.id} className="flex items-center justify-between gap-2 p-2 border rounded-md"><div><p className="font-medium text-sm">{shelf.name}</p>{shelf.description && <p className="text-xs text-muted-foreground">{shelf.description}</p>}</div><div className="flex items-center gap-1"><Button type="button" variant="ghost" size="icon" onClick={()=>{setEditingShelf(shelf); setShelfName(shelf.name || ""); setShelfDescription(shelf.description || "");}}><Pencil className="w-4 h-4" /></Button><Button type="button" variant="ghost" size="icon" onClick={()=>deleteShelf.mutate(shelf.id)}><Trash2 className="w-4 h-4" /></Button></div></div>)}</div></TabsContent>
         </Tabs>
@@ -1459,7 +1459,7 @@ function CatalogTab({
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="isbn" className="text-sm font-semibold">
                   <span className="text-red-500">*</span> Book ISBN
@@ -1482,7 +1482,7 @@ function CatalogTab({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="publisher" className="text-sm font-semibold">
                   <span className="text-red-500">*</span> Publisher
@@ -1505,7 +1505,7 @@ function CatalogTab({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label className="text-sm font-semibold">
                   <span className="text-red-500">*</span> Subject
@@ -1562,7 +1562,7 @@ function CatalogTab({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label className="text-sm font-semibold">Bookshelf</Label>
                 <div className="flex gap-2">
@@ -1697,7 +1697,7 @@ function CatalogTab({
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex gap-3 flex-1 min-w-0 flex-wrap">
-          <div className="relative flex-1 min-w-[200px] max-w-md">
+          <div className="relative w-full basis-full md:basis-auto md:flex-1 md:min-w-[260px] md:max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               placeholder="Search books..."
@@ -1708,7 +1708,7 @@ function CatalogTab({
             />
           </div>
           <Select value={filterCategory} onValueChange={setFilterCategory}>
-            <SelectTrigger className="w-[180px]" data-testid="select-filter-category">
+            <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-filter-category">
               <SelectValue placeholder="Category" />
             </SelectTrigger>
             <SelectContent>
@@ -1719,7 +1719,7 @@ function CatalogTab({
             </SelectContent>
           </Select>
           <Select value={filterSubject} onValueChange={setFilterSubject}>
-            <SelectTrigger className="w-[180px]" data-testid="select-catalog-subject-filter">
+            <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-catalog-subject-filter">
               <SelectValue placeholder="Subject" />
             </SelectTrigger>
             <SelectContent className="max-h-48 overflow-y-auto">
@@ -1784,7 +1784,7 @@ function CatalogTab({
             <DialogDescription>Manage Policies, Categories and Bookshelves from one place.</DialogDescription>
           </DialogHeader>
           <Tabs value={librarySetupTab} onValueChange={setLibrarySetupTab} className="w-full">
-            <TabsList className="mb-4 grid grid-cols-3 w-full">
+            <TabsList className="mb-4 grid h-auto w-full grid-cols-1 gap-2 sm:grid-cols-3">
               <TabsTrigger value="policies">Manage Policies</TabsTrigger>
               <TabsTrigger value="categories">Manage Categories</TabsTrigger>
               <TabsTrigger value="shelves">Manage Bookshelves</TabsTrigger>
@@ -1803,11 +1803,11 @@ function CatalogTab({
                 }}
                 className="space-y-4"
               >
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-1.5"><Label htmlFor="maxBooksStudent">Max Books Student can Borrow</Label><Input id="maxBooksStudent" name="maxBooksStudent" type="number" min="1" defaultValue={libraryPolicy?.maxBooksStudent ?? 1} /></div>
                   <div className="space-y-1.5"><Label htmlFor="maxBooksTeacher">Max Books Teacher can Borrow</Label><Input id="maxBooksTeacher" name="maxBooksTeacher" type="number" min="1" defaultValue={libraryPolicy?.maxBooksTeacher ?? 500} /></div>
                 </div>
-                <div className="grid grid-cols-2 gap-4"><div className="space-y-1.5"><Label htmlFor="overdueChargePerDay">Overdue Charge Per Day</Label><Input id="overdueChargePerDay" name="overdueChargePerDay" type="number" step="0.01" min="0" defaultValue={libraryPolicy?.overdueChargePerDay ?? "0.50"} /></div><div className="space-y-1.5"><Label htmlFor="defaultBorrowDays">Default Number of Borrow Days</Label><Input id="defaultBorrowDays" name="defaultBorrowDays" type="number" min="1" defaultValue={libraryPolicy?.defaultBorrowDays ?? 1} /></div></div>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2"><div className="space-y-1.5"><Label htmlFor="overdueChargePerDay">Overdue Charge Per Day</Label><Input id="overdueChargePerDay" name="overdueChargePerDay" type="number" step="0.01" min="0" defaultValue={libraryPolicy?.overdueChargePerDay ?? "0.50"} /></div><div className="space-y-1.5"><Label htmlFor="defaultBorrowDays">Default Number of Borrow Days</Label><Input id="defaultBorrowDays" name="defaultBorrowDays" type="number" min="1" defaultValue={libraryPolicy?.defaultBorrowDays ?? 1} /></div></div>
                 <div className="flex justify-end"><Button type="submit" disabled={savePolicy.isPending}>{savePolicy.isPending ? "Saving..." : "Save Policies"}</Button></div>
               </form>
             </TabsContent>
@@ -2337,7 +2337,7 @@ function CatalogTab({
               updateCopy.mutate({ id: selectedCopy.id, data: { qrCode: copyDraft.qrCode.trim(), condition: copyDraft.condition || "Good", status: copyDraft.status || selectedCopy.status || "available", notes: copyDraft.notes.trim(), attachmentUrls } });
             }}>
               <div className="space-y-2"><Label>Copy QR Code</Label><Input value={copyDraft.qrCode} onChange={(e) => setCopyDraft((prev) => ({ ...prev, qrCode: e.target.value }))} readOnly={!isCopyEditing} required /></div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-2"><Label>Status</Label>{isCopyEditing ? (<Select value={copyDraft.status} onValueChange={(value) => setCopyDraft((prev) => ({ ...prev, status: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="available">Available</SelectItem><SelectItem value="damaged">Damaged</SelectItem><SelectItem value="lost">Lost/Stolen</SelectItem>{selectedCopy.status === "borrowed" && <SelectItem value="borrowed">Borrowed</SelectItem>}</SelectContent></Select>) : (<div className="h-10 flex items-center">{getCopyStatusBadge(copyDraft.status)}</div>)}</div>
                 <div className="space-y-2"><Label>Condition</Label>{isCopyEditing ? (<Select value={copyDraft.condition} onValueChange={(value) => setCopyDraft((prev) => ({ ...prev, condition: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="Good">Good</SelectItem><SelectItem value="Fair">Fair</SelectItem><SelectItem value="Poor">Poor</SelectItem><SelectItem value="Damaged">Damaged</SelectItem><SelectItem value="Lost">Lost</SelectItem></SelectContent></Select>) : (<Input value={copyDraft.condition || "-"} readOnly />)}</div>
               </div>
@@ -2992,7 +2992,7 @@ function CirculationTab({
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex gap-3 flex-1 min-w-0 flex-wrap">
-          <div className="relative flex-1 min-w-[200px] max-w-md">
+          <div className="relative w-full basis-full md:basis-auto md:flex-1 md:min-w-[260px] md:max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               placeholder="Search by book or borrower..."
@@ -3003,7 +3003,7 @@ function CirculationTab({
             />
           </div>
           <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger className="w-[180px]" data-testid="select-loan-status-filter">
+            <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-loan-status-filter">
               <SelectValue placeholder="Filter by status" />
             </SelectTrigger>
             <SelectContent>
@@ -3041,7 +3041,7 @@ function CirculationTab({
           </DialogHeader>
 
           <Tabs value={communicateAlertsTab} onValueChange={setCommunicateAlertsTab} className="w-full">
-            <TabsList className="mb-4 grid grid-cols-5 w-full">
+            <TabsList className="mb-4 grid h-auto w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
               <TabsTrigger value="overdue">Overdue Books</TabsTrigger>
               <TabsTrigger value="fines">Unpaid Fines</TabsTrigger>
               <TabsTrigger value="damaged">Damaged Books</TabsTrigger>
@@ -3053,7 +3053,7 @@ function CirculationTab({
                 <div className="flex items-center justify-between gap-3 flex-wrap">
                   <div className="flex gap-3 flex-1 min-w-0 flex-wrap">
                     <Select value={communicationAudienceFilter} onValueChange={setCommunicationAudienceFilter}>
-                      <SelectTrigger className="w-[180px]">
+                      <SelectTrigger className="w-full sm:w-[180px]">
                         <SelectValue placeholder="Audience" />
                       </SelectTrigger>
                       <SelectContent>
@@ -3062,7 +3062,7 @@ function CirculationTab({
                         <SelectItem value="staff">Staff</SelectItem>
                       </SelectContent>
                     </Select>
-                    <div className="relative flex-1 min-w-[220px] max-w-md">
+                    <div className="relative w-full basis-full md:basis-auto md:flex-1 md:min-w-[260px] md:max-w-md">
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                       <Input
                         value={communicationSearch}
@@ -3503,7 +3503,7 @@ function DigitalResourcesTab({
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex gap-3 flex-1 min-w-0 flex-wrap">
-          <div className="relative flex-1 min-w-[200px] max-w-md">
+          <div className="relative w-full basis-full md:basis-auto md:flex-1 md:min-w-[260px] md:max-w-md">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Search resources..."
@@ -3514,7 +3514,7 @@ function DigitalResourcesTab({
             />
           </div>
           <Select value={filterType} onValueChange={setFilterType}>
-            <SelectTrigger className="w-[150px]" data-testid="select-filter-type">
+            <SelectTrigger className="w-full sm:w-[150px]" data-testid="select-filter-type">
               <SelectValue placeholder="Type" />
             </SelectTrigger>
             <SelectContent>
@@ -3526,7 +3526,7 @@ function DigitalResourcesTab({
             </SelectContent>
           </Select>
           <Select value={filterSubject} onValueChange={setFilterSubject}>
-            <SelectTrigger className="w-[180px]" data-testid="select-filter-subject">
+            <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-filter-subject">
               <SelectValue placeholder="Subject" />
             </SelectTrigger>
             <SelectContent className="max-h-48 overflow-y-auto">
@@ -3560,7 +3560,7 @@ function DigitalResourcesTab({
                 <Label htmlFor="res-description">Description</Label>
                 <Textarea id="res-description" name="description" data-testid="input-resource-description" />
               </div>
-              <div className="grid gap-4 grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="res-fileType">Type</Label>
                   <Select name="fileType" defaultValue="document">

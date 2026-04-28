@@ -753,7 +753,7 @@ export default function MarksEntryPage() {
   const selectedAssessment = assessments?.find((a) => a.id === parseInt(selectedAssessmentId));
 
   return (
-    <div className="p-6 space-y-6 max-w-[1600px] mx-auto">
+    <div className="p-3 sm:p-4 lg:p-6 space-y-6 max-w-[1600px] mx-auto">
       <div className="flex items-center gap-3">
         <FileText className="h-8 w-8" style={{ color: "#1b2a5c" }} />
         <div>
