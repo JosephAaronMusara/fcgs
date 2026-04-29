@@ -948,7 +948,7 @@ function StaffForm({
 
 function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId: number; subjects: Subject[]; classes: ClassType[]; onClose: () => void }) {
   const { toast } = useToast();
-  const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
+  const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
   const [selectedSubjectId, setSelectedSubjectId] = useState<number | null>(null);
   const [subjectSearch, setSubjectSearch] = useState("");
   const [classSearch, setClassSearch] = useState("");
@@ -956,11 +956,16 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
   const [reassignmentMeta, setReassignmentMeta] = useState<Record<string, { previousStaffId: number | null }>>({});
   const [notice, setNotice] = useState<
     | { type: "duplicate"; message: string }
-    | { type: "conflict"; message: string; assignment: { classId: number; subjectId: number; teacherName: string; staffId: number | null } }
+    | {
+        type: "conflict";
+        message: string;
+        assignments: Array<{ classId: number; subjectId: number; teacherName: string; staffId: number | null }>;
+        pendingAssignments: Array<{ classId: number; subjectId: number; previousStaffId?: number | null }>;
+      }
     | null
   >(null);
 
-  const { data: staffAssignments = [], isLoading } = useQuery<Array<{ id: number; classId: number | null; subjectId: number }>>({
+  const { data: staffAssignments, isLoading } = useQuery<Array<{ id: number; classId: number | null; subjectId: number }>>({
     queryKey: ["/api/staff-subject-assignments", staffId],
     queryFn: async () => {
       const res = await schoolFetch(`/api/staff/${staffId}/subject-assignments`);
@@ -971,10 +976,14 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
 
   useEffect(() => {
     setAssignmentChips(
-      staffAssignments
+      (staffAssignments ?? [])
         .filter((row) => row.classId !== null)
         .map((row) => ({ classId: row.classId as number, subjectId: row.subjectId }))
     );
+    setSelectedClassIds([]);
+    setSelectedSubjectId(null);
+    setClassSearch("");
+    setSubjectSearch("");
     setReassignmentMeta({});
     setNotice(null);
   }, [staffAssignments]);
@@ -986,41 +995,67 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
     cls.className.toLowerCase().includes(classSearch.toLowerCase())
   );
 
-  const selectedClass = selectedClassId ? classes.find((cls) => cls.id === selectedClassId) || null : null;
+  const selectedClasses = selectedClassIds
+    .map((classId) => classes.find((cls) => cls.id === classId))
+    .filter((cls): cls is ClassType => Boolean(cls));
   const selectedSubject = selectedSubjectId ? subjects.find((subject) => subject.id === selectedSubjectId) || null : null;
 
   const chipKey = (classId: number, subjectId: number) => `${classId}-${subjectId}`;
+  const getClassLabel = (classId: number) => classes.find((item) => item.id === classId)?.className || `Class #${classId}`;
+  const getSubjectLabel = (subjectId: number) => subjects.find((item) => item.id === subjectId)?.name || `Subject #${subjectId}`;
 
   const clearBuilders = () => {
-    setSelectedClassId(null);
+    setSelectedClassIds([]);
     setSelectedSubjectId(null);
     setClassSearch("");
     setSubjectSearch("");
   };
 
-  const addAssignmentChip = (
-    classId: number,
-    subjectId: number,
-    reassignment?: { previousStaffId: number | null }
+  const toggleClassSelection = (classId: number) => {
+    setSelectedClassIds((current) =>
+      current.includes(classId)
+        ? current.filter((id) => id !== classId)
+        : [...current, classId]
+    );
+    setNotice(null);
+  };
+
+  const addAssignmentChips = (
+    assignments: Array<{ classId: number; subjectId: number; previousStaffId?: number | null }>,
+    options?: { clearSelection?: boolean }
   ) => {
-    const key = chipKey(classId, subjectId);
-    if (assignmentChips.some((chip) => chipKey(chip.classId, chip.subjectId) === key)) {
-      setNotice({
-        type: "duplicate",
-        message: "This Class + Subject combination submitted already exists.",
-      });
+    if (assignments.length === 0) {
+      setNotice(null);
+      if (options?.clearSelection) clearBuilders();
       return;
     }
 
-    setAssignmentChips((current) => [...current, { classId, subjectId }]);
-    if (reassignment) {
-      setReassignmentMeta((current) => ({
-        ...current,
-        [key]: { previousStaffId: reassignment.previousStaffId ?? null },
-      }));
+    setAssignmentChips((current) => {
+      const existingKeys = new Set(current.map((chip) => chipKey(chip.classId, chip.subjectId)));
+      const uniqueAssignments = assignments.filter((assignment) => {
+        const key = chipKey(assignment.classId, assignment.subjectId);
+        if (existingKeys.has(key)) return false;
+        existingKeys.add(key);
+        return true;
+      });
+      return [...current, ...uniqueAssignments.map(({ classId, subjectId }) => ({ classId, subjectId }))];
+    });
+
+    const reassignments = assignments.filter((assignment) => assignment.previousStaffId !== undefined);
+    if (reassignments.length > 0) {
+      setReassignmentMeta((current) => {
+        const next = { ...current };
+        reassignments.forEach((assignment) => {
+          next[chipKey(assignment.classId, assignment.subjectId)] = {
+            previousStaffId: assignment.previousStaffId ?? null,
+          };
+        });
+        return next;
+      });
     }
+
     setNotice(null);
-    clearBuilders();
+    if (options?.clearSelection) clearBuilders();
   };
 
   const handleRemoveChip = (classId: number, subjectId: number) => {
@@ -1035,42 +1070,80 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
   };
 
   const handleAddCombination = async () => {
-    if (!selectedClassId || !selectedSubjectId) {
+    if (selectedClassIds.length === 0 || !selectedSubjectId) {
       toast({
         title: "Missing selection",
-        description: "Please select one class and one subject first.",
+        description: "Please select one or more classes and one subject first.",
         variant: "destructive",
       });
       return;
     }
 
-    const newKey = chipKey(selectedClassId, selectedSubjectId);
-    if (assignmentChips.some((chip) => chipKey(chip.classId, chip.subjectId) === newKey)) {
-      setNotice({ type: "duplicate", message: "This Class + Subject combination submitted already exists." });
+    const uniqueClassIds = Array.from(new Set(selectedClassIds));
+    const existingKeys = new Set(assignmentChips.map((chip) => chipKey(chip.classId, chip.subjectId)));
+    const newClassIds = uniqueClassIds.filter((classId) => !existingKeys.has(chipKey(classId, selectedSubjectId)));
+
+    if (newClassIds.length === 0) {
+      setNotice({ type: "duplicate", message: "All selected Class + Subject combinations already exist." });
       return;
     }
 
     try {
-      const res = await schoolFetch(`/api/staff-subject-assignment-conflict?classId=${selectedClassId}&subjectId=${selectedSubjectId}&excludeStaffId=${staffId}`);
-      if (!res.ok) {
-        throw new Error((await res.text()) || "Failed to validate assignment combination");
-      }
-      const data = await res.json();
-      if (data?.conflict && data?.assignment) {
-        setNotice({
-          type: "conflict",
-          message: `This Class + Subject combination submitted is already assigned to ${data.assignment.teacherName}, would you like to reassign?`,
-          assignment: {
-            classId: data.assignment.classId,
-            subjectId: data.assignment.subjectId,
+      const validationResults = await Promise.all(
+        newClassIds.map(async (classId) => {
+          const params = new URLSearchParams({
+            classId: String(classId),
+            subjectId: String(selectedSubjectId),
+            excludeStaffId: String(staffId),
+          });
+          const res = await schoolFetch(`/api/staff-subject-assignment-conflict?${params.toString()}`);
+          if (!res.ok) {
+            throw new Error((await res.text()) || "Failed to validate assignment combination");
+          }
+          const data = await res.json();
+          return { classId, data };
+        })
+      );
+
+      const conflictAssignments: Array<{ classId: number; subjectId: number; teacherName: string; staffId: number | null }> = [];
+      const nonConflictingAssignments: Array<{ classId: number; subjectId: number }> = [];
+
+      validationResults.forEach(({ classId, data }) => {
+        if (data?.conflict && data?.assignment) {
+          conflictAssignments.push({
+            classId: Number(data.assignment.classId) || classId,
+            subjectId: Number(data.assignment.subjectId) || selectedSubjectId,
             teacherName: data.assignment.teacherName,
             staffId: data.assignment.staffId ?? null,
-          },
+          });
+        } else {
+          nonConflictingAssignments.push({ classId, subjectId: selectedSubjectId });
+        }
+      });
+
+      if (conflictAssignments.length > 0) {
+        const conflictSummary = conflictAssignments
+          .map((assignment) => `${getClassLabel(assignment.classId)} + ${getSubjectLabel(assignment.subjectId)} is assigned to ${assignment.teacherName}`)
+          .join("; ");
+        const pendingAssignments = [
+          ...nonConflictingAssignments,
+          ...conflictAssignments.map((assignment) => ({
+            classId: assignment.classId,
+            subjectId: assignment.subjectId,
+            previousStaffId: assignment.staffId ?? null,
+          })),
+        ];
+
+        setNotice({
+          type: "conflict",
+          message: `${conflictAssignments.length} selected combination${conflictAssignments.length === 1 ? "" : "s"} already ${conflictAssignments.length === 1 ? "has" : "have"} another teacher. ${conflictSummary}. Would you like to reassign?`,
+          assignments: conflictAssignments,
+          pendingAssignments,
         });
         return;
       }
 
-      addAssignmentChip(selectedClassId, selectedSubjectId);
+      addAssignmentChips(nonConflictingAssignments, { clearSelection: true });
     } catch (error: any) {
       toast({ title: "Error", description: error?.message || "Failed to validate assignment combination", variant: "destructive" });
     }
@@ -1124,16 +1197,12 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
     },
   });
 
-  const chipLabels = assignmentChips.map((chip) => {
-    const cls = classes.find((item) => item.id === chip.classId);
-    const subject = subjects.find((item) => item.id === chip.subjectId);
-    return {
-      ...chip,
-      key: chipKey(chip.classId, chip.subjectId),
-      className: cls?.className || `Class #${chip.classId}`,
-      subjectName: subject?.name || `Subject #${chip.subjectId}`,
-    };
-  });
+  const chipLabels = assignmentChips.map((chip) => ({
+    ...chip,
+    key: chipKey(chip.classId, chip.subjectId),
+    className: getClassLabel(chip.classId),
+    subjectName: getSubjectLabel(chip.subjectId),
+  }));
 
   if (isLoading) return <Skeleton className="h-48 w-full" />;
 
@@ -1142,7 +1211,7 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
       <div>
         <h3 className="font-semibold">Create assignment combination</h3>
         <p className="text-sm text-muted-foreground">
-          Select one class and one subject, then add that exact Class + Subject combination.
+          Select one or more classes and one subject, then add the Class + Subject combination(s).
         </p>
       </div>
 
@@ -1161,18 +1230,18 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
               data-testid="input-search-classes"
             />
           </div>
-          <div className="border rounded-md max-h-[220px] overflow-y-auto">
+          <div className="border rounded-md max-h-[188px] overflow-y-auto">
             {filteredClasses.length === 0 ? (
               <p className="text-sm text-muted-foreground p-3 text-center">No classes found</p>
             ) : (
               filteredClasses.map((cls) => {
-                const isSelected = selectedClassId === cls.id;
+                const isSelected = selectedClassIds.includes(cls.id);
                 return (
                   <button
                     key={cls.id}
                     type="button"
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
-                    onClick={() => setSelectedClassId(cls.id)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10 text-primary font-medium" : ""}`}
+                    onClick={() => toggleClassSelection(cls.id)}
                     data-testid={`button-select-class-${cls.id}`}
                   >
                     {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
@@ -1183,7 +1252,9 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
             )}
           </div>
           <p className="text-xs text-muted-foreground min-h-[1rem]">
-            {selectedClass ? `Selected: ${selectedClass.className}` : "No class selected"}
+            {selectedClasses.length > 0
+              ? `Selected ${selectedClasses.length}: ${selectedClasses.map((cls) => cls.className).join(", ")}`
+              : "No class selected"}
           </p>
         </div>
 
@@ -1201,7 +1272,7 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
               data-testid="input-search-subjects"
             />
           </div>
-          <div className="border rounded-md max-h-[220px] overflow-y-auto">
+          <div className="border rounded-md max-h-[188px] overflow-y-auto">
             {filteredSubjects.length === 0 ? (
               <p className="text-sm text-muted-foreground p-3 text-center">No subjects found</p>
             ) : (
@@ -1212,8 +1283,11 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
                   <button
                     key={subject.id}
                     type="button"
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10" : ""}`}
-                    onClick={() => setSelectedSubjectId(subject.id)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover-elevate transition-colors ${isSelected ? "bg-primary/10 text-primary font-medium" : ""}`}
+                    onClick={() => {
+                      setSelectedSubjectId(subject.id);
+                      setNotice(null);
+                    }}
                     data-testid={`button-select-subject-${subject.id}`}
                   >
                     {isSelected ? <Check className="h-4 w-4 text-primary shrink-0" /> : <div className="h-4 w-4 shrink-0" />}
@@ -1235,7 +1309,7 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
         onClick={handleAddCombination}
         data-testid="button-add-combination"
       >
-        Add Combination
+        Add Combination(s)
       </Button>
 
       {notice && (
@@ -1253,7 +1327,10 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() => setNotice(null)}
+                onClick={() => {
+                  const nonConflictingAssignments = notice.pendingAssignments.filter((assignment) => assignment.previousStaffId === undefined);
+                  addAssignmentChips(nonConflictingAssignments, { clearSelection: true });
+                }}
                 data-testid="button-reassign-no"
               >
                 No
@@ -1261,12 +1338,7 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
               <Button
                 type="button"
                 size="sm"
-                onClick={() => {
-                  addAssignmentChip(notice.assignment.classId, notice.assignment.subjectId, {
-                    previousStaffId: notice.assignment.staffId ?? null,
-                  });
-                  setNotice(null);
-                }}
+                onClick={() => addAssignmentChips(notice.pendingAssignments, { clearSelection: true })}
                 data-testid="button-reassign-yes"
               >
                 Yes
@@ -1325,7 +1397,6 @@ function StaffAssignmentsForm({ staffId, subjects, classes, onClose }: { staffId
     </div>
   );
 }
-
 function StaffSubjectsForm({ staffId, subjects, onClose }: { staffId: number; subjects: Subject[]; onClose: () => void }) {
   const { toast } = useToast();
   const [selectedSubjects, setSelectedSubjects] = useState<number[]>([]);

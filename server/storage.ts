@@ -543,14 +543,14 @@ function generateEnrollmentTrend(
 function computeClassroomPopulation(
   studentList: any[],
   classList: any[],
-): Array<{ className: string; count: number }> {
+): Array<{ className: string; male: number; female: number; other: number; count: number }> {
   const activeClasses = (classList ?? []).filter((cls: any) => !cls?.archivedAt);
 
-  const counts = new Map<number, number>();
+  const counts = new Map<number, { male: number; female: number; other: number; count: number }>();
   for (const cls of activeClasses) {
     const classId = Number(cls?.id);
     if (Number.isFinite(classId)) {
-      counts.set(classId, 0);
+      counts.set(classId, { male: 0, female: 0, other: 0, count: 0 });
     }
   }
 
@@ -559,18 +559,29 @@ function computeClassroomPopulation(
     if (!DASHBOARD_ACTIVE_STUDENT_STATUSES.has(status)) continue;
 
     const classId = Number(student?.classId);
-    if (!counts.has(classId)) continue;
+    const bucket = counts.get(classId);
+    if (!bucket) continue;
 
-    counts.set(classId, (counts.get(classId) ?? 0) + 1);
+    const gender = String(student?.gender ?? "").trim().toLowerCase();
+    if (gender === "male" || gender === "m") bucket.male += 1;
+    else if (gender === "female" || gender === "f") bucket.female += 1;
+    else bucket.other += 1;
+    bucket.count += 1;
   }
 
   return activeClasses
-    .map((cls: any) => ({
-      className: String(
-        cls?.shortCode?.trim() || cls?.className?.trim() || `Class ${cls?.id}`
-      ),
-      count: counts.get(Number(cls?.id)) ?? 0,
-    }))
+    .map((cls: any) => {
+      const count = counts.get(Number(cls?.id)) ?? { male: 0, female: 0, other: 0, count: 0 };
+      return {
+        className: String(
+          cls?.shortCode?.trim() || cls?.className?.trim() || `Class ${cls?.id}`
+        ),
+        male: count.male,
+        female: count.female,
+        other: count.other,
+        count: count.count,
+      };
+    })
     .sort((a, b) =>
       a.className.localeCompare(b.className, undefined, {
         numeric: true,

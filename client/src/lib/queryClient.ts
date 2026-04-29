@@ -1,7 +1,29 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import {
+  getUserActivityHeaders,
+  markSessionRefresh,
+  notifySessionExpired,
+} from "./session";
 
-async function throwIfResNotOk(res: Response) {
+function shouldNotifyUnauthorized(url: string): boolean {
+  const path = url.split("?")[0];
+  return (
+    path.startsWith("/api/") &&
+    path !== "/api/auth/user" &&
+    path !== "/api/auth/login" &&
+    path !== "/api/auth/logout" &&
+    path !== "/api/auth/register" &&
+    path !== "/api/auth/reset-password-with-token" &&
+    !path.startsWith("/api/public/")
+  );
+}
+
+async function throwIfResNotOk(res: Response, url: string) {
   if (!res.ok) {
+    if (res.status === 401 && shouldNotifyUnauthorized(url)) {
+      notifySessionExpired("unauthorized");
+    }
+
     const text = (await res.text()) || res.statusText;
     throw new Error(`${res.status}: ${text}`);
   }
@@ -18,10 +40,25 @@ export function schoolFetch(url: string, options: RequestInit = {}): Promise<Res
   if (schoolId && !headers.has("X-School-Id")) {
     headers.set("X-School-Id", schoolId);
   }
+
+  for (const [key, value] of Object.entries(getUserActivityHeaders())) {
+    if (!headers.has(key)) {
+      headers.set(key, value);
+    }
+  }
+
   return fetch(url, {
     ...options,
     headers,
     credentials: options.credentials ?? "include",
+  }).then((res) => {
+    if (res.ok && headers.has("X-FCGS-User-Activity")) {
+      markSessionRefresh();
+    }
+    if (res.status === 401 && shouldNotifyUnauthorized(url)) {
+      notifySessionExpired("unauthorized");
+    }
+    return res;
   });
 }
 
@@ -30,11 +67,15 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const headers: Record<string, string> = {
+  const headers = new Headers({
     ...getSchoolContextHeaders(),
-    ...(data ? { "Content-Type": "application/json" } : {}),
-  };
-  
+    ...getUserActivityHeaders(),
+  });
+
+  if (data && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
   const res = await fetch(url, {
     method,
     headers,
@@ -42,7 +83,11 @@ export async function apiRequest(
     credentials: "include",
   });
 
-  await throwIfResNotOk(res);
+  if (res.ok && (url === "/api/auth/keep-alive" || headers.has("X-FCGS-User-Activity"))) {
+    markSessionRefresh();
+  }
+
+  await throwIfResNotOk(res, url);
   return res;
 }
 
@@ -52,16 +97,26 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
+    const url = queryKey.join("/") as string;
+    const headers = new Headers({
+      ...getSchoolContextHeaders(),
+      ...getUserActivityHeaders(),
+    });
+
+    const res = await fetch(url, {
       credentials: "include",
-      headers: getSchoolContextHeaders(),
+      headers,
     });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;
     }
 
-    await throwIfResNotOk(res);
+    if (res.ok && headers.has("X-FCGS-User-Activity")) {
+      markSessionRefresh();
+    }
+
+    await throwIfResNotOk(res, url);
     return await res.json();
   };
 
