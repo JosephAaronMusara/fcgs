@@ -10,6 +10,8 @@ import type { User } from "@shared/schema";
 type PermissionRequirement = string | string[];
 
 const MemoryStore = createMemoryStore(session);
+const SESSION_TIMEOUT_MS = 60 * 60 * 1000;
+const SESSION_ACTIVITY_HEADER = "X-FCGS-User-Activity";
 
 declare global {
   namespace Express {
@@ -31,6 +33,12 @@ declare global {
       tempPasswordLoginsRemaining: number | null;
       mustResetPassword: boolean | null;
     }
+  }
+}
+
+declare module "express-session" {
+  interface SessionData {
+    lastUserActivityAt?: number;
   }
 }
 
@@ -274,6 +282,17 @@ async function buildAuthenticatedUserResponse(user: User, schoolHeader?: string 
   };
 }
 
+function refreshAuthenticatedSession(req: Request): number {
+  const now = Date.now();
+  req.session.cookie.maxAge = SESSION_TIMEOUT_MS;
+  req.session.lastUserActivityAt = now;
+  return now + SESSION_TIMEOUT_MS;
+}
+
+function isSessionActivityRefreshRequest(req: Request): boolean {
+  return req.get(SESSION_ACTIVITY_HEADER) === "true";
+}
+
 export function setupAuth(app: Express): void {
   if (process.env.NODE_ENV === "production" && !process.env.SESSION_SECRET) {
     throw new Error("SESSION_SECRET environment variable is required in production");
@@ -281,12 +300,12 @@ export function setupAuth(app: Express): void {
   
   const sessionSettings: session.SessionOptions = {
     secret: process.env.SESSION_SECRET || "fcgs-school-dev-secret-2026",
-    resave: true,
+    resave: false,
     saveUninitialized: false,
-    rolling: true,
+    rolling: false,
     cookie: {
       secure: process.env.NODE_ENV === "production",
-      maxAge: 60 * 60 * 1000,
+      maxAge: SESSION_TIMEOUT_MS,
     },
     store: new MemoryStore({
       checkPeriod: 3600000,
@@ -300,6 +319,13 @@ export function setupAuth(app: Express): void {
   app.use(session(sessionSettings));
   app.use(passport.initialize());
   app.use(passport.session());
+
+  app.use((req, _res, next) => {
+    if (req.isAuthenticated?.() && req.user && isSessionActivityRefreshRequest(req)) {
+      refreshAuthenticatedSession(req);
+    }
+    next();
+  });
 
   passport.use(
     new LocalStrategy(async (username, password, done) => {
@@ -392,6 +418,7 @@ export function setupAuth(app: Express): void {
 
       req.login(user, (err) => {
         if (err) return next(err);
+        refreshAuthenticatedSession(req);
         const { password: _, ...userWithoutPassword } = user;
         res.json(userWithoutPassword);
       });
@@ -437,6 +464,7 @@ export function setupAuth(app: Express): void {
 
       req.login(user, async (err) => {
         if (err) return next(err);
+        refreshAuthenticatedSession(req);
         
         if (user.tempPasswordLoginsRemaining !== null && user.tempPasswordLoginsRemaining > 0) {
           const remaining = user.tempPasswordLoginsRemaining - 1;
@@ -532,28 +560,52 @@ export function setupAuth(app: Express): void {
     }
   });
 
+  app.post("/api/auth/keep-alive", (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const expiresAt = refreshAuthenticatedSession(req);
+    req.session.save((err) => {
+      if (err) {
+        return res.status(500).json({ message: "Could not extend session" });
+      }
+      res.json({ message: "Session extended", expiresAt });
+    });
+  });
+
   app.post("/api/auth/logout", async (req, res) => {
     const user = req.user as User | undefined;
+    const reason = req.body?.reason === "timeout" ? "timeout" : "manual";
     if (user) {
       try {
+        const userName = user.firstName ? `${user.firstName} ${user.lastName || ""}`.trim() : user.username;
         await storage.createActivityLog({
           schoolId: user.schoolId,
           organizationId: user.organizationId,
           userId: user.id,
-          userName: user.firstName ? `${user.firstName} ${user.lastName || ""}`.trim() : user.username,
+          userName,
           userRole: user.role,
           action: "logout",
           category: "authentication",
-          description: `${user.firstName ? `${user.firstName} ${user.lastName || ""}`.trim() : user.username} logged out`,
+          description: reason === "timeout" ? `${userName} session timed out due to inactivity` : `${userName} logged out`,
           ipAddress: req.ip || req.socket.remoteAddress || null,
         });
       } catch (e) {}
     }
+
     req.logout((err) => {
       if (err) {
         return res.status(500).json({ message: "Logout failed" });
       }
-      res.json({ message: "Logged out successfully" });
+
+      req.session.destroy((destroyErr) => {
+        if (destroyErr) {
+          return res.status(500).json({ message: "Logout failed" });
+        }
+        res.clearCookie("connect.sid");
+        res.json({ message: "Logged out successfully" });
+      });
     });
   });
 

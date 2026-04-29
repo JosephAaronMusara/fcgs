@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { InfiniteYearPicker } from "@/components/ui/infinite-year-picker";
+import { SearchableMultiSelect } from "@/components/ui/searchable-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -280,13 +281,24 @@ export default function AssessmentsPage() {
 
   const createMutation = useMutation({
     mutationFn: async (data: any) => {
-      const res = await apiRequest("POST", "/api/assessments", data);
-      return res.json();
+      const requestedClassIds = Array.isArray(data.classIds) ? data.classIds : [data.classId];
+      const classIds = requestedClassIds.filter((id: unknown) => id !== undefined && id !== null && id !== "").map((id: unknown) => Number(id));
+      if (classIds.length === 0) throw new Error("Select at least one class");
+      const created = await Promise.all(classIds.map(async (classId: number) => {
+        const payload = { ...data, classId };
+        delete payload.classIds;
+        const res = await apiRequest("POST", "/api/assessments", payload);
+        return res.json();
+      }));
+      return { created, count: created.length };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/assessments"] });
       setIsAddOpen(false);
-      toast({ title: "Success", description: "Assessment created successfully" });
+      toast({
+        title: "Success",
+        description: result?.count && result.count > 1 ? `${result.count} assessments created successfully` : "Assessment created successfully",
+      });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -648,6 +660,7 @@ function AssessmentDialog({
 }: AssessmentDialogProps) {
   const [topic, setTopic] = useState("");
   const [classId, setClassId] = useState("");
+  const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
   const [subjectId, setSubjectId] = useState("");
   const [assessmentTypeId, setAssessmentTypeId] = useState("");
   const [assessmentDate, setAssessmentDate] = useState("");
@@ -665,6 +678,7 @@ function AssessmentDialog({
     setDueDate("");
     setExamId("");
     setPapers([{ paperName: "Paper 1", paperMarks: 100, paperWeightPct: "100" }]);
+    setSelectedClassIds([]);
     setTouched(false);
   };
 
@@ -677,6 +691,7 @@ function AssessmentDialog({
     if (assessment) {
       setTopic(assessment.topic || "");
       setClassId(assessment.classId?.toString() || "");
+      setSelectedClassIds(assessment.classId ? [assessment.classId] : []);
       setSubjectId(assessment.subjectId?.toString() || "");
       setAssessmentTypeId(assessment.assessmentTypeId?.toString() || "");
       setAssessmentDate(assessment.assessmentDate || "");
@@ -688,7 +703,6 @@ function AssessmentDialog({
       resetForm();
     }
   }, [assessment, open]);
-
   const addPaper = () => {
     setPapers([...papers, { paperName: `Paper ${papers.length + 1}`, paperMarks: 100, paperWeightPct: "0" }]);
   };
@@ -702,43 +716,54 @@ function AssessmentDialog({
     (updated[index] as any)[field] = value;
     setPapers(updated);
   };
-
   const totalWeight = papers.reduce((sum, p) => sum + parseFloat(p.paperWeightPct || "0"), 0);
   const weightsValid = Math.abs(totalWeight - 100) < 0.01;
 
   const isTopicValid = topic.trim().length > 0;
-  const isClassValid = classId !== "";
   const isSubjectValid = subjectId !== "";
   const isExamValid = examId !== "";
   const hasPapers = papers.length >= 1;
 
   const availableClasses = useMemo(() => classes, [classes]);
+  const getClassDisplayName = (item: ClassType) => item.shortCode?.trim() || item.className;
+  const classOptions = useMemo(
+    () => availableClasses.map((item) => ({
+      value: item.id.toString(),
+      label: getClassDisplayName(item),
+      searchText: item.className,
+    })),
+    [availableClasses],
+  );
 
   const selectedClass = useMemo(() => classes.find((item) => String(item.id) === classId) || null, [classes, classId]);
-  const selectedClassExplicitSubjectIds = useMemo(() => {
-    if (!selectedClass) return [];
-    return classSubjects.filter((row) => row.classId === selectedClass.id).map((row) => row.subjectId);
-  }, [classSubjects, selectedClass]);
+  const selectedClasses = useMemo(() => {
+    if (assessment) return selectedClass ? [selectedClass] : [];
+    return selectedClassIds
+      .map((id) => classes.find((item) => item.id === id))
+      .filter((item): item is ClassType => Boolean(item));
+  }, [assessment, classes, selectedClass, selectedClassIds]);
 
   const availableSubjects = useMemo(() => {
-    let filtered = subjects;
-    if (selectedClass) {
-      const classStreamId = selectedClass.streamId;
-      filtered = filtered.filter((subject) => {
-        const streamIds = Array.isArray((subject as any).streamIds) && (subject as any).streamIds.length > 0
-          ? (subject as any).streamIds
-          : (subject as any).streamId ? [(subject as any).streamId] : [];
-        const streamCompatible = !classStreamId || streamIds.length === 0 || streamIds.includes(classStreamId);
-        if (!streamCompatible) return false;
-        if (selectedClassExplicitSubjectIds.length > 0) {
-          return selectedClassExplicitSubjectIds.includes(subject.id);
-        }
-        return true;
-      });
-    }
+    if (selectedClasses.length === 0) return subjects;
 
-    return filtered;
-  }, [subjects, selectedClass, selectedClassExplicitSubjectIds]);
+    return subjects.filter((subject) => selectedClasses.every((selectedClassItem) => {
+      const classStreamId = selectedClassItem.streamId;
+      const streamIds = Array.isArray((subject as any).streamIds) && (subject as any).streamIds.length > 0
+        ? (subject as any).streamIds
+        : (subject as any).streamId ? [(subject as any).streamId] : [];
+      const streamCompatible = !classStreamId || streamIds.length === 0 || streamIds.includes(classStreamId);
+      if (!streamCompatible) return false;
+
+      const explicitSubjectIds = classSubjects
+        .filter((row) => row.classId === selectedClassItem.id)
+        .map((row) => row.subjectId);
+      if (explicitSubjectIds.length > 0) {
+        return explicitSubjectIds.includes(subject.id);
+      }
+
+      return true;
+    }));
+  }, [subjects, selectedClasses, classSubjects]);
 
   useEffect(() => {
     if (classId && !availableClasses.some((item) => String(item.id) === classId)) {
@@ -760,9 +785,12 @@ function AssessmentDialog({
       return;
     }
     
+    const primaryClassId = assessment ? parseInt(classId) : selectedClassIds[0];
+
     onSubmit({
       topic: topic.trim(),
-      classId: parseInt(classId),
+      classId: primaryClassId,
+      classIds: assessment ? [primaryClassId] : selectedClassIds,
       subjectId: parseInt(subjectId),
       assessmentTypeId: assessmentTypeId ? parseInt(assessmentTypeId) : null,
       assessmentDate: assessmentDate || null,
@@ -775,7 +803,7 @@ function AssessmentDialog({
       })),
     });
   };
-
+  const isClassValid = assessment ? !!classId : selectedClassIds.length > 0;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -811,17 +839,39 @@ function AssessmentDialog({
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label>Class *</Label>
-              <Select value={classId} onValueChange={setClassId}>
-                <SelectTrigger className={touched && !isClassValid ? "border-destructive" : ""} data-testid="select-class">
-                  <SelectValue placeholder="Select class" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableClasses.map((c) => (
-                    <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {assessment ? (
+                <>
+                  <Label>Class *</Label>
+                  <Select value={classId} onValueChange={setClassId}>
+                    <SelectTrigger className={touched && !isClassValid ? "border-destructive" : ""} data-testid="select-class">
+                      <SelectValue placeholder="Select class" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableClasses.map((c) => (
+                        <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </>
+              ) : (
+                <>
+                  <Label>Classes *</Label>
+                  <SearchableMultiSelect
+                    values={selectedClassIds.map(String)}
+                    onValuesChange={(values) => {
+                      const ids = values.map((value) => Number(value)).filter(Number.isFinite);
+                      setSelectedClassIds(ids);
+                      setClassId(ids[0]?.toString() || "");
+                    }}
+                    options={classOptions}
+                    placeholder="Select classes"
+                    searchPlaceholder="Search classes..."
+                    emptyText="No classes found"
+                    data-testid="multi-select-assessment-classes"
+                    triggerClassName={touched && !isClassValid ? "border-destructive" : ""}
+                  />
+                </>
+              )}
               {touched && !isClassValid && (
                 <p className="text-destructive text-sm">Class is required</p>
               )}

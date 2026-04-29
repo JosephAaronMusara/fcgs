@@ -13,7 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
-import { Save, AlertCircle, CheckCircle2, User, BookOpen, ClipboardList, Download, Upload, FileSpreadsheet, AlertTriangle, Loader2, FileText } from "lucide-react";
+import { Save, AlertCircle, CheckCircle2, User, BookOpen, ClipboardList, Download, Upload, FileSpreadsheet, AlertTriangle, Loader2, FileText, Search } from "lucide-react";
 import * as XLSX from "xlsx";
 import type { Assessment, Subject, Class as ClassType, Student, Grade, AssessmentComment } from "@shared/schema";
 
@@ -91,6 +91,7 @@ export default function MarksEntryPage() {
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
   const [selectedTermFilter, setSelectedTermFilter] = useState<string>("none");
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string>("");
+  const [studentSearch, setStudentSearch] = useState("");
   const [studentMarks, setStudentMarks] = useState<Record<number, StudentMarkState>>({});
   const studentMarksRef = useRef<Record<number, StudentMarkState>>({});
   const [validationWarnings, setValidationWarnings] = useState<ValidationWarning[]>([]);
@@ -211,6 +212,7 @@ export default function MarksEntryPage() {
     return { percentage, gradeName, gradeId };
   }, [marksData]);
 
+
   const hasAnyMarks = useCallback((paperMarks: Record<number, string>): boolean => {
     return Object.values(paperMarks).some(v => v !== "" && v !== undefined);
   }, []);
@@ -226,7 +228,12 @@ export default function MarksEntryPage() {
           const existingPaperMark = existingMark?.paperMarks?.find(
             (pm) => pm.assessmentPaperId === paper.id
           );
-          paperMarks[paper.id] = existingPaperMark?.markObtained || "";
+          if (existingPaperMark?.markObtained !== undefined && existingPaperMark?.markObtained !== null && existingPaperMark.markObtained !== "") {
+            const numericMark = Number(existingPaperMark.markObtained);
+            paperMarks[paper.id] = Number.isFinite(numericMark) ? String(Math.round(numericMark)) : String(existingPaperMark.markObtained);
+          } else {
+            paperMarks[paper.id] = "";
+          }
         }
         
         initialMarks[student.id] = {
@@ -244,6 +251,20 @@ export default function MarksEntryPage() {
       setValidationWarnings([]);
     }
   }, [marksData]);
+
+  useEffect(() => {
+    setStudentSearch("");
+  }, [selectedAssessmentId]);
+
+  const displayedStudents = useMemo(() => {
+    const students = marksData?.students || [];
+    const term = studentSearch.trim().toLowerCase();
+    if (!term) return students;
+    return students.filter((student) => {
+      const studentName = `${student.firstName || ""} ${student.lastName || ""}`.trim().toLowerCase();
+      return studentName.includes(term) || String(student.admissionNo || "").toLowerCase().includes(term);
+    });
+  }, [marksData?.students, studentSearch]);
 
   useEffect(() => {
     studentMarksRef.current = studentMarks;
@@ -423,13 +444,22 @@ export default function MarksEntryPage() {
     };
   }, [studentMarks, hasAnyMarks, calculatePercentageAndGrade, getPoolComment]);
 
-  const handlePaperMarkChange = (studentId: number, paperId: number, value: string) => {
+  const handlePaperMarkChange = (studentId: number, paperId: number, rawValue: string) => {
     if (!marksData) return;
-    
+
+    const value = rawValue.replace(/[^0-9]/g, "");
+    if (rawValue !== value) {
+      setValidationWarnings(prev => [
+        ...prev.filter(w => !(w.studentId === studentId && w.paperId === paperId)),
+        { studentId, paperId, message: "Marks must be whole numbers only" }
+      ]);
+      return;
+    }
+
     const paper = marksData.papers.find(p => p.id === paperId);
     if (paper && value !== "") {
-      const numVal = parseFloat(value);
-      if (!isNaN(numVal) && numVal > paper.paperMarks) {
+      const numVal = parseInt(value, 10);
+      if (!Number.isNaN(numVal) && numVal > paper.paperMarks) {
         setValidationWarnings(prev => [
           ...prev.filter(w => !(w.studentId === studentId && w.paperId === paperId)),
           { studentId, paperId, message: `Mark cannot exceed ${paper.paperMarks}` }
@@ -437,15 +467,15 @@ export default function MarksEntryPage() {
         return;
       }
     }
-    
+
     setValidationWarnings(prev => prev.filter(w => !(w.studentId === studentId && w.paperId === paperId)));
-    
+
     const currentMark = studentMarks[studentId];
     const newPaperMarks = {
       ...currentMark?.paperMarks,
       [paperId]: value,
     };
-    
+
     const updates = recalculateRow(studentId, newPaperMarks, currentMark?.attStatus || "none");
     
     setStudentMarks((prev) => ({
@@ -785,6 +815,21 @@ export default function MarksEntryPage() {
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap items-end gap-4">
+            <div className="space-y-2 min-w-[240px] flex-1">
+              <Label className="block">Search Student</Label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={studentSearch}
+                  onChange={(e) => setStudentSearch(e.target.value)}
+                  placeholder="Search name or admission no..."
+                  className="pl-9"
+                  disabled={!selectedAssessmentId}
+                  data-testid="input-marks-student-search"
+                />
+              </div>
+            </div>
+
             <div className="space-y-2">
               <Label className="block">Academic Year</Label>
               <InfiniteYearPicker
@@ -937,7 +982,7 @@ export default function MarksEntryPage() {
                   <Skeleton key={i} className="h-16 w-full" />
                 ))}
               </div>
-            ) : marksData?.students.length === 0 ? (
+            ) : displayedStudents.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">
                 <User className="h-12 w-12 mx-auto mb-4 opacity-50" />
                 <p>No students found in this class</p>
@@ -964,7 +1009,7 @@ export default function MarksEntryPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {marksData?.students.map((student) => {
+                    {displayedStudents.map((student) => {
                       const studentMark = studentMarks[student.id];
                       const isNotPresent = studentMark?.attStatus !== "present";
                       const calcResult = studentMark?.attStatus === "present" 
@@ -1006,6 +1051,9 @@ export default function MarksEntryPage() {
                               <Input
                                 type="number"
                                 min={0}
+                                step={1}
+                                inputMode="numeric"
+                                pattern="[0-9]*"
                                 max={paper.paperMarks}
                                 className="h-8 w-20 text-center mx-auto"
                                 value={studentMark?.paperMarks[paper.id] || ""}

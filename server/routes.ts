@@ -3928,14 +3928,29 @@ export async function registerRoutes(
 
   app.get("/api/attendance/grid/:classId/:from/:to", requireAuth, async (req, res, next) => {
     try {
-      const classId = parseInt(req.params.classId);
+      const classParam = req.params.classId;
+      const showAllClasses = classParam === "all";
+      const classId = showAllClasses ? null : parseInt(classParam);
       const isValidDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime());
       let from = req.params.from || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       let to = req.params.to || new Date().toISOString().split('T')[0];
       if (!isValidDate(from)) from = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       if (!isValidDate(to)) to = new Date().toISOString().split('T')[0];
-      const records = await storage.getAttendanceByClassRange(classId, from, to);
-      const students = await storage.getStudentsByClass(classId);
+
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      const classesForScope = schoolId ? await storage.getClassesBySchool(schoolId) : await storage.getAllClasses();
+      const classesById = new Map(classesForScope.map((classItem) => [classItem.id, classItem]));
+      const targetClasses = showAllClasses
+        ? classesForScope
+        : classId && classesById.has(classId)
+          ? [classesById.get(classId)!]
+          : [];
+
+      const studentGroups = await Promise.all(targetClasses.map((classItem) => storage.getStudentsByClass(classItem.id)));
+      const recordGroups = await Promise.all(targetClasses.map((classItem) => storage.getAttendanceByClassRange(classItem.id, from, to)));
+      const students = studentGroups.flat();
+      const records = recordGroups.flat();
 
       const dates: string[] = [];
       const d = new Date(from);
@@ -3948,10 +3963,13 @@ export async function registerRoutes(
         d.setDate(d.getDate() + 1);
       }
 
-      const index: Record<number, Record<string, string>> = {};
+      const statusIndex: Record<number, Record<string, string>> = {};
+      const recordIndex: Record<number, Record<string, any>> = {};
       for (const r of records) {
-        if (!index[r.studentId]) index[r.studentId] = {};
-        index[r.studentId][r.date] = r.status;
+        if (!statusIndex[r.studentId]) statusIndex[r.studentId] = {};
+        if (!recordIndex[r.studentId]) recordIndex[r.studentId] = {};
+        statusIndex[r.studentId][r.date] = r.status;
+        recordIndex[r.studentId][r.date] = r;
       }
 
       let presentCount = 0;
@@ -3965,12 +3983,22 @@ export async function registerRoutes(
 
       res.json({
         dates,
-        students: students.map(s => ({
-          id: s.id,
-          name: `${s.firstName} ${s.lastName}`,
-          admissionNo: s.admissionNo,
-          statuses: index[s.id] || {},
-        })),
+        students: students
+          .map(s => {
+            const classInfo = classesById.get(Number(s.classId));
+            return {
+              id: s.id,
+              firstName: s.firstName,
+              lastName: s.lastName,
+              name: `${s.firstName} ${s.lastName}`.trim(),
+              admissionNo: s.admissionNo,
+              classId: s.classId,
+              className: classInfo?.shortCode || classInfo?.className || '',
+              statuses: statusIndex[s.id] || {},
+              records: recordIndex[s.id] || {},
+            };
+          })
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || String(a.admissionNo || '').localeCompare(String(b.admissionNo || ''))),
         present: presentCount,
         absent: absentCount,
         total: students.length,
@@ -9341,11 +9369,31 @@ export async function registerRoutes(
       // Get assessment papers to calculate weighted percentage
       const papers = await storage.getAssessmentPapers(assessment.id);
       
+
+      const normalizedPaperMarks = paperMarks.map((pm: any) => {
+        const markValue = pm?.markObtained;
+        if (markValue === null || markValue === undefined || markValue === "") {
+          return { ...pm, markObtained: null };
+        }
+        const numericMark = Number(markValue);
+        if (!Number.isFinite(numericMark) || !Number.isInteger(numericMark)) {
+          throw new Error("Marks must be whole numbers only");
+        }
+        const paper = papers.find(p => p.id === pm.assessmentPaperId);
+        if (paper && numericMark > Number(paper.paperMarks)) {
+          throw new Error(`Mark cannot exceed ${paper.paperMarks}`);
+        }
+        if (numericMark < 0) {
+          throw new Error("Marks cannot be negative");
+        }
+        return { ...pm, markObtained: numericMark.toString() };
+      });
+
       // Calculate weighted percentage
       let totalWeightedScore = 0;
       let totalWeight = 0;
       
-      for (const pm of paperMarks) {
+      for (const pm of normalizedPaperMarks) {
         const paper = papers.find(p => p.id === pm.assessmentPaperId);
         if (paper && pm.markObtained !== null && pm.markObtained !== "") {
           const markPct = (parseFloat(pm.markObtained) / paper.paperMarks) * 100;
@@ -9436,7 +9484,7 @@ export async function registerRoutes(
       }
       
       // Save paper marks
-      await storage.setMarkPapers(mark.id, paperMarks);
+      await storage.setMarkPapers(mark.id, normalizedPaperMarks);
       
       // Get saved paper marks
       const savedPaperMarks = await storage.getMarkPapers(mark.id);

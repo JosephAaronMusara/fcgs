@@ -9,6 +9,8 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -80,11 +82,24 @@ export default function StudentsPage() {
   });
 
   const isBoardingSchool = school?.enableHostel || false;
+  const getClassDisplayName = (cls: Class) => cls.shortCode?.trim() || cls.className;
 
   const { data: hostels } = useQuery<Hostel[]>({
     queryKey: ["/api/hostels"],
     enabled: isBoardingSchool,
   });
+
+  const classFilterOptions = useMemo(
+    () => [
+      { value: "all", label: "All Classes" },
+      ...((classes || []).map((cls) => ({
+        value: cls.id.toString(),
+        label: getClassDisplayName(cls),
+        searchText: cls.className,
+      }))),
+    ],
+    [classes],
+  );
 
   const createMutation = useMutation({
     mutationFn: async (data: Partial<Student>) => {
@@ -209,9 +224,13 @@ export default function StudentsPage() {
     return hostel?.name || "Unassigned";
   };
 
-  const getParentName = (parentId: number | null) => {
-    if (!parentId) return "-";
-    const parent = parents?.find((p) => p.id === parentId);
+  const getParent = (parentId: number | null | undefined) => {
+    if (!parentId) return undefined;
+    return parents?.find((p) => p.id === parentId);
+  };
+
+  const getParentName = (parentId: number | null | undefined) => {
+    const parent = getParent(parentId);
     return parent ? `${parent.firstName} ${parent.lastName}` : "-";
   };
 
@@ -449,19 +468,17 @@ export default function StudentsPage() {
                 data-testid="input-search-students"
               />
             </div>
-            <Select value={classFilter} onValueChange={setClassFilter}>
-              <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-class-filter">
-                <SelectValue placeholder="All Classes" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Classes</SelectItem>
-                {classes?.map((c) => (
-                  <SelectItem key={c.id} value={c.id.toString()}>
-                    {c.className}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="w-full sm:w-[220px]">
+              <SearchableSelect
+                value={classFilter}
+                onValueChange={setClassFilter}
+                options={classFilterOptions}
+                placeholder="All Classes"
+                searchPlaceholder="Search classes..."
+                emptyText="No classes found"
+                data-testid="select-class-filter"
+              />
+            </div>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="w-full sm:w-[150px]" data-testid="select-status-filter">
                 <SelectValue placeholder="All Status" />
@@ -604,6 +621,7 @@ export default function StudentsPage() {
                                 student={s}
                                 className={getClassName(s.classId)}
                                 parentName={getParentName(s.parentId)}
+                                parent={getParent(s.parentId)}
                                 streamName={streams?.find((st) => st.id === s.streamId)?.name || "-"}
                                 hostelName={getHostelName(s) || "-"}
                                 isBoardingSchool={isBoardingSchool}
@@ -790,6 +808,7 @@ function StudentView({
   student,
   className,
   parentName,
+  parent,
   streamName,
   hostelName,
   isBoardingSchool,
@@ -797,6 +816,7 @@ function StudentView({
   student: Student;
   className: string;
   parentName: string;
+  parent?: Parent;
   streamName: string;
   hostelName: string;
   isBoardingSchool: boolean;
@@ -842,6 +862,18 @@ function StudentView({
         <div className="space-y-1">
           <Label>Parent / Guardian</Label>
           <div className="rounded-md border px-3 py-2 text-sm">{parentName}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Parent Phone</Label>
+          <div className="rounded-md border px-3 py-2 text-sm" data-testid="text-student-parent-phone">{parent?.phone || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Parent Email</Label>
+          <div className="rounded-md border px-3 py-2 text-sm break-all" data-testid="text-student-parent-email">{parent?.email || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Relationship</Label>
+          <div className="rounded-md border px-3 py-2 text-sm capitalize" data-testid="text-student-parent-relationship">{parent?.relationship || "-"}</div>
         </div>
         <div className="space-y-1">
           <Label>Gender</Label>
@@ -976,7 +1008,8 @@ function StudentForm({
   const { toast } = useToast();
   const [photoPreview, setPhotoPreview] = useState<string | null>(defaultValues?.photo || null);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
-  const photoInputRef = useRef<HTMLInputElement>(null);
+  const galleryPhotoInputRef = useRef<HTMLInputElement>(null);
+  const cameraPhotoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setPhotoPreview(defaultValues?.photo || null);
@@ -1059,7 +1092,7 @@ function StudentForm({
         <div className="flex flex-col items-center gap-1.5">
           <div
             className="w-20 h-20 rounded-md border border-gray-300 dark:border-gray-600 overflow-hidden flex items-center justify-center bg-gray-50 dark:bg-gray-800 cursor-pointer"
-            onClick={() => defaultValues?.id && photoInputRef.current?.click()}
+            onClick={() => defaultValues?.id && galleryPhotoInputRef.current?.click()}
             data-testid="button-upload-student-photo"
           >
             {photoPreview ? (
@@ -1071,23 +1104,43 @@ function StudentForm({
           {defaultValues?.id && (
             <>
               <input
-                ref={photoInputRef}
+                ref={galleryPhotoInputRef}
                 type="file"
                 accept="image/*"
                 className="hidden"
                 onChange={handlePhotoUpload}
-                data-testid="input-student-photo"
+                data-testid="input-student-photo-gallery"
               />
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => photoInputRef.current?.click()}
-                disabled={isUploadingPhoto}
-                data-testid="button-change-student-photo"
-              >
-                {isUploadingPhoto ? "Uploading..." : photoPreview ? "Change" : "Upload"}
-              </Button>
+              <input
+                ref={cameraPhotoInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={handlePhotoUpload}
+                data-testid="input-student-photo-camera"
+              />
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={isUploadingPhoto}
+                    data-testid="button-change-student-photo"
+                  >
+                    {isUploadingPhoto ? "Uploading..." : photoPreview ? "Change" : "Upload"}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="center">
+                  <DropdownMenuItem onClick={() => galleryPhotoInputRef.current?.click()} data-testid="menu-upload-gallery">
+                    Choose from Gallery
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => cameraPhotoInputRef.current?.click()} data-testid="menu-upload-camera">
+                    Take Photo / Camera
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </>
           )}
         </div>

@@ -22,7 +22,7 @@ interface DashboardStats {
   recentPayments: Array<{ id: number; amount: string; paymentDate: string; paymentMethod: string }>;
   studentsGender: { male: number; female: number };
   studentsDailyStats: { approved: number; pending: number; transferred: number };
-  classroomPopulation: Array<{ className: string; count: number }>;
+  classroomPopulation: Array<{ className: string; male: number; female: number; other: number; count: number }>;
   feesToday: { cash: number; mobileMoney: number; bank: number; total: number };
   termFeesCollected: number;
   staffMonitoring: { present: number; absent: number; late: number; earlyExits: number };
@@ -759,7 +759,9 @@ export default function Dashboard() {
                       <XAxis dataKey="className" tick={{ fontSize: 8 }} angle={-45} textAnchor="end" height={60} />
                       <YAxis tick={{ fontSize: 10 }} />
                       <Tooltip />
-                      <Bar dataKey="count" fill="#22c55e" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="male" name="Male" stackId="population" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+	                      <Bar dataKey="female" name="Female" stackId="population" fill="#ec4899" radius={[4, 4, 0, 0]} />
+	                      <Bar dataKey="other" name="Other" stackId="population" fill="#94a3b8" radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -772,14 +774,20 @@ export default function Dashboard() {
                     <TableHeader>
                       <TableRow className="bg-muted/50">
                         <TableHead className="text-xs">Class</TableHead>
-                        <TableHead className="text-xs text-right">Number of Students</TableHead>
+                        <TableHead className="text-xs text-right">Male</TableHead>
+	                        <TableHead className="text-xs text-right">Female</TableHead>
+	                        <TableHead className="text-xs text-right">Other</TableHead>
+	                        <TableHead className="text-xs text-right">Total</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {stats.classroomPopulation.map((row, i) => (
                         <TableRow key={i}>
                           <TableCell className="text-xs py-2">{row.className}</TableCell>
-                          <TableCell className="text-xs py-2 text-right">{row.count}</TableCell>
+                          <TableCell className="text-xs py-2 text-right">{row.male}</TableCell>
+	                          <TableCell className="text-xs py-2 text-right">{row.female}</TableCell>
+	                          <TableCell className="text-xs py-2 text-right">{row.other}</TableCell>
+	                          <TableCell className="text-xs py-2 text-right font-semibold">{row.count}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
