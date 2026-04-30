@@ -28,6 +28,62 @@ interface BaseSearchableProps {
 
 const OPTION_ROW_HEIGHT = 36;
 
+
+function isScrollableList(element: HTMLElement | null) {
+  if (!element) return false;
+  return element.scrollHeight > element.clientHeight + 1;
+}
+
+function useNaturalListScroll<T extends HTMLElement>() {
+  const lastTouchYRef = React.useRef<number | null>(null);
+
+  const onWheelCapture = React.useCallback((event: React.WheelEvent<T>) => {
+    const element = event.currentTarget;
+    if (!isScrollableList(element)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    element.scrollTop += event.deltaY;
+  }, []);
+
+  const onTouchStartCapture = React.useCallback((event: React.TouchEvent<T>) => {
+    const element = event.currentTarget;
+    if (!isScrollableList(element)) {
+      lastTouchYRef.current = null;
+      return;
+    }
+
+    lastTouchYRef.current = event.touches[0]?.clientY ?? null;
+  }, []);
+
+  const onTouchMoveCapture = React.useCallback((event: React.TouchEvent<T>) => {
+    const element = event.currentTarget;
+    const currentY = event.touches[0]?.clientY;
+
+    if (!isScrollableList(element) || lastTouchYRef.current === null || currentY === undefined) return;
+
+    const deltaY = lastTouchYRef.current - currentY;
+    if (deltaY === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    element.scrollTop += deltaY;
+    lastTouchYRef.current = currentY;
+  }, []);
+
+  const resetTouchScroll = React.useCallback(() => {
+    lastTouchYRef.current = null;
+  }, []);
+
+  return {
+    onWheelCapture,
+    onTouchStartCapture,
+    onTouchMoveCapture,
+    onTouchEndCapture: resetTouchScroll,
+    onTouchCancelCapture: resetTouchScroll,
+  };
+}
+
 function filterOptions(options: SearchableSelectOption[], search: string) {
   const term = search.trim().toLowerCase();
   if (!term) return options;
@@ -76,10 +132,19 @@ interface TypeaheadListProps {
 }
 
 function TypeaheadList({ maxVisibleItems, emptyText, children, isEmpty }: TypeaheadListProps) {
+  const scrollHandlers = useNaturalListScroll<HTMLDivElement>();
+
   return (
     <div
-      className="overflow-y-auto p-1"
-      style={{ maxHeight: Math.max(1, maxVisibleItems) * OPTION_ROW_HEIGHT + 8 }}
+      className="overscroll-y-contain p-1 touch-pan-y"
+      style={{
+        maxHeight: Math.max(1, maxVisibleItems) * OPTION_ROW_HEIGHT + 8,
+        overflowY: "auto",
+        overscrollBehaviorY: "contain",
+        WebkitOverflowScrolling: "touch",
+        touchAction: "pan-y",
+      } as React.CSSProperties}
+      {...scrollHandlers}
     >
       {isEmpty ? (
         <div className="px-2 py-3 text-center text-sm text-muted-foreground">{emptyText}</div>
