@@ -69,6 +69,62 @@ function assignRefs<T>(node: T | null, ...refs: Array<React.ForwardedRef<T> | un
   })
 }
 
+
+function isScrollableList(element: HTMLElement | null) {
+  if (!element) return false
+  return element.scrollHeight > element.clientHeight + 1
+}
+
+function useNaturalListScroll<T extends HTMLElement>() {
+  const lastTouchYRef = React.useRef<number | null>(null)
+
+  const onWheelCapture = React.useCallback((event: React.WheelEvent<T>) => {
+    const element = event.currentTarget
+    if (!isScrollableList(element)) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    element.scrollTop += event.deltaY
+  }, [])
+
+  const onTouchStartCapture = React.useCallback((event: React.TouchEvent<T>) => {
+    const element = event.currentTarget
+    if (!isScrollableList(element)) {
+      lastTouchYRef.current = null
+      return
+    }
+
+    lastTouchYRef.current = event.touches[0]?.clientY ?? null
+  }, [])
+
+  const onTouchMoveCapture = React.useCallback((event: React.TouchEvent<T>) => {
+    const element = event.currentTarget
+    const currentY = event.touches[0]?.clientY
+
+    if (!isScrollableList(element) || lastTouchYRef.current === null || currentY === undefined) return
+
+    const deltaY = lastTouchYRef.current - currentY
+    if (deltaY === 0) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    element.scrollTop += deltaY
+    lastTouchYRef.current = currentY
+  }, [])
+
+  const resetTouchScroll = React.useCallback(() => {
+    lastTouchYRef.current = null
+  }, [])
+
+  return {
+    onWheelCapture,
+    onTouchStartCapture,
+    onTouchMoveCapture,
+    onTouchEndCapture: resetTouchScroll,
+    onTouchCancelCapture: resetTouchScroll,
+  }
+}
+
 function isTypingKey(event: React.KeyboardEvent) {
   return event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey
 }
@@ -136,6 +192,7 @@ const SelectContent = React.forwardRef<
   const contentRef = React.useRef<React.ElementRef<typeof SelectPrimitive.Content> | null>(null)
   const activeSearch = search.trim().length > 0
   const matchingItemCount = React.useMemo(() => countMatchingItems(children, search), [children, search])
+  const viewportScrollHandlers = useNaturalListScroll<HTMLDivElement>()
 
   React.useEffect(() => {
     if (!activeSearch) return
@@ -196,10 +253,17 @@ const SelectContent = React.forwardRef<
           <SelectScrollUpButton />
           <SelectPrimitive.Viewport
             className={cn(
-              "overflow-y-auto p-1",
+              "overscroll-y-contain p-1 touch-pan-y",
               position === "popper" && "w-full min-w-[var(--radix-select-trigger-width)]"
             )}
-            style={{ maxHeight: OPTION_ROW_HEIGHT * DEFAULT_VISIBLE_ITEMS + 8 }}
+            style={{
+              maxHeight: OPTION_ROW_HEIGHT * DEFAULT_VISIBLE_ITEMS + 8,
+              overflowY: "auto",
+              overscrollBehaviorY: "contain",
+              WebkitOverflowScrolling: "touch",
+              touchAction: "pan-y",
+            } as React.CSSProperties}
+            {...viewportScrollHandlers}
           >
             {activeSearch && matchingItemCount === 0 ? (
               <div className="px-2 py-3 text-center text-sm text-muted-foreground">No options found</div>
