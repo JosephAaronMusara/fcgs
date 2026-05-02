@@ -8072,7 +8072,11 @@ export async function registerRoutes(
   // Assessment Types
   app.get("/api/assessment-types", requireAuth, async (req, res, next) => {
     try {
-      const types = await storage.getAssessmentTypes();
+      const schoolId = getSchoolContext(req);
+      const types = schoolId
+        ? await storage.getAssessmentTypes(schoolId)
+        : await storage.getAssessmentTypes();
+
       res.json(types);
     } catch (error) {
       next(error);
@@ -8152,7 +8156,11 @@ export async function registerRoutes(
   // Exams
   app.get("/api/exams", requireAuth, async (req, res, next) => {
     try {
-      const examList = await storage.getExams();
+      const schoolId = getSchoolContext(req);
+      const examList = schoolId
+        ? await storage.getExamsBySchool(schoolId)
+        : await storage.getExams();
+
       res.json(examList);
     } catch (error) {
       next(error);
@@ -8174,9 +8182,17 @@ export async function registerRoutes(
     try {
       const examData = { ...req.body };
       const currentUser = await storage.getUser((req.user as any).id);
-      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
-      
-      if (!examData.schoolId && schoolId) {
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId || null;
+      const hasExplicitSchoolId = Object.prototype.hasOwnProperty.call(examData, "schoolId");
+
+      if (currentUser?.role === "org_admin") {
+        // Org HQ may intentionally create a global linked exercise/exam by sending schoolId: null.
+        // If Org HQ does not send schoolId, use the active school context if there is one.
+        if (!hasExplicitSchoolId) {
+          examData.schoolId = schoolId;
+        }
+      } else {
+        // School-level users must not be able to create global or other-school linked records.
         examData.schoolId = schoolId;
       }
       

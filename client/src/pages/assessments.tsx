@@ -600,6 +600,7 @@ export default function AssessmentsPage() {
         classSubjects={classSubjectRows || []}
         teacherAssignments={currentStaffAssignments || []}
         currentUserRole={user?.role || null}
+        schoolScopeId={schoolScopeId}
         onSubmit={(data) => {
           if (editingAssessment) {
             updateMutation.mutate({ id: editingAssessment.id, data });
@@ -639,6 +640,7 @@ interface AssessmentDialogProps {
   classSubjects: ClassSubjectRow[];
   teacherAssignments: StaffAssignment[];
   currentUserRole: string | null;
+  schoolScopeId: number | null;
   onSubmit: (data: any) => void;
   isSubmitting: boolean;
 }
@@ -655,6 +657,7 @@ function AssessmentDialog({
   classSubjects,
   teacherAssignments,
   currentUserRole,
+  schoolScopeId,
   onSubmit,
   isSubmitting,
 }: AssessmentDialogProps) {
@@ -723,6 +726,28 @@ function AssessmentDialog({
   const isSubjectValid = subjectId !== "";
   const isExamValid = examId !== "";
   const hasPapers = papers.length >= 1;
+  const availableExams = useMemo(() => {
+  const currentSchool = schoolScopeId == null ? null : Number(schoolScopeId);
+  const selectedTypeId = assessmentTypeId ? Number(assessmentTypeId) : null;
+
+  if (!selectedTypeId) return [];
+
+  return exams.filter((exam) => {
+    const examAssessmentTypeId = exam.assessmentTypeId == null ? null : Number(exam.assessmentTypeId);
+    const examSchoolId = exam.schoolId == null ? null : Number(exam.schoolId);
+
+    return (
+      examAssessmentTypeId === selectedTypeId &&
+      (examSchoolId === null || examSchoolId === currentSchool)
+    );
+  });
+}, [exams, assessmentTypeId, schoolScopeId]);
+
+useEffect(() => {
+  if (examId && !availableExams.some((exam) => String(exam.id) === examId)) {
+    setExamId("");
+  }
+}, [examId, availableExams]);
 
   const availableClasses = useMemo(() => classes, [classes]);
   const getClassDisplayName = (item: ClassType) => item.shortCode?.trim() || item.className;
@@ -918,11 +943,9 @@ function AssessmentDialog({
                   <SelectValue placeholder={assessmentTypeId ? "Select exercise/exam" : "Select assessment type first"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {exams
-                    .filter((e) => assessmentTypeId && e.assessmentTypeId?.toString() === assessmentTypeId)
-                    .map((e) => (
-                      <SelectItem key={e.id} value={e.id.toString()}>{e.examName}</SelectItem>
-                    ))}
+                  {availableExams.map((e) => (
+                    <SelectItem key={e.id} value={e.id.toString()}>{e.examName}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               {touched && !examId && <p className="text-xs text-destructive">Exercise/Exam is required</p>}

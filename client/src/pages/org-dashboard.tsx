@@ -217,7 +217,7 @@ export default function OrgDashboard() {
   const [accountNewPassword, setAccountNewPassword] = useState("");
   const [showAccountPassword, setShowAccountPassword] = useState(false);
   const [isArchivedOpen, setIsArchivedOpen] = useState(false);
-
+ 
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(searchQuery);
@@ -386,8 +386,10 @@ export default function OrgDashboard() {
     queryKey: ["/api/exams"],
   });
 
+  const globalExamList = (globalExams || []).filter((exam) => exam.schoolId == null);
+
   const createExamMutation = useMutation({
-    mutationFn: async (data: { examName: string; assessmentTypeId: number }) => {
+    mutationFn: async (data: { examName: string; assessmentTypeId: number; schoolId?: number | null }) => {
       const res = await apiRequest("POST", "/api/exams", data);
       return res.json();
     },
@@ -427,6 +429,7 @@ export default function OrgDashboard() {
     createExamMutation.mutate({
       examName: examName.trim(),
       assessmentTypeId: parseInt(examAssessmentTypeId),
+      schoolId: null,
     });
   };
 
@@ -2527,14 +2530,14 @@ export default function OrgDashboard() {
             <DialogDescription>Manage global exercises/exams used across all schools</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            {(!globalExams || globalExams.length === 0) ? (
+            {globalExamList.length === 0 ? (
               <div className="text-center py-6 text-muted-foreground">
                 <FileText className="w-8 h-8 mx-auto mb-2 opacity-50" />
                 <p className="text-sm">No exercises/exams created yet</p>
               </div>
             ) : (
               <div className="space-y-2">
-                {globalExams.map((exam) => {
+                {globalExamList.map((exam) => {
                   const linkedType = assessmentTypes?.find(t => t.id === exam.assessmentTypeId);
                   return (
                     <div key={exam.id} className="flex items-center justify-between p-3 border rounded-md" data-testid={`row-exam-${exam.id}`}>
