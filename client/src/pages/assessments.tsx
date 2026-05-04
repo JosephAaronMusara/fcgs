@@ -44,12 +44,6 @@ interface ClassSubjectRow {
   subjectId: number;
 }
 
-interface StaffRecord {
-  id: number;
-  userId: number | null;
-  schoolId: number | null;
-}
-
 interface StaffAssignment {
   id: number;
   subjectId: number;
@@ -195,7 +189,7 @@ export default function AssessmentsPage() {
     ? classSubjectRowsResponse
     : (classSubjectRowsResponse?.items ?? []);
 
-  const filteredSubjects = useMemo(() => {
+  const classCompatibleFilterSubjects = useMemo(() => {
     if (filterClassId === "all") return subjects || [];
     const subjectIds = new Set((classSubjectRows || []).filter((row) => row.classId === Number(filterClassId)).map((row) => row.subjectId));
     return subjectIds.size > 0
@@ -219,25 +213,11 @@ export default function AssessmentsPage() {
     : (streamsResponse?.items ?? []);
 
   const isTeacherScoped = user?.role === "teacher" || user?.role === "assistant_teacher";
-  const { data: staffListResponse } = useQuery<any>({
-    queryKey: ["/api/staff", schoolScopeId],
+  const { data: currentStaffAssignmentsResponse } = useQuery<any>({
+    queryKey: ["/api/me/subject-assignments", schoolScopeId],
     enabled: !!schoolScopeId && isTeacherScoped,
     queryFn: async () => {
-      const res = await schoolFetch("/api/staff");
-      if (!res.ok) throw new Error("Failed to fetch staff");
-      return res.json();
-    },
-  });
-  const staffList: StaffRecord[] = Array.isArray(staffListResponse)
-    ? staffListResponse
-    : (staffListResponse?.items ?? []);
-  const currentStaff = useMemo(() => staffList.find((item) => item.userId === user?.id) || null, [staffList, user?.id]);
-
-  const { data: currentStaffAssignmentsResponse } = useQuery<any>({
-    queryKey: ["/api/staff-subjects", schoolScopeId, currentStaff?.id],
-    enabled: !!schoolScopeId && !!currentStaff?.id && isTeacherScoped,
-    queryFn: async () => {
-      const res = await schoolFetch(`/api/staff/${currentStaff!.id}/subjects`);
+      const res = await schoolFetch("/api/me/subject-assignments");
       if (!res.ok) throw new Error("Failed to fetch teacher assignments");
       return res.json();
     },
@@ -245,6 +225,47 @@ export default function AssessmentsPage() {
   const currentStaffAssignments: StaffAssignment[] = Array.isArray(currentStaffAssignmentsResponse)
     ? currentStaffAssignmentsResponse
     : (currentStaffAssignmentsResponse?.items ?? []);
+
+  const teacherAssignmentsWithClass = useMemo(
+    () => (currentStaffAssignments || []).filter((row) => row.classId !== null && row.classId !== undefined),
+    [currentStaffAssignments],
+  );
+
+  const filterClasses = useMemo(() => {
+    if (!isTeacherScoped) return classes || [];
+    return (classes || []).filter((item) => {
+      const classMatchesTeacher = teacherAssignmentsWithClass.some((row) => Number(row.classId) === item.id);
+      if (!classMatchesTeacher) return false;
+      if (filterSubjectId === "all") return true;
+      return teacherAssignmentsWithClass.some((row) =>
+        Number(row.classId) === item.id && Number(row.subjectId) === Number(filterSubjectId)
+      );
+    });
+  }, [classes, isTeacherScoped, teacherAssignmentsWithClass, filterSubjectId]);
+
+  const filteredSubjects = useMemo(() => {
+    if (!isTeacherScoped) return classCompatibleFilterSubjects;
+    return classCompatibleFilterSubjects.filter((subject) => {
+      if (filterClassId === "all") {
+        return teacherAssignmentsWithClass.some((row) => Number(row.subjectId) === subject.id);
+      }
+      return teacherAssignmentsWithClass.some((row) =>
+        Number(row.classId) === Number(filterClassId) && Number(row.subjectId) === subject.id
+      );
+    });
+  }, [classCompatibleFilterSubjects, isTeacherScoped, teacherAssignmentsWithClass, filterClassId]);
+
+  useEffect(() => {
+    if (filterClassId !== "all" && !filterClasses.some((item) => String(item.id) === filterClassId)) {
+      setFilterClassId("all");
+    }
+  }, [filterClassId, filterClasses]);
+
+  useEffect(() => {
+    if (filterSubjectId !== "all" && !filteredSubjects.some((item) => String(item.id) === filterSubjectId)) {
+      setFilterSubjectId("all");
+    }
+  }, [filterSubjectId, filteredSubjects]);
 
   const { data: assessmentsResponse, isLoading } = useQuery<any>({
     queryKey: ["/api/assessments", schoolScopeId, filterAcademicYear, filterClassId, filterSubjectId, filterTerm, filterDateFrom, filterDateTo, debouncedSearch],
@@ -421,14 +442,14 @@ export default function AssessmentsPage() {
             </div>
             <div className="space-y-1">
               <Label className="block">Class</Label>
-              <Select value={filterClassId} onValueChange={(value) => { setFilterClassId(value); setFilterSubjectId("all"); setPage(1); }}>
+              <Select value={filterClassId} onValueChange={(value) => { setFilterClassId(value); setPage(1); }}>
                 <SelectTrigger className="w-[180px]" data-testid="select-filter-class">
                   <SelectValue placeholder="All Classes" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Classes</SelectItem>
-                  {classes?.map((c) => (
-                    <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
+                  {filterClasses.map((c) => (
+                    <SelectItem key={c.id} value={c.id.toString()}>{c.shortCode?.trim() || c.className}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -749,7 +770,24 @@ useEffect(() => {
   }
 }, [examId, availableExams]);
 
-  const availableClasses = useMemo(() => classes, [classes]);
+  const teacherScopedDialog = currentUserRole === "teacher" || currentUserRole === "assistant_teacher";
+  const teacherDialogAssignments = useMemo(
+    () => (teacherAssignments || []).filter((row) => row.classId !== null && row.classId !== undefined),
+    [teacherAssignments],
+  );
+
+  const availableClasses = useMemo(() => {
+    if (!teacherScopedDialog) return classes;
+    return classes.filter((item) => {
+      const isAssignedClass = teacherDialogAssignments.some((row) => Number(row.classId) === item.id);
+      if (!isAssignedClass) return false;
+      if (!subjectId) return true;
+      return teacherDialogAssignments.some((row) =>
+        Number(row.classId) === item.id && Number(row.subjectId) === Number(subjectId)
+      );
+    });
+  }, [classes, teacherScopedDialog, teacherDialogAssignments, subjectId]);
+
   const getClassDisplayName = (item: ClassType) => item.shortCode?.trim() || item.className;
   const classOptions = useMemo(
     () => availableClasses.map((item) => ({
@@ -769,33 +807,57 @@ useEffect(() => {
   }, [assessment, classes, selectedClass, selectedClassIds]);
 
   const availableSubjects = useMemo(() => {
-    if (selectedClasses.length === 0) return subjects;
+    const classCompatibleSubjects = selectedClasses.length === 0
+      ? subjects
+      : subjects.filter((subject) => selectedClasses.every((selectedClassItem) => {
+        const classStreamId = selectedClassItem.streamId;
+        const streamIds = Array.isArray((subject as any).streamIds) && (subject as any).streamIds.length > 0
+          ? (subject as any).streamIds
+          : (subject as any).streamId ? [(subject as any).streamId] : [];
+        const streamCompatible = !classStreamId || streamIds.length === 0 || streamIds.includes(classStreamId);
+        if (!streamCompatible) return false;
 
-    return subjects.filter((subject) => selectedClasses.every((selectedClassItem) => {
-      const classStreamId = selectedClassItem.streamId;
-      const streamIds = Array.isArray((subject as any).streamIds) && (subject as any).streamIds.length > 0
-        ? (subject as any).streamIds
-        : (subject as any).streamId ? [(subject as any).streamId] : [];
-      const streamCompatible = !classStreamId || streamIds.length === 0 || streamIds.includes(classStreamId);
-      if (!streamCompatible) return false;
+        const explicitSubjectIds = classSubjects
+          .filter((row) => row.classId === selectedClassItem.id)
+          .map((row) => row.subjectId);
+        if (explicitSubjectIds.length > 0) {
+          return explicitSubjectIds.includes(subject.id);
+        }
 
-      const explicitSubjectIds = classSubjects
-        .filter((row) => row.classId === selectedClassItem.id)
-        .map((row) => row.subjectId);
-      if (explicitSubjectIds.length > 0) {
-        return explicitSubjectIds.includes(subject.id);
+        return true;
+      }));
+
+    if (!teacherScopedDialog) return classCompatibleSubjects;
+
+    return classCompatibleSubjects.filter((subject) => {
+      if (selectedClasses.length === 0) {
+        return teacherDialogAssignments.some((row) => Number(row.subjectId) === subject.id);
       }
-
-      return true;
-    }));
-  }, [subjects, selectedClasses, classSubjects]);
+      return selectedClasses.every((selectedClassItem) =>
+        teacherDialogAssignments.some((row) =>
+          Number(row.classId) === selectedClassItem.id && Number(row.subjectId) === subject.id
+        )
+      );
+    });
+  }, [subjects, selectedClasses, classSubjects, teacherScopedDialog, teacherDialogAssignments]);
 
   useEffect(() => {
-    if (classId && !availableClasses.some((item) => String(item.id) === classId)) {
-      setClassId("");
-      setSubjectId("");
+    if (assessment) {
+      if (classId && !availableClasses.some((item) => String(item.id) === classId)) {
+        setClassId("");
+      }
+      return;
     }
-  }, [classId, availableClasses]);
+
+    if (selectedClassIds.length > 0) {
+      const availableClassIds = new Set(availableClasses.map((item) => item.id));
+      const nextSelectedClassIds = selectedClassIds.filter((id) => availableClassIds.has(id));
+      if (nextSelectedClassIds.length !== selectedClassIds.length) {
+        setSelectedClassIds(nextSelectedClassIds);
+        setClassId(nextSelectedClassIds[0]?.toString() || "");
+      }
+    }
+  }, [assessment, classId, availableClasses, selectedClassIds]);
 
   useEffect(() => {
     if (subjectId && !availableSubjects.some((item) => String(item.id) === subjectId)) {
@@ -873,7 +935,7 @@ useEffect(() => {
                     </SelectTrigger>
                     <SelectContent>
                       {availableClasses.map((c) => (
-                        <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
+                        <SelectItem key={c.id} value={c.id.toString()}>{getClassDisplayName(c)}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>

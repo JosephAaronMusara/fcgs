@@ -16,6 +16,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Save, AlertCircle, CheckCircle2, User, BookOpen, ClipboardList, Download, Upload, FileSpreadsheet, AlertTriangle, Loader2, FileText, Search } from "lucide-react";
 import * as XLSX from "xlsx";
 import type { Assessment, Subject, Class as ClassType, Student, Grade, AssessmentComment } from "@shared/schema";
+import { useAuth } from "@/lib/auth";
 
 interface AssessmentPaper {
   id: number;
@@ -73,6 +74,12 @@ interface ClassSubjectRow {
   subjectId: number;
 }
 
+interface StaffAssignment {
+  id: number;
+  subjectId: number;
+  classId: number | null;
+}
+
 const TERM_OPTIONS = [
   { value: "none", label: "All Terms" },
   { value: "term1", label: "Term 1" },
@@ -85,6 +92,9 @@ const TERM_OPTIONS = [
 
 export default function MarksEntryPage() {
   const { toast } = useToast();
+  const { currentSchoolId, user } = useAuth();
+  const schoolScopeId = currentSchoolId || user?.schoolId || null;
+  const isTeacherScoped = user?.role === "teacher" || user?.role === "assistant_teacher";
   const currentYear = new Date().getFullYear();
   const [selectedAcademicYear, setSelectedAcademicYear] = useState<string>(String(currentYear));
   const [selectedClassId, setSelectedClassId] = useState<string>("");
@@ -101,17 +111,35 @@ export default function MarksEntryPage() {
   const selectedAssessmentIdRef = useRef<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const { data: classes } = useQuery<ClassType[]>({
-    queryKey: ["/api/classes"],
+  const { data: classesResponse } = useQuery<any>({
+    queryKey: ["/api/classes", schoolScopeId, "marks-entry"],
+    enabled: !!schoolScopeId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/classes");
+      if (!res.ok) throw new Error("Failed to fetch classes");
+      return res.json();
+    },
   });
+  const classes: ClassType[] = Array.isArray(classesResponse)
+    ? classesResponse
+    : (classesResponse?.items ?? []);
 
-  const { data: subjectsData } = useQuery<{ items: Subject[]; total: number }>({
-    queryKey: ["/api/subjects"],
+  const { data: subjectsData } = useQuery<any>({
+    queryKey: ["/api/subjects", schoolScopeId, "marks-entry"],
+    enabled: !!schoolScopeId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/subjects");
+      if (!res.ok) throw new Error("Failed to fetch subjects");
+      return res.json();
+    },
   });
-  const subjects = subjectsData?.items;
+  const subjects: Subject[] = Array.isArray(subjectsData)
+    ? subjectsData
+    : (subjectsData?.items ?? []);
 
   const { data: classSubjectRows } = useQuery<ClassSubjectRow[]>({
-    queryKey: ["/api/class-subjects/all", "marks-entry"],
+    queryKey: ["/api/class-subjects/all", schoolScopeId, "marks-entry"],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/class-subjects/all");
       if (!res.ok) throw new Error("Failed to fetch class subjects");
@@ -119,16 +147,73 @@ export default function MarksEntryPage() {
     },
   });
 
-  const filteredSubjects = useMemo(() => {
-    if (!selectedClassId || !subjects) return [];
+  const { data: currentStaffAssignmentsResponse } = useQuery<any>({
+    queryKey: ["/api/me/subject-assignments", schoolScopeId, "marks-entry"],
+    enabled: !!schoolScopeId && isTeacherScoped,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/me/subject-assignments");
+      if (!res.ok) throw new Error("Failed to fetch teacher assignments");
+      return res.json();
+    },
+  });
+  const currentStaffAssignments: StaffAssignment[] = Array.isArray(currentStaffAssignmentsResponse)
+    ? currentStaffAssignmentsResponse
+    : (currentStaffAssignmentsResponse?.items ?? []);
+
+  const teacherAssignmentsWithClass = useMemo(
+    () => (currentStaffAssignments || []).filter((row) => row.classId !== null && row.classId !== undefined),
+    [currentStaffAssignments],
+  );
+
+  const filteredClasses = useMemo(() => {
+    if (!isTeacherScoped) return classes || [];
+    return (classes || []).filter((cls) => {
+      const classMatchesTeacher = teacherAssignmentsWithClass.some((row) => Number(row.classId) === cls.id);
+      if (!classMatchesTeacher) return false;
+      if (!selectedSubjectId) return true;
+      return teacherAssignmentsWithClass.some((row) =>
+        Number(row.classId) === cls.id && Number(row.subjectId) === Number(selectedSubjectId)
+      );
+    });
+  }, [classes, isTeacherScoped, teacherAssignmentsWithClass, selectedSubjectId]);
+
+  const classCompatibleSubjects = useMemo(() => {
+    if (!subjects) return [];
+    if (!selectedClassId) return subjects;
     const subjectIds = new Set((classSubjectRows || []).filter((row) => row.classId === Number(selectedClassId)).map((row) => row.subjectId));
     return subjectIds.size > 0
       ? subjects.filter((subject) => subjectIds.has(subject.id))
       : subjects;
   }, [selectedClassId, subjects, classSubjectRows]);
 
+  const filteredSubjects = useMemo(() => {
+    if (!isTeacherScoped) return classCompatibleSubjects;
+    return classCompatibleSubjects.filter((subject) => {
+      if (!selectedClassId) {
+        return teacherAssignmentsWithClass.some((row) => Number(row.subjectId) === subject.id);
+      }
+      return teacherAssignmentsWithClass.some((row) =>
+        Number(row.classId) === Number(selectedClassId) && Number(row.subjectId) === subject.id
+      );
+    });
+  }, [classCompatibleSubjects, isTeacherScoped, teacherAssignmentsWithClass, selectedClassId]);
+
+  useEffect(() => {
+    if (selectedClassId && !filteredClasses.some((cls) => String(cls.id) === selectedClassId)) {
+      setSelectedClassId("");
+      setSelectedAssessmentId("");
+    }
+  }, [selectedClassId, filteredClasses]);
+
+  useEffect(() => {
+    if (selectedSubjectId && !filteredSubjects.some((subject) => String(subject.id) === selectedSubjectId)) {
+      setSelectedSubjectId("");
+      setSelectedAssessmentId("");
+    }
+  }, [selectedSubjectId, filteredSubjects]);
+
   const { data: assessments } = useQuery<Assessment[]>({
-    queryKey: ["/api/assessments", selectedAcademicYear, selectedClassId, selectedSubjectId, selectedTermFilter],
+    queryKey: ["/api/assessments", schoolScopeId, selectedAcademicYear, selectedClassId, selectedSubjectId, selectedTermFilter],
     queryFn: async () => {
       if (!selectedClassId || !selectedSubjectId) return [];
       const params = new URLSearchParams();
@@ -140,7 +225,7 @@ export default function MarksEntryPage() {
       if (!res.ok) throw new Error("Failed to fetch assessments");
       return res.json();
     },
-    enabled: !!selectedClassId && !!selectedSubjectId,
+    enabled: !!schoolScopeId && !!selectedClassId && !!selectedSubjectId,
   });
 
   const { data: marksData, isLoading: isLoadingMarks } = useQuery<MarksEntryData>({
@@ -850,7 +935,6 @@ export default function MarksEntryPage() {
                 value={selectedClassId}
                 onValueChange={(value) => {
                   setSelectedClassId(value);
-                  setSelectedSubjectId("");
                   setSelectedAssessmentId("");
                 }}
               >
@@ -858,9 +942,9 @@ export default function MarksEntryPage() {
                   <SelectValue placeholder="Select class..." />
                 </SelectTrigger>
                 <SelectContent>
-                  {classes?.map((cls) => (
+                  {filteredClasses.map((cls) => (
                     <SelectItem key={cls.id} value={cls.id.toString()}>
-                      {cls.className}
+                      {cls.shortCode?.trim() || cls.className}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -875,10 +959,9 @@ export default function MarksEntryPage() {
                   setSelectedSubjectId(value);
                   setSelectedAssessmentId("");
                 }}
-                disabled={!selectedClassId}
               >
                 <SelectTrigger className="w-[240px]" data-testid="select-subject">
-                  <SelectValue placeholder={!selectedClassId ? "Select class first" : "Select subject..."} />
+                  <SelectValue placeholder="Select subject..." />
                 </SelectTrigger>
                 <SelectContent>
                   {filteredSubjects?.map((sub) => (

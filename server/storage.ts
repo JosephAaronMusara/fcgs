@@ -128,6 +128,8 @@ export interface IStorage {
 
   getAllStudents(): Promise<Student[]>;
   getStudentsBySchool(schoolId: number): Promise<Student[]>;
+  getArchivedStudents(): Promise<Student[]>;
+  getArchivedStudentsBySchool(schoolId: number): Promise<Student[]>;
   getStudent(id: number): Promise<Student | undefined>;
   getStudentsByClass(classId: number): Promise<Student[]>;
   getStudentsByParent(parentId: number): Promise<Student[]>;
@@ -590,6 +592,21 @@ function computeClassroomPopulation(
     );
 }
 
+function nonArchivedStudentCondition() {
+  return isNull(students.archivedAt);
+}
+
+function archivedStudentCondition() {
+  return sql`${students.archivedAt} IS NOT NULL`;
+}
+
+function activeEnrolledStudentCondition() {
+  return sql`
+    ${students.archivedAt} IS NULL
+    AND LOWER(TRIM(COALESCE(${students.status}::text, 'active'))) IN ('active', 'approved', '')
+  `;
+}
+
 export class DatabaseStorage implements IStorage {
   private subjectMatchesStream(subject: Subject, streamId: number | null | undefined): boolean {
     if (streamId == null) {
@@ -933,7 +950,11 @@ export class DatabaseStorage implements IStorage {
   }
   
   async getStudentCountByClass(classId: number): Promise<number> {
-    const result = await db.select({ count: drizzleCount() }).from(students).where(eq(students.classId, classId));
+    const result = await db
+      .select({ count: drizzleCount() })
+      .from(students)
+      .where(and(eq(students.classId, classId), activeEnrolledStudentCondition()));
+
     return result[0]?.count ?? 0;
   }
   
@@ -990,19 +1011,25 @@ export class DatabaseStorage implements IStorage {
   }
   
   async migrateStudents(fromClassId: number, toClassId: number, studentIds?: number[]): Promise<number> {
-    let studentsToMigrate: typeof students.$inferSelect[];
+    const conditions = [
+      eq(students.classId, fromClassId),
+      activeEnrolledStudentCondition(),
+    ];
+
     if (studentIds && studentIds.length > 0) {
-      studentsToMigrate = await db.select().from(students)
-        .where(and(eq(students.classId, fromClassId), sql`${students.id} = ANY(${sql.raw(`ARRAY[${studentIds.join(',')}]`)})`));
-    } else {
-      studentsToMigrate = await db.select().from(students).where(eq(students.classId, fromClassId));
+      conditions.push(inArray(students.id, studentIds));
     }
-    
+
+    const studentsToMigrate = await db
+      .select()
+      .from(students)
+      .where(and(...conditions));
+
     for (const student of studentsToMigrate) {
       await db.update(students).set({ classId: toClassId }).where(eq(students.id, student.id));
       await db.delete(studentSubjects).where(eq(studentSubjects.studentId, student.id));
     }
-    
+
     return studentsToMigrate.length;
   }
 
@@ -1035,11 +1062,35 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllStudents(): Promise<Student[]> {
-    return db.select().from(students).orderBy(desc(students.createdAt));
+    return db
+      .select()
+      .from(students)
+      .where(nonArchivedStudentCondition())
+      .orderBy(desc(students.createdAt));
   }
 
   async getStudentsBySchool(schoolId: number): Promise<Student[]> {
-    return db.select().from(students).where(eq(students.schoolId, schoolId)).orderBy(desc(students.createdAt));
+    return db
+      .select()
+      .from(students)
+      .where(and(eq(students.schoolId, schoolId), nonArchivedStudentCondition()))
+      .orderBy(desc(students.createdAt));
+  }
+
+  async getArchivedStudents(): Promise<Student[]> {
+    return db
+      .select()
+      .from(students)
+      .where(archivedStudentCondition())
+      .orderBy(desc(students.archivedAt), desc(students.createdAt));
+  }
+
+  async getArchivedStudentsBySchool(schoolId: number): Promise<Student[]> {
+    return db
+      .select()
+      .from(students)
+      .where(and(eq(students.schoolId, schoolId), archivedStudentCondition()))
+      .orderBy(desc(students.archivedAt), desc(students.createdAt));
   }
 
   async getStudent(id: number): Promise<Student | undefined> {
@@ -1048,11 +1099,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getStudentsByClass(classId: number): Promise<Student[]> {
-    return db.select().from(students).where(eq(students.classId, classId));
+    return db
+      .select()
+      .from(students)
+      .where(and(eq(students.classId, classId), activeEnrolledStudentCondition()));
   }
 
   async getStudentsByParent(parentId: number): Promise<Student[]> {
-    return db.select().from(students).where(eq(students.parentId, parentId));
+    return db
+      .select()
+      .from(students)
+      .where(and(eq(students.parentId, parentId), nonArchivedStudentCondition()));
   }
 
   async createStudent(studentData: InsertStudent): Promise<Student> {
@@ -1061,13 +1118,38 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateStudent(id: number, studentData: Partial<InsertStudent>): Promise<Student | undefined> {
-    const [updated] = await db.update(students).set(studentData).where(eq(students.id, id)).returning();
+    const [updated] = await db
+      .update(students)
+      .set(studentData)
+      .where(and(eq(students.id, id), isNull(students.archivedAt)))
+      .returning();
     return updated;
   }
 
   async deleteStudent(id: number): Promise<boolean> {
-    await db.delete(students).where(eq(students.id, id));
-    return true;
+    const archived = await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(students).where(eq(students.id, id));
+      if (!existing || existing.archivedAt) {
+        return false;
+      }
+
+      if (existing.userId) {
+        await tx
+          .update(users)
+          .set({ isActive: false })
+          .where(eq(users.id, existing.userId));
+      }
+
+      const [updated] = await tx
+        .update(students)
+        .set({ archivedAt: new Date(), status: "inactive" })
+        .where(and(eq(students.id, id), isNull(students.archivedAt)))
+        .returning();
+
+      return !!updated;
+    });
+
+    return archived;
   }
 
   async getNextAdmissionNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string> {
@@ -1542,8 +1624,14 @@ export class DatabaseStorage implements IStorage {
 
     const buildAttendanceStats = async (sid?: number | null) => {
       const studentQuery = sid
-        ? db.select().from(students).where(eq(students.schoolId, sid))
-        : db.select().from(students);
+        ? db
+            .select()
+            .from(students)
+            .where(and(eq(students.schoolId, sid), activeEnrolledStudentCondition()))
+        : db
+            .select()
+            .from(students)
+            .where(activeEnrolledStudentCondition());
 
       const studentsList = await studentQuery;
       const classIdsFromStudents = Array.from(new Set(
@@ -1569,11 +1657,33 @@ export class DatabaseStorage implements IStorage {
             })
             .from(attendanceRecords)
             .innerJoin(students, eq(students.id, attendanceRecords.studentId))
-            .where(and(eq(students.schoolId, sid), gte(attendanceRecords.date, normalizedFromDate), lte(attendanceRecords.date, normalizedToDate)))
+            .where(and(
+              eq(students.schoolId, sid),
+              activeEnrolledStudentCondition(),
+              gte(attendanceRecords.date, normalizedFromDate),
+              lte(attendanceRecords.date, normalizedToDate),
+            ))
         : await db
-            .select()
+            .select({
+              id: attendanceRecords.id,
+              studentId: attendanceRecords.studentId,
+              classId: attendanceRecords.classId,
+              date: attendanceRecords.date,
+              status: attendanceRecords.status,
+              reason: attendanceRecords.reason,
+              notifyParent: attendanceRecords.notifyParent,
+              notifiedStatus: attendanceRecords.notifiedStatus,
+              notifiedReason: attendanceRecords.notifiedReason,
+              markedBy: attendanceRecords.markedBy,
+              createdAt: attendanceRecords.createdAt,
+            })
             .from(attendanceRecords)
-            .where(and(gte(attendanceRecords.date, normalizedFromDate), lte(attendanceRecords.date, normalizedToDate)));
+            .innerJoin(students, eq(students.id, attendanceRecords.studentId))
+            .where(and(
+              activeEnrolledStudentCondition(),
+              gte(attendanceRecords.date, normalizedFromDate),
+              lte(attendanceRecords.date, normalizedToDate),
+            ));
 
       const attendanceClassIds = Array.from(new Set(
         attendanceList
@@ -1795,26 +1905,31 @@ export class DatabaseStorage implements IStorage {
     };
 
     if (schoolId) {
-      const schoolStudentsList = await db.select().from(students).where(eq(students.schoolId, schoolId));
+      const schoolStudentRecordsList = await db
+        .select()
+        .from(students)
+        .where(and(eq(students.schoolId, schoolId), nonArchivedStudentCondition()));
+
+      const schoolStudentsList = schoolStudentRecordsList.filter((studentItem: any) => {
+        const status = String(studentItem.status || "active").toLowerCase();
+        return DASHBOARD_ACTIVE_STUDENT_STATUSES.has(status);
+      });
       const schoolStaffList = await db.select().from(staff).where(eq(staff.schoolId, schoolId));
       const schoolClassesList = await db.select().from(classes).where(and(eq(classes.schoolId, schoolId), isNull(classes.archivedAt)));
       const allSubjectsList = await db.select().from(subjects);
-      const studentIds = new Set(schoolStudentsList.map(s => s.id));
+      const studentIds = new Set(schoolStudentRecordsList.map(s => s.id));
       const [attendanceStats, allPayments] = await Promise.all([
         buildAttendanceStats(schoolId),
         db.select().from(feesPayments).orderBy(desc(feesPayments.paymentDate)).limit(50),
       ]);
       const recentPayments = allPayments.filter(p => studentIds.has(p.studentId)).slice(0, 10);
 
-      const activeStudentsList = schoolStudentsList.filter((studentItem: any) => {
-        const status = String(studentItem.status || "active").toLowerCase();
-        return status === "active" || status === "approved" || status === "";
-      });
+      const activeStudentsList = schoolStudentsList;
       const approved = activeStudentsList.length;
       const maleCount = activeStudentsList.filter(s => s.gender === 'male' || s.gender === 'Male').length;
       const femaleCount = activeStudentsList.filter(s => s.gender === 'female' || s.gender === 'Female').length;
-      const pending = schoolStudentsList.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
-      const transferred = schoolStudentsList.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
+      const pending = schoolStudentRecordsList.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
+      const transferred = schoolStudentRecordsList.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
 
       const todayPayments = recentPayments.filter(p => p.paymentDate === today);
       const cashToday = todayPayments.filter(p => p.paymentMethod === 'cash').reduce((sum, p) => sum + parseAmount(p.amount), 0);
@@ -1853,28 +1968,26 @@ export class DatabaseStorage implements IStorage {
     }
 
     const [studentCount, staffCount, classCount, subjectCount] = await Promise.all([
-      db.select({ count: drizzleCount() }).from(students),
+      db.select({ count: drizzleCount() }).from(students).where(activeEnrolledStudentCondition()),
       db.select({ count: drizzleCount() }).from(staff),
       db.select({ count: drizzleCount() }).from(classes).where(isNull(classes.archivedAt)),
       db.select({ count: drizzleCount() }).from(subjects),
     ]);
 
-    const [allStudents, allClasses, attendanceStats, recentPayments] = await Promise.all([
-      db.select().from(students),
+    const [allStudents, allStudentRecords, allClasses, attendanceStats, recentPayments] = await Promise.all([
+      db.select().from(students).where(activeEnrolledStudentCondition()),
+      db.select().from(students).where(nonArchivedStudentCondition()),
       db.select().from(classes).where(isNull(classes.archivedAt)),
       buildAttendanceStats(),
       db.select().from(feesPayments).orderBy(desc(feesPayments.paymentDate)).limit(10),
     ]);
 
-    const activeStudentsList = allStudents.filter((studentItem: any) => {
-      const status = String(studentItem.status || "active").toLowerCase();
-      return status === "active" || status === "approved" || status === "";
-    });
+    const activeStudentsList = allStudents;
     const approved = activeStudentsList.length;
     const maleCount = activeStudentsList.filter(s => s.gender === 'male' || s.gender === 'Male').length;
     const femaleCount = activeStudentsList.filter(s => s.gender === 'female' || s.gender === 'Female').length;
-    const pending = allStudents.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
-    const transferred = allStudents.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
+    const pending = allStudentRecords.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
+    const transferred = allStudentRecords.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
 
     const todayPayments = recentPayments.filter(p => p.paymentDate === today);
     const cashToday = todayPayments.filter(p => p.paymentMethod === 'cash').reduce((sum, p) => sum + parseAmount(p.amount), 0);

@@ -121,8 +121,41 @@ async function getCurrentStaffMember(req: Request, schoolId: number) {
   return schoolStaff.find((member) => member.userId === currentUser.id) || null;
 }
 
-async function ensureTeacherAssignmentForAssessment(_req: Request, _res: Response, _schoolId: number, _classId: number, _subjectId: number) {
-  return true;
+function isTeacherScopedRole(role?: string | null) {
+  return role === "teacher" || role === "assistant_teacher";
+}
+
+async function getTeacherAssignmentScope(req: Request, schoolId: number) {
+  const currentUser = req.user as User;
+  if (!isTeacherScopedRole(currentUser?.role)) return null;
+
+  const staffMember = await getCurrentStaffMember(req, schoolId);
+  if (!staffMember) {
+    return { staffMember: null, assignments: [] as any[] };
+  }
+
+  const assignments = (await storage.getStaffSubjects(staffMember.id))
+    .filter((row: any) => row.classId !== null && row.classId !== undefined);
+
+  return { staffMember, assignments };
+}
+
+function isPairInTeacherAssignments(assignments: any[], classId: number, subjectId: number) {
+  return assignments.some((row) =>
+    Number(row.classId) === Number(classId) && Number(row.subjectId) === Number(subjectId)
+  );
+}
+
+async function ensureTeacherAssignmentForAssessment(req: Request, res: Response, schoolId: number, classId: number, subjectId: number) {
+  const scope = await getTeacherAssignmentScope(req, schoolId);
+  if (!scope) return true;
+
+  if (isPairInTeacherAssignments(scope.assignments, classId, subjectId)) {
+    return true;
+  }
+
+  res.status(403).json({ message: "You are not assigned to this class and subject combination" });
+  return false;
 }
 
 function calculatePositionMap(items: Array<{ id: number; value: number | null }>) {
@@ -609,6 +642,15 @@ function applyAssessmentFilters<T extends { schoolId?: number | null; classId?: 
   return filtered;
 }
 
+function isOperationalActiveStudent(student: any): boolean {
+  const status = String(student?.status ?? "active").trim().toLowerCase();
+
+  return (
+    !student?.archivedAt &&
+    ["", "active", "approved"].includes(status)
+  );
+}
+
 async function getHistoricalStudentsForAssessments(params: {
   schoolId: number;
   classId: number;
@@ -617,10 +659,21 @@ async function getHistoricalStudentsForAssessments(params: {
   includeSiblingAssessmentHistory?: boolean;
   academicYear?: number | null;
 }) {
-  const { schoolId, classId, subjectId, assessmentIds, includeSiblingAssessmentHistory = false, academicYear = null } = params;
+  const {
+    schoolId,
+    classId,
+    subjectId,
+    assessmentIds,
+    includeSiblingAssessmentHistory = false,
+    academicYear = null,
+  } = params;
 
-  const currentClassStudents = (await storage.getStudentsByClass(classId)).filter((s) => s.schoolId === schoolId);
-  const studentMap = new Map(currentClassStudents.map((student) => [student.id, student]));
+  const currentClassStudents = (await storage.getStudentsByClass(classId))
+    .filter((student: any) =>
+      student.schoolId === schoolId && isOperationalActiveStudent(student)
+    );
+
+  const studentMap = new Map(currentClassStudents.map((student: any) => [student.id, student]));
 
   const subjectStudentIds = new Set<number>();
   for (const student of currentClassStudents) {
@@ -638,31 +691,64 @@ async function getHistoricalStudentsForAssessments(params: {
       subjectId,
       academicYear,
     });
-    historyAssessmentIds = Array.from(new Set([...historyAssessmentIds, ...siblingAssessments.map((a) => a.id)]));
+
+    historyAssessmentIds = Array.from(
+      new Set([...historyAssessmentIds, ...siblingAssessments.map((assessment) => assessment.id)])
+    );
   }
 
   const historicalStudentIds = new Set<number>();
   if (historyAssessmentIds.length > 0) {
     const historyMarks = await storage.getAssessmentMarksByAssessments(historyAssessmentIds);
+
     for (const mark of historyMarks) {
       historicalStudentIds.add(mark.studentId);
     }
+
     if (historicalStudentIds.size > 0) {
       const historicalStudents = await db
         .select()
         .from(studentsTable)
-        .where(and(eq(studentsTable.schoolId, schoolId), inArray(studentsTable.id, Array.from(historicalStudentIds))));
+        .where(
+          and(
+            eq(studentsTable.schoolId, schoolId),
+            inArray(studentsTable.id, Array.from(historicalStudentIds))
+          )
+        );
+
       for (const student of historicalStudents) {
-        studentMap.set(student.id, student as any);
+        if (isOperationalActiveStudent(student)) {
+          studentMap.set(student.id, student as any);
+        }
       }
     }
   }
 
-  const students = Array.from(studentMap.values()).filter((student: any) =>
-    subjectStudentIds.has(student.id) || historicalStudentIds.has(student.id)
+  const currentStudentsForSubject = currentClassStudents.filter((student: any) =>
+    subjectStudentIds.has(student.id)
   );
 
-  students.sort((a: any, b: any) => `${a.lastName}${a.firstName}`.localeCompare(`${b.lastName}${b.firstName}`));
+  const shouldFallbackToWholeActiveClass =
+    currentClassStudents.length > 0 && currentStudentsForSubject.length === 0;
+
+  const allowedCurrentStudentIds = new Set(
+    (shouldFallbackToWholeActiveClass ? currentClassStudents : currentStudentsForSubject)
+      .map((student: any) => student.id)
+  );
+
+  const students = Array.from(studentMap.values())
+    .filter((student: any) =>
+      isOperationalActiveStudent(student) &&
+      (
+        allowedCurrentStudentIds.has(student.id) ||
+        historicalStudentIds.has(student.id)
+      )
+    );
+
+  students.sort((a: any, b: any) =>
+    `${a.lastName}${a.firstName}`.localeCompare(`${b.lastName}${b.firstName}`)
+  );
+
   return students;
 }
 
@@ -1019,6 +1105,15 @@ async function getScopedAssessmentOrRespond(req: Request, res: Response, assessm
     res.status(403).json({ message: "Assessment not in school context" });
     return null;
   }
+
+  const hasTeacherAssignment = await ensureTeacherAssignmentForAssessment(
+    req,
+    res,
+    schoolId,
+    Number(assessment.classId),
+    Number(assessment.subjectId),
+  );
+  if (!hasTeacherAssignment) return null;
 
   return { schoolId, assessment };
 }
@@ -1424,6 +1519,23 @@ export async function registerRoutes(
         ? staffList.filter(s => s.schoolId === schoolId)
         : staffList;
       res.json(filtered);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/me/subject-assignments", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const staffMember = await getCurrentStaffMember(req, schoolId);
+      if (!staffMember) {
+        return res.json([]);
+      }
+
+      const rows = await storage.getStaffSubjects(staffMember.id);
+      res.json(rows.filter((row: any) => row.classId !== null && row.classId !== undefined));
     } catch (error) {
       next(error);
     }
@@ -2643,12 +2755,18 @@ export async function registerRoutes(
   app.get("/api/students", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const studentList = await storage.getAllStudents();
-      // Filter by school context
-      const filtered = schoolId 
-        ? studentList.filter(s => s.schoolId === schoolId)
-        : studentList;
-      res.json(filtered);
+      const status = String(req.query.status || "").toLowerCase();
+      const archivedOnly = status === "archived";
+
+      const studentList = archivedOnly
+        ? schoolId
+          ? await storage.getArchivedStudentsBySchool(schoolId)
+          : await storage.getArchivedStudents()
+        : schoolId
+          ? await storage.getStudentsBySchool(schoolId)
+          : await storage.getAllStudents();
+
+      res.json(studentList);
     } catch (error) {
       next(error);
     }
@@ -2862,8 +2980,33 @@ export async function registerRoutes(
 
   app.delete("/api/students/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      await storage.deleteStudent(parseInt(req.params.id));
-      res.json({ message: "Student deleted successfully" });
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req);
+      const studentId = parseInt(req.params.id);
+
+      const student = await storage.getStudent(studentId);
+      if (!student || student.archivedAt) {
+        return res.status(404).json({ message: "Student not found" });
+      }
+      if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const deleted = await storage.deleteStudent(studentId);
+      if (!deleted) {
+        return res.status(404).json({ message: "Student not found" });
+      }
+
+      logActivity(req, {
+        action: "delete",
+        category: "students",
+        description: `Archived student: ${student.firstName} ${student.lastName}`,
+        targetType: "student",
+        targetId: student.id,
+        targetName: `${student.firstName} ${student.lastName}`,
+        schoolId: student.schoolId ?? undefined,
+      });
+      res.json({ message: "Student deleted successfully", archived: true });
     } catch (error) {
       next(error);
     }
@@ -2875,13 +3018,16 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req);
       const id = parseInt(req.params.id);
       const student = await storage.getStudent(id);
-      if (!student) {
+      if (!student || student.archivedAt) {
         return res.status(404).json({ message: "Student not found" });
       }
       if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
       const updated = await storage.updateStudent(id, { status: "transferred" });
+      if (student.userId) {
+        await storage.updateUser(student.userId, { isActive: false });
+      }
       res.json({ message: "Student transferred successfully", student: updated });
     } catch (error) {
       next(error);
@@ -9140,6 +9286,7 @@ export async function registerRoutes(
       const school = await storage.getSchool(schoolId);
       const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : null;
       const calendarConfig = mergeAcademicCalendarSources(school, org);
+      const teacherScope = await getTeacherAssignmentScope(req, schoolId);
 
       let assessmentList;
       if (classId) {
@@ -9158,6 +9305,16 @@ export async function registerRoutes(
         termFilter,
         calendarConfig,
       });
+
+      if (teacherScope) {
+        assessmentList = assessmentList.filter((assessment: any) =>
+          isPairInTeacherAssignments(
+            teacherScope.assignments,
+            Number(assessment.classId),
+            Number(assessment.subjectId),
+          )
+        );
+      }
 
       if (search) {
         const lowerSearch = search.toLowerCase();
@@ -9193,6 +9350,15 @@ export async function registerRoutes(
 
       const validatedRefs = await validateAssessmentPayloadForSchool(schoolId, assessmentData, res);
       if (!validatedRefs) return;
+
+      const hasTeacherAssignment = await ensureTeacherAssignmentForAssessment(
+        req,
+        res,
+        schoolId,
+        Number(assessmentData.classId),
+        Number(assessmentData.subjectId),
+      );
+      if (!hasTeacherAssignment) return;
 
       const assessmentWithName = {
         ...assessmentData,
@@ -9237,6 +9403,17 @@ export async function registerRoutes(
 
       const validatedRefs = await validateAssessmentPayloadForSchool(scoped.schoolId, assessmentData, res, scoped.assessment);
       if (!validatedRefs) return;
+
+      const resolvedClassId = assessmentData.classId !== undefined ? Number(assessmentData.classId) : Number(scoped.assessment.classId);
+      const resolvedSubjectId = assessmentData.subjectId !== undefined ? Number(assessmentData.subjectId) : Number(scoped.assessment.subjectId);
+      const hasTeacherAssignment = await ensureTeacherAssignmentForAssessment(
+        req,
+        res,
+        scoped.schoolId,
+        resolvedClassId,
+        resolvedSubjectId,
+      );
+      if (!hasTeacherAssignment) return;
 
       const updatePayload = {
         ...assessmentData,
