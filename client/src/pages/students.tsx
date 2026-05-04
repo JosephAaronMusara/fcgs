@@ -48,8 +48,23 @@ export default function StudentsPage() {
   }, [isAddOpen]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const studentListMode = statusFilter === "archived" ? "archived" : "records";
+
   const { data: students, isLoading } = useQuery<Student[]>({
-    queryKey: ["/api/students"],
+    queryKey: ["/api/students", studentListMode],
+    queryFn: async () => {
+      const url = statusFilter === "archived"
+        ? "/api/students?status=archived"
+        : "/api/students";
+
+      const res = await schoolFetch(url);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status}: ${text || res.statusText}`);
+      }
+
+      return res.json();
+    },
   });
 
   const { data: classes } = useQuery<Class[]>({
@@ -202,9 +217,21 @@ export default function StudentsPage() {
   });
 
   const filteredStudents = students?.filter((s) => {
-    const matchesSearch = `${s.firstName} ${s.lastName} ${s.admissionNo}`.toLowerCase().includes(search.toLowerCase());
+    const matchesSearch = `${s.firstName} ${s.lastName} ${s.admissionNo}`
+      .toLowerCase()
+      .includes(search.toLowerCase());
+
     const matchesClass = classFilter === "all" || s.classId?.toString() === classFilter;
-    const matchesStatus = statusFilter === "all" || s.status === statusFilter;
+    const isArchived = !!s.archivedAt;
+    const studentStatus = String(s.status || "active").toLowerCase();
+
+    const matchesStatus =
+      statusFilter === "all"
+        ? !isArchived
+        : statusFilter === "archived"
+          ? isArchived
+          : !isArchived && studentStatus === statusFilter;
+
     return matchesSearch && matchesClass && matchesStatus;
   });
 
@@ -489,6 +516,7 @@ export default function StudentsPage() {
                 <SelectItem value="inactive">Inactive</SelectItem>
                 <SelectItem value="transferred">Transferred</SelectItem>
                 <SelectItem value="graduated">Graduated</SelectItem>
+                <SelectItem value="archived">Archived</SelectItem>
               </SelectContent>
             </Select>
             <Badge variant="secondary" className="flex items-center gap-1">

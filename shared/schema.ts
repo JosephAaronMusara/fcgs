@@ -249,6 +249,7 @@ export const students = pgTable("students", {
   feesMaxBalance: decimal("fees_max_balance", { precision: 10, scale: 2 }).default("0"),
   feesCustomerId: text("fees_customer_id"),
   feesStatus: text("fees_status").default("n/a"),
+  archivedAt: timestamp("archived_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -754,7 +755,7 @@ export const insertStreamSchema = createInsertSchema(streams).omit({ id: true })
 export const insertClassSchema = createInsertSchema(classes).omit({ id: true, archivedAt: true, createdAt: true });
 export const insertClassTeacherAssignmentSchema = createInsertSchema(classTeacherAssignments).omit({ id: true, createdAt: true });
 export const insertParentSchema = createInsertSchema(parents).omit({ id: true, createdAt: true });
-export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
+export const insertStudentSchema = createInsertSchema(students).omit({ id: true, archivedAt: true, createdAt: true });
 export const insertSubjectSchema = createInsertSchema(subjects).omit({ id: true });
 export const insertStaffSubjectSchema = createInsertSchema(staffSubjects).omit({ id: true });
 export const insertStudentSubjectSchema = createInsertSchema(studentSubjects).omit({ id: true });
