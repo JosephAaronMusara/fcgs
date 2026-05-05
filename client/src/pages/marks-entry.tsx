@@ -868,12 +868,12 @@ export default function MarksEntryPage() {
   const selectedAssessment = assessments?.find((a) => a.id === parseInt(selectedAssessmentId));
 
   return (
-    <div className="p-3 sm:p-4 lg:p-6 space-y-6 max-w-[1600px] mx-auto">
-      <div className="flex items-center gap-3">
-        <FileText className="h-8 w-8" style={{ color: "#1b2a5c" }} />
+    <div className="p-2.5 sm:p-4 lg:p-6 space-y-4 sm:space-y-6 max-w-[1600px] mx-auto">
+      <div className="flex items-center gap-2 sm:gap-3">
+        <FileText className="h-6 w-6 sm:h-8 sm:w-8" style={{ color: "#1b2a5c" }} />
         <div>
-          <h1 className="text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }}>Marks Entry</h1>
-          <p className="text-muted-foreground">
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight" style={{ color: "#1b2a5c" }}>Marks Entry</h1>
+          <p className="text-sm sm:text-base text-muted-foreground">
             Enter student marks for assessments. Select academic year, class, subject, term, and assessment to begin.
           </p>
         </div>
@@ -891,32 +891,17 @@ export default function MarksEntryPage() {
       )}
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <ClipboardList className="h-5 w-5" />
+        <CardHeader className="p-3 pb-2 sm:p-5 sm:pb-3">
+          <CardTitle className="text-base sm:text-lg flex items-center gap-2">
+            <ClipboardList className="h-4 w-4 sm:h-5 sm:w-5" />
             Select Assessment
           </CardTitle>
-          <CardDescription>Choose which assessment you want to enter marks for</CardDescription>
+          <CardDescription className="text-xs sm:text-sm">Choose which assessment you want to enter marks for</CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap items-end gap-4">
-            <div className="space-y-2 min-w-[240px] flex-1">
-              <Label className="block">Search Student</Label>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={studentSearch}
-                  onChange={(e) => setStudentSearch(e.target.value)}
-                  placeholder="Search name or admission no..."
-                  className="pl-9"
-                  disabled={!selectedAssessmentId}
-                  data-testid="input-marks-student-search"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="block">Academic Year</Label>
+        <CardContent className="px-3 pb-3 sm:px-5 sm:pb-5">
+          <div className="grid grid-cols-3 gap-x-3 gap-y-2 sm:gap-4 items-end lg:grid-cols-[150px_170px_minmax(190px,0.95fr)_minmax(240px,1.15fr)_minmax(280px,1.25fr)_minmax(280px,1.4fr)]">
+            <div className="space-y-1 col-span-1 lg:col-span-1 min-w-0">
+              <Label className="block text-xs sm:text-sm">Academic Year</Label>
               <InfiniteYearPicker
                 value={selectedAcademicYear}
                 onValueChange={(value) => {
@@ -924,57 +909,13 @@ export default function MarksEntryPage() {
                   setSelectedAssessmentId("");
                 }}
                 placeholder="Academic year..."
-                className="w-[150px]"
+                className="w-full h-8 sm:h-9 text-xs sm:text-sm"
                 dataTestId="select-academic-year"
               />
             </div>
 
-            <div className="space-y-2">
-              <Label className="block">Class</Label>
-              <Select
-                value={selectedClassId}
-                onValueChange={(value) => {
-                  setSelectedClassId(value);
-                  setSelectedAssessmentId("");
-                }}
-              >
-                <SelectTrigger className="w-[200px]" data-testid="select-class">
-                  <SelectValue placeholder="Select class..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {filteredClasses.map((cls) => (
-                    <SelectItem key={cls.id} value={cls.id.toString()}>
-                      {cls.shortCode?.trim() || cls.className}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="block">Subject</Label>
-              <Select
-                value={selectedSubjectId}
-                onValueChange={(value) => {
-                  setSelectedSubjectId(value);
-                  setSelectedAssessmentId("");
-                }}
-              >
-                <SelectTrigger className="w-[240px]" data-testid="select-subject">
-                  <SelectValue placeholder="Select subject..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {filteredSubjects?.map((sub) => (
-                    <SelectItem key={sub.id} value={sub.id.toString()}>
-                      {sub.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="block">School Term</Label>
+            <div className="space-y-1 col-span-1 lg:col-span-1 min-w-0">
+              <Label className="block text-xs sm:text-sm">School Term</Label>
               <Select
                 value={selectedTermFilter}
                 onValueChange={(value) => {
@@ -982,7 +923,7 @@ export default function MarksEntryPage() {
                   setSelectedAssessmentId("");
                 }}
               >
-                <SelectTrigger className="w-[170px]" data-testid="select-term-filter">
+                <SelectTrigger className="w-full h-8 sm:h-9 text-xs sm:text-sm" data-testid="select-term-filter">
                   <SelectValue placeholder="School term..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -995,10 +936,58 @@ export default function MarksEntryPage() {
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <Label className="block">Assessment</Label>
-              <Select value={selectedAssessmentId} onValueChange={setSelectedAssessmentId} disabled={!selectedSubjectId}>
-                <SelectTrigger className="w-[280px]" data-testid="select-assessment">
+            <div className="space-y-1 col-span-1 lg:col-span-1 min-w-0">
+              <Label className="block text-xs sm:text-sm">Class</Label>
+              <Select
+                value={selectedClassId}
+                onValueChange={(value) => {
+                  setSelectedClassId(value);
+                  setSelectedAssessmentId("");
+                }}
+              >
+                <SelectTrigger className="w-full h-8 sm:h-9 text-xs sm:text-sm" data-testid="select-class">
+                  <SelectValue placeholder="Select class..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {filteredClasses.map((cls) => (
+                    <SelectItem key={cls.id} value={cls.id.toString()}>
+                      {cls.shortCode?.trim() || cls.className}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1 col-span-1 lg:col-span-1 min-w-0">
+              <Label className="block text-xs sm:text-sm">Subject</Label>
+              <Select
+                value={selectedSubjectId}
+                onValueChange={(value) => {
+                  setSelectedSubjectId(value);
+                  setSelectedAssessmentId("");
+                }}
+              >
+                <SelectTrigger className="w-full h-8 sm:h-9 text-xs sm:text-sm" data-testid="select-subject">
+                  <SelectValue placeholder="Select subject..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {filteredSubjects?.map((sub) => (
+                    <SelectItem key={sub.id} value={sub.id.toString()}>
+                      {sub.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1 col-span-2 lg:col-span-1 min-w-0">
+              <Label className="block text-xs sm:text-sm">Assessment</Label>
+              <Select
+                value={selectedAssessmentId}
+                onValueChange={setSelectedAssessmentId}
+                disabled={!selectedSubjectId}
+              >
+                <SelectTrigger className="w-full h-8 sm:h-9 text-xs sm:text-sm" data-testid="select-assessment">
                   <SelectValue placeholder="Select assessment..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -1010,24 +999,39 @@ export default function MarksEntryPage() {
                 </SelectContent>
               </Select>
             </div>
+
+            <div className="space-y-1 col-span-3 lg:col-span-1 min-w-0">
+              <Label className="block text-xs sm:text-sm">Search Student</Label>
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground sm:left-3 sm:h-4 sm:w-4" />
+                <Input
+                  value={studentSearch}
+                  onChange={(e) => setStudentSearch(e.target.value)}
+                  placeholder="Search name or admission no..."
+                  className="pl-8 sm:pl-9 w-full h-8 sm:h-9 text-xs sm:text-sm"
+                  disabled={!selectedAssessmentId}
+                  data-testid="input-marks-student-search"
+                />
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
 
       {selectedAssessmentId && (
         <Card>
-          <CardHeader>
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <CardHeader className="p-3 pb-2 sm:p-5 sm:pb-3">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4">
               <div>
-                <CardTitle className="text-lg flex items-center gap-2">
-                  <BookOpen className="h-5 w-5" />
+                <CardTitle className="text-base sm:text-lg flex items-center gap-2">
+                  <BookOpen className="h-4 w-4 sm:h-5 sm:w-5" />
                   {selectedAssessment?.name}
                 </CardTitle>
-                <CardDescription>
+                <CardDescription className="text-xs sm:text-sm">
                   {selectedClass?.className} • {selectedSubject?.name}
                 </CardDescription>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-1.5 sm:gap-2">
                 {marksData?.papers.map((paper) => (
                   <Badge key={paper.id} variant="outline" className="text-xs">
                     {paper.paperName}: {paper.paperMarks} marks ({paper.paperWeightPct}%)
@@ -1035,16 +1039,16 @@ export default function MarksEntryPage() {
                 ))}
               </div>
             </div>
-            <div className="flex flex-wrap gap-2 pt-4">
-              <Button variant="outline" size="sm" onClick={handleDownloadTemplate} data-testid="button-download-template">
+            <div className="flex flex-wrap gap-2 pt-2 sm:pt-3">
+              <Button variant="outline" size="sm" className="h-8 px-2.5 text-xs sm:px-3" onClick={handleDownloadTemplate} data-testid="button-download-template">
                 <FileSpreadsheet className="h-4 w-4 mr-1" />
                 Template
               </Button>
-              <Button variant="outline" size="sm" onClick={handleExportCSV} data-testid="button-export-csv">
+              <Button variant="outline" size="sm" className="h-8 px-2.5 text-xs sm:px-3" onClick={handleExportCSV} data-testid="button-export-csv">
                 <Download className="h-4 w-4 mr-1" />
                 Download
               </Button>
-              <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} data-testid="button-import-csv">
+              <Button variant="outline" size="sm" className="h-8 px-2.5 text-xs sm:px-3" onClick={() => fileInputRef.current?.click()} data-testid="button-import-csv">
                 <Upload className="h-4 w-4 mr-1" />
                 Upload
               </Button>
@@ -1058,7 +1062,7 @@ export default function MarksEntryPage() {
               />
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="px-3 pb-3 pt-0 sm:px-5 sm:pb-5">
             {isLoadingMarks ? (
               <div className="space-y-4">
                 {[1, 2, 3].map((i) => (
@@ -1071,24 +1075,24 @@ export default function MarksEntryPage() {
                 <p>No students found in this class</p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <Table>
+              <div className="relative overflow-x-auto rounded-md border sm:border-0">
+                <Table className="w-max table-auto text-xs sm:min-w-full sm:text-sm">
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="min-w-[150px]">Student</TableHead>
-                      <TableHead className="min-w-[90px]">Status</TableHead>
+                      <TableHead className="sticky left-0 z-30 min-w-[118px] w-[118px] bg-background border-r px-1.5 py-1 h-7 sm:min-w-[150px] sm:w-[150px] sm:px-2 sm:h-8">Student</TableHead>
+                      <TableHead className="min-w-[54px] w-[54px] px-1 py-1 h-7 sm:min-w-[76px] sm:w-[76px] sm:px-2 sm:h-8">Status</TableHead>
                       {marksData?.papers.map((paper) => (
-                        <TableHead key={paper.id} className="min-w-[100px] text-center">
+                        <TableHead key={paper.id} className="min-w-[58px] w-[58px] text-center px-1 py-1 h-7 sm:min-w-[82px] sm:w-[82px] sm:px-2 sm:h-8">
                           {paper.paperName}
-                          <div className="text-xs font-normal text-muted-foreground">
+                          <div className="text-[10px] sm:text-xs font-normal text-muted-foreground leading-tight">
                             /{paper.paperMarks}
                           </div>
                         </TableHead>
                       ))}
-                      <TableHead className="min-w-[80px] text-center">%</TableHead>
-                      <TableHead className="min-w-[60px] text-center">Grade</TableHead>
-                      <TableHead className="min-w-[180px]">Comment</TableHead>
-                      <TableHead className="min-w-[80px]">Action</TableHead>
+                      <TableHead className="min-w-[44px] w-[44px] text-center px-1 py-1 h-7 sm:min-w-[60px] sm:w-[60px] sm:px-2 sm:h-8">%</TableHead>
+                      <TableHead className="min-w-[48px] w-[48px] text-center px-1 py-1 h-7 sm:min-w-[56px] sm:w-[56px] sm:px-2 sm:h-8">Grade</TableHead>
+                      <TableHead className="min-w-[172px] w-[172px] px-1 py-1 h-7 sm:min-w-[260px] sm:w-[260px] sm:px-2 sm:h-8">Comment</TableHead>
+                      <TableHead className="min-w-[64px] w-[64px] px-1 py-1 h-7 sm:min-w-[78px] sm:w-[78px] sm:px-2 sm:h-8">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1106,18 +1110,18 @@ export default function MarksEntryPage() {
                       
                       return (
                         <TableRow key={student.id} className={isNotPresent ? "opacity-60" : ""}>
-                          <TableCell className="font-medium">
-                            <div className="flex flex-col">
-                              <span>{student.firstName} {student.lastName}</span>
-                              <span className="text-xs text-muted-foreground">{student.admissionNo}</span>
+                          <TableCell className="sticky left-0 z-20 bg-background border-r px-1.5 py-0.5 font-medium align-middle sm:px-2 sm:py-1">
+                            <div className="flex flex-col leading-tight">
+                              <span className="text-xs sm:text-sm">{student.firstName} {student.lastName}</span>
+                              <span className="text-[10px] sm:text-xs text-muted-foreground">{student.admissionNo}</span>
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="px-1 py-0.5 align-middle sm:px-2 sm:py-1">
                             <Select
                               value={studentMark?.attStatus || "none"}
                               onValueChange={(value) => handleAttStatusChange(student.id, value)}
                             >
-                              <SelectTrigger className="h-8 text-xs" data-testid={`select-status-${student.id}`}>
+                              <SelectTrigger className="h-7 w-[52px] truncate px-1 pr-5 text-xs sm:h-8 sm:w-[82px] sm:px-2 [&>span]:truncate" data-testid={`select-status-${student.id}`}>
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
@@ -1130,7 +1134,7 @@ export default function MarksEntryPage() {
                             </Select>
                           </TableCell>
                           {marksData?.papers.map((paper) => (
-                            <TableCell key={paper.id} className="text-center">
+                            <TableCell key={paper.id} className="px-1 py-0.5 text-center align-middle sm:px-2 sm:py-1">
                               <Input
                                 type="number"
                                 min={0}
@@ -1138,7 +1142,7 @@ export default function MarksEntryPage() {
                                 inputMode="numeric"
                                 pattern="[0-9]*"
                                 max={paper.paperMarks}
-                                className="h-8 w-20 text-center mx-auto"
+                                className="h-7 w-[50px] text-center mx-auto px-1 text-xs sm:h-8 sm:w-20 sm:text-sm"
                                 value={studentMark?.paperMarks[paper.id] || ""}
                                 onChange={(e) => handlePaperMarkChange(student.id, paper.id, e.target.value)}
                                 disabled={isNotPresent && studentMark?.attStatus !== "none"}
@@ -1146,30 +1150,32 @@ export default function MarksEntryPage() {
                               />
                             </TableCell>
                           ))}
-                          <TableCell className="text-center font-semibold">
+                          <TableCell className="px-1 py-0.5 text-center font-semibold align-middle sm:px-2 sm:py-1">
                             {percentage !== null ? `${percentage}%` : "-"}
                           </TableCell>
-                          <TableCell className="text-center">
+                          <TableCell className="px-1 py-0.5 text-center align-middle sm:px-2 sm:py-1">
                             {gradeName ? (
-                              <Badge className={`${getGradeColor(gradeName)} border`}>
+                              <Badge className={`${getGradeColor(gradeName)} border px-1.5 py-0 text-[10px] sm:text-xs`}>
                                 {gradeName}
                               </Badge>
                             ) : (
                               <span className="text-muted-foreground">-</span>
                             )}
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="px-1 py-0.5 align-middle sm:px-2 sm:py-1">
                             <Textarea
-                              className="h-16 text-xs resize-none"
+                              rows={1}
+                              className="h-7 min-h-7 max-h-7 resize-none overflow-x-hidden overflow-y-hidden whitespace-nowrap px-2 py-1 text-xs leading-5 sm:h-9 sm:min-h-9 sm:max-h-9 sm:whitespace-normal"
                               placeholder={livePoolComment || "No comment available"}
                               value={studentMark?.commentSource === "custom" ? (studentMark?.customCommentText || "") : ""}
                               onChange={(e) => handleCustomCommentChange(student.id, e.target.value)}
                               data-testid={`input-comment-${student.id}`}
                             />
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="px-1 py-0.5 align-middle sm:px-2 sm:py-1">
                             <Button
                               size="sm"
+                              className="h-7 px-1.5 text-xs sm:h-8 sm:px-3"
                               onClick={() => handleManualSave(student.id)}
                               disabled={studentMark?.isSaving || !studentMark?.isDirty}
                               data-testid={`button-save-${student.id}`}
@@ -1202,10 +1208,10 @@ export default function MarksEntryPage() {
 
       {!selectedAssessmentId && (
         <Card className="border-dashed">
-          <CardContent className="py-12">
+          <CardContent className="py-8 sm:py-12">
             <div className="text-center text-muted-foreground">
-              <AlertCircle className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p className="text-lg font-medium">No assessment selected</p>
+              <AlertCircle className="h-10 w-10 sm:h-12 sm:w-12 mx-auto mb-3 sm:mb-4 opacity-50" />
+              <p className="text-base sm:text-lg font-medium">No assessment selected</p>
               <p className="text-sm">Select a class, subject, and assessment above to start entering marks</p>
             </div>
           </CardContent>
