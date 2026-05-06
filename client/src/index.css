@@ -1092,6 +1092,92 @@
     @apply w-full max-w-full overflow-x-auto overscroll-x-contain;
     -webkit-overflow-scrolling: touch;
   }
+  .mobile-record-list {
+    @apply space-y-2 p-2 md:hidden;
+  }
+
+  .mobile-record-card {
+    @apply min-w-0 overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm;
+  }
+
+  .mobile-record-title-row {
+    @apply flex items-start gap-2;
+  }
+
+  .mobile-record-title {
+    @apply min-w-0 flex-1 font-bold leading-snug text-foreground;
+    font-size: 14.25px;
+  }
+
+  .mobile-record-media-row {
+    @apply mt-2 flex gap-2;
+  }
+
+  .mobile-record-status-vertical-wrap {
+    @apply flex w-4 shrink-0 justify-center;
+  }
+
+  .mobile-record-status-vertical {
+    @apply flex h-16 w-4 rotate-180 items-center justify-center px-0 py-1 leading-none;
+    writing-mode: vertical-rl;
+    font-size: 8px;
+  }
+
+  .mobile-record-avatar {
+    @apply flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted text-xs font-semibold;
+  }
+
+  .mobile-record-details {
+    @apply min-w-0 flex-1 self-start pt-0.5 leading-tight text-muted-foreground;
+    font-size: 11px;
+  }
+
+  .mobile-record-details-grid {
+    @apply grid min-w-0 gap-x-2;
+  }
+
+  .mobile-record-two-col {
+    grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+  }
+
+  .mobile-record-field {
+    @apply flex min-w-0 items-center gap-1;
+  }
+
+  .mobile-record-label {
+    @apply font-semibold text-foreground;
+  }
+
+  .mobile-record-truncate {
+    @apply truncate;
+  }
+
+  .mobile-record-actions-wrap {
+    @apply mt-1.5 pl-6;
+  }
+
+  .mobile-record-actions {
+    @apply flex min-w-0 flex-nowrap items-stretch justify-between gap-1 overflow-hidden;
+  }
+
+  .mobile-record-action-button {
+    @apply h-7 min-w-0 px-1.5 leading-none gap-0.5;
+    flex: 1 1 0;
+    font-size: 8px;
+  }
+
+  .mobile-record-action-icon {
+    @apply h-2.5 w-2.5 shrink-0;
+  }
+
+  .mobile-record-action-text {
+    @apply truncate;
+  }
+
+  .mobile-record-delete-button {
+    @apply h-7 w-7 shrink-0 text-destructive hover:text-destructive;
+  }
+
 }
 
 [data-radix-popper-content-wrapper] {
@@ -1103,4 +1189,149 @@
 .flex > *,
 .grid > * {
   min-width: 0;
+}
+
+@layer components {
+  /* Reusable compact mobile record/card patterns.
+     These are opt-in classes, so existing pages are not changed unless the page uses them. */
+  .fcgs-mobile-card-list {
+    @apply space-y-2 p-2 md:hidden;
+  }
+
+  .fcgs-mobile-record-card {
+    @apply rounded-lg border bg-card p-2.5 shadow-sm;
+  }
+
+  .fcgs-mobile-title-row {
+    @apply flex items-start gap-2;
+  }
+
+  .fcgs-mobile-title-check {
+    @apply mt-0.5 shrink-0;
+  }
+
+  .fcgs-mobile-card-title {
+    @apply min-w-0 flex-1 text-[14.25px] font-bold leading-snug text-foreground;
+  }
+
+  .fcgs-mobile-body-grid {
+    @apply mt-2 flex gap-2;
+  }
+
+  .fcgs-mobile-vertical-status-slot {
+    @apply flex w-4 shrink-0 justify-center;
+  }
+
+  .fcgs-mobile-vertical-status {
+    @apply flex h-16 w-4 rotate-180 items-center justify-center px-0 py-1 text-[8px] leading-none;
+    writing-mode: vertical-rl;
+  }
+
+  .fcgs-mobile-avatar-box {
+    @apply w-16 shrink-0;
+  }
+
+  .fcgs-mobile-avatar {
+    @apply flex h-16 w-16 items-center justify-center overflow-hidden rounded-md bg-muted text-xs font-semibold;
+  }
+
+  .fcgs-mobile-meta {
+    @apply min-w-0 flex-1 self-start pt-0.5 text-[11px] leading-tight text-muted-foreground;
+  }
+
+  .fcgs-mobile-meta-two {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+    column-gap: 0.5rem;
+  }
+
+  .fcgs-mobile-meta-row {
+    @apply flex min-w-0 items-center gap-1;
+  }
+
+  .fcgs-mobile-meta-icon {
+    @apply h-3 w-3 shrink-0;
+  }
+
+  .fcgs-mobile-meta-pair {
+    @apply mt-1;
+  }
+
+  .fcgs-mobile-line {
+    @apply mt-1 min-w-0;
+  }
+
+  .fcgs-mobile-line-text {
+    @apply block truncate;
+  }
+
+  .fcgs-mobile-actions-outer {
+    @apply mt-1.5 pl-6;
+  }
+
+  .fcgs-mobile-actions {
+    @apply flex min-w-0 flex-nowrap items-stretch justify-between gap-1 overflow-hidden;
+  }
+
+  .fcgs-mobile-action {
+    @apply h-7 min-w-0 basis-0 shrink px-1.5 text-[8px] leading-none gap-0.5;
+  }
+
+  .fcgs-mobile-action svg {
+    @apply h-2.5 w-2.5 shrink-0;
+  }
+
+  .fcgs-mobile-action-text {
+    @apply truncate;
+  }
+
+  .fcgs-mobile-action-manage {
+    flex: 1.15 1 0%;
+  }
+
+  .fcgs-mobile-action-view {
+    flex: 1 1 0%;
+  }
+
+  .fcgs-mobile-action-workload {
+    flex: 1.2 1 0%;
+  }
+
+  .fcgs-mobile-action-permissions {
+    flex: 1.45 1 0%;
+  }
+
+  .fcgs-mobile-action-reset {
+    flex: 1.35 1 0%;
+    @apply px-1 text-[7px];
+  }
+
+  .fcgs-mobile-action-icon-only {
+    @apply h-7 w-7 shrink-0;
+  }
+
+  .fcgs-mobile-action-icon-only svg {
+    @apply h-2.5 w-2.5;
+  }
+
+  @media (max-width: 380px) {
+    .fcgs-mobile-card-title {
+      font-size: 13.5px;
+    }
+
+    .fcgs-mobile-actions {
+      gap: 0.125rem;
+    }
+
+    .fcgs-mobile-action {
+      padding-left: 0.25rem;
+      padding-right: 0.25rem;
+      font-size: 7.5px;
+    }
+
+    .fcgs-mobile-action-reset {
+      font-size: 6.75px;
+    }
+  }
 }

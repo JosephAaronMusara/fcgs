@@ -271,17 +271,14 @@ export default function StaffPage() {
     }));
   };
 
-  const getAccessGroupName = (accessGroupId: number | null | undefined) => {
-    if (!accessGroupId) return "-";
-    const group = accessGroups?.find(g => g.id === accessGroupId);
-    return group?.name || "-";
+  const getStaffRoleLabel = (role: string | null | undefined) => {
+    if (!role) return "Teacher";
+    const configuredRole = staffRolesList?.find((r) => r.name === role);
+    if (configuredRole?.label) return configuredRole.label;
+    return role.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
   };
 
-  const getRoleDisplay = (role: string | null | undefined, accessGroupId: number | null | undefined) => {
-    const groupName = getAccessGroupName(accessGroupId);
-    if (groupName !== "-") return groupName;
-    return role?.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase()) || "Teacher";
-  };
+  const getStaffInitials = (staff: Staff) => `${staff.firstName?.[0] || ""}${staff.lastName?.[0] || ""}`.toUpperCase() || "S";
 
   return (
     <div className="space-y-4">
@@ -367,7 +364,9 @@ export default function StaffPage() {
               ))}
             </div>
           ) : (
-            <Table>
+            <>
+              <div className="hidden md:block">
+                <Table>
               <TableHeader>
                 <TableRow className="bg-muted/50">
                   <TableHead className="w-[30px]">
@@ -387,7 +386,7 @@ export default function StaffPage() {
                   <SortableTableHead sortKey="gender" sortConfig={sortConfig} onSort={requestSort}>GENDER</SortableTableHead>
                   <SortableTableHead sortKey="residentialAddress" sortConfig={sortConfig} onSort={requestSort}>ADDRESS</SortableTableHead>
                   <TableHead>USER ACCOUNT</TableHead>
-                  <SortableTableHead sortKey="accessGroupId" sortConfig={sortConfig} onSort={requestSort}>ACCESS LEVEL</SortableTableHead>
+                  <SortableTableHead sortKey="role" sortConfig={sortConfig} onSort={requestSort}>ROLE</SortableTableHead>
                   <SortableTableHead sortKey="isActive" sortConfig={sortConfig} onSort={requestSort}>STATUS</SortableTableHead>
                   <TableHead>ACTION</TableHead>
                 </TableRow>
@@ -445,14 +444,14 @@ export default function StaffPage() {
                         Manage
                       </Button>
                     </TableCell>
-                    <TableCell>{getRoleDisplay(s.role, s.accessGroupId)}</TableCell>
+                    <TableCell>{getStaffRoleLabel(s.role)}</TableCell>
                     <TableCell>
                       <Badge variant={s.status === "active" ? "default" : "secondary"} className={s.status === "active" ? "bg-green-500 hover:bg-green-600" : ""}>
                         {s.status?.toUpperCase()}
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-1 flex-wrap">
+                      <div className="flex flex-nowrap items-center gap-1">
                         <Dialog open={viewingStaff?.id === s.id} onOpenChange={(open) => !open && setViewingStaff(null)}>
                           <DialogTrigger asChild>
                             <Button
@@ -494,6 +493,17 @@ export default function StaffPage() {
                             />
                           </DialogContent>
                         </Dialog>
+
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setEditingStaff(s)}
+                          data-testid={`button-edit-staff-${s.id}`}
+                          title="Edit"
+                          aria-label="Edit"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
 
                         <Dialog open={assignmentsDialogStaff?.id === s.id} onOpenChange={(open) => !open && setAssignmentsDialogStaff(null)}>
                           <DialogTrigger asChild>
@@ -538,15 +548,17 @@ export default function StaffPage() {
                         {canResetDeviceId && (
                           <Button
                             variant="ghost"
-                            size="sm"
+                            size="icon"
                             onClick={() => {
                               if (confirm("This will reset the device ID for this staff member. Their next successful clock-in from a new device will register that device.")) {
                                 resetDeviceIdMutation.mutate(s.id);
                               }
                             }}
                             data-testid={`button-reset-device-${s.id}`}
+                            title="Reset Device ID"
+                            aria-label="Reset Device ID"
                           >
-                            Reset Device ID
+                            <Smartphone className="h-4 w-4" />
                           </Button>
                         )}
 
@@ -577,7 +589,178 @@ export default function StaffPage() {
                   </TableRow>
                 )}
               </TableBody>
-            </Table>
+                </Table>
+              </div>
+
+              <div className="fcgs-mobile-card-list">
+                {(sortedStaff ?? []).map((s) => {
+                  const genderLabel = s.gender
+                    ? String(s.gender).replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())
+                    : "___";
+                  const addressLine = `${s.streetAddress || "___"}, ${s.residentialArea || "___"}, ${s.address || "___"}`;
+
+                  return (
+                    <div key={s.id} className="fcgs-mobile-record-card" data-testid={`mobile-card-staff-${s.id}`}>
+                      <div className="fcgs-mobile-title-row">
+                        <Checkbox
+                          checked={selectedStaffIds.includes(s.id)}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              setSelectedStaffIds([...selectedStaffIds, s.id]);
+                            } else {
+                              setSelectedStaffIds(selectedStaffIds.filter(id => id !== s.id));
+                            }
+                          }}
+                          className="fcgs-mobile-title-check"
+                          data-testid={`mobile-checkbox-staff-${s.id}`}
+                        />
+
+                        <p className="fcgs-mobile-card-title">
+                          <span className="break-words">{s.firstName || "___"} {s.lastName || "___"} ({s.staffNo || "___"}): </span>
+                          <span>{getStaffRoleLabel(s.role) || "___"}</span>
+                        </p>
+                      </div>
+
+                      <div className="fcgs-mobile-body-grid">
+                        <div className="fcgs-mobile-vertical-status-slot">
+                          <Badge
+                            variant={s.status === "active" ? "default" : "secondary"}
+                            className={`fcgs-mobile-vertical-status ${s.status === "active" ? "bg-green-500 hover:bg-green-600" : ""}`}
+                          >
+                            {s.status?.toUpperCase() || "ACTIVE"}
+                          </Badge>
+                        </div>
+
+                        <div className="fcgs-mobile-avatar-box">
+                          <div className="fcgs-mobile-avatar">
+                            {s.photo ? (
+                              <img src={s.photo} alt={`${s.firstName} ${s.lastName}`} className="h-full w-full object-cover" />
+                            ) : (
+                              <span>{getStaffInitials(s)}</span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="fcgs-mobile-meta">
+                          <div className="fcgs-mobile-meta-two">
+                            <div className="fcgs-mobile-meta-row">
+                              <Phone className="fcgs-mobile-meta-icon" />
+                              <span className="shrink-0">:</span>
+                              <span className="truncate">{s.phone || "___"}</span>
+                            </div>
+                            <div className="fcgs-mobile-meta-row">
+                              <Mail className="fcgs-mobile-meta-icon" />
+                              <span className="shrink-0">:</span>
+                              <span className="truncate">{s.email || "___"}</span>
+                            </div>
+                          </div>
+                          <div className="fcgs-mobile-meta-two fcgs-mobile-meta-pair">
+                            <span className="truncate"><span className="font-semibold text-foreground">Gender:</span> {genderLabel}</span>
+                            <span className="truncate"><span className="font-semibold text-foreground">National ID #:</span> {s.nationalIdNumber || "___"}</span>
+                          </div>
+                          <div className="fcgs-mobile-line">
+                            <span className="fcgs-mobile-line-text"><span className="font-semibold text-foreground">Address:</span> {addressLine}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="fcgs-mobile-actions-outer">
+                        <div className="fcgs-mobile-actions">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="fcgs-mobile-action fcgs-mobile-action-manage"
+                            onClick={() => setAccountDialogStaff(s)}
+                            data-testid={`mobile-button-manage-account-${s.id}`}
+                            title="Manage User Account"
+                            aria-label="Manage User Account"
+                          >
+                            <UserCog />
+                            <span className="fcgs-mobile-action-text">Manage</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="fcgs-mobile-action fcgs-mobile-action-view"
+                            onClick={() => setViewingStaff(s)}
+                            data-testid={`mobile-button-view-staff-${s.id}`}
+                            title="View"
+                            aria-label="View"
+                          >
+                            <Eye />
+                            <span className="fcgs-mobile-action-text">View</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="fcgs-mobile-action fcgs-mobile-action-workload"
+                            onClick={() => setAssignmentsDialogStaff(s)}
+                            data-testid={`mobile-button-assignments-staff-${s.id}`}
+                            title="Workload"
+                            aria-label="Workload"
+                          >
+                            <BookOpen />
+                            <span className="fcgs-mobile-action-text">Workload</span>
+                          </Button>
+                          {canManageAccessRights && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="fcgs-mobile-action fcgs-mobile-action-permissions"
+                              onClick={() => setAccessRightsStaff(s)}
+                              data-testid={`mobile-button-access-rights-${s.id}`}
+                              title="Permissions"
+                              aria-label="Permissions"
+                            >
+                              <KeyRound />
+                              <span className="fcgs-mobile-action-text">Permissions</span>
+                            </Button>
+                          )}
+                          {canResetDeviceId && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="fcgs-mobile-action fcgs-mobile-action-reset"
+                              onClick={() => {
+                                if (confirm("This will reset the device ID for this staff member. Their next successful clock-in from a new device will register that device.")) {
+                                  resetDeviceIdMutation.mutate(s.id);
+                                }
+                              }}
+                              data-testid={`mobile-button-reset-device-${s.id}`}
+                              title="Reset Mobile ID"
+                              aria-label="Reset Mobile ID"
+                            >
+                              <span className="fcgs-mobile-action-text">Reset Mobile ID</span>
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="fcgs-mobile-action-icon-only text-destructive hover:text-destructive"
+                            onClick={() => {
+                              if (confirm("Are you sure you want to delete this staff member?")) {
+                                deleteMutation.mutate(s.id);
+                              }
+                            }}
+                            data-testid={`mobile-button-delete-staff-${s.id}`}
+                            title="Delete"
+                            aria-label="Delete"
+                          >
+                            <Trash2 />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {filteredStaff?.length === 0 && (
+                  <div className="py-8 text-center text-sm text-muted-foreground">
+                    No staff members found
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
