@@ -1225,14 +1225,14 @@ export default function CalendarPage() {
             </div>
           </CardHeader>
 
-          <CardContent>
-            <div className="-mx-1 overflow-x-auto pb-1">
-              <div className="min-w-[700px] px-1">
-                <div className="mb-2 grid grid-cols-7 gap-2">
+          <CardContent className="px-2 pb-3 sm:px-6 sm:pb-6">
+            <div className="w-full min-w-0 overflow-hidden">
+              <div className="w-full min-w-0">
+                <div className="mb-1 grid grid-cols-7 gap-1 sm:mb-2 sm:gap-2">
                   {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
                     <div
                       key={day}
-                      className="py-2 text-center text-xs font-medium text-muted-foreground"
+                      className="py-1 text-center text-[10px] font-medium text-muted-foreground sm:py-2 sm:text-xs"
                     >
                       {day}
                     </div>
@@ -1240,15 +1240,15 @@ export default function CalendarPage() {
                 </div>
 
                 {isLoading ? (
-                  <div className="rounded-lg border p-6 text-sm text-muted-foreground">
+                  <div className="rounded-lg border p-4 text-sm text-muted-foreground sm:p-6">
                     Loading calendar events...
                   </div>
                 ) : error ? (
-                  <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive sm:p-6">
                     {(error as Error).message || "Failed to load calendar events."}
                   </div>
                 ) : (
-                  <div className="grid grid-cols-7 gap-2">
+                  <div className="grid grid-cols-7 gap-1 sm:gap-2">
                     {calendarDays.map((date) => {
                       const inCurrentMonth = date.getMonth() === viewDate.getMonth();
                       const isToday = isSameDay(date, today);
@@ -1263,29 +1263,29 @@ export default function CalendarPage() {
                           type="button"
                           onClick={() => setSelectedDate(date)}
                           className={[
-                            "min-h-[96px] rounded-2xl border p-1.5 text-left transition hover:border-primary hover:bg-muted/40 sm:min-h-[118px] sm:p-2",
+                            "min-h-[46px] min-w-0 overflow-hidden rounded-lg border p-1 text-left transition hover:border-primary hover:bg-muted/40 sm:min-h-[118px] sm:rounded-2xl sm:p-2",
                             !inCurrentMonth ? "opacity-45" : "",
                             isSelected ? "border-primary ring-1 ring-primary" : "",
                           ].join(" ")}
                           data-testid={`calendar-day-${date.toISOString().slice(0, 10)}`}
                         >
-                          <div className="flex items-center justify-between">
+                          <div className="flex min-w-0 items-center justify-between gap-0.5 sm:gap-1">
                             <span
                               className={[
-                                "inline-flex h-7 w-7 items-center justify-center rounded-full text-sm",
+                                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] sm:h-7 sm:w-7 sm:text-sm",
                                 isToday ? "bg-primary text-primary-foreground" : "",
                               ].join(" ")}
                             >
                               {date.getDate()}
                             </span>
                             {dateEvents.length > 0 && (
-                              <span className="text-[10px] text-muted-foreground">
+                              <span className="shrink-0 text-[9px] leading-none text-muted-foreground sm:text-[10px]">
                                 {dateEvents.length}
                               </span>
                             )}
                           </div>
 
-                          <div className="mt-2 space-y-1">
+                          <div className="mt-1 space-y-0.5 sm:mt-2 sm:space-y-1">
                             {visibleDateEvents.map((event: any) => {
                               const meta = getScopeMeta(event.scope);
                               return (
@@ -1296,7 +1296,7 @@ export default function CalendarPage() {
                                     e.stopPropagation();
                                     openViewDialog(event);
                                   }}
-                                  className={`w-full rounded-md px-2 py-1 text-[10px] truncate text-left sm:text-[11px] ${meta.chipClass}`}
+                                  className={`hidden w-full min-w-0 truncate rounded-md px-1.5 py-0.5 text-left text-[9px] leading-tight sm:block sm:px-2 sm:py-1 sm:text-[11px] ${meta.chipClass}`}
                                   data-testid={`button-day-event-${event.id}`}
                                 >
                                   {event.title || "Untitled event"}
@@ -1311,7 +1311,7 @@ export default function CalendarPage() {
                                   e.stopPropagation();
                                   setSelectedDate(date);
                                 }}
-                                className="w-full rounded-md bg-muted px-2 py-1 text-[11px] text-left text-muted-foreground hover:bg-muted/80"
+                                className="hidden w-full min-w-0 truncate rounded-md bg-muted px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/80 sm:block"
                                 data-testid={`button-more-events-${date.toISOString().slice(0, 10)}`}
                               >
                                 +{hiddenCount} more
@@ -1319,8 +1319,28 @@ export default function CalendarPage() {
                             )}
 
                             {dateEvents.length === 0 && (
-                              <div className="rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+                              <div className="hidden rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground sm:block">
                                 No events
+                              </div>
+                            )}
+
+                            {dateEvents.length > 0 && (
+                              <div className="flex flex-wrap gap-0.5 sm:hidden">
+                                {visibleDateEvents.map((event: any) => {
+                                  const meta = getScopeMeta(event.scope);
+                                  return (
+                                    <span
+                                      key={`mobile-dot-${event.id}`}
+                                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.chipClass}`}
+                                      aria-hidden="true"
+                                    />
+                                  );
+                                })}
+                                {hiddenCount > 0 && (
+                                  <span className="text-[8px] leading-none text-muted-foreground">
+                                    +{hiddenCount}
+                                  </span>
+                                )}
                               </div>
                             )}
                           </div>

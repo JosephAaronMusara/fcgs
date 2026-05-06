@@ -374,7 +374,7 @@ export default function AttendancePage() {
       return (
         <button
           type="button"
-          className="inline-flex h-7 min-w-7 items-center justify-center rounded-full border border-dashed px-2 text-xs text-muted-foreground hover:border-primary hover:text-primary"
+          className="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-dashed px-1.5 text-[11px] text-muted-foreground hover:border-primary hover:text-primary"
           onClick={() => student && date && setSingleEditTarget({ student, date })}
           aria-label="Mark blank attendance cell"
         >
@@ -386,7 +386,7 @@ export default function AttendancePage() {
     return (
       <button
         type="button"
-        className="inline-flex h-7 min-w-7 items-center justify-center rounded-full px-2 text-xs font-bold text-white shadow-sm transition-transform hover:scale-105"
+        className="inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[11px] font-bold text-white shadow-sm transition-transform hover:scale-105"
         style={{ backgroundColor: color }}
         title={STATUS_LABELS[status] || status}
         onClick={() => student && date && setSingleEditTarget({ student, date })}
@@ -488,13 +488,13 @@ export default function AttendancePage() {
     <div className="p-3 sm:p-4 lg:p-6 space-y-6 overflow-x-hidden">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2" data-testid="text-attendance-title">
+          <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2" style={{ color: "#1b2a5c" }} data-testid="text-attendance-title">
             <ClipboardList className="h-8 w-8" style={{ color: "#1b2a5c" }} />
             Attendance Register
           </h1>
           <p className="text-muted-foreground">Mark and review student attendance records</p>
         </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:flex lg:items-center">
+        <div className="grid grid-cols-2 gap-2 lg:flex lg:items-center">
           <Button variant="outline" data-testid="button-import-attendance">
             <Upload className="w-4 h-4 mr-2" />
             Import
@@ -506,37 +506,37 @@ export default function AttendancePage() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-3 gap-2 sm:gap-4">
         <Card>
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="p-2 rounded-full bg-green-100 dark:bg-green-900/30">
-              <ClipboardCheck className="w-5 h-5 text-green-600" />
+          <CardContent className="p-2 sm:p-4 flex items-center gap-2 sm:gap-3">
+            <div className="p-1.5 sm:p-2 rounded-full bg-green-100 dark:bg-green-900/30">
+              <ClipboardCheck className="w-4 h-4 sm:w-5 sm:h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-muted-foreground">Present</p>
-              <p className="text-2xl font-bold" data-testid="text-present-count">{stats.present}</p>
+              <p className="text-[11px] text-muted-foreground sm:text-sm">Present</p>
+              <p className="text-lg font-bold sm:text-2xl" data-testid="text-present-count">{stats.present}</p>
             </div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
-              <X className="w-5 h-5 text-red-600" />
+          <CardContent className="p-2 sm:p-4 flex items-center gap-2 sm:gap-3">
+            <div className="p-1.5 sm:p-2 rounded-full bg-red-100 dark:bg-red-900/30">
+              <X className="w-4 h-4 sm:w-5 sm:h-5 text-red-600" />
             </div>
             <div>
-              <p className="text-sm text-muted-foreground">Absent / Other</p>
-              <p className="text-2xl font-bold" data-testid="text-absent-count">{stats.absent}</p>
+              <p className="text-[11px] text-muted-foreground sm:text-sm">Absent / Other</p>
+              <p className="text-lg font-bold sm:text-2xl" data-testid="text-absent-count">{stats.absent}</p>
             </div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="p-2 rounded-full bg-blue-100 dark:bg-blue-900/30">
-              <Users className="w-5 h-5 text-blue-600" />
+          <CardContent className="p-2 sm:p-4 flex items-center gap-2 sm:gap-3">
+            <div className="p-1.5 sm:p-2 rounded-full bg-blue-100 dark:bg-blue-900/30">
+              <Users className="w-4 h-4 sm:w-5 sm:h-5 text-blue-600" />
             </div>
             <div>
-              <p className="text-sm text-muted-foreground">Students Shown</p>
-              <p className="text-2xl font-bold" data-testid="text-total-count">{visibleStudents.length}</p>
+              <p className="text-[11px] text-muted-foreground sm:text-sm">Total</p>
+              <p className="text-lg font-bold sm:text-2xl" data-testid="text-total-count">{visibleStudents.length}</p>
             </div>
           </CardContent>
         </Card>
@@ -544,11 +544,11 @@ export default function AttendancePage() {
 
       <Card>
         <CardHeader className="pb-4">
-          <div className="grid gap-3 lg:grid-cols-[minmax(180px,240px)_150px_150px_minmax(260px,1fr)_auto] lg:items-end">
-            <div className="space-y-1.5">
+          <div className="grid grid-cols-3 gap-2 sm:gap-3 lg:grid-cols-[minmax(180px,240px)_150px_150px_minmax(260px,1fr)_auto] lg:items-end">
+            <div className="min-w-0 space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">Class</label>
               <Select value={selectedClass} onValueChange={setSelectedClass}>
-                <SelectTrigger data-testid="select-attendance-class">
+                <SelectTrigger className="w-full" data-testid="select-attendance-class">
                   <SelectValue placeholder="Select Class" />
                 </SelectTrigger>
                 <SelectContent>
@@ -559,15 +559,15 @@ export default function AttendancePage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1.5">
+            <div className="min-w-0 space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">From</label>
-              <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} data-testid="input-date-from" />
+              <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="w-full" data-testid="input-date-from" />
             </div>
-            <div className="space-y-1.5">
+            <div className="min-w-0 space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">To</label>
-              <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} data-testid="input-date-to" />
+              <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="w-full" data-testid="input-date-to" />
             </div>
-            <div className="space-y-1.5">
+            <div className="col-span-2 min-w-0 space-y-1.5 lg:col-span-1">
               <label className="text-xs font-medium text-muted-foreground">Search student</label>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -580,10 +580,19 @@ export default function AttendancePage() {
                 />
               </div>
             </div>
-            <Button onClick={handleOpenMarkDialog} className="w-full lg:w-auto" data-testid="button-mark-attendance">
+            <Button onClick={handleOpenMarkDialog} className="w-full self-end lg:w-auto" data-testid="button-mark-attendance">
               <Calendar className="w-4 h-4 mr-2" />
               Mark
             </Button>
+          </div>
+
+          <div className="mt-3 flex w-full flex-wrap items-center justify-start gap-1.5 rounded-md border bg-muted/20 px-2 py-2 text-xs sm:justify-between sm:gap-2 sm:px-4 lg:px-6" data-testid="attendance-status-legend">
+            {Object.entries(STATUS_LABELS).map(([status, label]) => (
+              <Badge key={status} variant="outline" className="gap-1 px-2 py-1 sm:flex-1 sm:justify-center sm:px-3">
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: STATUS_PALETTE[status] }} />
+                {STATUS_ICONS[status]} = {label}
+              </Badge>
+            ))}
           </div>
         </CardHeader>
         <CardContent>
@@ -599,28 +608,28 @@ export default function AttendancePage() {
                 {[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-12 w-full" />)}
               </div>
             ) : gridData && gridData.dates.length > 0 ? (
-              <Table>
+              <Table className="w-max min-w-max table-auto">
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="sticky left-0 z-10 bg-card min-w-[220px]">Student</TableHead>
-                    {selectedClass === "all" && <TableHead className="min-w-[140px]">Class</TableHead>}
+                    <TableHead className="sticky left-0 z-20 w-max min-w-[120px] bg-card px-2 text-[11px] sm:text-xs whitespace-nowrap">Student</TableHead>
+                    {selectedClass === "all" && <TableHead className="w-[96px] min-w-[96px] px-2 text-[11px] sm:text-xs">Class</TableHead>}
                     {gridData.dates.map(date => (
-                      <TableHead key={date} className="text-center min-w-[72px]">{formatDateLabel(date)}</TableHead>
+                      <TableHead key={date} className="w-[58px] min-w-[58px] px-1 text-center text-[11px] sm:text-xs whitespace-nowrap">{formatDateLabel(date)}</TableHead>
                     ))}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {visibleStudents.length > 0 ? visibleStudents.map(student => (
-                    <TableRow key={student.id}>
-                      <TableCell className="sticky left-0 z-10 bg-card font-medium min-w-[220px]">
-                        <div className="min-w-0">
-                          <div className="truncate">{normalizeStudentName(student)}</div>
-                          <div className="text-xs text-muted-foreground">{student.admissionNo}</div>
+                    <TableRow key={student.id} className="text-[11px] sm:text-xs md:text-sm">
+                      <TableCell className="sticky left-0 z-10 w-max min-w-[120px] bg-card px-2 py-1.5 font-medium whitespace-nowrap">
+                        <div className="min-w-0 whitespace-nowrap">
+                          <div className="whitespace-nowrap text-[11px] leading-tight sm:text-xs md:text-sm">{normalizeStudentName(student)}</div>
+                          <div className="whitespace-nowrap text-[10px] leading-tight text-muted-foreground sm:text-[11px] md:text-xs">{student.admissionNo}</div>
                         </div>
                       </TableCell>
-                      {selectedClass === "all" && <TableCell className="text-sm text-muted-foreground">{student.className || "—"}</TableCell>}
+                      {selectedClass === "all" && <TableCell className="w-[96px] min-w-[96px] px-2 py-1.5 text-[11px] text-muted-foreground truncate sm:text-xs md:text-sm">{student.className || "—"}</TableCell>}
                       {gridData.dates.map(date => (
-                        <TableCell key={date} className="text-center">
+                        <TableCell key={date} className="w-[58px] min-w-[58px] px-1 py-1.5 text-center">
                           {renderStatusPill(student.statuses?.[date], student, date)}
                         </TableCell>
                       ))}
@@ -642,14 +651,6 @@ export default function AttendancePage() {
             )}
           </div>
 
-          <div className="mt-4 flex flex-wrap gap-2 text-xs">
-            {Object.entries(STATUS_LABELS).map(([status, label]) => (
-              <Badge key={status} variant="outline" className="gap-1">
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: STATUS_PALETTE[status] }} />
-                {STATUS_ICONS[status]} = {label}
-              </Badge>
-            ))}
-          </div>
         </CardContent>
       </Card>
 

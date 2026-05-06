@@ -15,7 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Pencil, Trash2, GraduationCap, Download, Bell, Upload, BookOpen, UserCog, KeyRound, Eye, EyeOff, ArrowRightLeft, UserPlus, Camera, X, ChevronDown } from "lucide-react";
+import { Plus, Search, Trash2, GraduationCap, Download, Bell, Upload, BookOpen, UserCog, KeyRound, Eye, EyeOff, ArrowRightLeft, UserPlus, Camera, X, ChevronDown, Phone, Mail } from "lucide-react";
 import type { Student, Class, Parent, Subject, Stream, User, School, Hostel, Staff } from "@shared/schema";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
@@ -259,6 +259,30 @@ export default function StudentsPage() {
   const getParentName = (parentId: number | null | undefined) => {
     const parent = getParent(parentId);
     return parent ? `${parent.firstName} ${parent.lastName}` : "-";
+  };
+
+  const displayValue = (value: unknown) => {
+    const text = String(value ?? "").trim();
+    return text && text !== "-" ? text : "___";
+  };
+
+  const getStudentInitials = (student: Student) =>
+    `${student.firstName?.[0] || ""}${student.lastName?.[0] || ""}`.toUpperCase() || "S";
+
+  const getGenderLabel = (gender: Student["gender"]) =>
+    gender ? String(gender).replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "___";
+
+  const getStudentAddressLine = (student: Student) =>
+    `${student.streetAddress || "___"}, ${student.residentialArea || "___"}, ${student.address || "___"}`;
+
+  const getStudentStatusLabel = (student: Student) =>
+    student.archivedAt ? "ARCHIVED" : String(student.status || "active").toUpperCase();
+
+  const getStudentStatusVariant = (student: Student) => {
+    if (student.archivedAt) return "secondary" as const;
+    if (student.status === "active") return "default" as const;
+    if (student.status === "graduated") return "secondary" as const;
+    return "outline" as const;
   };
 
   const getNotifyRecipients = () => {
@@ -532,8 +556,9 @@ export default function StudentsPage() {
               ))}
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
+            <>
+              <div className="hidden overflow-x-auto md:block">
+                <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-10">
@@ -653,6 +678,10 @@ export default function StudentsPage() {
                                 streamName={streams?.find((st) => st.id === s.streamId)?.name || "-"}
                                 hostelName={getHostelName(s) || "-"}
                                 isBoardingSchool={isBoardingSchool}
+                                onEdit={() => {
+                                  setViewingStudent(null);
+                                  setEditingStudent(s);
+                                }}
                               />
                             </DialogContent>
                           </Dialog>
@@ -661,17 +690,6 @@ export default function StudentsPage() {
                             open={editingStudent?.id === s.id}
                             onOpenChange={(open) => !open && setEditingStudent(null)}
                           >
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => setEditingStudent(s)}
-                                data-testid={`button-edit-student-${s.id}`}
-                                title="Edit"
-                              >
-                                <Pencil className="w-4 h-4" />
-                              </Button>
-                            </DialogTrigger>
                             <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
                               <DialogHeader>
                                 <DialogTitle>Edit Student</DialogTitle>
@@ -760,6 +778,7 @@ export default function StudentsPage() {
                           <Button
                             variant="ghost"
                             size="icon"
+                            className="text-destructive hover:text-destructive"
                             onClick={() => {
                               if (confirm("Are you sure you want to delete this student?")) {
                                 deleteMutation.mutate(s.id);
@@ -767,8 +786,9 @@ export default function StudentsPage() {
                             }}
                             data-testid={`button-delete-student-${s.id}`}
                             title="Delete"
+                            aria-label="Delete"
                           >
-                            <Trash2 className="w-4 h-4 text-destructive" />
+                            <Trash2 className="w-4 h-4" />
                           </Button>
                         </div>
                       </TableCell>
@@ -782,8 +802,173 @@ export default function StudentsPage() {
                     </TableRow>
                   )}
                 </TableBody>
-              </Table>
-            </div>
+                </Table>
+              </div>
+
+              <div className="mobile-record-list">
+                {(sortedStudents ?? []).map((s) => {
+                  const parent = getParent(s.parentId);
+                  const parentName = displayValue(parent ? `${parent.firstName} ${parent.lastName}` : "");
+                  const parentPhone = parent?.phone || "___";
+                  const classLabel = displayValue(getClassName(s.classId));
+                  const hostelLabel = getHostelName(s);
+                  const learnerType = s.isDayScholar ? "Day Scholar" : "Boarder";
+                  const statusLabel = getStudentStatusLabel(s);
+                  const statusVariant = getStudentStatusVariant(s);
+
+                  return (
+                    <div key={s.id} className="mobile-record-card" data-testid={`mobile-card-student-${s.id}`}>
+                      <div className="mobile-record-title-row">
+                        <Checkbox
+                          checked={selectedStudentIds.includes(s.id)}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              setSelectedStudentIds([...selectedStudentIds, s.id]);
+                            } else {
+                              setSelectedStudentIds(selectedStudentIds.filter(id => id !== s.id));
+                            }
+                          }}
+                          className="mt-0.5 shrink-0"
+                          data-testid={`mobile-checkbox-student-${s.id}`}
+                        />
+
+                        <p className="mobile-record-title">
+                          <span className="break-words">{s.firstName || "___"} {s.lastName || "___"} ({s.admissionNo || "___"}): </span>
+                          <span>{classLabel}</span>
+                        </p>
+                      </div>
+
+                      <div className="mobile-record-media-row">
+                        <div className="mobile-record-status-vertical-wrap">
+                          <Badge
+                            variant={statusVariant}
+                            className={`mobile-record-status-vertical ${!s.archivedAt && s.status === "active" ? "bg-green-500 hover:bg-green-600" : ""}`}
+                          >
+                            {statusLabel}
+                          </Badge>
+                        </div>
+
+                        <div className="mobile-record-avatar h-[70px] w-[70px]">
+                          {s.photo ? (
+                            <img src={s.photo} alt={`${s.firstName} ${s.lastName}`} className="h-full w-full object-cover" />
+                          ) : (
+                            <span>{getStudentInitials(s)}</span>
+                          )}
+                        </div>
+
+                        <div className="mobile-record-details">
+                          <div className="mobile-record-details-grid mobile-record-two-col">
+                            <div className="mobile-record-field">
+                              <Phone className="h-3 w-3 shrink-0" />
+                              <span className="shrink-0">:</span>
+                              <span className="mobile-record-truncate">{s.phone || "___"}</span>
+                            </div>
+                            <div className="mobile-record-field">
+                              <Mail className="h-3 w-3 shrink-0" />
+                              <span className="shrink-0">:</span>
+                              <span className="mobile-record-truncate">{s.email || "___"}</span>
+                            </div>
+                          </div>
+
+                          <div className="mobile-record-details-grid mobile-record-two-col mt-1">
+                            <span className="mobile-record-truncate"><span className="mobile-record-label">Gender:</span> {getGenderLabel(s.gender)}</span>
+                            <span className="mobile-record-truncate"><span className="mobile-record-label">Type:</span> {learnerType}</span>
+                          </div>
+
+                          <div className="mt-1 min-w-0">
+                            <span className="block truncate"><span className="mobile-record-label">Parent:</span> {parentName} ({parentPhone})</span>
+                          </div>
+
+                          {isBoardingSchool && (
+                            <div className="mt-1 min-w-0">
+                              <span className="block truncate"><span className="mobile-record-label">Hostel:</span> {displayValue(hostelLabel)}</span>
+                            </div>
+                          )}
+
+                          <div className="mt-1 min-w-0">
+                            <span className="block truncate"><span className="mobile-record-label">Address:</span> {getStudentAddressLine(s)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mobile-record-actions-wrap">
+                        <div className="mobile-record-actions">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mobile-record-action-button"
+                            onClick={() => setAccountDialogStudent(s)}
+                            data-testid={`mobile-button-account-student-${s.id}`}
+                            title="Manage User Account"
+                            aria-label="Manage User Account"
+                          >
+                            <UserCog className="mobile-record-action-icon" />
+                            <span className="mobile-record-action-text">Manage</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mobile-record-action-button"
+                            onClick={() => setViewingStudent(s)}
+                            data-testid={`mobile-button-view-student-${s.id}`}
+                            title="View"
+                            aria-label="View"
+                          >
+                            <Eye className="mobile-record-action-icon" />
+                            <span className="mobile-record-action-text">View</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mobile-record-action-button"
+                            onClick={() => setSubjectsDialogStudent(s)}
+                            data-testid={`mobile-button-subjects-student-${s.id}`}
+                            title="Subjects"
+                            aria-label="Subjects"
+                          >
+                            <BookOpen className="mobile-record-action-icon" />
+                            <span className="mobile-record-action-text">Subjects</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mobile-record-action-button"
+                            onClick={() => setTransferDialogStudent(s)}
+                            data-testid={`mobile-button-transfer-student-${s.id}`}
+                            title="Transfer"
+                            aria-label="Transfer"
+                          >
+                            <ArrowRightLeft className="mobile-record-action-icon" />
+                            <span className="mobile-record-action-text">Transfer</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="mobile-record-delete-button text-destructive hover:text-destructive"
+                            onClick={() => {
+                              if (confirm("Are you sure you want to delete this student?")) {
+                                deleteMutation.mutate(s.id);
+                              }
+                            }}
+                            data-testid={`mobile-button-delete-student-${s.id}`}
+                            title="Delete"
+                            aria-label="Delete"
+                          >
+                            <Trash2 className="mobile-record-action-icon" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {filteredStudents?.length === 0 && (
+                  <div className="py-8 text-center text-sm text-muted-foreground">
+                    No students found
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -840,6 +1025,7 @@ function StudentView({
   streamName,
   hostelName,
   isBoardingSchool,
+  onEdit,
 }: {
   student: Student;
   className: string;
@@ -848,6 +1034,7 @@ function StudentView({
   streamName: string;
   hostelName: string;
   isBoardingSchool: boolean;
+  onEdit: () => void;
 }) {
   const studentType = student.isDayScholar ? "Day Scholar" : "Boarder";
 
@@ -931,6 +1118,12 @@ function StudentView({
           <Label>Email</Label>
           <div className="rounded-md border px-3 py-2 text-sm break-all">{student.email || "-"}</div>
         </div>
+      </div>
+
+      <div className="flex justify-end">
+        <Button type="button" onClick={onEdit} data-testid={`button-edit-student-from-view-${student.id}`}>
+          Edit
+        </Button>
       </div>
     </div>
   );

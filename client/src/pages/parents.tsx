@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Pencil, Trash2, Download, Bell, Users, UserCog, Send, Upload, UserCheck, Eye } from "lucide-react";
+import { Plus, Search, Trash2, Download, Bell, Users, UserCog, Send, Upload, UserCheck, Eye, Phone, Mail } from "lucide-react";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
 import * as XLSX from "xlsx";
@@ -137,6 +137,20 @@ export default function ParentsPage() {
   const getLinkedStudents = (parentId: number) => {
     return students?.filter(s => s.parentId === parentId) || [];
   };
+
+  const displayValue = (value: unknown) => {
+    const text = String(value ?? "").trim();
+    return text && text !== "-" && text !== "—" ? text : "___";
+  };
+
+  const getParentInitials = (parent: Parent) =>
+    `${parent.firstName?.[0] || ""}${parent.lastName?.[0] || ""}`.toUpperCase() || "P";
+
+  const getRelationshipLabel = (relationship: Parent["relationship"]) =>
+    relationship ? String(relationship).replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Parent";
+
+  const getParentAddressLine = (parent: Parent) =>
+    `${parent.streetAddress || "___"}, ${parent.residentialArea || "___"}, ${parent.address || "___"}`;
 
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
@@ -350,8 +364,9 @@ export default function ParentsPage() {
               ))}
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
+            <>
+              <div className="hidden overflow-x-auto md:block">
+                <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-10">
@@ -410,78 +425,68 @@ export default function ParentsPage() {
                         </Button>
                       </TableCell>
                       <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <Dialog
-                            open={viewingParent?.id === p.id}
-                            onOpenChange={(open) => !open && setViewingParent(null)}
-                          >
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => setViewingParent(p)}
-                                data-testid={`button-view-parent-${p.id}`}
-                                title="View"
-                                aria-label="View"
-                              >
-                                <Eye className="w-4 h-4" />
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-                              <DialogHeader>
-                                <DialogTitle>View Parent</DialogTitle>
-                              </DialogHeader>
-                              <ParentView
-                                parent={p}
-                                linkedStudents={getLinkedStudents(p.id)}
-                              />
-                            </DialogContent>
-                          </Dialog>
+                      <div className="flex flex-nowrap items-center justify-end gap-1">
+                        <Dialog open={viewingParent?.id === p.id} onOpenChange={(open) => !open && setViewingParent(null)}>
+                          <DialogTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => setViewingParent(p)}
+                              data-testid={`button-view-parent-${p.id}`}
+                              title="View"
+                              aria-label="View"
+                            >
+                              <Eye className="w-4 h-4" />
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                            <DialogHeader>
+                              <DialogTitle>View Parent</DialogTitle>
+                            </DialogHeader>
+                            <ParentView
+                              parent={p}
+                              linkedStudents={getLinkedStudents(p.id)}
+                              onEdit={() => {
+                                setViewingParent(null);
+                                setEditingParent(p);
+                                setLinkedStudentIds((students || []).filter(s => s.parentId === p.id).map(s => s.id));
+                              }}
+                            />
+                          </DialogContent>
+                        </Dialog>
 
-                          <Dialog
-                            open={editingParent?.id === p.id}
-                            onOpenChange={(open) => !open && setEditingParent(null)}
-                          >
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => {
-                                  setEditingParent(p);
-                                  setLinkedStudentIds((students || []).filter(s => s.parentId === p.id).map(s => s.id));
-                                }}
-                                data-testid={`button-edit-parent-${p.id}`}
-                              >
-                                <Pencil className="w-4 h-4" />
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
-                              <DialogHeader>
-                                <DialogTitle>Edit Parent</DialogTitle>
-                              </DialogHeader>
-                              <ParentForm
-                                onSubmit={handleSubmit}
-                                defaultValues={p}
-                                isLoading={updateMutation.isPending}
-                                students={students}
-                                linkedStudentIds={linkedStudentIds}
-                              />
-                            </DialogContent>
-                          </Dialog>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => {
-                              if (confirm("Are you sure you want to delete this parent?")) {
-                                deleteMutation.mutate(p.id);
-                              }
-                            }}
-                            data-testid={`button-delete-parent-${p.id}`}
-                          >
-                            <Trash2 className="w-4 h-4 text-destructive" />
-                          </Button>
-                        </div>
-                      </TableCell>
+                        <Dialog open={editingParent?.id === p.id} onOpenChange={(open) => !open && setEditingParent(null)}>
+                          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                            <DialogHeader>
+                              <DialogTitle>Edit Parent</DialogTitle>
+                            </DialogHeader>
+                            <ParentForm
+                              onSubmit={handleSubmit}
+                              defaultValues={p}
+                              isLoading={updateMutation.isPending}
+                              students={students || []}
+                              linkedStudentIds={linkedStudentIds}
+                            />
+                          </DialogContent>
+                        </Dialog>
+
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive"
+                          onClick={() => {
+                            if (confirm("Are you sure you want to delete this parent?")) {
+                              deleteMutation.mutate(p.id);
+                            }
+                          }}
+                          data-testid={`button-delete-parent-${p.id}`}
+                          title="Delete"
+                          aria-label="Delete"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </TableCell>
                     </TableRow>
                   ))}
                   {filteredParents?.length === 0 && (
@@ -492,8 +497,129 @@ export default function ParentsPage() {
                     </TableRow>
                   )}
                 </TableBody>
-              </Table>
-            </div>
+                </Table>
+              </div>
+
+              <div className="mobile-record-list">
+                {(sortedParents ?? []).map((p) => {
+                  const childrenCount = getChildrenCount(p.id);
+                  const relationshipLabel = getRelationshipLabel(p.relationship);
+                  const addressLine = getParentAddressLine(p);
+
+                  return (
+                    <div key={p.id} className="mobile-record-card" data-testid={`mobile-card-parent-${p.id}`}>
+                      <div className="mobile-record-title-row">
+                        <Checkbox
+                          checked={selectedIds.includes(p.id)}
+                          onCheckedChange={(checked) => handleSelectOne(p.id, !!checked)}
+                          className="mt-0.5 shrink-0"
+                          data-testid={`mobile-checkbox-parent-${p.id}`}
+                        />
+
+                        <p className="mobile-record-title">
+                          <span className="break-words">{p.firstName || "___"} {p.lastName || "___"}: </span>
+                          <span>{relationshipLabel}</span>
+                        </p>
+                      </div>
+
+                      <div className="mobile-record-media-row pl-6">
+                        <div className="flex shrink-0 flex-col items-stretch gap-1">
+                          <div className="mobile-record-avatar">
+                            <span>{getParentInitials(p)}</span>
+                          </div>
+                        </div>
+
+                        <div className="mobile-record-details">
+                          <div className="mobile-record-details-grid mobile-record-two-col">
+                            <div className="mobile-record-field">
+                              <Phone className="h-3 w-3 shrink-0" />
+                              <span className="shrink-0">:</span>
+                              <span className="mobile-record-truncate">{p.phone || "___"}</span>
+                            </div>
+                            <div className="mobile-record-field">
+                              <Mail className="h-3 w-3 shrink-0" />
+                              <span className="shrink-0">:</span>
+                              <span className="mobile-record-truncate">{p.email || "___"}</span>
+                            </div>
+                          </div>
+
+                          <div className="mobile-record-details-grid mobile-record-two-col mt-1">
+                            <span className="mobile-record-truncate"><span className="mobile-record-label">Occupation:</span> {displayValue(p.occupation)}</span>
+                            <span className="mobile-record-truncate"><span className="mobile-record-label">Children:</span> {childrenCount} Student{childrenCount !== 1 ? "s" : ""}</span>
+                          </div>
+
+                          <div className="mt-1 min-w-0">
+                            <span className="block truncate"><span className="mobile-record-label">Address:</span> {addressLine}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mobile-record-actions-wrap">
+                        <div className="mobile-record-actions">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mobile-record-action-button"
+                            onClick={() => setUserAccountParent(p)}
+                            data-testid={`mobile-button-account-${p.id}`}
+                            title="Manage User Account"
+                            aria-label="Manage User Account"
+                          >
+                            <UserCog className="mobile-record-action-icon" />
+                            <span className="mobile-record-action-text">Manage</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mobile-record-action-button"
+                            onClick={() => setViewingParent(p)}
+                            data-testid={`mobile-button-view-parent-${p.id}`}
+                            title="View"
+                            aria-label="View"
+                          >
+                            <Eye className="mobile-record-action-icon" />
+                            <span className="mobile-record-action-text">View</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mobile-record-action-button"
+                            onClick={() => setStudentsDialogParent(p)}
+                            data-testid={`mobile-button-children-${p.id}`}
+                            title="Linked Students"
+                            aria-label="Linked Students"
+                          >
+                            <Users className="mobile-record-action-icon" />
+                            <span className="mobile-record-action-text">Students</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="mobile-record-delete-button text-destructive hover:text-destructive"
+                            onClick={() => {
+                              if (confirm("Are you sure you want to delete this parent?")) {
+                                deleteMutation.mutate(p.id);
+                              }
+                            }}
+                            data-testid={`mobile-button-delete-parent-${p.id}`}
+                            title="Delete"
+                            aria-label="Delete"
+                          >
+                            <Trash2 className="mobile-record-action-icon" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {filteredParents?.length === 0 && (
+                  <div className="py-8 text-center text-sm text-muted-foreground">
+                    No parents found
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -569,7 +695,15 @@ export default function ParentsPage() {
 }
 
 
-function ParentView({ parent, linkedStudents }: { parent: Parent; linkedStudents: Student[] }) {
+function ParentView({
+  parent,
+  linkedStudents,
+  onEdit,
+}: {
+  parent: Parent;
+  linkedStudents: Student[];
+  onEdit: () => void;
+}) {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -619,6 +753,12 @@ function ParentView({ parent, linkedStudents }: { parent: Parent; linkedStudents
             ))}
           </div>
         )}
+      </div>
+
+      <div className="flex justify-end">
+        <Button type="button" onClick={onEdit} data-testid={`button-edit-parent-from-view-${parent.id}`}>
+          Edit
+        </Button>
       </div>
     </div>
   );

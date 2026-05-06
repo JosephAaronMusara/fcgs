@@ -251,81 +251,91 @@ export default function HostelPage() {
         </div>
       </div>
       <Card>
-        <CardContent className="p-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex min-w-0 items-center gap-2">
-              {selectedHostel && gridData && !drawerOpen && (
-                <span className="text-sm text-muted-foreground ml-2" data-testid="text-summary">
-                  Present: <span className="font-bold text-green-600">{gridData.present}</span>
-                  {" | "}Absent: <span className="font-bold text-red-600">{gridData.absent}</span>
-                  {" | "}Total: <span className="font-bold">{gridData.total}</span>
-                </span>
-              )}
-            </div>
+        <CardContent className="space-y-3 p-4">
+          <div className="flex min-w-0 items-center gap-2">
+            {selectedHostel && gridData && !drawerOpen && (
+              <span className="text-sm text-muted-foreground" data-testid="text-summary">
+                Present: <span className="font-bold text-green-600">{gridData.present}</span>
+                {" | "}Absent: <span className="font-bold text-red-600">{gridData.absent}</span>
+                {" | "}Total: <span className="font-bold">{gridData.total}</span>
+              </span>
+            )}
+          </div>
 
-            <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:flex xl:w-auto xl:flex-wrap xl:items-end">
-              <Select value={selectedHostel} onValueChange={(v) => { setSelectedHostel(v); setDrawerOpen(false); setAttendanceState({}); }}>
-                <SelectTrigger className="w-full sm:w-[200px]" data-testid="select-hostel">
-                  <SelectValue placeholder="Select Hostel" />
-                </SelectTrigger>
-                <SelectContent>
-                  {hostels.map((h) => (
-                    <SelectItem key={h.id} value={h.id.toString()}>
-                      {h.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select value={selectedTimeSlot} onValueChange={setSelectedTimeSlot}>
-                <SelectTrigger className="w-full sm:w-[140px]" data-testid="select-timeslot">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="morning">Morning</SelectItem>
-                  <SelectItem value="evening">Evening</SelectItem>
-                  <SelectItem value="night">Night</SelectItem>
-                </SelectContent>
-              </Select>
-              <div className="flex flex-col gap-1">
-                <span className="text-xs font-semibold text-muted-foreground">From</span>
-                <Input
-                  type="date"
-                  value={dateFrom}
-                  onChange={(e) => setDateFrom(e.target.value)}
-                  className="w-full sm:w-[150px]"
-                  data-testid="input-date-from"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <span className="text-xs font-semibold text-muted-foreground">To</span>
-                <Input
-                  type="date"
-                  value={dateTo}
-                  onChange={(e) => setDateTo(e.target.value)}
-                  className="w-full sm:w-[150px]"
-                  data-testid="input-date-to"
-                />
-              </div>
-              <Button
-                className="w-full sm:w-auto"
-                onClick={handleOpenDrawer}
-                disabled={!selectedHostel}
-                data-testid="button-mark"
-              >
-                <ClipboardList className="w-4 h-4 mr-1" />
-                MARK
-              </Button>
-              <Button
-                className="w-full sm:w-auto"
-                variant="outline"
-                onClick={handleExport}
-                disabled={!selectedHostel}
-                data-testid="button-export"
-              >
-                <Download className="w-4 h-4 mr-1" />
-                DOWNLOAD
-              </Button>
+          <div className="grid w-full grid-cols-2 gap-2 sm:grid-cols-4 xl:flex xl:flex-wrap xl:items-end">
+            <Select value={selectedHostel} onValueChange={(v) => { setSelectedHostel(v); setDrawerOpen(false); setAttendanceState({}); }}>
+              <SelectTrigger className="w-full xl:w-[200px]" data-testid="select-hostel">
+                <SelectValue placeholder="Select Hostel" />
+              </SelectTrigger>
+              <SelectContent>
+                {hostels.map((h) => (
+                  <SelectItem key={h.id} value={h.id.toString()}>
+                    {h.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={selectedTimeSlot} onValueChange={setSelectedTimeSlot}>
+              <SelectTrigger className="w-full xl:w-[140px]" data-testid="select-timeslot">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="morning">Morning</SelectItem>
+                <SelectItem value="evening">Evening</SelectItem>
+                <SelectItem value="night">Night</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="flex min-w-0 flex-col gap-1">
+              <span className="text-xs font-semibold text-muted-foreground">From</span>
+              <Input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="w-full xl:w-[150px]"
+                data-testid="input-date-from"
+              />
             </div>
+            <div className="flex min-w-0 flex-col gap-1">
+              <span className="text-xs font-semibold text-muted-foreground">To</span>
+              <Input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="w-full xl:w-[150px]"
+                data-testid="input-date-to"
+              />
+            </div>
+            <Button
+              className="w-full xl:w-auto"
+              onClick={handleOpenDrawer}
+              disabled={!selectedHostel}
+              data-testid="button-mark"
+            >
+              <ClipboardList className="w-4 h-4 mr-1" />
+              MARK
+            </Button>
+            <Button
+              className="w-full xl:w-auto"
+              variant="outline"
+              onClick={handleExport}
+              disabled={!selectedHostel}
+              data-testid="button-export"
+            >
+              <Download className="w-4 h-4 mr-1" />
+              DOWNLOAD
+            </Button>
+          </div>
+
+          <div className="flex w-full flex-wrap items-center justify-start gap-1.5 rounded-md border bg-muted/20 px-2 py-2 sm:justify-between sm:gap-2 sm:px-4 lg:px-6" data-testid="hostel-status-legend">
+            {Object.entries(STATUS_PALETTE).map(([slug, color]) => (
+              <span
+                key={slug}
+                className="inline-flex items-center justify-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-white sm:flex-1"
+                style={{ backgroundColor: color }}
+              >
+                {STATUS_LABELS[slug]}
+              </span>
+            ))}
           </div>
         </CardContent>
       </Card>
@@ -382,7 +392,7 @@ export default function HostelPage() {
                 Do not Notify School Admin
               </label>
             </div>
-            <div className="grid w-full grid-cols-1 gap-2 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap">
+            <div className="grid w-full grid-cols-3 gap-2 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap">
               <Button variant="outline" size="sm" onClick={handleMarkAllPresent} data-testid="button-mark-all-present">
                 <Check className="w-4 h-4 mr-1" />
                 All Present
@@ -598,18 +608,6 @@ export default function HostelPage() {
         </Card>
       )}
 
-      <div className="flex flex-wrap gap-2 items-center">
-        <span className="text-xs text-muted-foreground mr-1">Legend:</span>
-        {Object.entries(STATUS_PALETTE).map(([slug, color]) => (
-          <span
-            key={slug}
-            className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full text-white font-medium"
-            style={{ backgroundColor: color }}
-          >
-            {STATUS_LABELS[slug]}
-          </span>
-        ))}
-      </div>
     </div>
   );
 }
