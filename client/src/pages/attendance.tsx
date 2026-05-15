@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -168,6 +168,8 @@ export default function AttendancePage() {
   const [singleEditTarget, setSingleEditTarget] = useState<{ student: AttendanceGridStudent; date: string } | null>(null);
   const [notifyParent, setNotifyParent] = useState(true);
   const [attendanceState, setAttendanceState] = useState<Record<number, AttendanceState>>({});
+  const attendanceStateTouchedRef = useRef(false);
+  const markDialogStateKeyRef = useRef<string | null>(null);
   const [arrearsModalOpen, setArrearsModalOpen] = useState(false);
   const [arrearsData, setArrearsData] = useState<ArrearsData | null>(null);
 
@@ -201,6 +203,8 @@ export default function AttendancePage() {
 
   useEffect(() => {
     if (!markDialogOpen) return;
+
+    const stateKey = `${selectedClass}-${selectedDate}-${studentsForMarking.map((student) => student.id).join(",")}`;
     const newState: Record<number, AttendanceState> = {};
     studentsForMarking.forEach((student) => {
       const existing = existingRecords?.find((r) => r.studentId === student.id) || student.records?.[selectedDate];
@@ -209,11 +213,29 @@ export default function AttendancePage() {
         reason: existing?.reason || "",
       };
     });
-    setAttendanceState(newState);
-  }, [markDialogOpen, selectedDate, studentsForMarking, existingRecords]);
+
+    const isSameMarkingSession = markDialogStateKeyRef.current === stateKey;
+    setAttendanceState((currentState) => {
+      if (!isSameMarkingSession || !attendanceStateTouchedRef.current) {
+        return newState;
+      }
+
+      const preservedState: Record<number, AttendanceState> = { ...newState };
+      Object.keys(currentState).forEach((studentIdKey) => {
+        const studentId = Number(studentIdKey);
+        if (preservedState[studentId]) {
+          preservedState[studentId] = currentState[studentId];
+        }
+      });
+      return preservedState;
+    });
+    markDialogStateKeyRef.current = stateKey;
+  }, [markDialogOpen, selectedClass, selectedDate, studentsForMarking, existingRecords]);
 
   useEffect(() => {
     if (!singleEditTarget) return;
+    attendanceStateTouchedRef.current = false;
+    markDialogStateKeyRef.current = null;
     const existing = singleEditTarget.student.records?.[singleEditTarget.date];
     setSelectedDate(singleEditTarget.date);
     setAttendanceState({
@@ -249,6 +271,8 @@ export default function AttendancePage() {
       });
       return;
     }
+    attendanceStateTouchedRef.current = false;
+    markDialogStateKeyRef.current = null;
     setAttendanceState({});
     queryClient.removeQueries({ queryKey: ["/api/attendance/by-class", selectedClass, selectedDate] });
     setMarkDialogOpen(true);
@@ -257,16 +281,21 @@ export default function AttendancePage() {
   const handleCloseMarkDialog = () => {
     setMarkDialogOpen(false);
     setAttendanceState({});
+    attendanceStateTouchedRef.current = false;
+    markDialogStateKeyRef.current = null;
     invalidateAttendanceQueries();
   };
 
   const handleCloseSingleEdit = () => {
     setSingleEditTarget(null);
     setAttendanceState({});
+    attendanceStateTouchedRef.current = false;
+    markDialogStateKeyRef.current = null;
     invalidateAttendanceQueries();
   };
 
   const handleStatusToggle = (studentId: number, status: "present" | "absent") => {
+    attendanceStateTouchedRef.current = true;
     setAttendanceState(prev => ({
       ...prev,
       [studentId]: {
@@ -277,6 +306,7 @@ export default function AttendancePage() {
   };
 
   const handleReasonSelect = (studentId: number, reason: string) => {
+    attendanceStateTouchedRef.current = true;
     const slug = reasonToSlug(reason);
     setAttendanceState(prev => ({
       ...prev,
@@ -285,6 +315,7 @@ export default function AttendancePage() {
   };
 
   const handleMarkAllPresent = () => {
+    attendanceStateTouchedRef.current = true;
     const targetStudents = singleEditTarget ? [singleEditTarget.student] : studentsForMarking;
     const newState: Record<number, AttendanceState> = {};
     targetStudents.forEach((student) => {

@@ -97,6 +97,7 @@ interface StreamStat {
 interface SubjectProgress {
   subjectId: number;
   subjectName: string;
+  teacherName?: string | null;
   totalStudents: number;
   markedCount: number;
   progressPct: number;
@@ -3115,6 +3116,7 @@ function ClassLevelBlock({
               <thead>
                 <tr className="border-b bg-muted/30">
                   <th className="text-left p-2 font-semibold">Subject</th>
+                  <th className="text-left p-2 font-semibold">Teacher</th>
                   <th className="text-center p-2 font-semibold">Progress</th>
                   <th className="text-center p-2 font-semibold">Avg Mark</th>
                 </tr>
@@ -3127,6 +3129,13 @@ function ClassLevelBlock({
                       <div className="text-xs text-muted-foreground">
                         Students: {sub.totalStudents}
                       </div>
+                    </td>
+                    <td className="p-2">
+                      {sub.teacherName ? (
+                        <span className="text-sm">{sub.teacherName}</span>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">—</span>
+                      )}
                     </td>
                     <td className="text-center p-2">
                       <ProgressBadge pct={sub.progressPct} />

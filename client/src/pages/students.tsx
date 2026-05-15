@@ -40,12 +40,51 @@ export default function StudentsPage() {
   const [transferDialogStudent, setTransferDialogStudent] = useState<Student | null>(null);
   const [quickAddParentOpen, setQuickAddParentOpen] = useState(false);
   const [recentQuickAddedParent, setRecentQuickAddedParent] = useState<Parent | null>(null);
+  const quickAddParentFlowRef = useRef(false);
 
-  useEffect(() => {
-    if (!isAddOpen) {
+  const clearQuickAddParentFlowAfterClose = () => {
+    setTimeout(() => {
+      quickAddParentFlowRef.current = false;
+    }, 150);
+  };
+
+  const openQuickAddParentDialog = () => {
+    quickAddParentFlowRef.current = true;
+    setRecentQuickAddedParent(null);
+    setQuickAddParentOpen(true);
+  };
+
+  const closeQuickAddParentDialog = () => {
+    setQuickAddParentOpen(false);
+    clearQuickAddParentFlowAfterClose();
+  };
+
+  const handleAddStudentOpenChange = (open: boolean) => {
+    if (!open && quickAddParentFlowRef.current) return;
+    setIsAddOpen(open);
+    if (!open) {
       setRecentQuickAddedParent(null);
     }
-  }, [isAddOpen]);
+  };
+
+  const handleEditStudentOpenChange = (open: boolean) => {
+    if (!open && quickAddParentFlowRef.current) return;
+    if (!open) {
+      setEditingStudent(null);
+      setRecentQuickAddedParent(null);
+    }
+  };
+
+  const handleQuickAddParentOpenChange = (open: boolean) => {
+    if (open) {
+      quickAddParentFlowRef.current = true;
+      setQuickAddParentOpen(true);
+      return;
+    }
+
+    closeQuickAddParentDialog();
+  };
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const studentListMode = statusFilter === "archived" ? "archived" : "records";
@@ -206,9 +245,17 @@ export default function StudentsPage() {
       const res = await apiRequest("POST", "/api/parents", data);
       return res.json();
     },
-    onSuccess: () => {
-      refetchParents();
-      setQuickAddParentOpen(false);
+    onSuccess: async (newParent: Parent) => {
+      queryClient.setQueryData<Parent[]>(["/api/parents"], (existingParents = []) => {
+        if (existingParents.some((parent) => parent.id === newParent.id)) {
+          return existingParents;
+        }
+
+        return [...existingParents, newParent];
+      });
+      setRecentQuickAddedParent(newParent);
+      closeQuickAddParentDialog();
+      await refetchParents();
       toast({ title: "Success", description: "Parent added successfully" });
     },
     onError: (error: Error) => {
@@ -477,7 +524,7 @@ export default function StudentsPage() {
             Upload
           </Button>
 
-          <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+          <Dialog open={isAddOpen} onOpenChange={handleAddStudentOpenChange}>
             <DialogTrigger asChild>
               <Button data-testid="button-add-student">
                 <Plus className="w-4 h-4 mr-2" />
@@ -496,7 +543,7 @@ export default function StudentsPage() {
                 streams={streams || []}
                 defaultAdmissionNo={nextAdmissionNo?.admissionNo}
                 isLoading={createMutation.isPending}
-                onQuickAddParent={() => setQuickAddParentOpen(true)}
+                onQuickAddParent={openQuickAddParentDialog}
                 isBoardingSchool={isBoardingSchool}
                 hostels={hostels || []}
                 quickAddedParent={recentQuickAddedParent}
@@ -688,7 +735,7 @@ export default function StudentsPage() {
 
                           <Dialog
                             open={editingStudent?.id === s.id}
-                            onOpenChange={(open) => !open && setEditingStudent(null)}
+                            onOpenChange={handleEditStudentOpenChange}
                           >
                             <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
                               <DialogHeader>
@@ -702,7 +749,7 @@ export default function StudentsPage() {
                                 streams={streams || []}
                                 defaultValues={s}
                                 isLoading={updateMutation.isPending}
-                                onQuickAddParent={() => setQuickAddParentOpen(true)}
+                                onQuickAddParent={openQuickAddParentDialog}
                                 isBoardingSchool={isBoardingSchool}
                                 hostels={hostels || []}
                                 quickAddedParent={recentQuickAddedParent}
@@ -980,7 +1027,7 @@ export default function StudentsPage() {
         />
       )}
 
-      <Dialog open={quickAddParentOpen} onOpenChange={setQuickAddParentOpen}>
+      <Dialog open={quickAddParentOpen} onOpenChange={handleQuickAddParentOpenChange}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Quick Add Parent</DialogTitle>
