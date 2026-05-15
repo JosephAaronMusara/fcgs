@@ -302,40 +302,75 @@ export default function MarksEntryPage() {
     return Object.values(paperMarks).some(v => v !== "" && v !== undefined);
   }, []);
 
+  const initializedMarksAssessmentRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (marksData) {
-      const initialMarks: Record<number, StudentMarkState> = {};
-      for (const student of marksData.students) {
-        const existingMark = marksData.marksByStudent[student.id];
-        const paperMarks: Record<number, string> = {};
-        
-        for (const paper of marksData.papers) {
-          const existingPaperMark = existingMark?.paperMarks?.find(
-            (pm) => pm.assessmentPaperId === paper.id
-          );
-          if (existingPaperMark?.markObtained !== undefined && existingPaperMark?.markObtained !== null && existingPaperMark.markObtained !== "") {
-            const numericMark = Number(existingPaperMark.markObtained);
-            paperMarks[paper.id] = Number.isFinite(numericMark) ? String(Math.round(numericMark)) : String(existingPaperMark.markObtained);
-          } else {
-            paperMarks[paper.id] = "";
-          }
+    if (!marksData || !selectedAssessmentId) return;
+
+    const initialMarks: Record<number, StudentMarkState> = {};
+    for (const student of marksData.students) {
+      const existingMark = marksData.marksByStudent[student.id];
+      const paperMarks: Record<number, string> = {};
+      
+      for (const paper of marksData.papers) {
+        const existingPaperMark = existingMark?.paperMarks?.find(
+          (pm) => pm.assessmentPaperId === paper.id
+        );
+        if (existingPaperMark?.markObtained !== undefined && existingPaperMark?.markObtained !== null && existingPaperMark.markObtained !== "") {
+          const numericMark = Number(existingPaperMark.markObtained);
+          paperMarks[paper.id] = Number.isFinite(numericMark) ? String(Math.round(numericMark)) : String(existingPaperMark.markObtained);
+        } else {
+          paperMarks[paper.id] = "";
         }
-        
-        initialMarks[student.id] = {
-          paperMarks,
-          attStatus: existingMark?.attStatus || "none",
-          commentSource: existingMark?.commentSource || "pool",
-          customCommentText: existingMark?.customCommentText || "",
-          autoCommentSnapshot: existingMark?.autoCommentSnapshot || "",
-          isDirty: false,
-          isSaving: false,
-          validationError: null,
-        };
       }
-      setStudentMarks(initialMarks);
+      
+      initialMarks[student.id] = {
+        paperMarks,
+        attStatus: existingMark?.attStatus || "none",
+        commentSource: existingMark?.commentSource || "pool",
+        customCommentText: existingMark?.customCommentText || "",
+        autoCommentSnapshot: existingMark?.autoCommentSnapshot || "",
+        isDirty: false,
+        isSaving: false,
+        validationError: null,
+      };
+    }
+
+    const isSameAssessment = initializedMarksAssessmentRef.current === selectedAssessmentId;
+
+    setStudentMarks((currentMarks) => {
+      if (!isSameAssessment) {
+        return initialMarks;
+      }
+
+      const mergedMarks: Record<number, StudentMarkState> = { ...initialMarks };
+
+      Object.entries(currentMarks).forEach(([studentIdKey, localMark]) => {
+        const studentId = Number(studentIdKey);
+        if (!mergedMarks[studentId]) return;
+
+        const shouldPreserveLocalState = localMark.isDirty || localMark.isSaving || Boolean(localMark.validationError);
+        if (!shouldPreserveLocalState) return;
+
+        mergedMarks[studentId] = {
+          ...mergedMarks[studentId],
+          ...localMark,
+          paperMarks: {
+            ...mergedMarks[studentId].paperMarks,
+            ...localMark.paperMarks,
+          },
+        };
+      });
+
+      return mergedMarks;
+    });
+
+    if (!isSameAssessment) {
       setValidationWarnings([]);
     }
-  }, [marksData]);
+
+    initializedMarksAssessmentRef.current = selectedAssessmentId;
+  }, [marksData, selectedAssessmentId]);
 
   useEffect(() => {
     setStudentSearch("");

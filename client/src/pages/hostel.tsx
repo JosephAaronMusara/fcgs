@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent } from "@/components/ui/card";
@@ -93,6 +93,8 @@ export default function HostelPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notifySchoolAdmin, setNotifySchoolAdmin] = useState(true);
   const [attendanceState, setAttendanceState] = useState<Record<number, AttendanceState>>({});
+  const attendanceStateTouchedRef = useRef(false);
+  const drawerStateKeyRef = useRef<string | null>(null);
 
   const { data: hostels = [], isLoading: hostelsLoading } = useQuery<Hostel[]>({
     queryKey: ["/api/hostels"],
@@ -124,6 +126,8 @@ export default function HostelPage() {
 
   useEffect(() => {
     if (!drawerOpen || hostelStudents.length === 0) return;
+
+    const stateKey = `${selectedHostel}-${selectedDate}-${selectedTimeSlot}-${hostelStudents.map((student) => student.id).join(",")}`;
     const newState: Record<number, AttendanceState> = {};
     hostelStudents.forEach(s => {
       const existing = existingRecords?.find((r: any) => r.studentId === s.id);
@@ -132,10 +136,28 @@ export default function HostelPage() {
         reason: existing?.notes || "",
       };
     });
-    setAttendanceState(newState);
-  }, [drawerOpen, hostelStudents, existingRecords]);
+
+    const isSameDrawerSession = drawerStateKeyRef.current === stateKey;
+    setAttendanceState((currentState) => {
+      if (!isSameDrawerSession || !attendanceStateTouchedRef.current) {
+        return newState;
+      }
+
+      const preservedState: Record<number, AttendanceState> = { ...newState };
+      Object.keys(currentState).forEach((studentIdKey) => {
+        const studentId = Number(studentIdKey);
+        if (preservedState[studentId]) {
+          preservedState[studentId] = currentState[studentId];
+        }
+      });
+      return preservedState;
+    });
+    drawerStateKeyRef.current = stateKey;
+  }, [drawerOpen, selectedHostel, selectedDate, selectedTimeSlot, hostelStudents, existingRecords]);
 
   const handleOpenDrawer = () => {
+    attendanceStateTouchedRef.current = false;
+    drawerStateKeyRef.current = null;
     setAttendanceState({});
     queryClient.removeQueries({ queryKey: ["/api/hostel/rollcall/by-hostel", selectedHostel, selectedDate, selectedTimeSlot] });
     setDrawerOpen(true);
@@ -144,10 +166,13 @@ export default function HostelPage() {
   const handleCloseDrawer = () => {
     setDrawerOpen(false);
     setAttendanceState({});
+    attendanceStateTouchedRef.current = false;
+    drawerStateKeyRef.current = null;
     queryClient.invalidateQueries({ queryKey: ["/api/hostel/rollcall/grid", selectedHostel] });
   };
 
   const handleStatusToggle = (studentId: number, status: "present" | "absent") => {
+    attendanceStateTouchedRef.current = true;
     setAttendanceState(prev => ({
       ...prev,
       [studentId]: {
@@ -158,6 +183,7 @@ export default function HostelPage() {
   };
 
   const handleReasonSelect = (studentId: number, reason: string) => {
+    attendanceStateTouchedRef.current = true;
     const slug = reasonToSlug(reason);
     setAttendanceState(prev => ({
       ...prev,
@@ -166,6 +192,7 @@ export default function HostelPage() {
   };
 
   const handleMarkAllPresent = () => {
+    attendanceStateTouchedRef.current = true;
     const newState: Record<number, AttendanceState> = {};
     hostelStudents.forEach(s => {
       newState[s.id] = { status: "present", reason: "" };

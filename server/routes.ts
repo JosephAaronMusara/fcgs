@@ -11158,12 +11158,119 @@ export async function registerRoutes(
       const students = await storage.getStudentsByClass(classId);
       const totalStudents = students.length;
 
+      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+      await Promise.all(students.map(async (student: any) => {
+        const rows = await storage.getStudentSubjects(student.id);
+        studentSubjectIdsByStudent.set(
+          student.id,
+          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
+        );
+      }));
+
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
       const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
 
       const subjectIds = [...new Set(classAssessments.map(a => a.subjectId))];
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const validSubjects = subjectsData.filter(Boolean);
+
+      const teacherMap = new Map<number, string>();
+      const subjectIdSet = new Set(validSubjects.map((subject: any) => Number(subject.id)));
+      const getTeacherDisplayName = async (staffId: number) => {
+        const staffMember = await storage.getStaff(staffId);
+        if (!staffMember) return `Staff #${staffId}`;
+
+        const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
+        const normalizedGender = (staffMember.gender || "").toString().toLowerCase();
+        const title = normalizedGender === "male" ? "Mr." : normalizedGender === "female" ? "Ms." : "";
+        const firstName = ((staffMember.firstName || user?.firstName || "") as string).trim();
+        const lastName = ((staffMember.lastName || user?.lastName || "") as string).trim();
+        const firstInitial = firstName ? `${firstName.charAt(0).toUpperCase()}.` : "";
+
+        if (lastName) {
+          return [title, firstInitial, lastName].filter(Boolean).join(" ").trim();
+        }
+
+        const fallbackName = user
+          ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
+          : `${staffMember.firstName || ""} ${staffMember.lastName || ""}`.trim();
+
+        return fallbackName || `Staff #${staffId}`;
+      };
+
+      const setTeacherIfNeeded = async (subjectId: number, staffId: number | null | undefined) => {
+        if (!subjectIdSet.has(Number(subjectId)) || !staffId || teacherMap.has(Number(subjectId))) return;
+        teacherMap.set(Number(subjectId), await getTeacherDisplayName(Number(staffId)));
+      };
+
+      // Primary source: Staff Management → subject assignments (exact Class + Subject).
+      try {
+        const subjectTeacherRows = await db.select({
+          staffId: staffSubjects.staffId,
+          subjectId: staffSubjects.subjectId,
+        }).from(staffSubjects).where(eq(staffSubjects.classId, classId));
+
+        for (const row of subjectTeacherRows) {
+          await setTeacherIfNeeded(Number(row.subjectId), row.staffId);
+        }
+      } catch (error) {
+        console.warn("[CLASS_PROGRESS_TEACHER_ASSIGNMENTS_ERROR]", error);
+      }
+
+      // Fallback source: Timetable slots for the same Class + Subject.
+      // This covers schools that assigned teachers through Timetable before the newer
+      // Staff Management class-subject assignment screen was used.
+      try {
+        const timetableTeacherRows = await db.select({
+          teacherId: timetableSlotsTable.teacherId,
+          subjectId: timetableSlotsTable.subjectId,
+        }).from(timetableSlotsTable).where(eq(timetableSlotsTable.classId, classId));
+
+        const countsBySubject = new Map<number, Map<number, number>>();
+        for (const row of timetableTeacherRows) {
+          if (!row.teacherId || !subjectIdSet.has(Number(row.subjectId)) || teacherMap.has(Number(row.subjectId))) continue;
+          const subjectCounts = countsBySubject.get(Number(row.subjectId)) || new Map<number, number>();
+          subjectCounts.set(Number(row.teacherId), (subjectCounts.get(Number(row.teacherId)) || 0) + 1);
+          countsBySubject.set(Number(row.subjectId), subjectCounts);
+        }
+
+        for (const [subjectId, teacherCounts] of countsBySubject.entries()) {
+          const [topTeacherId] = Array.from(teacherCounts.entries()).sort((a, b) => b[1] - a[1])[0] || [];
+          await setTeacherIfNeeded(subjectId, topTeacherId);
+        }
+      } catch (error) {
+        console.warn("[CLASS_PROGRESS_TIMETABLE_TEACHER_ERROR]", error);
+      }
+
+      // Last safe fallback: legacy staff_subjects rows where class_id is NULL.
+      // Only use this when exactly one staff member in this school is assigned to the subject;
+      // otherwise the class-specific teacher would be ambiguous.
+      try {
+        const legacyRows = await db.select({
+          staffId: staffSubjects.staffId,
+          subjectId: staffSubjects.subjectId,
+        }).from(staffSubjects).where(sql`${staffSubjects.classId} IS NULL`);
+
+        const legacyBySubject = new Map<number, number[]>();
+        for (const row of legacyRows) {
+          const subjectId = Number(row.subjectId);
+          if (!subjectIdSet.has(subjectId) || teacherMap.has(subjectId)) continue;
+          const staffMember = await storage.getStaff(Number(row.staffId));
+          if (!staffMember || staffMember.schoolId !== schoolId) continue;
+          const current = legacyBySubject.get(subjectId) || [];
+          current.push(Number(row.staffId));
+          legacyBySubject.set(subjectId, current);
+        }
+
+        for (const [subjectId, staffIds] of legacyBySubject.entries()) {
+          const uniqueStaffIds = Array.from(new Set(staffIds));
+          if (uniqueStaffIds.length === 1) {
+            await setTeacherIfNeeded(subjectId, uniqueStaffIds[0]);
+          }
+        }
+      } catch (error) {
+        console.warn("[CLASS_PROGRESS_LEGACY_TEACHER_ASSIGNMENTS_ERROR]", error);
+      }
 
       const assessmentIds = classAssessments.map(a => a.id);
       let classMarks: any[] = [];
@@ -11173,13 +11280,20 @@ export async function registerRoutes(
 
       const subjectProgress = validSubjects.map(subject => {
         if (!subject) return null;
-        const subjectMarks = classMarks.filter(m => m.subjectId === subject.id);
+        const eligibleStudents = students.filter((student: any) =>
+          studentSubjectIdsByStudent.get(student.id)?.has(subject.id)
+        );
+        const eligibleStudentIds = new Set(eligibleStudents.map((student: any) => student.id));
+        const subjectTotalStudents = eligibleStudents.length;
+        const subjectMarks = classMarks.filter(m =>
+          m.subjectId === subject.id && eligibleStudentIds.has(m.studentId)
+        );
         const studentsWithMarks = new Set(
           subjectMarks
             .filter(m => m.percentage !== null && m.percentage !== undefined)
             .map(m => m.studentId)
         );
-        const progressPct = totalStudents > 0 ? Math.round((studentsWithMarks.size / totalStudents) * 100) : 0;
+        const progressPct = subjectTotalStudents > 0 ? Math.round((studentsWithMarks.size / subjectTotalStudents) * 100) : 0;
 
         const marksWithPct = subjectMarks.filter(m => m.percentage !== null && m.percentage !== undefined);
         const avgPct = marksWithPct.length > 0
@@ -11189,7 +11303,8 @@ export async function registerRoutes(
         return {
           subjectId: subject.id,
           subjectName: subject.name,
-          totalStudents,
+          teacherName: teacherMap.get(subject.id) || null,
+          totalStudents: subjectTotalStudents,
           markedCount: studentsWithMarks.size,
           progressPct,
           avgPct,
@@ -11220,7 +11335,15 @@ export async function registerRoutes(
       if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
       const students = await storage.getStudentsByClass(classId);
-      const totalStudents = students.length;
+
+      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+      await Promise.all(students.map(async (student: any) => {
+        const rows = await storage.getStudentSubjects(student.id);
+        studentSubjectIdsByStudent.set(
+          student.id,
+          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
+        );
+      }));
 
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
       const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
@@ -11237,21 +11360,27 @@ export async function registerRoutes(
 
       const missingBySubject = validSubjects.map(subject => {
         if (!subject) return null;
-        const subjectMarks = classMarks.filter(m => m.subjectId === subject.id);
+        const eligibleStudents = students.filter((student: any) =>
+          studentSubjectIdsByStudent.get(student.id)?.has(subject.id)
+        );
+        const eligibleStudentIds = new Set(eligibleStudents.map((student: any) => student.id));
+        const subjectMarks = classMarks.filter(m =>
+          m.subjectId === subject.id && eligibleStudentIds.has(m.studentId)
+        );
         const markedStudentIds = new Set(
           subjectMarks
             .filter(m => m.percentage !== null && m.percentage !== undefined)
             .map(m => m.studentId)
         );
 
-        const missing = students
-          .filter(s => !markedStudentIds.has(s.id))
-          .map(s => ({ id: s.id, name: `${s.firstName} ${s.lastName}`, admissionNo: s.admissionNo }));
+        const missing = eligibleStudents
+          .filter((s: any) => !markedStudentIds.has(s.id))
+          .map((s: any) => ({ id: s.id, name: `${s.firstName} ${s.lastName}`, admissionNo: s.admissionNo }));
 
         return {
           subjectId: subject.id,
           subjectName: subject.name,
-          totalStudents,
+          totalStudents: eligibleStudents.length,
           missingCount: missing.length,
           missingStudents: missing,
         };
@@ -11276,13 +11405,21 @@ export async function registerRoutes(
       if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
       const students = await storage.getStudentsByClass(classId);
+      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+      await Promise.all(students.map(async (student: any) => {
+        const rows = await storage.getStudentSubjects(student.id);
+        studentSubjectIdsByStudent.set(
+          student.id,
+          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
+        );
+      }));
+
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
       const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
 
       const subjectIds = [...new Set(classAssessments.map(a => a.subjectId))];
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const validSubjects = subjectsData.filter(Boolean);
-      const subjectCount = validSubjects.length;
 
       const assessmentIds = classAssessments.map(a => a.id);
       let classMarks: any[] = [];
@@ -11291,13 +11428,22 @@ export async function registerRoutes(
       }
 
       const rows = students.map(student => {
+        const eligibleSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
         const studentMarks = classMarks.filter(m => m.studentId === student.id);
         const cells: Record<number, number | null> = {};
         let sum = 0;
+        let eligibleCount = 0;
         let have = 0;
 
         for (const subject of validSubjects) {
           if (!subject) continue;
+          const takesSubject = eligibleSubjectIds.has(subject.id);
+          if (!takesSubject) {
+            cells[subject.id] = null;
+            continue;
+          }
+
+          eligibleCount++;
           const mark = studentMarks.find(m => m.subjectId === subject.id);
           const pct = mark?.percentage !== null && mark?.percentage !== undefined ? parseFloat(mark.percentage) : null;
           cells[subject.id] = pct;
@@ -11307,7 +11453,7 @@ export async function registerRoutes(
           }
         }
 
-        const avg = subjectCount > 0 ? sum / subjectCount : 0;
+        const avg = eligibleCount > 0 ? sum / eligibleCount : 0;
 
         return {
           studentName: `${student.firstName} ${student.lastName}`,
@@ -11316,8 +11462,9 @@ export async function registerRoutes(
           total: Math.round(sum),
           avg: Math.round(avg * 10) / 10,
           subjectsWithMarks: have,
+          eligibleSubjectCount: eligibleCount,
         };
-      });
+      }).filter(row => row.eligibleSubjectCount > 0);
 
       rows.sort((a, b) => {
         if (b.avg !== a.avg) return b.avg - a.avg;
@@ -11341,7 +11488,7 @@ export async function registerRoutes(
       res.json({
         subjects: validSubjects.map(s => ({ id: s!.id, name: s!.name })),
         rows: rankedRows,
-        totalStudents: students.length,
+        totalStudents: rows.length,
       });
     } catch (error) {
       next(error);
@@ -11365,12 +11512,22 @@ export async function registerRoutes(
       const totalStudents = students.length;
       const grades = await storage.getGradesBySchool(schoolId);
 
+      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+      await Promise.all(students.map(async (student: any) => {
+        const rows = await storage.getStudentSubjects(student.id);
+        studentSubjectIdsByStudent.set(
+          student.id,
+          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
+        );
+      }));
+
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
       const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
 
       const subjectIds = [...new Set(classAssessments.map(a => a.subjectId))];
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const validSubjects = subjectsData.filter(Boolean);
+      const validSubjectIdSet = new Set(validSubjects.map((subject: any) => Number(subject.id)));
 
       const assessmentIds = classAssessments.map(a => a.id);
       let classMarks: any[] = [];
@@ -11379,11 +11536,22 @@ export async function registerRoutes(
       }
 
       const gradeCounts: Record<string, number> = {};
-      const subjectStats: Record<number, { sum: number; have: number; pass: number; gradeCounts: Record<string, number> }> = {};
+      const subjectStats: Record<number, { sum: number; have: number; expected: number; pass: number; gradeCounts: Record<string, number> }> = {};
 
       for (const subject of validSubjects) {
         if (!subject) continue;
-        subjectStats[subject.id] = { sum: 0, have: 0, pass: 0, gradeCounts: {} };
+        const expected = students.filter((student: any) => studentSubjectIdsByStudent.get(student.id)?.has(subject.id)).length;
+        subjectStats[subject.id] = { sum: 0, have: 0, expected, pass: 0, gradeCounts: {} };
+      }
+
+      const eligibleStudentSubjectPairs = new Set<string>();
+      for (const student of students) {
+        const eligibleSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
+        for (const subjectId of eligibleSubjectIds) {
+          if (validSubjectIdSet.has(Number(subjectId))) {
+            eligibleStudentSubjectPairs.add(`${student.id}-${subjectId}`);
+          }
+        }
       }
 
       let enteredCells = 0;
@@ -11391,6 +11559,7 @@ export async function registerRoutes(
 
       for (const mark of classMarks) {
         if (mark.percentage === null || mark.percentage === undefined) continue;
+        if (!eligibleStudentSubjectPairs.has(`${mark.studentId}-${mark.subjectId}`)) continue;
         const pct = parseFloat(mark.percentage);
 
         enteredCells++;
@@ -11407,7 +11576,7 @@ export async function registerRoutes(
         }
       }
 
-      const expectedCells = totalStudents * validSubjects.length;
+      const expectedCells = Object.values(subjectStats).reduce((sum, stats) => sum + stats.expected, 0);
       const completion = expectedCells > 0 ? Math.round((enteredCells / expectedCells) * 100) : 0;
       const overallAvg = expectedCells > 0 ? Math.round(overallSum / expectedCells) : 0;
 
@@ -11415,9 +11584,9 @@ export async function registerRoutes(
         if (!subject) return null;
         const stats = subjectStats[subject.id];
         if (!stats) return null;
-        const avg = stats.have > 0 ? Math.round(stats.sum / stats.have) : 0;
-        const subCompletion = totalStudents > 0 ? Math.round((stats.have / totalStudents) * 100) : 0;
-        const passRate = stats.have > 0 ? Math.round((stats.pass / stats.have) * 100) : 0;
+        const avg = stats.expected > 0 ? Math.round(stats.sum / stats.expected) : 0;
+        const subCompletion = stats.expected > 0 ? Math.round((stats.have / stats.expected) * 100) : 0;
+        const passRate = stats.expected > 0 ? Math.round((stats.pass / stats.expected) * 100) : 0;
 
         return {
           subjectId: subject.id,
@@ -11426,6 +11595,7 @@ export async function registerRoutes(
           completion: subCompletion,
           passRate,
           gradeCounts: stats.gradeCounts,
+          totalStudents: stats.expected,
         };
       }).filter(Boolean);
 
