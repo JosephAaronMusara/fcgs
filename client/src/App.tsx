@@ -832,60 +832,60 @@ function AuthenticatedRoutes() {
   return (
     <AppLayout>
       <Switch>
-        <Route path="/dashboard" component={() => <ProtectedRoute component={Dashboard} />} />
-        <Route path="/student-360" component={() => <ProtectedRoute component={Student360Page} />} />
-        <Route path="/staff-360" component={() => <ProtectedRoute component={Staff360Page} />} />
-        <Route path="/staff" component={() => <ProtectedRoute component={StaffPage} />} />
-        <Route path="/students" component={() => <ProtectedRoute component={StudentsPage} />} />
-        <Route path="/parents" component={() => <ProtectedRoute component={ParentsPage} />} />
-        <Route path="/classes" component={() => <ProtectedRoute component={ClassesPage} />} />
-        <Route path="/subjects" component={() => <ProtectedRoute component={SubjectsPage} />} />
-        <Route path="/grades" component={() => <ProtectedRoute component={GradesPage} />} />
-        <Route path="/assessments" component={() => <ProtectedRoute component={AssessmentsPage} />} />
-        <Route path="/marks-entry" component={() => <ProtectedRoute component={MarksEntryPage} />} />
-        <Route path="/academic-reports" component={() => <ProtectedRoute component={AcademicReportsPage} />} />
-        <Route path="/qc-reports" component={() => <ProtectedRoute component={QCReportsPage} />} />
-        <Route path="/qc-reports/class/:classId" component={() => <Redirect to="/qc-reports" />} />
-        <Route path="/qc-reports/student/:studentId" component={() => <Redirect to="/qc-reports" />} />
-        <Route path="/attendance" component={() => <ProtectedRoute component={AttendancePage} />} />
-        <Route path="/fees" component={() => <ProtectedRoute component={FeesRoutePage} />} />
-        <Route path="/clinic" component={() => <ProtectedRoute component={ClinicPage} />} />
-        <Route path="/discipline" component={() => <ProtectedRoute component={DisciplinePage} />} />
-        <Route path="/marks" component={() => <ProtectedRoute component={MarksPage} />} />
-        <Route path="/record-of-marks" component={() => <ProtectedRoute component={RecordOfMarksPage} />} />
-        <Route path="/kundai" component={() => <ProtectedRoute component={KundAiPage} />} />
-        <Route path="/transport" component={() => <ProtectedRoute component={TransportPage} />} />
-        <Route path="/school-finance" component={() => <ProtectedRoute component={SchoolFinancePage} />} />
-        <Route path="/arrears" component={() => <ProtectedRoute component={ParentsWithArrearsRedirectPage} />} />
-        <Route path="/school-expenses" component={() => <ProtectedRoute component={SchoolExpensesRedirectPage} />} />
-        <Route path="/school-incomes" component={() => <ProtectedRoute component={SchoolIncomesRedirectPage} />} />
-        <Route path="/products" component={() => <ProtectedRoute component={ProductsRedirectPage} />} />
-        <Route path="/assets-inventory" component={() => <ProtectedRoute component={AssetsInventoryPage} />} />
-        <Route path="/financial-statements" component={() => <ProtectedRoute component={FinancialStatementsRedirectPage} />} />
-          <Route path="/discussion-forum" component={() => <ProtectedRoute component={DiscussionForumPage} />} />
-        <Route path="/learning-materials" component={() => <ProtectedRoute component={LearningMaterialsPage} />} />
-        <Route path="/children" component={() => <ProtectedRoute component={MyChildrenPage} />} />
-        <Route path="/settings" component={() => <ProtectedRoute component={SchoolSettingsPage} />} />
-        <Route path="/library" component={() => <ProtectedRoute component={LibraryPage} />} />
-        <Route path="/calendar" component={() => <ProtectedRoute component={CalendarPage} />} />
-        <Route path="/timetable" component={() => <ProtectedRoute component={TimetablePage} />} />
-        <Route path="/logbook" component={() => <ProtectedRoute component={LogbookPage} />} />
-        <Route path="/pos" component={() => <ProtectedRoute component={POSPage} />} />
-        <Route path="/newsletters" component={() => <ProtectedRoute component={NewslettersPage} />} />
-        <Route path="/schemes" component={() => <ProtectedRoute component={SchemesPage} />} />
-        <Route path="/hostel" component={() => <ProtectedRoute component={HostelPage} />} />
-        <Route path="/hostels" component={() => <ProtectedRoute component={HostelsPage} />} />
-        <Route path="/applications" component={() => <ProtectedRoute component={ApplicationsPage} />} />
-        <Route path="/messages" component={() => <ProtectedRoute component={MessagesPage} />} />
-        <Route path="/my-classes" component={() => <ProtectedRoute component={MyClassesPage} />} />
-        <Route path="/my-attendance" component={() => <ProtectedRoute component={MyAttendancePage} />} />
-        <Route path="/my-grades" component={() => <ProtectedRoute component={MyGradesPage} />} />
-        <Route path="/my-profile" component={() => <ProtectedRoute component={MyProfilePage} />} />
-        <Route path="/my-notifications" component={() => <ProtectedRoute component={MyNotificationsPage} />} />
-        <Route path="/my-newsletters" component={() => <ProtectedRoute component={MyNewslettersPage} />} />
-        <Route path="/children-attendance" component={() => <ProtectedRoute component={ChildrenAttendancePage} />} />
-        <Route path="/children-reports" component={() => <ProtectedRoute component={ChildrenReportsPage} />} />
-        <Route component={NotFound} />
+        <Route path="/dashboard"><ProtectedRoute component={Dashboard} /></Route>
+        <Route path="/student-360"><ProtectedRoute component={Student360Page} /></Route>
+        <Route path="/staff-360"><ProtectedRoute component={Staff360Page} /></Route>
+        <Route path="/staff"><ProtectedRoute component={StaffPage} /></Route>
+        <Route path="/students"><ProtectedRoute component={StudentsPage} /></Route>
+        <Route path="/parents"><ProtectedRoute component={ParentsPage} /></Route>
+        <Route path="/classes"><ProtectedRoute component={ClassesPage} /></Route>
+        <Route path="/subjects"><ProtectedRoute component={SubjectsPage} /></Route>
+        <Route path="/grades"><ProtectedRoute component={GradesPage} /></Route>
+        <Route path="/assessments"><ProtectedRoute component={AssessmentsPage} /></Route>
+        <Route path="/marks-entry"><ProtectedRoute component={MarksEntryPage} /></Route>
+        <Route path="/academic-reports"><ProtectedRoute component={AcademicReportsPage} /></Route>
+        <Route path="/qc-reports"><ProtectedRoute component={QCReportsPage} /></Route>
+        <Route path="/qc-reports/class/:classId"><Redirect to="/qc-reports" /></Route>
+        <Route path="/qc-reports/student/:studentId"><Redirect to="/qc-reports" /></Route>
+        <Route path="/attendance"><ProtectedRoute component={AttendancePage} /></Route>
+        <Route path="/fees"><ProtectedRoute component={FeesRoutePage} /></Route>
+        <Route path="/clinic"><ProtectedRoute component={ClinicPage} /></Route>
+        <Route path="/discipline"><ProtectedRoute component={DisciplinePage} /></Route>
+        <Route path="/marks"><ProtectedRoute component={MarksPage} /></Route>
+        <Route path="/record-of-marks"><ProtectedRoute component={RecordOfMarksPage} /></Route>
+        <Route path="/kundai"><ProtectedRoute component={KundAiPage} /></Route>
+        <Route path="/transport"><ProtectedRoute component={TransportPage} /></Route>
+        <Route path="/school-finance"><ProtectedRoute component={SchoolFinancePage} /></Route>
+        <Route path="/arrears"><ProtectedRoute component={ParentsWithArrearsRedirectPage} /></Route>
+        <Route path="/school-expenses"><ProtectedRoute component={SchoolExpensesRedirectPage} /></Route>
+        <Route path="/school-incomes"><ProtectedRoute component={SchoolIncomesRedirectPage} /></Route>
+        <Route path="/products"><ProtectedRoute component={ProductsRedirectPage} /></Route>
+        <Route path="/assets-inventory"><ProtectedRoute component={AssetsInventoryPage} /></Route>
+        <Route path="/financial-statements"><ProtectedRoute component={FinancialStatementsRedirectPage} /></Route>
+        <Route path="/discussion-forum" component={() => <ProtectedRoute component={DiscussionForumPage} />} />
+        <Route path="/learning-materials"><ProtectedRoute component={LearningMaterialsPage} /></Route>
+        <Route path="/children"><ProtectedRoute component={MyChildrenPage} /></Route>
+        <Route path="/settings"><ProtectedRoute component={SchoolSettingsPage} /></Route>
+        <Route path="/library"><ProtectedRoute component={LibraryPage} /></Route>
+        <Route path="/calendar"><ProtectedRoute component={CalendarPage} /></Route>
+        <Route path="/timetable"><ProtectedRoute component={TimetablePage} /></Route>
+        <Route path="/logbook"><ProtectedRoute component={LogbookPage} /></Route>
+        <Route path="/pos"><ProtectedRoute component={POSPage} /></Route>
+        <Route path="/newsletters"><ProtectedRoute component={NewslettersPage} /></Route>
+        <Route path="/schemes"><ProtectedRoute component={SchemesPage} /></Route>
+        <Route path="/hostel"><ProtectedRoute component={HostelPage} /></Route>
+        <Route path="/hostels"><ProtectedRoute component={HostelsPage} /></Route>
+        <Route path="/applications"><ProtectedRoute component={ApplicationsPage} /></Route>
+        <Route path="/messages"><ProtectedRoute component={MessagesPage} /></Route>
+        <Route path="/my-classes"><ProtectedRoute component={MyClassesPage} /></Route>
+        <Route path="/my-attendance"><ProtectedRoute component={MyAttendancePage} /></Route>
+        <Route path="/my-grades"><ProtectedRoute component={MyGradesPage} /></Route>
+        <Route path="/my-profile"><ProtectedRoute component={MyProfilePage} /></Route>
+        <Route path="/my-notifications"><ProtectedRoute component={MyNotificationsPage} /></Route>
+        <Route path="/my-newsletters"><ProtectedRoute component={MyNewslettersPage} /></Route>
+        <Route path="/children-attendance"><ProtectedRoute component={ChildrenAttendancePage} /></Route>
+        <Route path="/children-reports"><ProtectedRoute component={ChildrenReportsPage} /></Route>
+        <Route><NotFound /></Route>
       </Switch>
     </AppLayout>
   );

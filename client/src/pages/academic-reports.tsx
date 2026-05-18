@@ -123,29 +123,43 @@ interface MeritRow {
   studentName: string;
   admissionNo: string;
   cells: Record<number, number | null>;
+  cellDisplays?: Record<number, string>;
+  cellGrades?: Record<number, string>;
   total: number;
+  totalDisplay?: string;
   avg: number;
+  avgDisplay?: string;
+  points?: number | string;
+  pointsDisplay?: string;
   subjectsWithMarks: number;
   position: string;
 }
 
 interface MeritData {
+  examName?: string;
+  className?: string;
   subjects: { id: number; name: string }[];
   rows: MeritRow[];
   totalStudents: number;
+  showPointsColumn?: boolean;
 }
 
 interface AnalyticsData {
+  examName?: string;
+  className?: string;
   overallAvg: number;
   completion: number;
   enteredCells: number;
   expectedCells: number;
+  gradeColumns: string[];
   gradeCounts: Record<string, number>;
   subjectSummary: {
     subjectId: number;
     subjectName: string;
     avg: number;
     completion: number;
+    passed: number;
+    failed: number;
     passRate: number;
     gradeCounts: Record<string, number>;
   }[];
@@ -154,19 +168,26 @@ interface AnalyticsData {
 }
 
 interface StreamMeritData {
+  examName?: string;
+  streamName?: string;
   subjects: string[];
   rows: {
     studentName: string;
     admissionNo: string;
     total: string;
     avg: string;
+    points?: string | number;
     position: string;
     subjectMarks: string[];
   }[];
   totalStudents: number;
+  showPointsColumn?: boolean;
 }
 
 interface StreamAnalyticsData {
+  examName?: string;
+  streamName?: string;
+  gradeColumns: string[];
   rows: {
     subjectId: number;
     subjectName: string;
@@ -259,6 +280,423 @@ interface ReportCardData {
   reportCards: ReportStudent[];
 }
 
+function sanitizeExcelFilePart(value: string | undefined | null) {
+  const cleaned = (value || "").toString().trim();
+  return (cleaned || "Report")
+    .replace(/[\\/:*?"<>|]+/g, "")
+    .replace(/\s+/g, "_")
+    .slice(0, 80);
+}
+
+function sanitizeExcelSheetName(value: string | undefined | null) {
+  const cleaned = (value || "Sheet1").toString().trim();
+  return (cleaned || "Sheet1")
+    .replace(/[\[\]\*\?\/:\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .slice(0, 31);
+}
+
+function escapeExcelXml(value: string | number | null | undefined) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+type ExcelCellValue = string | number | null | undefined;
+
+function formatMeritCellForDisplay(
+  row: Pick<MeritRow, "cells" | "cellDisplays" | "cellGrades">,
+  subjectId: number,
+) {
+  const explicitDisplay = row.cellDisplays?.[subjectId];
+  const explicitGrade = row.cellGrades?.[subjectId];
+  if (explicitDisplay) {
+    if (explicitGrade && !/[()]/.test(explicitDisplay)) {
+      return `${explicitDisplay} (${explicitGrade})`;
+    }
+    return explicitDisplay;
+  }
+
+  const value = row.cells?.[subjectId];
+  if (value === null || value === undefined) return "-";
+
+  const rounded = Math.round(value);
+  const grade = row.cellGrades?.[subjectId];
+  return grade ? `${rounded}% (${grade})` : `${rounded}%`;
+}
+
+function excelXmlCell(value: ExcelCellValue, styleId?: "Bold" | "Header") {
+  const style = styleId ? ` ss:StyleID="${styleId}"` : "";
+  if (value === null || value === undefined || value === "") {
+    return `<Cell${style}/>`;
+  }
+
+  const isNumber = typeof value === "number" && Number.isFinite(value);
+  const type = isNumber ? "Number" : "String";
+  return `<Cell${style}><Data ss:Type="${type}">${escapeExcelXml(value)}</Data></Cell>`;
+}
+
+function normalizeXlsxFilename(filename: string) {
+  const cleanFilename = String(filename || "academic_report").trim() || "academic_report";
+  if (/\.xlsx$/i.test(cleanFilename)) return cleanFilename;
+  return `${cleanFilename.replace(/\.xls$/i, "")}.xlsx`;
+}
+
+function excelColumnName(index: number) {
+  let dividend = index + 1;
+  let columnName = "";
+  while (dividend > 0) {
+    const modulo = (dividend - 1) % 26;
+    columnName = String.fromCharCode(65 + modulo) + columnName;
+    dividend = Math.floor((dividend - modulo) / 26);
+  }
+  return columnName;
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(data: Uint8Array) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i += 1) {
+    crc = CRC32_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeUint16(target: number[], value: number) {
+  target.push(value & 0xff, (value >>> 8) & 0xff);
+}
+
+function writeUint32(target: number[], value: number) {
+  target.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+}
+
+function concatUint8Arrays(parts: Uint8Array[]) {
+  const totalLength = parts.reduce((total, part) => total + part.length, 0);
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
+  parts.forEach((part) => {
+    output.set(part, offset);
+    offset += part.length;
+  });
+  return output;
+}
+
+function createStoredZip(files: Array<{ path: string; data: string | Uint8Array }>) {
+  const encoder = new TextEncoder();
+  const fileParts: Uint8Array[] = [];
+  const centralDirectoryParts: Uint8Array[] = [];
+  let offset = 0;
+
+  files.forEach((file) => {
+    const filenameBytes = encoder.encode(file.path);
+    const dataBytes = typeof file.data === "string" ? encoder.encode(file.data) : file.data;
+    const checksum = crc32(dataBytes);
+
+    const localHeader: number[] = [];
+    writeUint32(localHeader, 0x04034b50);
+    writeUint16(localHeader, 20);
+    writeUint16(localHeader, 0);
+    writeUint16(localHeader, 0);
+    writeUint16(localHeader, 0);
+    writeUint16(localHeader, 0);
+    writeUint32(localHeader, checksum);
+    writeUint32(localHeader, dataBytes.length);
+    writeUint32(localHeader, dataBytes.length);
+    writeUint16(localHeader, filenameBytes.length);
+    writeUint16(localHeader, 0);
+
+    const localPart = concatUint8Arrays([new Uint8Array(localHeader), filenameBytes, dataBytes]);
+    fileParts.push(localPart);
+
+    const centralHeader: number[] = [];
+    writeUint32(centralHeader, 0x02014b50);
+    writeUint16(centralHeader, 20);
+    writeUint16(centralHeader, 20);
+    writeUint16(centralHeader, 0);
+    writeUint16(centralHeader, 0);
+    writeUint16(centralHeader, 0);
+    writeUint16(centralHeader, 0);
+    writeUint32(centralHeader, checksum);
+    writeUint32(centralHeader, dataBytes.length);
+    writeUint32(centralHeader, dataBytes.length);
+    writeUint16(centralHeader, filenameBytes.length);
+    writeUint16(centralHeader, 0);
+    writeUint16(centralHeader, 0);
+    writeUint16(centralHeader, 0);
+    writeUint16(centralHeader, 0);
+    writeUint32(centralHeader, 0);
+    writeUint32(centralHeader, offset);
+
+    centralDirectoryParts.push(concatUint8Arrays([new Uint8Array(centralHeader), filenameBytes]));
+    offset += localPart.length;
+  });
+
+  const centralDirectory = concatUint8Arrays(centralDirectoryParts);
+  const endRecord: number[] = [];
+  writeUint32(endRecord, 0x06054b50);
+  writeUint16(endRecord, 0);
+  writeUint16(endRecord, 0);
+  writeUint16(endRecord, files.length);
+  writeUint16(endRecord, files.length);
+  writeUint32(endRecord, centralDirectory.length);
+  writeUint32(endRecord, offset);
+  writeUint16(endRecord, 0);
+
+  return new Blob([concatUint8Arrays([...fileParts, centralDirectory, new Uint8Array(endRecord)])], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+}
+
+function buildXlsxSheetXml(args: {
+  sheetName: string;
+  rows: ExcelCellValue[][];
+  boldRowIndexes?: number[];
+  headerRowIndexes?: number[];
+  columnWidths?: number[];
+  freezeFirstColumn?: boolean;
+}) {
+  const boldRows = new Set(args.boldRowIndexes || []);
+  const headerRows = new Set(args.headerRowIndexes || []);
+  const normalizedRows = args.rows.map((row) => row.map((cell) => (cell === null || cell === undefined ? "" : cell)));
+
+  const cols = args.columnWidths?.length
+    ? `<cols>${args.columnWidths
+        .map((width, index) => {
+          const excelWidth = Math.max(8, Math.round(width / 7));
+          return `<col min="${index + 1}" max="${index + 1}" width="${excelWidth}" customWidth="1"/>`;
+        })
+        .join("")}</cols>`
+    : "";
+
+  const sheetViews = args.freezeFirstColumn
+    ? `<sheetViews><sheetView workbookViewId="0"><pane xSplit="1" topLeftCell="B1" activePane="topRight" state="frozen"/><selection pane="topRight" activeCell="B1" sqref="B1"/></sheetView></sheetViews>`
+    : `<sheetViews><sheetView workbookViewId="0"/></sheetViews>`;
+
+  const sheetData = normalizedRows
+    .map((row, rowIndex) => {
+      const rowNumber = rowIndex + 1;
+      const shouldBold = boldRows.has(rowIndex) || headerRows.has(rowIndex);
+      const cells = row
+        .map((value, columnIndex) => {
+          if (value === "") return "";
+          const cellRef = `${excelColumnName(columnIndex)}${rowNumber}`;
+          const style = shouldBold ? ' s="1"' : "";
+          if (typeof value === "number" && Number.isFinite(value)) {
+            return `<c r="${cellRef}"${style}><v>${value}</v></c>`;
+          }
+          return `<c r="${cellRef}" t="inlineStr"${style}><is><t>${escapeExcelXml(value)}</t></is></c>`;
+        })
+        .join("");
+      return `<row r="${rowNumber}">${cells}</row>`;
+    })
+    .join("");
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${sheetViews}${cols}<sheetData>${sheetData}</sheetData></worksheet>`;
+}
+
+function downloadExcelXmlWorkbook(args: {
+  filename: string;
+  sheetName: string;
+  rows: ExcelCellValue[][];
+  boldRowIndexes?: number[];
+  headerRowIndexes?: number[];
+  columnWidths?: number[];
+  freezeFirstColumn?: boolean;
+}) {
+  const safeSheetName = sanitizeExcelSheetName(args.sheetName);
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${escapeExcelXml(safeSheetName)}" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles><dxfs count="0"/><tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/></styleSheet>`;
+
+  const blob = createStoredZip([
+    { path: "[Content_Types].xml", data: contentTypesXml },
+    { path: "_rels/.rels", data: rootRelsXml },
+    { path: "xl/workbook.xml", data: workbookXml },
+    { path: "xl/_rels/workbook.xml.rels", data: workbookRelsXml },
+    { path: "xl/styles.xml", data: stylesXml },
+    {
+      path: "xl/worksheets/sheet1.xml",
+      data: buildXlsxSheetXml({
+        sheetName: safeSheetName,
+        rows: args.rows,
+        boldRowIndexes: args.boldRowIndexes,
+        headerRowIndexes: args.headerRowIndexes,
+        columnWidths: args.columnWidths,
+        freezeFirstColumn: args.freezeFirstColumn,
+      }),
+    },
+  ]);
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = normalizeXlsxFilename(args.filename);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function resolveAnalyticsGradeColumns(
+  gradeColumns: string[] | undefined,
+  rows: Array<{ gradeCounts?: Record<string, number> }> = [],
+) {
+  const ordered = new Set<string>();
+  (gradeColumns || []).forEach((grade) => {
+    if (grade) ordered.add(grade);
+  });
+  rows.forEach((row) => {
+    Object.keys(row.gradeCounts || {}).forEach((grade) => {
+      if (grade) ordered.add(grade);
+    });
+  });
+  return Array.from(ordered);
+}
+
+function downloadAnalyticsWorkbook(args: {
+  analysisType: "Class Analytics" | "Stream Analytics";
+  examName: string;
+  contextLabel: string;
+  gradeColumns: string[];
+  rows: Array<{
+    subjectName: string;
+    avg: number;
+    completion?: number;
+    passed: number;
+    failed: number;
+    passRate: number;
+    gradeCounts: Record<string, number>;
+  }>;
+}) {
+  const headers = [
+    "Subject",
+    "Avg (%)",
+    ...(args.analysisType === "Class Analytics" ? ["Completion (%)"] : []),
+    "Passed",
+    "Failed",
+    "Pass Rate (%)",
+    ...args.gradeColumns,
+  ];
+
+  const body = args.rows.map((row) => [
+    row.subjectName,
+    row.avg,
+    ...(args.analysisType === "Class Analytics" ? [row.completion ?? ""] : []),
+    row.passed,
+    row.failed,
+    row.passRate,
+    ...args.gradeColumns.map((grade) => row.gradeCounts?.[grade] || 0),
+  ]);
+
+  const filename = `${sanitizeExcelFilePart(args.contextLabel)}_${sanitizeExcelFilePart(args.examName)}_${args.analysisType.replace(/\s+/g, "_")}.xlsx`;
+  downloadExcelXmlWorkbook({
+    filename,
+    sheetName: args.analysisType,
+    rows: [
+      [`${args.contextLabel} — ${args.analysisType}`],
+      [`Exam: ${args.examName}`],
+      [],
+      headers,
+      ...body,
+    ],
+    boldRowIndexes: [0, 1],
+    headerRowIndexes: [3],
+  });
+}
+
+function formatStudentNameWithAdmission(studentName: string, admissionNo?: string | null) {
+  const cleanName = String(studentName || "").trim() || "Unnamed Student";
+  const cleanAdmission = String(admissionNo || "").trim();
+  return cleanAdmission ? `${cleanName} (${cleanAdmission})` : cleanName;
+}
+
+function downloadMeritWorkbook(args: {
+  meritType: "Class Merit List" | "Stream Merit List";
+  examName: string;
+  contextLabel: string;
+  subjects: string[];
+  showPointsColumn?: boolean;
+  rows: Array<{
+    studentName: string;
+    admissionNo?: string | null;
+    subjectMarks: ExcelCellValue[];
+    total: ExcelCellValue;
+    avg: ExcelCellValue;
+    points?: ExcelCellValue;
+    position: ExcelCellValue;
+  }>;
+}) {
+  const headers = [
+    "Student",
+    ...args.subjects,
+    "Total",
+    "Average",
+    ...(args.showPointsColumn ? ["Points"] : []),
+    "Pos",
+  ];
+  const body = args.rows.map((row) => [
+    formatStudentNameWithAdmission(row.studentName, row.admissionNo),
+    ...row.subjectMarks,
+    row.total,
+    row.avg,
+    ...(args.showPointsColumn ? [row.points ?? ""] : []),
+    row.position,
+  ]);
+
+  const subjectColumnWidths = args.subjects.map((subject) =>
+    Math.min(115, Math.max(48, String(subject || "").length * 7)),
+  );
+  const longestStudentLabel = body.reduce(
+    (max, row) => Math.max(max, String(row[0] || "").length),
+    "Student".length,
+  );
+  const studentColumnWidth = Math.min(240, Math.max(150, longestStudentLabel * 6));
+
+  const filename = `${sanitizeExcelFilePart(args.contextLabel)}_${sanitizeExcelFilePart(args.examName)}_${args.meritType.replace(/\s+/g, "_")}.xlsx`;
+  downloadExcelXmlWorkbook({
+    filename,
+    sheetName: args.meritType,
+    rows: [
+      [`${args.contextLabel} — ${args.meritType}`],
+      [`Exam: ${args.examName}`],
+      [],
+      headers,
+      ...body,
+    ],
+    boldRowIndexes: [0, 1],
+    headerRowIndexes: [3],
+    columnWidths: [
+      studentColumnWidth,
+      ...subjectColumnWidths,
+      64,
+      70,
+      ...(args.showPointsColumn ? [58] : []),
+      48,
+    ],
+    freezeFirstColumn: true,
+  });
+}
 
 
 type ReportCommentGradeOption = {
@@ -1428,14 +1866,57 @@ function ClassMeritDialog({
     enabled: open && !!examId && !!classId,
   });
 
+  const effectiveClassName = data?.className || classLabel;
+  const effectiveExamName = data?.examName || "Selected Exam";
+
+  const handleDownloadExcel = () => {
+    if (!data || data.rows.length === 0) return;
+    downloadMeritWorkbook({
+      meritType: "Class Merit List",
+      examName: effectiveExamName,
+      contextLabel: effectiveClassName,
+      subjects: data.subjects.map((subject) => subject.name),
+      showPointsColumn: !!data.showPointsColumn,
+      rows: data.rows.map((row) => ({
+        studentName: row.studentName,
+        admissionNo: row.admissionNo,
+        subjectMarks: data.subjects.map((subject) => {
+          return formatMeritCellForDisplay(row, subject.id);
+        }),
+        total: row.totalDisplay || row.total,
+        avg: row.avgDisplay || `${Math.round(row.avg)}%`,
+        points: row.pointsDisplay ?? row.points ?? "",
+        position: row.position,
+      })),
+    });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{classLabel} — Merit List</DialogTitle>
-          <DialogDescription>
-            Sorted by average (missing marks count as 0)
-          </DialogDescription>
+      <DialogContent className="w-fit sm:w-fit min-w-[min(720px,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] sm:max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto">
+        <DialogHeader className="space-y-3 pr-10">
+          <div>
+            <DialogTitle>{effectiveClassName} — Merit List</DialogTitle>
+            <DialogDescription>
+              Sorted by average (missing marks count as 0)
+            </DialogDescription>
+          </div>
+          <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-muted-foreground">
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <span>
+                <strong className="text-foreground">Class:</strong> {effectiveClassName}
+              </span>
+              <span>
+                <strong className="text-foreground">Exam:</strong> {effectiveExamName}
+              </span>
+            </div>
+            {!isLoading && data && data.rows.length > 0 && (
+              <Button variant="outline" size="sm" onClick={handleDownloadExcel}>
+                <Download className="w-4 h-4 mr-2" />
+                Download Excel
+              </Button>
+            )}
+          </div>
         </DialogHeader>
         {isLoading ? (
           <div className="space-y-2">
@@ -1449,48 +1930,46 @@ function ClassMeritDialog({
             <p>No merit data available yet.</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="max-w-full overflow-x-auto rounded-md border">
             <table
-              className="w-full text-sm border-collapse"
+              className="w-max text-sm border-collapse"
               data-testid="table-merit-list"
             >
               <thead>
-                <tr className="border-b">
-                  <th className="text-left p-2 font-semibold">Student</th>
+                <tr className="border-b bg-muted/50">
+                  <th className="sticky left-0 z-20 bg-muted/50 text-left px-2 py-2 font-semibold border-r whitespace-nowrap min-w-[220px]">Student</th>
                   {data.subjects.map((s) => (
-                    <th key={s.id} className="text-center p-2 font-semibold">
+                    <th key={s.id} className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">
                       {s.name}
                     </th>
                   ))}
-                  <th className="text-center p-2 font-semibold">Total</th>
-                  <th className="text-center p-2 font-semibold">Average</th>
-                  <th className="text-center p-2 font-semibold">Pos</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Average</th>
+                  {data.showPointsColumn && (
+                    <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Points</th>
+                  )}
+                  <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
                 </tr>
               </thead>
               <tbody>
                 {data.rows.map((row, idx) => (
-                  <tr key={idx} className="border-b hover-elevate">
-                    <td className="p-2">
-                      <div className="font-medium">{row.studentName}</div>
-                      {row.admissionNo && (
-                        <div className="text-xs text-muted-foreground">
-                          {row.admissionNo}
-                        </div>
-                      )}
+                  <tr key={idx} className="border-b bg-white dark:bg-background">
+                    <td className="sticky left-0 z-10 bg-white dark:bg-background px-2 py-2 border-r whitespace-nowrap min-w-[220px]">
+                      <div className="font-medium">{formatStudentNameWithAdmission(row.studentName, row.admissionNo)}</div>
                     </td>
                     {data.subjects.map((s) => (
-                      <td key={s.id} className="text-center p-2">
-                        {row.cells[s.id] !== null &&
-                        row.cells[s.id] !== undefined
-                          ? `${Math.round(row.cells[s.id]!)}%`
-                          : "–"}
+                      <td key={s.id} className="text-center px-2 py-2 border-r whitespace-nowrap">
+                        {formatMeritCellForDisplay(row, s.id)}
                       </td>
                     ))}
-                    <td className="text-center p-2">{row.total}</td>
-                    <td className="text-center p-2 font-semibold">
-                      {Math.round(row.avg)}%
+                    <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.totalDisplay || row.total}</td>
+                    <td className="text-center px-2 py-2 border-r font-semibold whitespace-nowrap">
+                      {row.avgDisplay || `${Math.round(row.avg)}%`}
                     </td>
-                    <td className="text-center p-2">{row.position}</td>
+                    {data.showPointsColumn && (
+                      <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.pointsDisplay ?? row.points ?? "–"}</td>
+                    )}
+                    <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1520,14 +1999,51 @@ function ClassAnalyticsDialog({
     enabled: open && !!examId && !!classId,
   });
 
+  const gradeColumns = useMemo(
+    () => resolveAnalyticsGradeColumns(data?.gradeColumns, data?.subjectSummary),
+    [data],
+  );
+
+  const effectiveClassName = data?.className || classLabel;
+  const effectiveExamName = data?.examName || "Selected Exam";
+
+  const handleDownloadExcel = () => {
+    if (!data || data.subjectSummary.length === 0) return;
+    downloadAnalyticsWorkbook({
+      analysisType: "Class Analytics",
+      examName: effectiveExamName,
+      contextLabel: effectiveClassName,
+      gradeColumns,
+      rows: data.subjectSummary,
+    });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{classLabel} — Analytics</DialogTitle>
-          <DialogDescription>
-            Grade distribution and subject performance summary
-          </DialogDescription>
+      <DialogContent className="max-w-6xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader className="space-y-3 pr-10">
+          <div>
+            <DialogTitle>{effectiveClassName} — Class Analytics</DialogTitle>
+            <DialogDescription>
+              Subject grade breakdown and pass rates for this class
+            </DialogDescription>
+          </div>
+          <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-muted-foreground">
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <span>
+                <strong className="text-foreground">Class:</strong> {effectiveClassName}
+              </span>
+              <span>
+                <strong className="text-foreground">Exam:</strong> {effectiveExamName}
+              </span>
+            </div>
+            {!isLoading && data && data.subjectSummary.length > 0 && (
+              <Button variant="outline" size="sm" onClick={handleDownloadExcel}>
+                <Download className="w-4 h-4 mr-2" />
+                Download Excel
+              </Button>
+            )}
+          </div>
         </DialogHeader>
         {isLoading ? (
           <div className="space-y-3">
@@ -1574,20 +2090,18 @@ function ClassAnalyticsDialog({
               </Card>
             </div>
 
-            {Object.keys(data.gradeCounts).length > 0 && (
+            {gradeColumns.length > 0 && (
               <div>
                 <h4 className="font-semibold mb-2">Grade Distribution</h4>
                 <div className="flex flex-wrap gap-2">
-                  {Object.entries(data.gradeCounts)
-                    .sort((a, b) => a[0].localeCompare(b[0]))
-                    .map(([grade, count]) => (
-                      <div
-                        key={grade}
-                        className="border rounded-md px-3 py-1.5 text-sm"
-                      >
-                        <span className="font-semibold">{grade}</span>: {count}
-                      </div>
-                    ))}
+                  {gradeColumns.map((grade) => (
+                    <div
+                      key={grade}
+                      className="border rounded-md px-3 py-1.5 text-sm"
+                    >
+                      <span className="font-semibold">{grade}</span>: {data.gradeCounts?.[grade] || 0}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -1601,11 +2115,18 @@ function ClassAnalyticsDialog({
                     data-testid="table-analytics-subjects"
                   >
                     <thead>
-                      <tr className="border-b">
+                      <tr className="border-b bg-muted/50">
                         <th className="text-left p-2">Subject</th>
                         <th className="text-center p-2">Avg</th>
                         <th className="text-center p-2">Completion</th>
+                        <th className="text-center p-2">Passed</th>
+                        <th className="text-center p-2">Failed</th>
                         <th className="text-center p-2">Pass Rate</th>
+                        {gradeColumns.map((grade) => (
+                          <th key={grade} className="text-center p-2">
+                            {grade}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -1616,7 +2137,18 @@ function ClassAnalyticsDialog({
                             {s.avg}%
                           </td>
                           <td className="text-center p-2">{s.completion}%</td>
+                          <td className="text-center p-2 text-green-600 dark:text-green-400">
+                            {s.passed}
+                          </td>
+                          <td className="text-center p-2 text-red-600 dark:text-red-400">
+                            {s.failed}
+                          </td>
                           <td className="text-center p-2">{s.passRate}%</td>
+                          {gradeColumns.map((grade) => (
+                            <td key={grade} className="text-center p-2">
+                              {s.gradeCounts?.[grade] || 0}
+                            </td>
+                          ))}
                         </tr>
                       ))}
                     </tbody>
@@ -1649,14 +2181,55 @@ function StreamMeritDialog({
     enabled: open && !!examId && !!streamId,
   });
 
+  const effectiveStreamName = data?.streamName || streamName;
+  const effectiveExamName = data?.examName || "Selected Exam";
+
+  const handleDownloadExcel = () => {
+    if (!data || data.rows.length === 0) return;
+    downloadMeritWorkbook({
+      meritType: "Stream Merit List",
+      examName: effectiveExamName,
+      contextLabel: effectiveStreamName,
+      subjects: data.subjects,
+      showPointsColumn: !!data.showPointsColumn,
+      rows: data.rows.map((row) => ({
+        studentName: row.studentName,
+        admissionNo: row.admissionNo,
+        subjectMarks: row.subjectMarks,
+        total: row.total,
+        avg: row.avg,
+        points: row.points ?? "",
+        position: row.position,
+      })),
+    });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{streamName} — Stream Merit List</DialogTitle>
-          <DialogDescription>
-            Top students across all classes in this stream
-          </DialogDescription>
+      <DialogContent className="w-fit sm:w-fit min-w-[min(720px,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] sm:max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto">
+        <DialogHeader className="space-y-3 pr-10">
+          <div>
+            <DialogTitle>{effectiveStreamName} — Stream Merit List</DialogTitle>
+            <DialogDescription>
+              Top students across all classes in this stream
+            </DialogDescription>
+          </div>
+          <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-muted-foreground">
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <span>
+                <strong className="text-foreground">Stream:</strong> {effectiveStreamName}
+              </span>
+              <span>
+                <strong className="text-foreground">Exam:</strong> {effectiveExamName}
+              </span>
+            </div>
+            {!isLoading && data && data.rows.length > 0 && (
+              <Button variant="outline" size="sm" onClick={handleDownloadExcel}>
+                <Download className="w-4 h-4 mr-2" />
+                Download Excel
+              </Button>
+            )}
+          </div>
         </DialogHeader>
         {isLoading ? (
           <div className="space-y-2">
@@ -1670,43 +2243,44 @@ function StreamMeritDialog({
             <p>No merit data available.</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="max-w-full overflow-x-auto rounded-md border">
             <table
-              className="w-full text-sm border-collapse"
+              className="w-max text-sm border-collapse"
               data-testid="table-stream-merit"
             >
               <thead>
-                <tr className="border-b">
-                  <th className="text-left p-2 font-semibold">Student</th>
+                <tr className="border-b bg-muted/50">
+                  <th className="sticky left-0 z-20 bg-muted/50 text-left px-2 py-2 font-semibold border-r whitespace-nowrap min-w-[220px]">Student</th>
                   {data.subjects.map((s, i) => (
-                    <th key={i} className="text-center p-2 font-semibold">
+                    <th key={i} className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">
                       {s}
                     </th>
                   ))}
-                  <th className="text-center p-2 font-semibold">Total</th>
-                  <th className="text-center p-2 font-semibold">Average</th>
-                  <th className="text-center p-2 font-semibold">Pos</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Average</th>
+                  {data.showPointsColumn && (
+                    <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Points</th>
+                  )}
+                  <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
                 </tr>
               </thead>
               <tbody>
                 {data.rows.map((row, idx) => (
-                  <tr key={idx} className="border-b">
-                    <td className="p-2">
-                      <div className="font-medium">{row.studentName}</div>
-                      {row.admissionNo && (
-                        <div className="text-xs text-muted-foreground">
-                          {row.admissionNo}
-                        </div>
-                      )}
+                  <tr key={idx} className="border-b bg-white dark:bg-background">
+                    <td className="sticky left-0 z-10 bg-white dark:bg-background px-2 py-2 border-r whitespace-nowrap min-w-[220px]">
+                      <div className="font-medium">{formatStudentNameWithAdmission(row.studentName, row.admissionNo)}</div>
                     </td>
                     {row.subjectMarks.map((val, i) => (
-                      <td key={i} className="text-center p-2">
-                        {val}
+                      <td key={i} className="text-center px-2 py-2 border-r whitespace-nowrap">
+                        {val || "-"}
                       </td>
                     ))}
-                    <td className="text-center p-2">{row.total}</td>
-                    <td className="text-center p-2 font-semibold">{row.avg}</td>
-                    <td className="text-center p-2">{row.position}</td>
+                    <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.total}</td>
+                    <td className="text-center px-2 py-2 border-r font-semibold whitespace-nowrap">{row.avg}</td>
+                    {data.showPointsColumn && (
+                      <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.points ?? "–"}</td>
+                    )}
+                    <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1736,14 +2310,51 @@ function StreamAnalyticsDialog({
     enabled: open && !!examId && !!streamId,
   });
 
+  const gradeColumns = useMemo(
+    () => resolveAnalyticsGradeColumns(data?.gradeColumns, data?.rows),
+    [data],
+  );
+
+  const effectiveStreamName = data?.streamName || streamName;
+  const effectiveExamName = data?.examName || "Selected Exam";
+
+  const handleDownloadExcel = () => {
+    if (!data || data.rows.length === 0) return;
+    downloadAnalyticsWorkbook({
+      analysisType: "Stream Analytics",
+      examName: effectiveExamName,
+      contextLabel: effectiveStreamName,
+      gradeColumns,
+      rows: data.rows,
+    });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{streamName} — Stream Analytics</DialogTitle>
-          <DialogDescription>
-            Subject grade breakdown and pass rates across the stream
-          </DialogDescription>
+      <DialogContent className="max-w-6xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader className="space-y-3 pr-10">
+          <div>
+            <DialogTitle>{effectiveStreamName} — Stream Analytics</DialogTitle>
+            <DialogDescription>
+              Subject grade breakdown and pass rates across the stream
+            </DialogDescription>
+          </div>
+          <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-muted-foreground">
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <span>
+                <strong className="text-foreground">Stream:</strong> {effectiveStreamName}
+              </span>
+              <span>
+                <strong className="text-foreground">Exam:</strong> {effectiveExamName}
+              </span>
+            </div>
+            {!isLoading && data && data.rows.length > 0 && (
+              <Button variant="outline" size="sm" onClick={handleDownloadExcel}>
+                <Download className="w-4 h-4 mr-2" />
+                Download Excel
+              </Button>
+            )}
+          </div>
         </DialogHeader>
         {isLoading ? (
           <div className="space-y-2">
@@ -1763,15 +2374,15 @@ function StreamAnalyticsDialog({
               data-testid="table-stream-analytics"
             >
               <thead>
-                <tr className="border-b">
+                <tr className="border-b bg-muted/50">
                   <th className="text-left p-2 font-semibold">Subject</th>
                   <th className="text-center p-2 font-semibold">Avg</th>
                   <th className="text-center p-2 font-semibold">Passed</th>
                   <th className="text-center p-2 font-semibold">Failed</th>
                   <th className="text-center p-2 font-semibold">Pass Rate</th>
-                  {["A*", "A", "B", "C", "D", "E", "F"].map((g) => (
-                    <th key={g} className="text-center p-2 font-semibold">
-                      {g}
+                  {gradeColumns.map((grade) => (
+                    <th key={grade} className="text-center p-2 font-semibold">
+                      {grade}
                     </th>
                   ))}
                 </tr>
@@ -1790,9 +2401,9 @@ function StreamAnalyticsDialog({
                       {row.failed}
                     </td>
                     <td className="text-center p-2">{row.passRate}%</td>
-                    {["A*", "A", "B", "C", "D", "E", "F"].map((g) => (
-                      <td key={g} className="text-center p-2">
-                        {row.gradeCounts[g] || 0}
+                    {gradeColumns.map((grade) => (
+                      <td key={grade} className="text-center p-2">
+                        {row.gradeCounts?.[grade] || 0}
                       </td>
                     ))}
                   </tr>
