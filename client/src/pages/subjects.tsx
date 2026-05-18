@@ -578,7 +578,7 @@ function SubjectDialog({
               <Label>Streams</Label>
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button variant="outline" role="combobox" className="w-full justify-between font-normal h-auto min-h-[2.5rem]" data-testid="select-stream">
+                  <Button type="button" variant="outline" role="combobox" className="w-full justify-between font-normal h-auto min-h-[2.5rem]" data-testid="select-stream">
                     <div className="flex flex-wrap gap-1 flex-1">
                       {isAllStreams ? (
                         <Badge variant="secondary" className="flex items-center gap-1" data-testid="tag-stream-all">

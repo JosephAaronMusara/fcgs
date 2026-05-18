@@ -11401,8 +11401,18 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const classInfo = await storage.getClass(classId);
+      const [classInfo, exam, school] = await Promise.all([
+        storage.getClass(classId),
+        storage.getExam(examId),
+        storage.getSchool(schoolId),
+      ]);
       if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+
+      const stream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+      const streamName = stream?.name || null;
+      const showPointsColumn = shouldShowMeritPointsColumn({ streamName, className: classInfo.className });
+      const allGrades = await storage.getGradesBySchool(schoolId);
 
       const students = await storage.getStudentsByClass(classId);
       const studentSubjectIdsByStudent = new Map<number, Set<number>>();
@@ -11421,6 +11431,22 @@ export async function registerRoutes(
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const validSubjects = subjectsData.filter(Boolean);
 
+      const gradeCandidatesBySubject = new Map<number, any[]>();
+      const getSubjectGradeCandidates = (subject: any) => {
+        const existing = gradeCandidatesBySubject.get(Number(subject.id));
+        if (existing) return existing;
+        const profileKey = resolveGradeProfileKey({
+          schoolType: school?.schoolType,
+          examinationBoard: school?.examinationBoard,
+          streamName,
+          subjectType: subject.subjectType,
+        });
+        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
+        const candidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
+        gradeCandidatesBySubject.set(Number(subject.id), candidates);
+        return candidates;
+      };
+
       const assessmentIds = classAssessments.map(a => a.id);
       let classMarks: any[] = [];
       if (assessmentIds.length > 0) {
@@ -11431,9 +11457,12 @@ export async function registerRoutes(
         const eligibleSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
         const studentMarks = classMarks.filter(m => m.studentId === student.id);
         const cells: Record<number, number | null> = {};
+        const cellGrades: Record<number, string> = {};
+        const cellDisplays: Record<number, string> = {};
         let sum = 0;
         let eligibleCount = 0;
         let have = 0;
+        let totalPoints = 0;
 
         for (const subject of validSubjects) {
           if (!subject) continue;
@@ -11450,6 +11479,12 @@ export async function registerRoutes(
           if (pct !== null) {
             sum += pct;
             have++;
+            const gradeCandidates = getSubjectGradeCandidates(subject);
+            const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType, allGrades);
+            const gradeLabel = getGradeDisplayName(grade);
+            totalPoints += getMeritGradePoints(grade);
+            if (gradeLabel) cellGrades[subject.id] = gradeLabel;
+            cellDisplays[subject.id] = formatMeritMarkDisplay(pct, gradeLabel);
           }
         }
 
@@ -11459,8 +11494,14 @@ export async function registerRoutes(
           studentName: `${student.firstName} ${student.lastName}`,
           admissionNo: student.admissionNo,
           cells,
+          cellGrades,
+          cellDisplays,
           total: Math.round(sum),
+          totalDisplay: `${Math.round(sum)}/${eligibleCount * 100}`,
           avg: Math.round(avg * 10) / 10,
+          avgDisplay: `${Math.round(avg)}%`,
+          points: totalPoints,
+          pointsDisplay: formatMeritPoints(totalPoints),
           subjectsWithMarks: have,
           eligibleSubjectCount: eligibleCount,
         };
@@ -11486,14 +11527,157 @@ export async function registerRoutes(
       });
 
       res.json({
-        subjects: validSubjects.map(s => ({ id: s!.id, name: s!.name })),
+        examName: exam?.examName || "",
+        className: classInfo.className,
+        subjects: validSubjects.map(s => ({ id: s!.id, name: getReportSubjectLabel(s) })),
         rows: rankedRows,
         totalStudents: rows.length,
+        showPointsColumn,
       });
     } catch (error) {
       next(error);
     }
   });
+
+
+  function getGradeDisplayName(grade: any) {
+    return String(grade?.gradeName || "").trim();
+  }
+
+  function formatMeritMarkDisplay(pct: number, gradeLabel?: string | null) {
+    const rounded = Math.round(pct);
+    const cleanGrade = String(gradeLabel || "").trim();
+    return cleanGrade ? `${rounded}% (${cleanGrade})` : `${rounded}%`;
+  }
+
+  function getMeritGradePoints(grade: any) {
+    const rawPoints = grade?.gradePoints ?? grade?.points ?? 0;
+    const points = typeof rawPoints === "number" ? rawPoints : parseFloat(String(rawPoints));
+    return Number.isFinite(points) ? points : 0;
+  }
+
+  function formatMeritPoints(points: number) {
+    if (!Number.isFinite(points)) return "0";
+    return Number.isInteger(points) ? String(points) : String(Number(points.toFixed(1)));
+  }
+
+  function shouldShowMeritPointsColumn(_context?: { streamName?: string | null; className?: string | null }) {
+    return true;
+  }
+
+  function getReportSubjectLabel(subject: any) {
+    const shortCode = String(subject?.shortCode || "").trim();
+    const syllabusCode = String(subject?.syllabusCode || "").trim();
+    const base = shortCode || String(subject?.name || "Subject").trim() || "Subject";
+    return syllabusCode ? `${base} (${syllabusCode})` : base;
+  }
+
+  function orderAnalyticsGrades(grades: any[]) {
+    return [...grades].sort((a, b) => {
+      const upperDiff = Number(b.upperLimit ?? -1) - Number(a.upperLimit ?? -1);
+      if (upperDiff !== 0) return upperDiff;
+      const lowerDiff = Number(b.lowerLimit ?? -1) - Number(a.lowerLimit ?? -1);
+      if (lowerDiff !== 0) return lowerDiff;
+      return getGradeDisplayName(a).localeCompare(getGradeDisplayName(b));
+    });
+  }
+
+  function uniqueAnalyticsGradesByName(grades: any[]) {
+    const seen = new Set<string>();
+    const result: any[] = [];
+    for (const grade of grades) {
+      const name = getGradeDisplayName(grade);
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      result.push(grade);
+    }
+    return result;
+  }
+
+  function getAnalyticsGradeCandidates(grades: any[], subjectType?: string | null) {
+    const ordered = orderAnalyticsGrades(grades);
+    const compatibleTyped = ordered.filter((grade) => grade.gradeType && isSubjectTypeCompatibleWithGradeType(subjectType, grade.gradeType));
+    const genericGrades = ordered.filter((grade) => !grade.gradeType);
+    const candidates = compatibleTyped.length > 0
+      ? [...compatibleTyped, ...genericGrades]
+      : genericGrades.length > 0
+        ? genericGrades
+        : ordered;
+    return uniqueAnalyticsGradesByName(candidates);
+  }
+
+  function addAnalyticsGradeColumns(columns: string[], grades: any[]) {
+    const seen = new Set(columns);
+    for (const grade of grades) {
+      const name = getGradeDisplayName(grade);
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      columns.push(name);
+    }
+  }
+
+  function uniqueGradesById(grades: any[]) {
+    const seen = new Set<number>();
+    const result: any[] = [];
+    for (const grade of grades) {
+      const id = Number(grade?.id);
+      if (!Number.isFinite(id) || seen.has(id)) continue;
+      seen.add(id);
+      result.push(grade);
+    }
+    return result;
+  }
+
+  function findGradeForPercentage(pct: number, grades: any[], subjectType?: string | null) {
+    if (!Array.isArray(grades) || grades.length === 0) return null;
+
+    const ordered = orderAnalyticsGrades(grades);
+    const compatibleTyped = ordered.filter((grade) => grade.gradeType && isSubjectTypeCompatibleWithGradeType(subjectType, grade.gradeType));
+    const genericGrades = ordered.filter((grade) => !grade.gradeType);
+    const candidateSets = compatibleTyped.length > 0
+      ? [compatibleTyped, genericGrades, ordered]
+      : genericGrades.length > 0
+        ? [genericGrades, ordered]
+        : [ordered];
+
+    for (const set of candidateSets) {
+      for (const grade of set) {
+        const lower = Number(grade.lowerLimit);
+        const upper = Number(grade.upperLimit);
+        if (Number.isNaN(lower) || Number.isNaN(upper)) continue;
+        if (pct >= lower && pct <= upper) return grade;
+      }
+    }
+
+    return null;
+  }
+
+  function resolveAnalyticsGradeForMark(mark: any, pct: number, candidateGrades: any[], subjectType?: string | null, fallbackGrades: any[] = []) {
+    const typedFallbackCandidates = getAnalyticsGradeCandidates(fallbackGrades, subjectType);
+    const gradePool = uniqueGradesById([...candidateGrades, ...typedFallbackCandidates, ...fallbackGrades]);
+
+    const linkedGrade = mark?.gradeId
+      ? gradePool.find((grade) => Number(grade.id) === Number(mark.gradeId))
+      : null;
+    if (linkedGrade) return linkedGrade;
+
+    // First use the profile/class-specific grade set. If that cannot resolve the
+    // mark, continue to subject-type-aware school grades, then all school grades.
+    // This is important for older marks where grade_id is empty but percentage is set.
+    for (const pool of [candidateGrades, typedFallbackCandidates, fallbackGrades]) {
+      const resolved = findGradeForPercentage(pct, pool, subjectType);
+      if (resolved) return resolved;
+    }
+
+    return null;
+  }
+
+  function isPassingAnalyticsGrade(grade: any, pct: number, fallbackPassMark = 50) {
+    const status = String(grade?.gradeStatus || "").trim().toUpperCase();
+    if (status === "PASS") return true;
+    if (status === "FAIL") return false;
+    return pct >= fallbackPassMark;
+  }
 
   // Class analytics
   app.get("/api/report-hub/class-analytics/:examId/:classId", requireAuth, async (req, res, next) => {
@@ -11504,13 +11688,20 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const classInfo = await storage.getClass(classId);
+      const [school, exam, classInfo] = await Promise.all([
+        storage.getSchool(schoolId),
+        storage.getExam(examId),
+        storage.getClass(classId),
+      ]);
       if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
       const PASS_MARK = 50;
+      const stream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+      const streamName = stream?.name || null;
       const students = await storage.getStudentsByClass(classId);
       const totalStudents = students.length;
-      const grades = await storage.getGradesBySchool(schoolId);
+      const allGrades = await storage.getGradesBySchool(schoolId);
 
       const studentSubjectIdsByStudent = new Map<number, Set<number>>();
       await Promise.all(students.map(async (student: any) => {
@@ -11536,12 +11727,41 @@ export async function registerRoutes(
       }
 
       const gradeCounts: Record<string, number> = {};
-      const subjectStats: Record<number, { sum: number; have: number; expected: number; pass: number; gradeCounts: Record<string, number> }> = {};
+      const gradeColumns: string[] = [];
+      const subjectStats: Record<number, {
+        sum: number;
+        have: number;
+        expected: number;
+        pass: number;
+        fail: number;
+        gradeCounts: Record<string, number>;
+        gradeCandidates: any[];
+        subjectType?: string | null;
+      }> = {};
 
       for (const subject of validSubjects) {
         if (!subject) continue;
+        const profileKey = resolveGradeProfileKey({
+          schoolType: school?.schoolType,
+          examinationBoard: school?.examinationBoard,
+          streamName,
+          subjectType: subject.subjectType,
+        });
+        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
+        const gradeCandidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
+        addAnalyticsGradeColumns(gradeColumns, gradeCandidates);
+
         const expected = students.filter((student: any) => studentSubjectIdsByStudent.get(student.id)?.has(subject.id)).length;
-        subjectStats[subject.id] = { sum: 0, have: 0, expected, pass: 0, gradeCounts: {} };
+        subjectStats[subject.id] = {
+          sum: 0,
+          have: 0,
+          expected,
+          pass: 0,
+          fail: 0,
+          gradeCounts: {},
+          gradeCandidates,
+          subjectType: subject.subjectType,
+        };
       }
 
       const eligibleStudentSubjectPairs = new Set<string>();
@@ -11561,38 +11781,47 @@ export async function registerRoutes(
         if (mark.percentage === null || mark.percentage === undefined) continue;
         if (!eligibleStudentSubjectPairs.has(`${mark.studentId}-${mark.subjectId}`)) continue;
         const pct = parseFloat(mark.percentage);
+        if (Number.isNaN(pct)) continue;
+
+        const stats = subjectStats[mark.subjectId];
+        if (!stats) continue;
 
         enteredCells++;
         overallSum += pct;
+        stats.sum += pct;
+        stats.have++;
 
-        const gradeLabel = mark.gradeId ? (grades.find(g => g.id === mark.gradeId)?.name || "—") : "—";
-        gradeCounts[gradeLabel] = (gradeCounts[gradeLabel] || 0) + 1;
-
-        if (subjectStats[mark.subjectId]) {
-          subjectStats[mark.subjectId].sum += pct;
-          subjectStats[mark.subjectId].have++;
-          if (pct >= PASS_MARK) subjectStats[mark.subjectId].pass++;
-          subjectStats[mark.subjectId].gradeCounts[gradeLabel] = (subjectStats[mark.subjectId].gradeCounts[gradeLabel] || 0) + 1;
+        const grade = resolveAnalyticsGradeForMark(mark, pct, stats.gradeCandidates, stats.subjectType, allGrades);
+        const gradeLabel = getGradeDisplayName(grade);
+        if (gradeLabel) {
+          gradeCounts[gradeLabel] = (gradeCounts[gradeLabel] || 0) + 1;
+          stats.gradeCounts[gradeLabel] = (stats.gradeCounts[gradeLabel] || 0) + 1;
         }
+
+        if (isPassingAnalyticsGrade(grade, pct, PASS_MARK)) stats.pass++;
+        else stats.fail++;
       }
 
       const expectedCells = Object.values(subjectStats).reduce((sum, stats) => sum + stats.expected, 0);
       const completion = expectedCells > 0 ? Math.round((enteredCells / expectedCells) * 100) : 0;
-      const overallAvg = expectedCells > 0 ? Math.round(overallSum / expectedCells) : 0;
+      const overallAvg = enteredCells > 0 ? Math.round(overallSum / enteredCells) : 0;
 
       const subjectSummary = validSubjects.map(subject => {
         if (!subject) return null;
         const stats = subjectStats[subject.id];
         if (!stats) return null;
-        const avg = stats.expected > 0 ? Math.round(stats.sum / stats.expected) : 0;
+        const avg = stats.have > 0 ? Math.round(stats.sum / stats.have) : 0;
         const subCompletion = stats.expected > 0 ? Math.round((stats.have / stats.expected) * 100) : 0;
-        const passRate = stats.expected > 0 ? Math.round((stats.pass / stats.expected) * 100) : 0;
+        const gradedTotal = stats.pass + stats.fail;
+        const passRate = gradedTotal > 0 ? Math.round((stats.pass / gradedTotal) * 100) : 0;
 
         return {
           subjectId: subject.id,
-          subjectName: subject.name,
+          subjectName: getReportSubjectLabel(subject),
           avg,
           completion: subCompletion,
+          passed: stats.pass,
+          failed: stats.fail,
           passRate,
           gradeCounts: stats.gradeCounts,
           totalStudents: stats.expected,
@@ -11600,10 +11829,13 @@ export async function registerRoutes(
       }).filter(Boolean);
 
       res.json({
+        examName: exam?.examName || "",
+        className: classInfo.className,
         overallAvg,
         completion,
         enteredCells,
         expectedCells,
+        gradeColumns,
         gradeCounts,
         subjectSummary,
         totalStudents,
@@ -11623,17 +11855,37 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
+      const [exam, stream, school] = await Promise.all([
+        storage.getExam(examId),
+        storage.getStream(streamId),
+        storage.getSchool(schoolId),
+      ]);
+      if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+
       const allClasses = await storage.getAllClasses();
       const streamClasses = allClasses.filter(c => c.schoolId === schoolId && c.streamId === streamId);
+      const streamName = stream?.name || streamClasses[0]?.className || "";
+      const showPointsColumn = shouldShowMeritPointsColumn({ streamName });
       const classIds = streamClasses.map(c => c.id);
-      if (classIds.length === 0) return res.json({ subjects: [], rows: [], totalStudents: 0 });
+      if (classIds.length === 0) return res.json({ examName: exam?.examName || "", streamName, subjects: [], rows: [], totalStudents: 0, showPointsColumn });
+
+      const allGrades = await storage.getGradesBySchool(schoolId);
 
       let allStudents: any[] = [];
       for (const cls of streamClasses) {
         const classStudents = await storage.getStudentsByClass(cls.id);
         allStudents = allStudents.concat(classStudents);
       }
-      if (allStudents.length === 0) return res.json({ subjects: [], rows: [], totalStudents: 0 });
+      if (allStudents.length === 0) return res.json({ examName: exam?.examName || "", streamName, subjects: [], rows: [], totalStudents: 0, showPointsColumn });
+
+      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+      await Promise.all(allStudents.map(async (student: any) => {
+        const rows = await storage.getStudentSubjects(student.id);
+        studentSubjectIdsByStudent.set(
+          student.id,
+          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
+        );
+      }));
 
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
       const streamAssessments = allAssessmentsRaw.filter(a => classIds.includes(a.classId));
@@ -11644,53 +11896,102 @@ export async function registerRoutes(
         allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
       }
 
-      const subjectFreq: Record<number, number> = {};
-      for (const mark of allMarks) {
-        if (mark.percentage !== null && mark.percentage !== undefined) {
-          subjectFreq[mark.subjectId] = (subjectFreq[mark.subjectId] || 0) + 1;
-        }
+      const subjectIds = Array.from(new Set(streamAssessments.map((assessment: any) => Number(assessment.subjectId))));
+      const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
+      const subjectById = new Map<number, any>();
+      for (const subject of subjectsData) {
+        if (subject) subjectById.set(Number(subject.id), subject);
       }
+      const validSubjectIds = subjectIds.filter((id) => subjectById.has(Number(id)));
 
-      const topSubjectIds = Object.entries(subjectFreq)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 6)
-        .map(e => parseInt(e[0]));
+      const gradeCandidatesBySubjectClass = new Map<string, any[]>();
+      const getSubjectClassGradeCandidates = (subject: any, classId: number) => {
+        const key = `${subject.id}-${classId}`;
+        const existing = gradeCandidatesBySubjectClass.get(key);
+        if (existing) return existing;
+        const profileKey = resolveGradeProfileKey({
+          schoolType: school?.schoolType,
+          examinationBoard: school?.examinationBoard,
+          streamName,
+          subjectType: subject.subjectType,
+        });
+        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
+        const candidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
+        gradeCandidatesBySubjectClass.set(key, candidates);
+        return candidates;
+      };
 
-      const topSubjects = await Promise.all(topSubjectIds.map(id => storage.getSubject(id)));
-
-      const perStudent: Record<number, { sum: number; cnt: number; top: Record<number, number | null> }> = {};
+      const perStudent: Record<number, {
+        sum: number;
+        have: number;
+        eligibleCount: number;
+        points: number;
+        displays: Record<number, string>;
+        raw: Record<number, number>;
+        pointRaw: Record<number, number>;
+      }> = {};
       for (const student of allStudents) {
-        perStudent[student.id] = { sum: 0, cnt: 0, top: {} };
+        const eligibleSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
+        const eligibleCount = validSubjectIds.filter((subjectId) => eligibleSubjectIds.has(Number(subjectId))).length;
+        perStudent[student.id] = { sum: 0, have: 0, eligibleCount, points: 0, displays: {}, raw: {}, pointRaw: {} };
       }
 
       for (const mark of allMarks) {
-        if (!perStudent[mark.studentId]) continue;
-        if (mark.percentage !== null && mark.percentage !== undefined) {
-          const pct = parseFloat(mark.percentage);
-          perStudent[mark.studentId].sum += pct;
-          perStudent[mark.studentId].cnt++;
+        const target = perStudent[Number(mark.studentId)];
+        if (!target) continue;
+        if (mark.percentage === null || mark.percentage === undefined) continue;
 
-          if (topSubjectIds.includes(mark.subjectId)) {
-            perStudent[mark.studentId].top[mark.subjectId] = pct;
-          }
+        const eligibleSubjectIds = studentSubjectIdsByStudent.get(Number(mark.studentId));
+        if (eligibleSubjectIds && eligibleSubjectIds.size > 0 && !eligibleSubjectIds.has(Number(mark.subjectId))) continue;
+
+        const subject = subjectById.get(Number(mark.subjectId));
+        if (!subject) continue;
+
+        const pct = parseFloat(mark.percentage);
+        if (Number.isNaN(pct)) continue;
+
+        const subjectId = Number(mark.subjectId);
+        if (target.raw[subjectId] === undefined) {
+          target.sum += pct;
+          target.have++;
+        } else {
+          target.sum += pct - target.raw[subjectId];
         }
+
+        target.raw[subjectId] = pct;
+        const gradeCandidates = getSubjectClassGradeCandidates(subject, mark.classId);
+        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType, allGrades);
+        const gradeLabel = getGradeDisplayName(grade);
+        const gradePoints = getMeritGradePoints(grade);
+        if (target.pointRaw[subjectId] === undefined) {
+          target.points += gradePoints;
+        } else {
+          target.points += gradePoints - target.pointRaw[subjectId];
+        }
+        target.pointRaw[subjectId] = gradePoints;
+        target.displays[subjectId] = formatMeritMarkDisplay(pct, gradeLabel);
       }
 
       const ranked = allStudents
         .map(student => {
           const data = perStudent[student.id];
-          const avg = data.cnt > 0 ? data.sum / data.cnt : -1;
-          return { student, avg, total: data.sum, cnt: data.cnt, top: data.top };
+          if (!data || data.eligibleCount <= 0) return null;
+          const avg = data.sum / data.eligibleCount;
+          return { student, avg, total: data.sum, data };
         })
-        .filter(r => r.avg >= 0)
-        .sort((a, b) => {
-          if (b.avg !== a.avg) return b.avg - a.avg;
-          return b.total - a.total;
-        });
+        .filter(Boolean) as Array<{ student: any; avg: number; total: number; data: { eligibleCount: number; points: number; displays: Record<number, string> } }>;
+
+      ranked.sort((a, b) => {
+        if (b.avg !== a.avg) return b.avg - a.avg;
+        if (b.total !== a.total) return b.total - a.total;
+        const aName = `${a.student.firstName} ${a.student.lastName}`;
+        const bName = `${b.student.firstName} ${b.student.lastName}`;
+        return aName.localeCompare(bName);
+      });
 
       let strmPos = 0;
       let strmLastAvg: number | null = null;
-      const rows = ranked.slice(0, 60).map((r, index) => {
+      const rows = ranked.map((r, index) => {
         if (r.avg !== strmLastAvg) {
           strmPos = index + 1;
           strmLastAvg = r.avg;
@@ -11698,20 +11999,21 @@ export async function registerRoutes(
         return {
           studentName: `${r.student.firstName} ${r.student.lastName}`,
           admissionNo: r.student.admissionNo,
-          total: `${Math.round(r.total)}/${r.cnt * 100}`,
+          total: `${Math.round(r.total)}/${r.data.eligibleCount * 100}`,
           avg: `${Math.round(r.avg)}%`,
+          points: formatMeritPoints(r.data.points),
           position: `${strmPos}/${ranked.length}`,
-          subjectMarks: topSubjectIds.map(sid => {
-            const v = r.top[sid];
-            return v !== null && v !== undefined ? `${Math.round(v)}%` : "\u2013";
-          }),
+          subjectMarks: validSubjectIds.map(sid => r.data.displays[sid] || "-"),
         };
       });
 
       res.json({
-        subjects: topSubjects.filter(Boolean).map(s => s!.name),
+        examName: exam?.examName || "",
+        streamName,
+        subjects: validSubjectIds.map((subjectId) => getReportSubjectLabel(subjectById.get(Number(subjectId)))).filter(Boolean),
         rows,
         totalStudents: allStudents.length,
+        showPointsColumn,
       });
     } catch (error) {
       next(error);
@@ -11727,12 +12029,39 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
+      const [school, exam, stream] = await Promise.all([
+        storage.getSchool(schoolId),
+        storage.getExam(examId),
+        storage.getStream(streamId),
+      ]);
+      if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+
+      const PASS_MARK = 50;
       const allClasses = await storage.getAllClasses();
       const streamClasses = allClasses.filter(c => c.schoolId === schoolId && c.streamId === streamId);
       const classIds = streamClasses.map(c => c.id);
-      if (classIds.length === 0) return res.json({ rows: [] });
+      if (classIds.length === 0) {
+        return res.json({ examName: exam?.examName || "", streamName: stream?.name || "", gradeColumns: [], rows: [] });
+      }
 
-      const grades = await storage.getGradesBySchool(schoolId);
+      const streamName = stream?.name || streamClasses[0]?.className || "";
+      const allGrades = await storage.getGradesBySchool(schoolId);
+
+      let allStudents: any[] = [];
+      for (const cls of streamClasses) {
+        const classStudents = await storage.getStudentsByClass(cls.id);
+        allStudents = allStudents.concat(classStudents);
+      }
+      const streamStudentIds = new Set(allStudents.map((student: any) => Number(student.id)));
+
+      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+      await Promise.all(allStudents.map(async (student: any) => {
+        const rows = await storage.getStudentSubjects(student.id);
+        studentSubjectIdsByStudent.set(
+          student.id,
+          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
+        );
+      }));
 
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
       const streamAssessments = allAssessmentsRaw.filter(a => classIds.includes(a.classId));
@@ -11743,31 +12072,85 @@ export async function registerRoutes(
         allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
       }
 
-      const bySubject: Record<number, { sum: number; cnt: number; pass: number; fail: number; gradeCounts: Record<string, number> }> = {};
+      const subjectIds = [...new Set(streamAssessments.map((assessment: any) => Number(assessment.subjectId)))];
+      const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
+      const subjectById = new Map<number, any>();
+      for (const subject of subjectsData) {
+        if (subject) subjectById.set(Number(subject.id), subject);
+      }
+
+      const gradeColumns: string[] = [];
+      const gradeCandidatesBySubjectClass = new Map<string, any[]>();
+      const getSubjectClassGradeCandidates = (subject: any, classId: number) => {
+        const key = `${subject.id}-${classId}`;
+        const existing = gradeCandidatesBySubjectClass.get(key);
+        if (existing) return existing;
+        const profileKey = resolveGradeProfileKey({
+          schoolType: school?.schoolType,
+          examinationBoard: school?.examinationBoard,
+          streamName,
+          subjectType: subject.subjectType,
+        });
+        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
+        const candidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
+        gradeCandidatesBySubjectClass.set(key, candidates);
+        addAnalyticsGradeColumns(gradeColumns, candidates);
+        return candidates;
+      };
+
+      for (const assessment of streamAssessments) {
+        const subject = subjectById.get(Number(assessment.subjectId));
+        if (subject) getSubjectClassGradeCandidates(subject, assessment.classId);
+      }
+
+      const bySubject: Record<number, {
+        sum: number;
+        cnt: number;
+        pass: number;
+        fail: number;
+        gradeCounts: Record<string, number>;
+        subjectType?: string | null;
+      }> = {};
 
       for (const mark of allMarks) {
         if (mark.percentage === null || mark.percentage === undefined) continue;
+        if (!streamStudentIds.has(Number(mark.studentId))) continue;
+        const eligibleSubjectIds = studentSubjectIdsByStudent.get(mark.studentId);
+        if (eligibleSubjectIds && eligibleSubjectIds.size > 0 && !eligibleSubjectIds.has(Number(mark.subjectId))) continue;
+
         const pct = parseFloat(mark.percentage);
-        const subId = mark.subjectId;
+        if (Number.isNaN(pct)) continue;
+        const subId = Number(mark.subjectId);
+        let subject = subjectById.get(subId);
+        if (!subject) {
+          subject = await storage.getSubject(subId);
+          if (subject) subjectById.set(subId, subject);
+        }
+        if (!subject) continue;
+
+        const gradeCandidates = getSubjectClassGradeCandidates(subject, mark.classId);
 
         if (!bySubject[subId]) {
-          bySubject[subId] = { sum: 0, cnt: 0, pass: 0, fail: 0, gradeCounts: {} };
+          bySubject[subId] = { sum: 0, cnt: 0, pass: 0, fail: 0, gradeCounts: {}, subjectType: subject.subjectType };
         }
 
         bySubject[subId].sum += pct;
         bySubject[subId].cnt++;
-        if (pct >= 50) bySubject[subId].pass++;
-        else bySubject[subId].fail++;
 
-        const gradeLabel = mark.gradeId ? (grades.find(g => g.id === mark.gradeId)?.name || "") : "";
+        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType, allGrades);
+        const gradeLabel = getGradeDisplayName(grade);
         if (gradeLabel) {
           bySubject[subId].gradeCounts[gradeLabel] = (bySubject[subId].gradeCounts[gradeLabel] || 0) + 1;
         }
+
+        if (isPassingAnalyticsGrade(grade, pct, PASS_MARK)) bySubject[subId].pass++;
+        else bySubject[subId].fail++;
       }
 
       const rows = [];
       for (const [subId, stats] of Object.entries(bySubject)) {
-        const subject = await storage.getSubject(parseInt(subId));
+        let subject = subjectById.get(Number(subId));
+        if (!subject) subject = await storage.getSubject(parseInt(subId));
         if (!subject) continue;
 
         const avg = stats.cnt > 0 ? Math.round(stats.sum / stats.cnt) : 0;
@@ -11776,7 +12159,7 @@ export async function registerRoutes(
 
         rows.push({
           subjectId: parseInt(subId),
-          subjectName: subject.name,
+          subjectName: getReportSubjectLabel(subject),
           avg,
           passed: stats.pass,
           failed: stats.fail,
@@ -11787,7 +12170,12 @@ export async function registerRoutes(
 
       rows.sort((a, b) => a.subjectName.localeCompare(b.subjectName));
 
-      res.json({ rows });
+      res.json({
+        examName: exam?.examName || "",
+        streamName,
+        gradeColumns,
+        rows,
+      });
     } catch (error) {
       next(error);
     }

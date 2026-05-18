@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -222,27 +222,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string, loginRole?: string) => {
     await loginMutation.mutateAsync({ username, password, loginRole });
-  }, [loginMutation]);
+  }, [loginMutation.mutateAsync]);
 
   const logout = useCallback(async (reason: LogoutReason = "manual") => {
     await logoutMutation.mutateAsync(reason);
-  }, [logoutMutation]);
+  }, [logoutMutation.mutateAsync]);
 
   const register = useCallback(async (data: RegisterData) => {
     await registerMutation.mutateAsync(data);
-  }, [registerMutation]);
+  }, [registerMutation.mutateAsync]);
 
-  const enterSchool = (schoolId: number) => {
+  const enterSchool = useCallback((schoolId: number) => {
     setCurrentSchoolId(schoolId);
     localStorage.setItem("currentSchoolId", schoolId.toString());
     queryClient.invalidateQueries();
-  };
+  }, []);
 
-  const exitSchool = () => {
+  const exitSchool = useCallback(() => {
     setCurrentSchoolId(null);
     localStorage.removeItem("currentSchoolId");
     queryClient.invalidateQueries();
-  };
+  }, []);
 
   useEffect(() => {
     if (!user) {
@@ -355,30 +355,50 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [handleSessionEnded]);
 
+  const normalizedUser = user ?? null;
   const isInSchoolContext = user?.role === "org_admin" ? currentSchoolId !== null : true;
 
   const schoolTermination = user?.schoolTermination ?? null;
-  const permissions = user?.effectivePermissions ?? [];
-  const hasPermission = (permission: string) => permissions.includes(permission);
-  const hasAnyPermission = (...permissionCodes: string[]) => permissionCodes.some(permission => permissions.includes(permission));
+  const permissions = useMemo(() => user?.effectivePermissions ?? [], [user?.effectivePermissions]);
+  const hasPermission = useCallback((permission: string) => permissions.includes(permission), [permissions]);
+  const hasAnyPermission = useCallback(
+    (...permissionCodes: string[]) => permissionCodes.some(permission => permissions.includes(permission)),
+    [permissions],
+  );
+
+  const contextValue = useMemo<AuthContextType>(() => ({
+    user: normalizedUser,
+    isLoading,
+    currentSchoolId,
+    setCurrentSchoolId,
+    isInSchoolContext,
+    schoolTermination,
+    permissions,
+    hasPermission,
+    hasAnyPermission,
+    login,
+    logout,
+    register,
+    enterSchool,
+    exitSchool,
+  }), [
+    normalizedUser,
+    isLoading,
+    currentSchoolId,
+    isInSchoolContext,
+    schoolTermination,
+    permissions,
+    hasPermission,
+    hasAnyPermission,
+    login,
+    logout,
+    register,
+    enterSchool,
+    exitSchool,
+  ]);
 
   return (
-    <AuthContext.Provider value={{ 
-      user: user ?? null, 
-      isLoading, 
-      currentSchoolId,
-      setCurrentSchoolId,
-      isInSchoolContext,
-      schoolTermination,
-      permissions,
-      hasPermission,
-      hasAnyPermission,
-      login, 
-      logout, 
-      register,
-      enterSchool,
-      exitSchool,
-    }}>
+    <AuthContext.Provider value={contextValue}>
       {children}
       <AlertDialog open={sessionWarningOpen}>
         <AlertDialogContent className="sm:max-w-md">

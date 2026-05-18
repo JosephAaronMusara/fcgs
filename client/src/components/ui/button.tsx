@@ -46,7 +46,7 @@ export interface ButtonProps
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, style, ...props }, ref) => {
+  ({ className, variant, size, asChild = false, style, type, ...props }, ref) => {
     const Comp = asChild ? Slot : "button"
     const hasCustomColor = className?.includes("text-") || style?.color
     const outlineStyle = variant === "outline" && !hasCustomColor
@@ -57,6 +57,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         className={cn(buttonVariants({ variant, size, className }))}
         ref={ref}
         style={outlineStyle}
+        {...(!asChild ? { type: type ?? "button" } : {})}
         {...props}
       />
     )
