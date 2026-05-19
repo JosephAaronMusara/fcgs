@@ -311,7 +311,7 @@ export const assessments = pgTable("assessments", {
   termId: integer("term_id"),
   year: integer("year"),
   examId: integer("exam_id"),
-  isPublished: boolean("is_published").default(false),
+  isPublished: boolean("is_published").default(true),
   createdBy: integer("created_by").references(() => staff.id),
   createdAt: timestamp("created_at").defaultNow(),
 });
