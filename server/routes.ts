@@ -9368,6 +9368,7 @@ export async function registerRoutes(
         assessmentTypeId: assessmentData.assessmentTypeId ? Number(assessmentData.assessmentTypeId) : null,
         examId: assessmentData.examId ? Number(assessmentData.examId) : null,
         name: assessmentData.name || assessmentData.topic,
+        isPublished: true,
       };
 
       const assessment = await storage.createAssessment(assessmentWithName);
@@ -9426,6 +9427,7 @@ export async function registerRoutes(
         examId: assessmentData.examId === undefined
           ? scoped.assessment.examId
           : (assessmentData.examId ? Number(assessmentData.examId) : null),
+        isPublished: true,
       };
 
       const updated = await storage.updateAssessment(scoped.assessment.id, updatePayload);

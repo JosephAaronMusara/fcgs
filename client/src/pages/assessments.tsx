@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Pencil, Trash2, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, RotateCcw, X, Menu, MessageSquare, ClipboardList } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, ChevronLeft, ChevronRight, AlertTriangle, FileText, X, Menu, MessageSquare, ClipboardList } from "lucide-react";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 import { useAuth } from "@/lib/auth";
@@ -354,23 +354,6 @@ export default function AssessmentsPage() {
     },
   });
 
-  const publishMutation = useMutation({
-    mutationFn: async ({ id, publish }: { id: number; publish: boolean }) => {
-      const res = await apiRequest("PUT", `/api/assessments/${id}`, { isPublished: publish });
-      return res.json();
-    },
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/assessments"] });
-      toast({ 
-        title: "Success", 
-        description: variables.publish ? "Assessment published successfully" : "Assessment unpublished" 
-      });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    },
-  });
-
   const filteredAssessments = (assessments || []).filter((a) => {
     const matchSearch = !debouncedSearch || 
       a.topic?.toLowerCase().includes(debouncedSearch.toLowerCase());
@@ -513,7 +496,6 @@ export default function AssessmentsPage() {
                   <SortableTableHead sortKey="assessmentTypeId" sortConfig={sortConfig} onSort={requestSort}>Type</SortableTableHead>
                   <SortableTableHead sortKey="date" sortConfig={sortConfig} onSort={requestSort}>Date</SortableTableHead>
                   <SortableTableHead sortKey="numberOfPapers" sortConfig={sortConfig} onSort={requestSort}>Papers</SortableTableHead>
-                  <SortableTableHead sortKey="status" sortConfig={sortConfig} onSort={requestSort}>Status</SortableTableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -530,28 +512,8 @@ export default function AssessmentsPage() {
                     <TableCell>
                       <Badge variant="secondary">{a.papers?.length || 0} papers</Badge>
                     </TableCell>
-                    <TableCell>
-                      {a.isPublished ? (
-                        <Badge>Published</Badge>
-                      ) : (
-                        <Badge variant="outline">Draft</Badge>
-                      )}
-                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => publishMutation.mutate({ id: a.id, publish: !a.isPublished })}
-                          data-testid={`button-publish-${a.id}`}
-                          title={a.isPublished ? "Unpublish assessment" : "Publish assessment"}
-                        >
-                          {a.isPublished ? (
-                            <RotateCcw className="w-4 h-4" />
-                          ) : (
-                            <Send className="w-4 h-4" />
-                          )}
-                        </Button>
                         <Button
                           variant="ghost"
                           size="icon"

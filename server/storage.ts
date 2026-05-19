@@ -1355,12 +1355,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createAssessment(assessmentData: InsertAssessment): Promise<Assessment> {
-    const [newAssessment] = await db.insert(assessments).values(assessmentData).returning();
+    const [newAssessment] = await db.insert(assessments).values({
+      ...assessmentData,
+      isPublished: true,
+    }).returning();
     return newAssessment;
   }
 
   async updateAssessment(id: number, assessmentData: Partial<InsertAssessment>): Promise<Assessment | undefined> {
-    const [updated] = await db.update(assessments).set(assessmentData).where(eq(assessments.id, id)).returning();
+    const [updated] = await db.update(assessments).set({
+      ...assessmentData,
+      isPublished: true,
+    }).where(eq(assessments.id, id)).returning();
     return updated;
   }
 
