@@ -131,7 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         title: reason === "timeout" ? "Session timed out" : reason === "logout" ? "Signed out" : "Session expired",
         description:
           reason === "timeout"
-            ? "You were signed out after 60 minutes of inactivity. Please log in again."
+            ? "You were signed out after 30 minutes of inactivity. Please log in again."
             : reason === "logout"
               ? "You were signed out in another tab."
               : "Your session is no longer active. Please log in again.",

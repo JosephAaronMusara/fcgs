@@ -15,7 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Trash2, GraduationCap, Download, Bell, Upload, BookOpen, UserCog, KeyRound, Eye, EyeOff, ArrowRightLeft, UserPlus, Camera, X, ChevronDown, Phone, Mail } from "lucide-react";
+import { Plus, Search, Trash2, GraduationCap, Download, Bell, Upload, BookOpen, UserCog, KeyRound, Eye, EyeOff, ArrowRightLeft, UserPlus, Camera, X, ChevronDown, Phone, Mail, ChevronLeft, ChevronRight } from "lucide-react";
 import type { Student, Class, Parent, Subject, Stream, User, School, Hostel, Staff } from "@shared/schema";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
@@ -24,12 +24,25 @@ import { ResidentialAreaInput } from "@/components/residential-area-input";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 
+type PaginatedResponse<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+};
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 export default function StudentsPage() {
   const { toast } = useToast();
   const { currentSchoolId } = useAuth();
   const [search, setSearch] = useState("");
   const [classFilter, setClassFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [viewingStudent, setViewingStudent] = useState<Student | null>(null);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
@@ -41,6 +54,16 @@ export default function StudentsPage() {
   const [quickAddParentOpen, setQuickAddParentOpen] = useState(false);
   const [recentQuickAddedParent, setRecentQuickAddedParent] = useState<Parent | null>(null);
   const quickAddParentFlowRef = useRef(false);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+    setSelectedStudentIds([]);
+  }, [debouncedSearch, classFilter, statusFilter, pageSize]);
 
   const clearQuickAddParentFlowAfterClose = () => {
     setTimeout(() => {
@@ -89,14 +112,19 @@ export default function StudentsPage() {
 
   const studentListMode = statusFilter === "archived" ? "archived" : "records";
 
-  const { data: students, isLoading } = useQuery<Student[]>({
-    queryKey: ["/api/students", studentListMode],
+  const { data: studentPageData, isLoading } = useQuery<PaginatedResponse<Student>>({
+    queryKey: ["/api/students", studentListMode, page, pageSize, debouncedSearch, classFilter, statusFilter],
     queryFn: async () => {
-      const url = statusFilter === "archived"
-        ? "/api/students?status=archived"
-        : "/api/students";
+      const params = new URLSearchParams({
+        paginated: "true",
+        page: page.toString(),
+        pageSize: pageSize.toString(),
+      });
+      if (debouncedSearch) params.set("search", debouncedSearch);
+      if (classFilter !== "all") params.set("classId", classFilter);
+      if (statusFilter !== "all") params.set("status", statusFilter);
 
-      const res = await schoolFetch(url);
+      const res = await schoolFetch(`/api/students?${params.toString()}`);
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`${res.status}: ${text || res.statusText}`);
@@ -104,14 +132,21 @@ export default function StudentsPage() {
 
       return res.json();
     },
+    placeholderData: (previousData) => previousData,
   });
+
+  const students = studentPageData?.items || [];
+  const totalStudents = studentPageData?.total || 0;
+  const totalPages = studentPageData?.totalPages || 1;
 
   const { data: classes } = useQuery<Class[]>({
     queryKey: ["/api/classes"],
   });
 
+  const shouldLoadParentDirectory = isAddOpen || !!editingStudent || quickAddParentOpen;
   const { data: parents, refetch: refetchParents } = useQuery<Parent[]>({
     queryKey: ["/api/parents"],
+    enabled: shouldLoadParentDirectory,
   });
 
   const { data: streams } = useQuery<Stream[]>({
@@ -124,10 +159,12 @@ export default function StudentsPage() {
 
   const { data: nextAdmissionNo } = useQuery<{ admissionNo: string }>({
     queryKey: ["/api/students/next-admission-no"],
+    enabled: isAddOpen,
   });
 
   const { data: staff } = useQuery<Staff[]>({
     queryKey: ["/api/staff"],
+    enabled: quickAddParentOpen,
   });
 
   const { data: school } = useQuery<School>({
@@ -217,8 +254,8 @@ export default function StudentsPage() {
   });
 
   const importMutation = useMutation({
-    mutationFn: async (studentData: Array<Record<string, unknown>>) => {
-      const res = await apiRequest("POST", "/api/students/import", { students: studentData });
+    mutationFn: async ({ rows, fileName }: { rows: Array<Record<string, unknown>>; fileName?: string }) => {
+      const res = await apiRequest("POST", "/api/students/import", { students: rows, fileName });
       return res.json();
     },
     onSuccess: (data: { imported: number; skipped: number; parentsCreated: number; classesCreated: number; total: number; errors?: string[] }) => {
@@ -263,24 +300,7 @@ export default function StudentsPage() {
     },
   });
 
-  const filteredStudents = students?.filter((s) => {
-    const matchesSearch = `${s.firstName} ${s.lastName} ${s.admissionNo}`
-      .toLowerCase()
-      .includes(search.toLowerCase());
-
-    const matchesClass = classFilter === "all" || s.classId?.toString() === classFilter;
-    const isArchived = !!s.archivedAt;
-    const studentStatus = String(s.status || "active").toLowerCase();
-
-    const matchesStatus =
-      statusFilter === "all"
-        ? !isArchived
-        : statusFilter === "archived"
-          ? isArchived
-          : !isArchived && studentStatus === statusFilter;
-
-    return matchesSearch && matchesClass && matchesStatus;
-  });
+  const filteredStudents = students;
 
   const { sortedData: sortedStudents, sortConfig, requestSort } = useTableSort(filteredStudents);
 
@@ -303,7 +323,9 @@ export default function StudentsPage() {
     return parents?.find((p) => p.id === parentId);
   };
 
-  const getParentName = (parentId: number | null | undefined) => {
+  const getParentName = (parentId: number | null | undefined, student?: Student) => {
+    const parentName = (student as any)?.parentName;
+    if (parentName) return parentName;
     const parent = getParent(parentId);
     return parent ? `${parent.firstName} ${parent.lastName}` : "-";
   };
@@ -348,6 +370,12 @@ export default function StudentsPage() {
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
+    const genderValue = formData.get("gender") as "male" | "female" | undefined;
+    if (!genderValue) {
+      toast({ title: "Missing required field", description: "Please select the student's gender.", variant: "destructive" });
+      return;
+    }
+
     const data: Partial<Student> = {
       admissionNo: formData.get("admissionNo") as string,
       firstName: formData.get("firstName") as string,
@@ -356,7 +384,7 @@ export default function StudentsPage() {
       passportNumber: (formData.get("passportNumber") as string) || undefined,
       email: formData.get("email") as string || undefined,
       phone: formData.get("phone") as string || undefined,
-      gender: formData.get("gender") as "male" | "female" | undefined,
+      gender: genderValue,
       dateOfBirth: formData.get("dateOfBirth") as string || undefined,
       streetAddress: formData.get("streetAddress") as string || undefined,
       residentialArea: formData.get("residentialArea") as string || undefined,
@@ -378,13 +406,26 @@ export default function StudentsPage() {
     }
   };
 
-  const handleExport = () => {
-    if (!filteredStudents?.length) {
+  const handleExport = async () => {
+    const params = new URLSearchParams({ paginated: "true", page: "1", pageSize: "100000" });
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    if (classFilter !== "all") params.set("classId", classFilter);
+    if (statusFilter !== "all") params.set("status", statusFilter);
+
+    const exportRes = await schoolFetch(`/api/students?${params.toString()}`);
+    if (!exportRes.ok) {
+      toast({ title: "Export failed", description: "Could not load student data for export", variant: "destructive" });
+      return;
+    }
+    const exportPage = (await exportRes.json()) as PaginatedResponse<Student>;
+    const exportStudents = exportPage.items || [];
+
+    if (!exportStudents.length) {
       toast({ title: "No data", description: "No students to export", variant: "destructive" });
       return;
     }
 
-    const exportData = filteredStudents.map(s => ({
+    const exportData = exportStudents.map(s => ({
       "Admission No": s.admissionNo,
       "First Name": s.firstName,
       "Last Name": s.lastName,
@@ -397,7 +438,7 @@ export default function StudentsPage() {
       "City": s.address || "",
       "Class": getClassName(s.classId),
       ...(isBoardingSchool ? { "Hostel": getHostelName(s) || "N/A" } : {}),
-      "Parent": getParentName(s.parentId),
+      "Parent": getParentName(s.parentId, s),
       "Status": s.status || "active",
       "Enrollment Date": s.enrollmentDate || "",
     }));
@@ -462,7 +503,7 @@ export default function StudentsPage() {
         }
 
         toast({ title: "Importing", description: `Processing ${studentData.length} students...` });
-        importMutation.mutate(studentData);
+        importMutation.mutate({ rows: studentData, fileName: file.name });
       } catch (error) {
         toast({ title: "Error", description: "Failed to parse file", variant: "destructive" });
       }
@@ -592,7 +633,7 @@ export default function StudentsPage() {
             </Select>
             <Badge variant="secondary" className="flex items-center gap-1">
               <GraduationCap className="w-3 h-3" />
-              {filteredStudents?.length || 0} Students
+              {totalStudents} Students
             </Badge>
           </div>
 
@@ -671,7 +712,7 @@ export default function StudentsPage() {
                           </span>
                         </TableCell>
                       )}
-                      <TableCell className="text-sm">{getParentName(s.parentId)}</TableCell>
+                      <TableCell className="text-sm">{getParentName(s.parentId, s)}</TableCell>
                       <TableCell>
                         <Button
                           variant="outline"
@@ -720,7 +761,7 @@ export default function StudentsPage() {
                               <StudentView
                                 student={s}
                                 className={getClassName(s.classId)}
-                                parentName={getParentName(s.parentId)}
+                                parentName={getParentName(s.parentId, s)}
                                 parent={getParent(s.parentId)}
                                 streamName={streams?.find((st) => st.id === s.streamId)?.name || "-"}
                                 hostelName={getHostelName(s) || "-"}
@@ -1014,6 +1055,34 @@ export default function StudentsPage() {
                     No students found
                   </div>
                 )}
+              </div>
+
+              <div className="mt-4 flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm text-muted-foreground">
+                  Showing {totalStudents === 0 ? 0 : (page - 1) * pageSize + 1}
+                  -{Math.min(page * pageSize, totalStudents)} of {totalStudents} students
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={pageSize.toString()} onValueChange={(value) => setPageSize(parseInt(value, 10))}>
+                    <SelectTrigger className="h-9 w-[120px]" data-testid="select-students-page-size">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PAGE_SIZE_OPTIONS.map((option) => (
+                        <SelectItem key={option} value={option.toString()}>{option} / page</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button variant="outline" size="sm" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1}>
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous
+                  </Button>
+                  <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
+                  <Button variant="outline" size="sm" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} disabled={page >= totalPages}>
+                    Next
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             </>
           )}

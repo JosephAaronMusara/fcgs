@@ -3,10 +3,10 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, libraryShelves as libraryShelvesTable } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, libraryShelves as libraryShelvesTable } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
-import { eq, and, or, inArray, sql, like, desc } from "drizzle-orm";
+import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
@@ -491,6 +491,133 @@ function logActivity(req: Request, data: Omit<InsertActivityLog, "userId" | "use
     userRole: user.role,
     ipAddress: req.ip || req.socket.remoteAddress || null,
   }).catch(() => {});
+}
+
+
+type PaginatedResult<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+};
+
+function shouldUsePagination(req: Request) {
+  return req.query.paginated === "true" || req.query.page !== undefined || req.query.pageSize !== undefined;
+}
+
+function parsePagination(req: Request) {
+  const page = Math.max(1, Number.parseInt(String(req.query.page || "1"), 10) || 1);
+  const requestedPageSize = Number.parseInt(String(req.query.pageSize || req.query.limit || "25"), 10) || 25;
+  const pageSize = Math.min(100000, Math.max(1, requestedPageSize));
+  const offset = (page - 1) * pageSize;
+  return { page, pageSize, offset };
+}
+
+function normalizeSearch(value: unknown) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function toPaginatedResult<T>(items: T[], total: number, page: number, pageSize: number): PaginatedResult<T> {
+  return {
+    items,
+    total,
+    page,
+    pageSize,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  };
+}
+
+function getBodyCount(body: any): number | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  for (const key of ["students", "parents", "staff", "records", "books", "items", "rows"]) {
+    if (Array.isArray(body[key])) return body[key].length;
+  }
+  return undefined;
+}
+
+function auditCategoryForPath(pathname: string) {
+  const clean = pathname.replace(/^\/api\//, "");
+  const first = clean.split("/")[0] || "system";
+  const map: Record<string, string> = {
+    students: "students",
+    parents: "parents",
+    staff: "staff",
+    clinic: "clinic",
+    fees: "finance",
+    library: "library",
+    classes: "classes",
+    subjects: "subjects",
+    assessments: "assessments",
+    attendance: "attendance",
+    applications: "applications",
+    schools: "settings",
+    users: "users",
+    permissions: "access_control",
+    "access-groups": "access_control",
+    notifications: "communication",
+    newsletters: "communication",
+    communication: "communication",
+  };
+  return map[first] || first;
+}
+
+function auditActionForRequest(req: Request) {
+  const pathname = req.path || req.originalUrl || "";
+  if (/\/import/.test(pathname)) return "import";
+  if (/\/upload|\/photo|\/cover/.test(pathname)) return "upload";
+  if (req.method === "POST") return "create";
+  if (req.method === "PUT" || req.method === "PATCH") return "update";
+  if (req.method === "DELETE") return "delete";
+  return req.method.toLowerCase();
+}
+
+function buildAuditDescription(req: Request, action: string, category: string) {
+  const user = req.user as User | undefined;
+  const userName = user?.firstName ? `${user.firstName} ${user.lastName || ""}`.trim() : user?.username || "System";
+  const target = (req.path || req.originalUrl || "").replace(/^\/api\//, "");
+  return `${userName} completed ${action} on ${category} (${target})`;
+}
+
+function installActivityAudit(app: Express) {
+  app.use("/api", (req, res, next) => {
+    if (!req.isAuthenticated?.() || !req.user) return next();
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+    if ((req.path || "").startsWith("/activity-logs")) return next();
+
+    res.on("finish", () => {
+      if (!req.user || res.statusCode < 200 || res.statusCode >= 400) return;
+      const action = auditActionForRequest(req);
+      const category = auditCategoryForPath(req.path || req.originalUrl || "");
+      const file = (req as any).file;
+      const files = (req as any).files;
+      const uploadedFileNames = Array.isArray(files)
+        ? files.map((f: any) => f?.originalname).filter(Boolean)
+        : file?.originalname
+          ? [file.originalname]
+          : undefined;
+
+      logActivity(req, {
+        schoolId: getSchoolContext(req),
+        action,
+        category,
+        description: buildAuditDescription(req, action, category),
+        targetType: category,
+        targetId: req.params?.id ? Number.parseInt(String(req.params.id), 10) || null : null,
+        targetName: req.body?.name || req.body?.title || req.body?.fileName || uploadedFileNames?.[0] || null,
+        metadata: {
+          method: req.method,
+          path: req.path || req.originalUrl,
+          statusCode: res.statusCode,
+          rowCount: getBodyCount(req.body),
+          fileName: req.body?.fileName || uploadedFileNames?.[0],
+          fileNames: uploadedFileNames,
+        },
+      });
+    });
+
+    next();
+  });
 }
 
 function addDays(dateStr: string, days: number): string {
@@ -1215,6 +1342,7 @@ export async function registerRoutes(
   });
 
   setupAuth(app);
+  installActivityAudit(app);
 
   app.post("/api/auth/request-password-reset", async (req, res, next) => {
     try {
@@ -1513,12 +1641,24 @@ export async function registerRoutes(
   app.get("/api/staff", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const staffList = await storage.getAllStaff();
-      // Filter by school context
-      const filtered = schoolId 
-        ? staffList.filter(s => s.schoolId === schoolId)
-        : staffList;
-      res.json(filtered);
+      if (!shouldUsePagination(req)) {
+        const staffList = await storage.getAllStaff();
+        const filtered = schoolId ? staffList.filter(s => s.schoolId === schoolId) : staffList;
+        return res.json(filtered);
+      }
+
+      const { page, pageSize, offset } = parsePagination(req);
+      const search = normalizeSearch(req.query.search);
+      const conditions: any[] = [];
+      if (schoolId) conditions.push(eq(staffTable.schoolId, schoolId));
+      if (search) {
+        const q = `%${search}%`;
+        conditions.push(sql`(lower(${staffTable.firstName}) like ${q} or lower(${staffTable.lastName}) like ${q} or lower(coalesce(${staffTable.staffNo}, '')) like ${q} or lower(coalesce(${staffTable.phone}, '')) like ${q} or lower(coalesce(${staffTable.email}, '')) like ${q} or lower(coalesce(${staffTable.role}, '')) like ${q})`);
+      }
+      const whereClause = conditions.length ? and(...conditions) : undefined;
+      const [{ count: totalCount }] = await db.select({ count: drizzleCount() }).from(staffTable).where(whereClause);
+      const items = await db.select().from(staffTable).where(whereClause).orderBy(desc(staffTable.createdAt)).limit(pageSize).offset(offset);
+      return res.json(toPaginatedResult(items, Number(totalCount), page, pageSize));
     } catch (error) {
       next(error);
     }
@@ -1664,7 +1804,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/staff/import", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/staff/import", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("staff.import"), async (req, res, next) => {
     try {
       const { staff: staffData } = req.body;
       if (!Array.isArray(staffData)) {
@@ -2399,13 +2539,39 @@ export async function registerRoutes(
   app.get("/api/parents", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parentList = await storage.getAllParents();
-      // Always filter by schoolId - exclude null schoolId parents unless org_admin explicitly wants them
-      // For multi-tenant security, require school context for parent access
-      const filtered = schoolId 
-        ? parentList.filter(p => p.schoolId === schoolId)
-        : parentList.filter(p => p.schoolId !== null); // Org_admin without context gets all valid school parents, not null ones
-      res.json(filtered);
+      if (!shouldUsePagination(req)) {
+        const parentList = await storage.getAllParents();
+        const filtered = schoolId
+          ? parentList.filter(p => p.schoolId === schoolId)
+          : parentList.filter(p => p.schoolId !== null);
+        return res.json(filtered);
+      }
+
+      const { page, pageSize, offset } = parsePagination(req);
+      const search = normalizeSearch(req.query.search);
+      const conditions: any[] = [];
+      if (schoolId) conditions.push(eq(parentsTable.schoolId, schoolId));
+      else conditions.push(sql`${parentsTable.schoolId} is not null`);
+      if (search) {
+        const q = `%${search}%`;
+        conditions.push(sql`(lower(${parentsTable.firstName}) like ${q} or lower(${parentsTable.lastName}) like ${q} or lower(coalesce(${parentsTable.phone}, '')) like ${q} or lower(coalesce(${parentsTable.email}, '')) like ${q} or lower(coalesce(${parentsTable.relationship}, '')) like ${q})`);
+      }
+      const whereClause = conditions.length ? and(...conditions) : undefined;
+      const [{ count: totalCount }] = await db.select({ count: drizzleCount() }).from(parentsTable).where(whereClause);
+      const items = await db.select().from(parentsTable).where(whereClause).orderBy(desc(parentsTable.createdAt)).limit(pageSize).offset(offset);
+      const parentIds = items.map((parent) => parent.id);
+      const childCounts = parentIds.length
+        ? await db.select({ parentId: studentsTable.parentId, count: drizzleCount() })
+            .from(studentsTable)
+            .where(and(inArray(studentsTable.parentId, parentIds), sql`${studentsTable.archivedAt} is null`))
+            .groupBy(studentsTable.parentId)
+        : [];
+      const countByParentId = new Map(childCounts.map((row) => [row.parentId, Number(row.count)]));
+      const itemsWithCounts = items.map((parent) => ({
+        ...parent,
+        childrenCount: countByParentId.get(parent.id) || 0,
+      }));
+      return res.json(toPaginatedResult(itemsWithCounts, Number(totalCount), page, pageSize));
     } catch (error) {
       next(error);
     }
@@ -2492,7 +2658,7 @@ export async function registerRoutes(
   });
 
   // Parent import endpoint
-  app.post("/api/parents/import", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/parents/import", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("parents.import"), async (req, res, next) => {
     try {
       const { parents: parentData } = req.body;
       if (!Array.isArray(parentData)) {
@@ -2756,17 +2922,69 @@ export async function registerRoutes(
     try {
       const schoolId = getSchoolContext(req);
       const status = String(req.query.status || "").toLowerCase();
-      const archivedOnly = status === "archived";
 
-      const studentList = archivedOnly
-        ? schoolId
-          ? await storage.getArchivedStudentsBySchool(schoolId)
-          : await storage.getArchivedStudents()
-        : schoolId
-          ? await storage.getStudentsBySchool(schoolId)
-          : await storage.getAllStudents();
+      if (!shouldUsePagination(req)) {
+        const archivedOnly = status === "archived";
+        const studentList = archivedOnly
+          ? schoolId
+            ? await storage.getArchivedStudentsBySchool(schoolId)
+            : await storage.getArchivedStudents()
+          : schoolId
+            ? await storage.getStudentsBySchool(schoolId)
+            : await storage.getAllStudents();
+        return res.json(studentList);
+      }
 
-      res.json(studentList);
+      const { page, pageSize, offset } = parsePagination(req);
+      const search = normalizeSearch(req.query.search);
+      const classId = req.query.classId && req.query.classId !== "all" ? Number.parseInt(String(req.query.classId), 10) : null;
+      const conditions: any[] = [];
+      if (schoolId) conditions.push(eq(studentsTable.schoolId, schoolId));
+      if (status === "archived") {
+        conditions.push(sql`${studentsTable.archivedAt} is not null`);
+      } else {
+        conditions.push(sql`${studentsTable.archivedAt} is null`);
+        if (status && status !== "all") {
+          conditions.push(eq(studentsTable.status, status as any));
+        }
+      }
+      if (Number.isFinite(classId)) conditions.push(eq(studentsTable.classId, classId as number));
+      if (search) {
+        const q = `%${search}%`;
+        conditions.push(sql`(
+          lower(${studentsTable.firstName}) like ${q}
+          or lower(${studentsTable.lastName}) like ${q}
+          or lower(coalesce(${studentsTable.admissionNo}, '')) like ${q}
+          or lower(coalesce(${studentsTable.phone}, '')) like ${q}
+          or lower(coalesce(${studentsTable.email}, '')) like ${q}
+          or exists (
+            select 1 from ${parentsTable}
+            where ${parentsTable.id} = ${studentsTable.parentId}
+              and (lower(${parentsTable.firstName}) like ${q}
+                or lower(${parentsTable.lastName}) like ${q}
+                or lower(coalesce(${parentsTable.phone}, '')) like ${q}
+                or lower(coalesce(${parentsTable.email}, '')) like ${q})
+          )
+        )`);
+      }
+      const whereClause = conditions.length ? and(...conditions) : undefined;
+      const [{ count: totalCount }] = await db.select({ count: drizzleCount() }).from(studentsTable).where(whereClause);
+      const items = await db.select().from(studentsTable).where(whereClause).orderBy(desc(status === "archived" ? studentsTable.archivedAt : studentsTable.createdAt), desc(studentsTable.createdAt)).limit(pageSize).offset(offset);
+      const parentIds = Array.from(new Set(items.map((student) => student.parentId).filter((id): id is number => typeof id === "number")));
+      const parentRows = parentIds.length
+        ? await db.select({ id: parentsTable.id, firstName: parentsTable.firstName, lastName: parentsTable.lastName, phone: parentsTable.phone, email: parentsTable.email }).from(parentsTable).where(inArray(parentsTable.id, parentIds))
+        : [];
+      const parentsById = new Map(parentRows.map((parent) => [parent.id, parent]));
+      const itemsWithParentDetails = items.map((student) => {
+        const parent = student.parentId ? parentsById.get(student.parentId) : undefined;
+        return parent ? {
+          ...student,
+          parentName: `${parent.firstName || ""} ${parent.lastName || ""}`.trim(),
+          parentPhone: parent.phone,
+          parentEmail: parent.email,
+        } : student;
+      });
+      return res.json(toPaginatedResult(itemsWithParentDetails, Number(totalCount), page, pageSize));
     } catch (error) {
       next(error);
     }
@@ -3186,7 +3404,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/students/import", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/students/import", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("students.import"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
@@ -4272,7 +4490,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/clinic/import", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/clinic/import", requireAuth, requireRole("school_admin", "teacher"), requirePermission("clinic.import"), async (req, res, next) => {
     try {
       const { records } = req.body;
       if (!Array.isArray(records)) return res.status(400).json({ message: "Records must be an array" });
@@ -4318,7 +4536,7 @@ export async function registerRoutes(
   // Student Fees Management - CSV Import
   const feesUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-  app.post("/api/fees/import-csv", requireAuth, requireRole("school_admin", "org_admin"), feesUpload.single("fees_csv"), async (req, res, next) => {
+  app.post("/api/fees/import-csv", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), feesUpload.single("fees_csv"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });

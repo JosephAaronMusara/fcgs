@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { CreateAccountForm } from "@/components/create-account-form";
@@ -9,10 +9,11 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Trash2, Download, Bell, Users, UserCog, Send, Upload, UserCheck, Eye, Phone, Mail } from "lucide-react";
+import { Plus, Search, Trash2, Download, Bell, Users, UserCog, Send, Upload, UserCheck, Eye, Phone, Mail, ChevronLeft, ChevronRight } from "lucide-react";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
 import * as XLSX from "xlsx";
@@ -21,11 +22,24 @@ import type { Parent, Student, User } from "@shared/schema";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 
+type PaginatedResponse<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+};
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 export default function ParentsPage() {
   const { toast } = useToast();
   const { currentSchoolId } = useAuth();
   
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [viewingParent, setViewingParent] = useState<Parent | null>(null);
@@ -37,12 +51,40 @@ export default function ParentsPage() {
   const [linkedStudentIds, setLinkedStudentIds] = useState<number[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const { data: parents, isLoading } = useQuery<Parent[]>({
-    queryKey: ["/api/parents"],
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+    setSelectedIds([]);
+  }, [debouncedSearch, pageSize]);
+
+  const { data: parentPageData, isLoading } = useQuery<PaginatedResponse<Parent & { childrenCount?: number }>>({
+    queryKey: ["/api/parents", page, pageSize, debouncedSearch],
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        paginated: "true",
+        page: page.toString(),
+        pageSize: pageSize.toString(),
+      });
+      if (debouncedSearch) params.set("search", debouncedSearch);
+      const res = await schoolFetch(`/api/parents?${params.toString()}`);
+      if (!res.ok) throw new Error("Failed to load parents");
+      return res.json();
+    },
+    placeholderData: (previousData) => previousData,
   });
 
+  const parents = parentPageData?.items || [];
+  const totalParents = parentPageData?.total || 0;
+  const totalPages = parentPageData?.totalPages || 1;
+
+  const shouldLoadStudents = isAddOpen || !!editingParent || !!viewingParent || !!studentsDialogParent;
   const { data: students } = useQuery<Student[]>({
     queryKey: ["/api/students"],
+    enabled: shouldLoadStudents,
   });
 
   const linkStudentsToParent = async (parentId: number) => {
@@ -109,8 +151,8 @@ export default function ParentsPage() {
   });
 
   const importMutation = useMutation({
-    mutationFn: async (parentData: Array<Record<string, unknown>>) => {
-      const res = await apiRequest("POST", "/api/parents/import", { parents: parentData });
+    mutationFn: async ({ rows, fileName }: { rows: Array<Record<string, unknown>>; fileName?: string }) => {
+      const res = await apiRequest("POST", "/api/parents/import", { parents: rows, fileName });
       return res.json();
     },
     onSuccess: (data: { imported: number; skipped: number; total: number }) => {
@@ -124,14 +166,13 @@ export default function ParentsPage() {
     },
   });
 
-  const filteredParents = parents?.filter((p) =>
-    `${p.firstName} ${p.lastName} ${p.email} ${p.phone}`.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredParents = parents;
 
   const { sortedData: sortedParents, sortConfig, requestSort } = useTableSort(filteredParents);
 
-  const getChildrenCount = (parentId: number) => {
-    return students?.filter(s => s.parentId === parentId).length || 0;
+  const getChildrenCount = (parent: Parent & { childrenCount?: number }) => {
+    if (typeof parent.childrenCount === "number") return parent.childrenCount;
+    return students?.filter(s => s.parentId === parent.id).length || 0;
   };
 
   const getLinkedStudents = (parentId: number) => {
@@ -180,12 +221,21 @@ export default function ParentsPage() {
       }));
   };
 
-  const handleExport = () => {
-    if (!filteredParents?.length) {
+  const handleExport = async () => {
+    const params = new URLSearchParams({ paginated: "true", page: "1", pageSize: "100000" });
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    const exportRes = await schoolFetch(`/api/parents?${params.toString()}`);
+    if (!exportRes.ok) {
+      toast({ title: "Export failed", description: "Could not load parent data for export", variant: "destructive" });
+      return;
+    }
+    const exportPage = (await exportRes.json()) as PaginatedResponse<Parent & { childrenCount?: number }>;
+    const exportParents = exportPage.items || [];
+    if (!exportParents.length) {
       toast({ title: "Error", description: "No parents to export", variant: "destructive" });
       return;
     }
-    const exportData = filteredParents.map((p) => ({
+    const exportData = exportParents.map((p) => ({
       "First Name": p.firstName,
       "Last Name": p.lastName,
       "Phone": p.phone,
@@ -195,12 +245,12 @@ export default function ParentsPage() {
       "Street Address": p.streetAddress || "",
       "Residential Area": p.residentialArea || "",
       "City": p.address || "",
-      "Children Count": getChildrenCount(p.id),
+      "Children Count": getChildrenCount(p),
     }));
     const worksheet = XLSX.utils.json_to_sheet(exportData);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Parents");
-    const searchLabel = search.trim() ? `_search_${search.trim().replace(/\s+/g, "_")}` : "";
+    const searchLabel = debouncedSearch ? `_search_${debouncedSearch.replace(/\s+/g, "_")}` : "";
     XLSX.writeFile(workbook, `Parents${searchLabel}_${new Date().toISOString().split("T")[0]}.xlsx`);
     toast({ title: "Success", description: "Parent list downloaded successfully" });
   };
@@ -236,7 +286,7 @@ export default function ParentsPage() {
         }
 
         toast({ title: "Importing", description: `Processing ${parentData.length} parents...` });
-        importMutation.mutate(parentData);
+        importMutation.mutate({ rows: parentData, fileName: file.name });
       } catch {
         toast({ title: "Error", description: "Failed to parse file", variant: "destructive" });
       }
@@ -353,7 +403,7 @@ export default function ParentsPage() {
             </div>
             <Badge variant="secondary" className="flex items-center gap-1">
               <Users className="w-3 h-3" />
-              {filteredParents?.length || 0} Parents
+              {totalParents} Parents
             </Badge>
           </div>
 
@@ -410,7 +460,7 @@ export default function ParentsPage() {
                           data-testid={`button-children-${p.id}`}
                         >
                           <Users className="w-4 h-4 mr-1" />
-                          {getChildrenCount(p.id)} Student{getChildrenCount(p.id) !== 1 ? "s" : ""}
+                          {getChildrenCount(p)} Student{getChildrenCount(p) !== 1 ? "s" : ""}
                         </Button>
                       </TableCell>
                       <TableCell>
@@ -502,7 +552,7 @@ export default function ParentsPage() {
 
               <div className="mobile-record-list">
                 {(sortedParents ?? []).map((p) => {
-                  const childrenCount = getChildrenCount(p.id);
+                  const childrenCount = getChildrenCount(p);
                   const relationshipLabel = getRelationshipLabel(p.relationship);
                   const addressLine = getParentAddressLine(p);
 
@@ -618,6 +668,34 @@ export default function ParentsPage() {
                     No parents found
                   </div>
                 )}
+              </div>
+
+              <div className="mt-4 flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm text-muted-foreground">
+                  Showing {totalParents === 0 ? 0 : (page - 1) * pageSize + 1}
+                  -{Math.min(page * pageSize, totalParents)} of {totalParents} parents
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={pageSize.toString()} onValueChange={(value) => setPageSize(parseInt(value, 10))}>
+                    <SelectTrigger className="h-9 w-[120px]" data-testid="select-parents-page-size">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PAGE_SIZE_OPTIONS.map((option) => (
+                        <SelectItem key={option} value={option.toString()}>{option} / page</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button variant="outline" size="sm" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1}>
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous
+                  </Button>
+                  <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
+                  <Button variant="outline" size="sm" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} disabled={page >= totalPages}>
+                    Next
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             </>
           )}
