@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Pencil, Trash2, Phone, Mail, Download, Bell, Upload, Smartphone, BookOpen, GraduationCap, School, UserCog, KeyRound, Eye, EyeOff, Shield, RotateCcw, Check, X, Camera, Users, AlertTriangle } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, Phone, Mail, Download, Bell, Upload, Smartphone, BookOpen, GraduationCap, School, UserCog, KeyRound, Eye, EyeOff, Shield, RotateCcw, Check, X, Camera, Users, AlertTriangle, ChevronLeft, ChevronRight } from "lucide-react";
 import type { Staff, Subject, Class as ClassType, User, Permission, AccessGroup, UserPermissionOverride } from "@shared/schema";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
@@ -23,12 +23,25 @@ import { ResidentialAreaInput } from "@/components/residential-area-input";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 
+type PaginatedResponse<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+};
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 export default function StaffPage() {
   const { toast } = useToast();
   const { currentSchoolId, hasAnyPermission } = useAuth();
   const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const canResetDeviceId = hasAnyPermission("staff_attendance.reset_device_id");
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [viewingStaff, setViewingStaff] = useState<Staff | null>(null);
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
@@ -39,21 +52,50 @@ export default function StaffPage() {
   const [accessRightsStaff, setAccessRightsStaff] = useState<Staff | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const { data: staffList, isLoading } = useQuery<Staff[]>({
-    queryKey: ["/api/staff"],
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+    setSelectedStaffIds([]);
+  }, [debouncedSearch, pageSize]);
+
+  const { data: staffPageData, isLoading } = useQuery<PaginatedResponse<Staff>>({
+    queryKey: ["/api/staff", page, pageSize, debouncedSearch],
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        paginated: "true",
+        page: page.toString(),
+        pageSize: pageSize.toString(),
+      });
+      if (debouncedSearch) params.set("search", debouncedSearch);
+      const res = await schoolFetch(`/api/staff?${params.toString()}`);
+      if (!res.ok) throw new Error("Failed to load staff");
+      return res.json();
+    },
+    placeholderData: (previousData) => previousData,
   });
+
+  const staffList = staffPageData?.items || [];
+  const totalStaff = staffPageData?.total || 0;
+  const totalPages = staffPageData?.totalPages || 1;
 
   const { data: nextStaffNo } = useQuery<{ staffNo: string }>({
     queryKey: ["/api/staff/next-no"],
+    enabled: isAddOpen,
   });
 
   const { data: subjectsRaw } = useQuery<any>({
     queryKey: ["/api/subjects"],
+    enabled: !!assignmentsDialogStaff,
   });
   const subjects: Subject[] = Array.isArray(subjectsRaw) ? subjectsRaw : (subjectsRaw?.items ?? []);
 
   const { data: classes } = useQuery<ClassType[]>({
     queryKey: ["/api/classes"],
+    enabled: !!assignmentsDialogStaff,
   });
 
   const { data: accessGroups } = useQuery<Array<{ id: number; name: string }>>({
@@ -124,8 +166,8 @@ export default function StaffPage() {
   });
 
   const importMutation = useMutation({
-    mutationFn: async (staffData: Array<Partial<Staff>>) => {
-      const res = await apiRequest("POST", "/api/staff/import", { staff: staffData });
+    mutationFn: async ({ rows, fileName }: { rows: Array<Partial<Staff>>; fileName?: string }) => {
+      const res = await apiRequest("POST", "/api/staff/import", { staff: rows, fileName });
       return res.json();
     },
     onSuccess: (data) => {
@@ -155,9 +197,7 @@ export default function StaffPage() {
     },
   });
 
-  const filteredStaff = staffList?.filter((s) =>
-    `${s.firstName} ${s.lastName} ${s.email} ${s.staffNo} ${s.phone}`.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredStaff = staffList;
 
   const { sortedData: sortedStaff, sortConfig, requestSort } = useTableSort(filteredStaff);
 
@@ -188,13 +228,22 @@ export default function StaffPage() {
     }
   };
 
-  const handleExport = () => {
-    if (!filteredStaff?.length) {
+  const handleExport = async () => {
+    const params = new URLSearchParams({ paginated: "true", page: "1", pageSize: "100000" });
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    const exportRes = await schoolFetch(`/api/staff?${params.toString()}`);
+    if (!exportRes.ok) {
+      toast({ title: "Export failed", description: "Could not load staff data for export", variant: "destructive" });
+      return;
+    }
+    const exportPage = (await exportRes.json()) as PaginatedResponse<Staff>;
+    const exportStaff = exportPage.items || [];
+    if (!exportStaff.length) {
       toast({ title: "No data", description: "No staff members to export", variant: "destructive" });
       return;
     }
 
-    const exportData = filteredStaff.map(s => ({
+    const exportData = exportStaff.map(s => ({
       "First Name": s.firstName,
       "Last Name": s.lastName,
       "Email": s.email || "",
@@ -212,7 +261,7 @@ export default function StaffPage() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Staff");
     const datePart = new Date().toISOString().split('T')[0];
-    const searchLabel = search.trim() ? `_${search.trim().replace(/\s+/g, "_")}` : "";
+    const searchLabel = debouncedSearch ? `_${debouncedSearch.replace(/\s+/g, "_")}` : "";
     XLSX.writeFile(workbook, `Staff${searchLabel}_${datePart}.xlsx`);
     toast({ title: "Success", description: "Staff list downloaded successfully" });
   };
@@ -248,7 +297,7 @@ export default function StaffPage() {
           return;
         }
 
-        importMutation.mutate(staffData);
+        importMutation.mutate({ rows: staffData, fileName: file.name });
       } catch (error) {
         toast({ title: "Error", description: "Failed to parse file. Please ensure it's a valid Excel or CSV file.", variant: "destructive" });
       }
@@ -759,6 +808,34 @@ export default function StaffPage() {
                     No staff members found
                   </div>
                 )}
+              </div>
+
+              <div className="flex flex-col gap-3 border-t px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm text-muted-foreground">
+                  Showing {totalStaff === 0 ? 0 : (page - 1) * pageSize + 1}
+                  -{Math.min(page * pageSize, totalStaff)} of {totalStaff} staff members
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={pageSize.toString()} onValueChange={(value) => setPageSize(parseInt(value, 10))}>
+                    <SelectTrigger className="h-9 w-[120px]" data-testid="select-staff-page-size">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PAGE_SIZE_OPTIONS.map((option) => (
+                        <SelectItem key={option} value={option.toString()}>{option} / page</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button variant="outline" size="sm" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1}>
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous
+                  </Button>
+                  <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
+                  <Button variant="outline" size="sm" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} disabled={page >= totalPages}>
+                    Next
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             </>
           )}

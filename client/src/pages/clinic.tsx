@@ -80,8 +80,8 @@ export default function ClinicPage() {
   });
 
   const importMutation = useMutation({
-    mutationFn: async (importRecords: Partial<ClinicRecord>[]) => {
-      const res = await apiRequest("POST", "/api/clinic/import", { records: importRecords });
+    mutationFn: async ({ records, fileName }: { records: Partial<ClinicRecord>[]; fileName?: string }) => {
+      const res = await apiRequest("POST", "/api/clinic/import", { records, fileName });
       return res.json();
     },
     onSuccess: (data: { imported: number }) => {
@@ -256,7 +256,7 @@ export default function ClinicPage() {
         toast({ title: "Error", description: "No valid records found in CSV. Ensure student admission numbers match.", variant: "destructive" });
         return;
       }
-      importMutation.mutate(importData);
+      importMutation.mutate({ records: importData, fileName: file.name });
     };
     reader.readAsText(file);
     e.target.value = "";

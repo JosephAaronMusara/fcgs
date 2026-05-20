@@ -2,15 +2,16 @@ import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import { type Express, type Request, type Response, type NextFunction } from "express";
 import session from "express-session";
-import createMemoryStore from "memorystore";
+import connectPgSimple from "connect-pg-simple";
 import bcrypt from "bcrypt";
 import { storage } from "./storage";
+import { pool } from "./db";
 import type { User } from "@shared/schema";
 
 type PermissionRequirement = string | string[];
 
-const MemoryStore = createMemoryStore(session);
-const SESSION_TIMEOUT_MS = 60 * 60 * 1000;
+const PgSessionStore = connectPgSimple(session);
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const SESSION_ACTIVITY_HEADER = "X-FCGS-User-Activity";
 
 declare global {
@@ -148,6 +149,11 @@ const LEGACY_ROUTE_PERMISSION_RULES: Array<{
   { method: "GET", pattern: /^\/api\/archived-schools$/, requirement: "settings.view" },
 
   { method: "GET", pattern: /^\/api\/activity-logs(\/export)?$/, requirement: "activity_logs.view" },
+  { method: "POST", pattern: /^\/api\/students\/import$/, requirement: "students.import" },
+  { method: "POST", pattern: /^\/api\/parents\/import$/, requirement: "parents.import" },
+  { method: "POST", pattern: /^\/api\/staff\/import$/, requirement: "staff.import" },
+  { method: "POST", pattern: /^\/api\/clinic\/import$/, requirement: "clinic.import" },
+  { method: "POST", pattern: /^\/api\/fees\/import-csv$/, requirement: "fees.import" },
   { method: "POST", pattern: /^\/api\/library\/resources$/, requirement: "library.resources.manage" },
   { method: "PUT", pattern: /^\/api\/library\/resources\/\d+$/, requirement: "library.resources.manage" },
   { method: "DELETE", pattern: /^\/api\/library\/resources\/\d+$/, requirement: "library.catalogue.delete" },
@@ -302,13 +308,15 @@ export function setupAuth(app: Express): void {
     secret: process.env.SESSION_SECRET || "fcgs-school-dev-secret-2026",
     resave: false,
     saveUninitialized: false,
-    rolling: false,
+    rolling: true,
     cookie: {
       secure: process.env.NODE_ENV === "production",
       maxAge: SESSION_TIMEOUT_MS,
     },
-    store: new MemoryStore({
-      checkPeriod: 3600000,
+    store: new PgSessionStore({
+      pool,
+      tableName: "session",
+      createTableIfMissing: true,
     }),
   };
 
@@ -619,6 +627,38 @@ export function setupAuth(app: Express): void {
   });
 }
 
+function getAccessDeniedSchoolId(req: Request, user: User): number | null {
+  const headerSchoolId = req.headers["x-school-id"];
+  const parsedHeaderSchoolId = typeof headerSchoolId === "string" ? parseInt(headerSchoolId, 10) : NaN;
+  if (Number.isFinite(parsedHeaderSchoolId)) return parsedHeaderSchoolId;
+  return user.schoolId ?? null;
+}
+
+function logBlockedActivity(req: Request, requirement: PermissionRequirement | null, reason = "Access denied") {
+  const user = req.user as User | undefined;
+  if (!user) return;
+  const userName = user.firstName ? `${user.firstName} ${user.lastName || ""}`.trim() : user.username;
+  storage.createActivityLog({
+    schoolId: getAccessDeniedSchoolId(req, user),
+    organizationId: user.organizationId,
+    userId: user.id,
+    userName,
+    userRole: user.role,
+    action: "access_denied",
+    category: "security",
+    description: `${userName} was blocked from ${req.method} ${req.path || req.originalUrl}`,
+    targetType: "route",
+    targetName: req.path || req.originalUrl,
+    metadata: {
+      method: req.method,
+      path: req.path || req.originalUrl,
+      requiredPermission: requirement,
+      reason,
+    },
+    ipAddress: req.ip || req.socket.remoteAddress || null,
+  }).catch(() => {});
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (req.isAuthenticated()) {
     return next();
@@ -638,6 +678,7 @@ export function requireAnyPermission(...permissions: string[]) {
 
     const hasPermission = await hasRequiredPermissions(req.user.id, permissions);
     if (!hasPermission) {
+      logBlockedActivity(req, permissions);
       return res.status(403).json({ message: "Access denied" });
     }
 
@@ -653,11 +694,13 @@ export function requireRole(..._roles: string[]) {
 
     const inferredRequirement = getLegacyRequirementForRequest(req);
     if (!inferredRequirement) {
+      logBlockedActivity(req, null, "No permission mapping for route");
       return res.status(403).json({ message: "Access denied" });
     }
 
     const hasPermission = await hasRequiredPermissions(req.user.id, inferredRequirement);
     if (!hasPermission) {
+      logBlockedActivity(req, inferredRequirement);
       return res.status(403).json({ message: "Access denied" });
     }
 
