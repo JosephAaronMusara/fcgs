@@ -1202,7 +1202,14 @@ export default function MarksEntryPage() {
                               rows={1}
                               className="h-7 min-h-7 max-h-7 resize-none overflow-x-hidden overflow-y-hidden whitespace-nowrap px-2 py-1 text-xs leading-5 sm:h-9 sm:min-h-9 sm:max-h-9 sm:whitespace-normal"
                               placeholder={livePoolComment || "No comment available"}
-                              value={studentMark?.commentSource === "custom" ? (studentMark?.customCommentText || "") : ""}
+                              value={displayComment || ""}
+                              onFocus={(e) => {
+                                const target = e.currentTarget;
+                                window.setTimeout(() => {
+                                  const end = target.value.length;
+                                  target.setSelectionRange(end, end);
+                                }, 0);
+                              }}
                               onChange={(e) => handleCustomCommentChange(student.id, e.target.value)}
                               data-testid={`input-comment-${student.id}`}
                             />

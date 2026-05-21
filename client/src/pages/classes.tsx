@@ -523,7 +523,7 @@ function ClassCard({
       </Card>
 
       <Dialog open={showSubjects} onOpenChange={setShowSubjects}>
-        <DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>{classItem.className.toUpperCase()} SUBJECTS</DialogTitle>
           </DialogHeader>
@@ -536,7 +536,7 @@ function ClassCard({
       </Dialog>
 
       <Dialog open={showStudents} onOpenChange={setShowStudents}>
-        <DialogContent className="max-w-md max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>{classItem.className} - Students ({studentCount})</DialogTitle>
           </DialogHeader>

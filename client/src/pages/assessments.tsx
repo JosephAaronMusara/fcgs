@@ -855,7 +855,7 @@ useEffect(() => {
   const isClassValid = assessment ? !!classId : selectedClassIds.length > 0;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader>
           <DialogTitle>{assessment ? "Edit Assessment" : "New Assessment"}</DialogTitle>
         </DialogHeader>
@@ -1354,7 +1354,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-3xl max-h-[92vh] flex flex-col">
+        <DialogContent className="max-w-3xl max-h-[calc(100dvh-2rem)] flex flex-col">
           <DialogHeader>
             <DialogTitle>Assessment Comments</DialogTitle>
             <DialogDescription>Multi Class x Multi Subject / Single Grade</DialogDescription>
@@ -1494,7 +1494,7 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
       </Dialog>
 
       <Dialog open={dupModalOpen} onOpenChange={(v) => { if (!v) { setDupModalOpen(false); setDuplicates([]); setMissingPairs([]); } }}>
-        <DialogContent className="max-w-xl max-h-[92vh] flex flex-col">
+        <DialogContent className="max-w-xl max-h-[calc(100dvh-2rem)] flex flex-col">
           <DialogHeader>
             <DialogTitle>Duplicate Comments Found</DialogTitle>
             <DialogDescription>Select which existing comments to overwrite with the new text. Missing pairs will be created automatically.</DialogDescription>

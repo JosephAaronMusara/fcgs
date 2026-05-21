@@ -293,7 +293,7 @@ export default function ClinicPage() {
                 Add Record
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
               <DialogHeader>
                 <DialogTitle>Add Clinic Visit Record</DialogTitle>
               </DialogHeader>
@@ -437,7 +437,7 @@ export default function ClinicPage() {
       </Card>
 
       <Dialog open={!!viewRecord} onOpenChange={() => setViewRecord(null)}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Stethoscope className="h-5 w-5" />

@@ -863,7 +863,7 @@ export default function StaffPage() {
       {/* Access Rights Dialog */}
       {canManageAccessRights && (
         <Dialog open={accessRightsStaff !== null} onOpenChange={(open) => !open && setAccessRightsStaff(null)}>
-          <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-hidden flex flex-col">
             <DialogHeader>
               <DialogTitle>Access Rights - {accessRightsStaff?.firstName} {accessRightsStaff?.lastName}</DialogTitle>
               <DialogDescription>

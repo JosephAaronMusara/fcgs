@@ -52,8 +52,8 @@ export function NotifyModal({ open, onOpenChange, recipientType, recipients, sch
     onSuccess: async (response) => {
       const result = await response.json();
       toast({
-        title: "Notification sent",
-        description: `Sent: ${result.sent}, Failed: ${result.failed}`,
+        title: result.queued ? "Notification queued" : "Notification sent",
+        description: result.message || `Sent: ${result.sent}, Failed: ${result.failed}`,
       });
       onOpenChange(false);
       setSubject("");

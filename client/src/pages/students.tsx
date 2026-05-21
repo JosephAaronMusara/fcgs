@@ -572,7 +572,7 @@ export default function StudentsPage() {
                 STUDENT
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
               <DialogHeader>
                 <DialogTitle>Add New Student</DialogTitle>
               </DialogHeader>
@@ -754,7 +754,7 @@ export default function StudentsPage() {
                                 <Eye className="w-4 h-4" />
                               </Button>
                             </DialogTrigger>
-                            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                            <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
                               <DialogHeader>
                                 <DialogTitle>View Student</DialogTitle>
                               </DialogHeader>
@@ -778,7 +778,7 @@ export default function StudentsPage() {
                             open={editingStudent?.id === s.id}
                             onOpenChange={handleEditStudentOpenChange}
                           >
-                            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                            <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
                               <DialogHeader>
                                 <DialogTitle>Edit Student</DialogTitle>
                               </DialogHeader>

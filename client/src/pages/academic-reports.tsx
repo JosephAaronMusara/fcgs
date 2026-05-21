@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest, queryClient, schoolFetch } from "@/lib/queryClient";
 import {
   Dialog,
   DialogContent,
@@ -156,6 +156,7 @@ interface AnalyticsData {
   subjectSummary: {
     subjectId: number;
     subjectName: string;
+    teacherName?: string | null;
     avg: number;
     completion: number;
     passed: number;
@@ -191,6 +192,7 @@ interface StreamAnalyticsData {
   rows: {
     subjectId: number;
     subjectName: string;
+    teacherName?: string | null;
     avg: number;
     passed: number;
     failed: number;
@@ -581,6 +583,7 @@ function downloadAnalyticsWorkbook(args: {
   gradeColumns: string[];
   rows: Array<{
     subjectName: string;
+    teacherName?: string | null;
     avg: number;
     completion?: number;
     passed: number;
@@ -591,6 +594,7 @@ function downloadAnalyticsWorkbook(args: {
 }) {
   const headers = [
     "Subject",
+    "Teacher",
     "Avg (%)",
     ...(args.analysisType === "Class Analytics" ? ["Completion (%)"] : []),
     "Passed",
@@ -601,6 +605,7 @@ function downloadAnalyticsWorkbook(args: {
 
   const body = args.rows.map((row) => [
     row.subjectName,
+    row.teacherName || "—",
     row.avg,
     ...(args.analysisType === "Class Analytics" ? [row.completion ?? ""] : []),
     row.passed,
@@ -1760,12 +1765,18 @@ function ReportCardSlip({
   );
 }
 
+function clampDisplayPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 function ProgressBadge({ pct }: { pct: number | null }) {
-  if (pct === null) return <span className="text-muted-foreground">–</span>;
-  const cls = pct >= 80 ? "qc-pct-circle-ok" : pct >= 40 ? "qc-pct-circle-mid" : "qc-pct-circle-bad";
+  const safePct = clampDisplayPercent(pct);
+  if (safePct === null) return <span className="text-muted-foreground">–</span>;
+  const cls = safePct >= 80 ? "qc-pct-circle-ok" : safePct >= 40 ? "qc-pct-circle-mid" : "qc-pct-circle-bad";
   return (
     <span className={`qc-pct-circle ${cls}`} data-testid="pill-progress">
-      {pct}%
+      {safePct}%
     </span>
   );
 }
@@ -1792,7 +1803,7 @@ function MissingMarksDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-3xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader>
           <DialogTitle>{classLabel} — Missing Marks</DialogTitle>
           <DialogDescription>
@@ -1893,7 +1904,7 @@ function ClassMeritDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-fit sm:w-fit min-w-[min(720px,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] sm:max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto">
+      <DialogContent className="w-fit sm:w-fit min-w-[min(720px,calc(100dvw-2rem))] max-w-[calc(100dvw-2rem)] sm:max-w-[calc(100dvw-3rem)] max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader className="space-y-3 pr-10">
           <div>
             <DialogTitle>{effectiveClassName} — Merit List</DialogTitle>
@@ -2020,7 +2031,7 @@ function ClassAnalyticsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-6xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-6xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader className="space-y-3 pr-10">
           <div>
             <DialogTitle>{effectiveClassName} — Class Analytics</DialogTitle>
@@ -2057,7 +2068,7 @@ function ClassAnalyticsDialog({
           </div>
         ) : (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <Card>
                 <CardContent className="p-3 text-center">
                   <div className="text-2xl font-bold">{data.overallAvg}%</div>
@@ -2076,35 +2087,12 @@ function ClassAnalyticsDialog({
               </Card>
               <Card>
                 <CardContent className="p-3 text-center">
-                  <div className="text-2xl font-bold">{data.enteredCells}</div>
-                  <div className="text-xs text-muted-foreground">
-                    Marks Entered
-                  </div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="p-3 text-center">
                   <div className="text-2xl font-bold">{data.totalStudents}</div>
                   <div className="text-xs text-muted-foreground">Students</div>
                 </CardContent>
               </Card>
             </div>
 
-            {gradeColumns.length > 0 && (
-              <div>
-                <h4 className="font-semibold mb-2">Grade Distribution</h4>
-                <div className="flex flex-wrap gap-2">
-                  {gradeColumns.map((grade) => (
-                    <div
-                      key={grade}
-                      className="border rounded-md px-3 py-1.5 text-sm"
-                    >
-                      <span className="font-semibold">{grade}</span>: {data.gradeCounts?.[grade] || 0}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {data.subjectSummary.length > 0 && (
               <div>
@@ -2117,6 +2105,7 @@ function ClassAnalyticsDialog({
                     <thead>
                       <tr className="border-b bg-muted/50">
                         <th className="text-left p-2">Subject</th>
+                        <th className="text-left p-2">Teacher</th>
                         <th className="text-center p-2">Avg</th>
                         <th className="text-center p-2">Completion</th>
                         <th className="text-center p-2">Passed</th>
@@ -2133,6 +2122,7 @@ function ClassAnalyticsDialog({
                       {data.subjectSummary.map((s) => (
                         <tr key={s.subjectId} className="border-b">
                           <td className="p-2">{s.subjectName}</td>
+                          <td className="p-2">{s.teacherName || "—"}</td>
                           <td className="text-center p-2 font-semibold">
                             {s.avg}%
                           </td>
@@ -2206,7 +2196,7 @@ function StreamMeritDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-fit sm:w-fit min-w-[min(720px,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] sm:max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto">
+      <DialogContent className="w-fit sm:w-fit min-w-[min(720px,calc(100dvw-2rem))] max-w-[calc(100dvw-2rem)] sm:max-w-[calc(100dvw-3rem)] max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader className="space-y-3 pr-10">
           <div>
             <DialogTitle>{effectiveStreamName} — Stream Merit List</DialogTitle>
@@ -2331,7 +2321,7 @@ function StreamAnalyticsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-6xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-6xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader className="space-y-3 pr-10">
           <div>
             <DialogTitle>{effectiveStreamName} — Stream Analytics</DialogTitle>
@@ -2376,6 +2366,7 @@ function StreamAnalyticsDialog({
               <thead>
                 <tr className="border-b bg-muted/50">
                   <th className="text-left p-2 font-semibold">Subject</th>
+                  <th className="text-left p-2 font-semibold">Teacher</th>
                   <th className="text-center p-2 font-semibold">Avg</th>
                   <th className="text-center p-2 font-semibold">Passed</th>
                   <th className="text-center p-2 font-semibold">Failed</th>
@@ -2391,6 +2382,7 @@ function StreamAnalyticsDialog({
                 {data.rows.map((row) => (
                   <tr key={row.subjectId} className="border-b">
                     <td className="p-2">{row.subjectName}</td>
+                    <td className="p-2">{row.teacherName || "—"}</td>
                     <td className="text-center p-2 font-semibold">
                       {row.avg}%
                     </td>
@@ -2645,7 +2637,8 @@ function ExamStreamTable({
 }
 
 export default function AcademicReportsPage() {
-  const { currentSchoolId } = useAuth();
+  const { currentSchoolId, user } = useAuth();
+  const schoolScopeId = currentSchoolId || user?.schoolId || null;
   const { toast } = useToast();
 
   const [viewMode, setViewMode] = useState<ViewMode>("hub");
@@ -2693,26 +2686,26 @@ export default function AcademicReportsPage() {
     AssessmentType[]
   >({
     queryKey: ["/api/assessment-types"],
-    enabled: !!currentSchoolId,
+    enabled: !!schoolScopeId,
   });
 
   const { data: exams = [], isLoading: examsLoading } = useQuery<Exam[]>({
     queryKey: ["/api/report-cards/exams"],
-    enabled: !!currentSchoolId,
+    enabled: !!schoolScopeId,
   });
 
   const { data: classes = [] } = useQuery<Class[]>({
     queryKey: ["/api/classes"],
-    enabled: !!currentSchoolId,
+    enabled: !!schoolScopeId,
   });
 
   const { data: currentSchool } = useQuery<any>({
-    queryKey: ["/api/schools/current", currentSchoolId],
-    enabled: !!currentSchoolId,
+    queryKey: ["/api/schools/current", schoolScopeId],
+    enabled: !!schoolScopeId,
     queryFn: async () => {
       const res = await fetch("/api/schools/current", {
         credentials: "include",
-        headers: currentSchoolId ? { "X-School-Id": String(currentSchoolId) } : undefined,
+        headers: schoolScopeId ? { "X-School-Id": String(schoolScopeId) } : undefined,
       });
       if (!res.ok) throw new Error("Failed to load current school");
       return res.json();
@@ -2986,7 +2979,7 @@ export default function AcademicReportsPage() {
       });
       const result = await res.json();
       toast({
-        title: "Report Cards Sent",
+        title: result.queued ? "Report Cards Queued" : "Report Cards Sent",
         description: result.message || "Sent successfully",
       });
     } catch (err: any) {
@@ -3864,6 +3857,7 @@ function ReportCommentsModal({
 }) {
   const { toast } = useToast();
   const { currentSchoolId, user } = useAuth();
+  const schoolScopeId = currentSchoolId || user?.schoolId || null;
   const [commentText, setCommentText] = useState("");
   const [selectedGradeId, setSelectedGradeId] = useState("");
   const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
@@ -3876,8 +3870,8 @@ function ReportCommentsModal({
   const isClassTeacher = commentType === "class_teacher";
 
   const { data: comments = [], isLoading } = useQuery<ReportComment[]>({
-    queryKey: ["/api/report-comments", currentSchoolId, commentType],
-    enabled: open && !!currentSchoolId,
+    queryKey: ["/api/report-comments", schoolScopeId, commentType],
+    enabled: open && !!schoolScopeId,
     staleTime: 0,
     refetchOnMount: "always",
     queryFn: async () => {
@@ -3888,8 +3882,8 @@ function ReportCommentsModal({
   });
 
   const { data: classesData = [] } = useQuery<Class[]>({
-    queryKey: ["/api/classes", currentSchoolId, "report-comments"],
-    enabled: open && !!currentSchoolId,
+    queryKey: ["/api/classes", schoolScopeId, "report-comments"],
+    enabled: open && !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/classes");
       if (!res.ok) throw new Error("Failed to load classes");
@@ -3898,8 +3892,8 @@ function ReportCommentsModal({
   });
 
   const { data: staffData = [] } = useQuery<any[]>({
-    queryKey: ["/api/staff", currentSchoolId, "report-comments"],
-    enabled: open && !!currentSchoolId,
+    queryKey: ["/api/staff", schoolScopeId, "report-comments"],
+    enabled: open && !!schoolScopeId,
     queryFn: async () => {
       const res = await schoolFetch("/api/staff");
       if (!res.ok) throw new Error("Failed to load staff");
@@ -3907,17 +3901,32 @@ function ReportCommentsModal({
     },
   });
 
-  const { data: gradesResponse } = useQuery<{ items: Grade[] } | Grade[]>({
-    queryKey: ["/api/grades", currentSchoolId, "report-comments"],
-    enabled: open && !!currentSchoolId,
+  const { data: gradesData = [] } = useQuery<Grade[]>({
+    queryKey: ["/api/grades", schoolScopeId, "report-comments"],
+    enabled: open && !!schoolScopeId,
     queryFn: async () => {
-      const params = new URLSearchParams({ page: "1", perPage: "500" });
-      const res = await schoolFetch(`/api/grades?${params.toString()}`);
-      if (!res.ok) throw new Error("Failed to load grades");
-      return res.json();
+      const allGrades: Grade[] = [];
+      let page = 1;
+      const perPage = 500;
+
+      while (page <= 20) {
+        const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+        const res = await schoolFetch(`/api/grades?${params.toString()}`);
+        if (!res.ok) throw new Error("Failed to load grades");
+        const data = await res.json();
+
+        if (Array.isArray(data)) return data;
+
+        const items = Array.isArray(data?.items) ? data.items : [];
+        allGrades.push(...items);
+
+        if (!data?.hasNext || items.length === 0) break;
+        page += 1;
+      }
+
+      return allGrades;
     },
   });
-  const gradesData = Array.isArray(gradesResponse) ? gradesResponse : (gradesResponse?.items ?? []);
 
   const resolvedSchoolType = useMemo(
     () => (currentSchoolType ? normalizeSchoolType(currentSchoolType) : null),
@@ -3932,9 +3941,19 @@ function ReportCommentsModal({
     return getGradingProfilesForSchool(resolvedSchoolType, resolvedExaminationBoard);
   }, [resolvedSchoolType, resolvedExaminationBoard]);
 
+  const profileKeysWithGrades = useMemo(() => {
+    const keys = new Set<string>();
+    profileTabs.forEach((profile) => {
+      if (gradesData.some((grade) => reportCommentGradeMatchesTab(grade.gradeLevel, profile.key))) {
+        keys.add(profile.key);
+      }
+    });
+    return keys;
+  }, [profileTabs, gradesData]);
+
   const { data: streamsData = [] } = useQuery<Stream[]>({
-    queryKey: ["/api/streams", resolvedSchoolType, currentSchoolId, "report-comments"],
-    enabled: open && !!currentSchoolId && !!resolvedSchoolType,
+    queryKey: ["/api/streams", resolvedSchoolType, schoolScopeId, "report-comments"],
+    enabled: open && !!schoolScopeId && !!resolvedSchoolType,
     queryFn: async () => {
       const res = await schoolFetch(`/api/streams?schoolType=${resolvedSchoolType}`);
       if (!res.ok) throw new Error("Failed to load streams");
@@ -3949,8 +3968,17 @@ function ReportCommentsModal({
     }
 
     const validTabs = new Set(profileTabs.map((profile) => profile.key));
-    setActiveTab((previous) => (validTabs.has(previous) ? previous : profileTabs[0].key));
-  }, [profileTabs]);
+    const firstProfileWithGrades =
+      profileTabs.find((profile) => profileKeysWithGrades.has(profile.key))?.key || profileTabs[0].key;
+
+    setActiveTab((previous) => {
+      if (!validTabs.has(previous)) return firstProfileWithGrades;
+      if (profileKeysWithGrades.size > 0 && !profileKeysWithGrades.has(previous)) {
+        return firstProfileWithGrades;
+      }
+      return previous;
+    });
+  }, [profileTabs, profileKeysWithGrades]);
 
   useEffect(() => {
     setSelectedGradeId("");
@@ -3987,13 +4015,15 @@ function ReportCommentsModal({
     return m;
   }, [gradesData]);
 
-  const gradeRankMap: Record<string, number> = { "A*": 0, A: 1, B: 2, C: 3, D: 4, E: 5, U: 6 };
   const sortedGrades = useMemo(() => {
     return [...gradesData].sort((a, b) => {
-      const rankA = gradeRankMap[a.gradeName.toUpperCase().replace(/\s/g, "")] ?? 999;
-      const rankB = gradeRankMap[b.gradeName.toUpperCase().replace(/\s/g, "")] ?? 999;
-      if (rankA !== rankB) return rankA - rankB;
-      return (b.upperLimit ?? 0) - (a.upperLimit ?? 0);
+      const upperDiff = Number(b.upperLimit ?? 0) - Number(a.upperLimit ?? 0);
+      if (upperDiff !== 0) return upperDiff;
+
+      const lowerDiff = Number(b.lowerLimit ?? 0) - Number(a.lowerLimit ?? 0);
+      if (lowerDiff !== 0) return lowerDiff;
+
+      return String(a.gradeName || "").localeCompare(String(b.gradeName || ""), undefined, { numeric: true });
     });
   }, [gradesData]);
 
@@ -4006,9 +4036,7 @@ function ReportCommentsModal({
         ? matchedGrades
         : blankProfileGrades.length > 0
           ? blankProfileGrades
-          : resolvedSchoolType === "primary"
-            ? sortedGrades
-            : matchedGrades;
+          : sortedGrades;
 
     return sourceGrades.map((grade) => ({
       id: grade.id,
@@ -4020,7 +4048,7 @@ function ReportCommentsModal({
       gradeStatus: grade.gradeStatus,
       gradeType: grade.gradeType,
     }));
-  }, [sortedGrades, activeTab, resolvedSchoolType]);
+  }, [sortedGrades, activeTab]);
 
   const selectableGradeMap = useMemo(() => {
     const m = new Map<number, ReportCommentGradeOption>();
@@ -4046,6 +4074,18 @@ function ReportCommentsModal({
       return filteredGrades.find((grade) => grade.gradeName === comment.commentGrade) || null;
     };
   }, [fetchedGradeMap, filteredGrades]);
+
+  const getCommentLevelLabel = (comment: ReportComment) => {
+    const linkedGrade = comment.gradeId ? fetchedGradeMap.get(comment.gradeId) : undefined;
+    const profileKey =
+      linkedGrade?.gradeLevel ||
+      comment.gradeLevel ||
+      findCommentGradeOption(comment)?.gradeLevel ||
+      activeTab;
+
+    if (!profileKey) return "—";
+    return getGradeProfileLabel(profileKey);
+  };
 
   const filteredComments = useMemo(() => {
     return comments.filter((comment) => {
@@ -4073,8 +4113,8 @@ function ReportCommentsModal({
   }, [filteredComments, findCommentGradeOption]);
 
   const refreshComments = async () => {
-    await queryClient.invalidateQueries({ queryKey: ["/api/report-comments", currentSchoolId, commentType] });
-    await queryClient.refetchQueries({ queryKey: ["/api/report-comments", currentSchoolId, commentType], exact: true });
+    await queryClient.invalidateQueries({ queryKey: ["/api/report-comments", schoolScopeId, commentType] });
+    await queryClient.refetchQueries({ queryKey: ["/api/report-comments", schoolScopeId, commentType], exact: true });
   };
 
   const createMutation = useMutation({
@@ -4249,6 +4289,7 @@ function ReportCommentsModal({
             classId,
             className: classMap[classId] || "",
             gradeName: selectedGrade?.gradeName || existing.commentGrade,
+            levelLabel: getCommentLevelLabel(existing),
             commentText: existing.commentText,
             selected: true,
           });
@@ -4273,6 +4314,7 @@ function ReportCommentsModal({
       setDuplicates([{
         id: existing.id,
         gradeName: selectedGrade?.gradeName || existing.commentGrade,
+        levelLabel: getCommentLevelLabel(existing),
         commentText: existing.commentText,
         selected: true,
       }]);
@@ -4298,7 +4340,7 @@ function ReportCommentsModal({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-4xl max-h-[88vh] flex flex-col">
+        <DialogContent className="max-w-4xl max-h-[calc(100dvh-2rem)] flex flex-col">
           <DialogHeader>
             <DialogTitle data-testid="text-report-comments-title">{title}</DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
@@ -4375,6 +4417,7 @@ function ReportCommentsModal({
                   <TableHeader>
                     <TableRow>
                       {isClassTeacher && <TableHead className="text-center">Class</TableHead>}
+                      <TableHead className="text-center">Level</TableHead>
                       <TableHead className="text-center">Grade</TableHead>
                       <TableHead>Comment</TableHead>
                       <TableHead className="text-center">Actions</TableHead>
@@ -4386,6 +4429,7 @@ function ReportCommentsModal({
                       return (
                         <TableRow key={comment.id}>
                           {isClassTeacher && <TableCell className="text-center">{comment.classId ? classMap[comment.classId] || "—" : "—"}</TableCell>}
+                          <TableCell className="text-center">{getCommentLevelLabel(comment)}</TableCell>
                           <TableCell className="text-center">{grade?.gradeName || comment.commentGrade}</TableCell>
                           <TableCell className="text-sm">{comment.commentText}</TableCell>
                           <TableCell className="text-center">
@@ -4405,7 +4449,7 @@ function ReportCommentsModal({
       </Dialog>
 
       <Dialog open={dupModalOpen} onOpenChange={(open) => { if (!open) { setDupModalOpen(false); setDuplicates([]); setMissingTargets([]); setPendingText(""); setPendingGradeOption(null); } }}>
-        <DialogContent className="max-w-xl max-h-[88vh] flex flex-col">
+        <DialogContent className="max-w-xl max-h-[calc(100dvh-2rem)] flex flex-col">
           <DialogHeader>
             <DialogTitle>Existing Comments Found</DialogTitle>
             <DialogDescription>Select which existing comments to overwrite with the new text. Missing targets will be created automatically.</DialogDescription>
@@ -4425,6 +4469,7 @@ function ReportCommentsModal({
                 <div className="flex-1 min-w-0">
                   <div className="text-sm">
                     {isClassTeacher && item.className ? <><span className="font-semibold">{item.className}</span> — </> : null}
+                    {item.levelLabel ? <><span>{item.levelLabel}</span> — </> : null}
                     <span className="italic">{item.gradeName}</span>
                   </div>
                   <p className="text-xs text-muted-foreground truncate">{item.commentText}</p>

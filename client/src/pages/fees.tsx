@@ -109,8 +109,8 @@ export default function FeesPage() {
     },
     onSuccess: (data) => {
       toast({
-        title: "Notifications Sent",
-        description: `${data.sent} reminder(s) sent. ${data.missing} missing parent contact.`,
+        title: data.queued ? "Notifications Queued" : "Notifications Sent",
+        description: data.message || `${data.sent} reminder(s) sent. ${data.missing} missing parent contact.`,
       });
       setSelectedIds(new Set());
     },
@@ -280,7 +280,7 @@ export default function FeesPage() {
                 Upload from CSV
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
               <DialogHeader>
                 <DialogTitle>Upload / Update from Excel (CSV)</DialogTitle>
                 <DialogDescription>
@@ -339,7 +339,7 @@ export default function FeesPage() {
                 Record Payment
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+            <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-lg">
               <DialogHeader>
                 <DialogTitle>Record New Payment</DialogTitle>
                 <DialogDescription>Enter payment details for a student.</DialogDescription>

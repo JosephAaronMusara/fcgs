@@ -162,7 +162,7 @@ export function ApplicationFormModal({ open, onOpenChange }: ApplicationFormModa
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader>
           <DialogTitle data-testid="text-application-title">Student Enrollment Application</DialogTitle>
           <DialogDescription>

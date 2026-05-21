@@ -1482,7 +1482,7 @@ export default function CalendarPage() {
       </div>
 
       <Dialog open={isEventListOpen} onOpenChange={setIsEventListOpen}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <List className="h-5 w-5" />
@@ -1547,7 +1547,7 @@ export default function CalendarPage() {
       </Dialog>
 
       <Dialog open={!!viewingEvent} onOpenChange={(open) => !open && setViewingEvent(null)}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 flex-wrap">
               <span>{viewingEvent?.title || "Event Details"}</span>
@@ -1686,7 +1686,7 @@ export default function CalendarPage() {
           if (!open) resetCreateForm();
         }}
       >
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-3xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Create Calendar Event</DialogTitle>
             <DialogDescription>
@@ -2221,7 +2221,7 @@ export default function CalendarPage() {
           if (!open) setEventBeingEdited(null);
         }}
       >
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Edit Calendar Event</DialogTitle>
             <DialogDescription>

@@ -1674,7 +1674,7 @@ export default function OrgDashboard() {
           permissionDraftInitializedForUserRef.current = null;
         }
       }}>
-        <DialogContent className="max-w-2xl max-h-[90vh]">
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Shield className="h-5 w-5" />
@@ -1958,7 +1958,7 @@ export default function OrgDashboard() {
       </Dialog>
 
       <Dialog open={isCalendarOpen} onOpenChange={setIsCalendarOpen}>
-        <DialogContent className="max-w-[95vw] w-[95vw] max-h-[92vh] p-0 flex flex-col">
+        <DialogContent className="w-[calc(100dvw-2rem)] max-w-[calc(100dvw-2rem)] max-h-[calc(100dvh-2rem)] p-0 flex flex-col">
           <DialogHeader className="px-6 pt-6 pb-0">
             <DialogTitle className="flex items-center gap-2">
               <Calendar className="h-5 w-5" />
@@ -1982,7 +1982,7 @@ export default function OrgDashboard() {
           setIsEditingHqBranding(false);
         }
       }}>
-        <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col">
+        <DialogContent className="max-w-5xl max-h-[calc(100dvh-2rem)] flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
@@ -2434,7 +2434,7 @@ export default function OrgDashboard() {
       </Dialog>
 
       <Dialog open={isAssessmentTypesDialogOpen} onOpenChange={setIsAssessmentTypesDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Assessment Types</DialogTitle>
             <DialogDescription>Manage global assessment types used across all schools</DialogDescription>
@@ -2524,7 +2524,7 @@ export default function OrgDashboard() {
       </Dialog>
 
       <Dialog open={isExamsDialogOpen} onOpenChange={setIsExamsDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Exercises/Exams</DialogTitle>
             <DialogDescription>Manage global exercises/exams used across all schools</DialogDescription>
