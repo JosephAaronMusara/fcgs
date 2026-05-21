@@ -157,7 +157,7 @@ export default function NewslettersPage() {
               New Newsletter
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
             <DialogHeader>
               <DialogTitle>Create Newsletter</DialogTitle>
               <DialogDescription>Compose a new newsletter for parents and students</DialogDescription>
@@ -349,7 +349,7 @@ export default function NewslettersPage() {
       )}
 
       <Dialog open={!!viewNewsletter} onOpenChange={() => setViewNewsletter(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>{viewNewsletter?.title}</DialogTitle>
             <DialogDescription>

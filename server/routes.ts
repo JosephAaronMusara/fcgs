@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, libraryShelves as libraryShelvesTable } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
@@ -491,6 +491,90 @@ function logActivity(req: Request, data: Omit<InsertActivityLog, "userId" | "use
     userRole: user.role,
     ipAddress: req.ip || req.socket.remoteAddress || null,
   }).catch(() => {});
+}
+
+function clampPercentage(value: number | null | undefined): number | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function clampPercentageNumber(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+type BackgroundJobResult = {
+  processedCount?: number;
+  successCount?: number;
+  failedCount?: number;
+  skippedCount?: number;
+  errorSummary?: string | null;
+  metadata?: Record<string, any>;
+};
+
+async function queueCommunicationBackgroundJob(input: {
+  schoolId?: number | null;
+  requestedBy?: number | null;
+  jobType: string;
+  title: string;
+  totalCount?: number;
+  metadata?: Record<string, any> | null;
+}, runner: (jobId: number) => Promise<BackgroundJobResult>) {
+  const [job] = await db.insert(communicationJobs).values({
+    schoolId: input.schoolId ?? null,
+    requestedBy: input.requestedBy ?? null,
+    jobType: input.jobType,
+    title: input.title,
+    status: "queued",
+    totalCount: input.totalCount ?? 0,
+    processedCount: 0,
+    successCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    metadata: input.metadata ?? null,
+  }).returning();
+
+  setImmediate(async () => {
+    try {
+      await db.update(communicationJobs)
+        .set({ status: "running", startedAt: new Date(), updatedAt: new Date() })
+        .where(eq(communicationJobs.id, job.id));
+
+      const result = await runner(job.id);
+      await db.update(communicationJobs)
+        .set({
+          status: "completed",
+          processedCount: result.processedCount ?? input.totalCount ?? 0,
+          successCount: result.successCount ?? 0,
+          failedCount: result.failedCount ?? 0,
+          skippedCount: result.skippedCount ?? 0,
+          errorSummary: result.errorSummary ?? null,
+          metadata: result.metadata ? { ...(input.metadata || {}), ...result.metadata } : input.metadata ?? null,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(communicationJobs.id, job.id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[COMMUNICATION_JOB_${job.id}_FAILED]`, error);
+      await db.update(communicationJobs)
+        .set({
+          status: "failed",
+          errorSummary: message,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(communicationJobs.id, job.id));
+    }
+  });
+
+  return job;
+}
+
+async function updateCommunicationJobProgress(jobId: number, patch: Partial<BackgroundJobResult>) {
+  await db.update(communicationJobs)
+    .set({ ...patch, updatedAt: new Date() } as any)
+    .where(eq(communicationJobs.id, jobId));
 }
 
 
@@ -3745,27 +3829,42 @@ export async function registerRoutes(
   app.get("/api/subjects", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
+      const hasPaginationParams = req.query.page !== undefined || req.query.perPage !== undefined || req.query.paginated === "true";
       const page = parseInt(req.query.page as string) || 1;
       const perPage = parseInt(req.query.perPage as string) || 50;
       const search = (req.query.search as string) || "";
-      
+
       const subjectList = await storage.getAllSubjects();
-      let filtered = schoolId 
+      let filtered = schoolId
         ? subjectList.filter(s => s.schoolId === schoolId)
         : subjectList;
-      
+
       if (search) {
         const searchLower = search.toLowerCase();
-        filtered = filtered.filter(s => 
-          s.name.toLowerCase().includes(searchLower) || 
-          s.shortCode.toLowerCase().includes(searchLower)
+        filtered = filtered.filter(s =>
+          s.name.toLowerCase().includes(searchLower) ||
+          (s.shortCode || "").toLowerCase().includes(searchLower) ||
+          (s.syllabusCode || "").toLowerCase().includes(searchLower)
         );
       }
-      
+
+      filtered.sort((a, b) => {
+        const aLabel = `${a.shortCode || ""} ${a.name || ""}`.trim();
+        const bLabel = `${b.shortCode || ""} ${b.name || ""}`.trim();
+        return aLabel.localeCompare(bLabel);
+      });
+
+      // Selector/dropdown consumers expect the complete school subject list so the
+      // visible 5-item searchable dropdown can scroll through all entries. Only the
+      // Subjects management page uses pagination params and receives a paginated shape.
+      if (!hasPaginationParams) {
+        return res.json(filtered);
+      }
+
       const total = filtered.length;
       const start = (page - 1) * perPage;
       const items = filtered.slice(start, start + perPage);
-      
+
       res.json({
         items,
         total,
@@ -4650,87 +4749,145 @@ export async function registerRoutes(
 
       const school = await storage.getSchool(schoolId);
       const schoolName = school?.name || "FCGS";
+      const selectedStudentIds = studentIds.map((sid: any) => parseInt(sid)).filter((sid: number) => Number.isFinite(sid));
 
-      let sent = 0;
-      let missing = 0;
+      const job = await queueCommunicationBackgroundJob({
+        schoolId,
+        requestedBy: userId || null,
+        jobType: "fees_reminder",
+        title: `Send fees reminders to ${selectedStudentIds.length} student${selectedStudentIds.length === 1 ? "" : "s"}`,
+        totalCount: selectedStudentIds.length,
+        metadata: { studentCount: selectedStudentIds.length },
+      }, async (jobId) => {
+        let sent = 0;
+        let missing = 0;
+        let processed = 0;
+        let failed = 0;
+        const errors: string[] = [];
 
-      for (const sid of studentIds) {
-        const student = await storage.getStudent(parseInt(sid));
-        if (!student || student.schoolId !== schoolId) continue;
+        for (const sid of selectedStudentIds) {
+          processed++;
+          try {
+            const student = await storage.getStudent(sid);
+            if (!student || student.schoolId !== schoolId) { missing++; continue; }
 
-        const name = `${student.firstName} ${student.lastName}`;
-        const total = parseFloat(student.feesTotalTerm || "0");
-        const paid = parseFloat(student.feesPaidSoFar || "0");
-        const balance = parseFloat(student.feesBalance || "0");
-        const maxBalance = parseFloat(student.feesMaxBalance || "0");
+            const name = `${student.firstName} ${student.lastName}`;
+            const total = parseFloat(student.feesTotalTerm || "0");
+            const paid = parseFloat(student.feesPaidSoFar || "0");
+            const balance = parseFloat(student.feesBalance || "0");
+            const maxBalance = parseFloat(student.feesMaxBalance || "0");
 
-        const statusKey = computeFeesStatusKey(balance, maxBalance);
-        const statusTxt = statusKey === "fully_paid" ? "fully paid" : statusKey === "up_to_date" ? "up to date" : "in arrears";
+            const statusKey = computeFeesStatusKey(balance, maxBalance);
+            const statusTxt = statusKey === "fully_paid" ? "fully paid" : statusKey === "up_to_date" ? "up to date" : "in arrears";
 
-        let classLabel = "N/A";
-        if (student.classId) {
-          const cls = await storage.getClass(student.classId);
-          if (cls) classLabel = cls.className;
-        }
+            let classLabel = "N/A";
+            if (student.classId) {
+              const cls = await storage.getClass(student.classId);
+              if (cls) classLabel = cls.className;
+            }
 
-        let parentPhone = "";
-        let parentEmail = "";
-        let parentName = "";
-        if (student.parentId) {
-          const parent = await storage.getParent(student.parentId);
-          if (parent) {
-            parentPhone = parent.phone || "";
-            parentEmail = parent.email || "";
-            parentName = `${parent.firstName} ${parent.lastName}`;
+            let parentPhone = "";
+            let parentEmail = "";
+            let parentName = "";
+            if (student.parentId) {
+              const parent = await storage.getParent(student.parentId);
+              if (parent) {
+                parentPhone = parent.phone || "";
+                parentEmail = parent.email || "";
+                parentName = `${parent.firstName} ${parent.lastName}`;
+              }
+            }
+
+            if (!parentPhone && !parentEmail) {
+              missing++;
+              continue;
+            }
+
+            const summaryLine = `Total: $${total.toFixed(2)} | Paid: $${paid.toFixed(2)} | Balance: $${balance.toFixed(2)} | Status: ${statusTxt}${maxBalance > 0 ? ` (max allowed balance: $${maxBalance.toFixed(2)})` : ""}`;
+            const smsMessage = `${schoolName} Fees Reminder: ${name} (${classLabel}). ${summaryLine}. Please clear any arrears as soon as possible. Thank you.`;
+            let anySent = false;
+
+            if (parentPhone) {
+              const smsResult = await communicationService.sendSms({
+                to: parentPhone,
+                message: smsMessage,
+                schoolId,
+                recipientType: "parent",
+                recipientId: student.parentId || undefined,
+                recipientName: parentName,
+                category: "fees_reminder",
+                sentBy: userId,
+              });
+              if (smsResult.success) anySent = true;
+              else if (smsResult.error) errors.push(`SMS for ${name}: ${smsResult.error}`);
+            }
+
+            if (parentEmail) {
+              const emailBody = `Dear Parent/Guardian
+
+This is a friendly reminder of the current fee position for your child:
+
+Student: ${name}
+Class: ${classLabel}
+${summaryLine}
+
+If you have recently made payment, please ignore this message.
+
+Thank you,
+${schoolName}`;
+              const emailResult = await communicationService.sendEmail({
+                to: parentEmail,
+                subject: `${schoolName} Fees Reminder - ${name}`,
+                text: emailBody,
+                html: emailBody.replace(/\n/g, "<br>"),
+                schoolId,
+                recipientType: "parent",
+                recipientId: student.parentId || undefined,
+                recipientName: parentName,
+                category: "fees_reminder",
+                sentBy: userId,
+              });
+              if (emailResult.success) anySent = true;
+              else if (emailResult.error) errors.push(`Email for ${name}: ${emailResult.error}`);
+            }
+
+            if (anySent) sent++; else failed++;
+          } catch (studentErr) {
+            failed++;
+            errors.push(`Student ${sid}: ${studentErr instanceof Error ? studentErr.message : 'unknown error'}`);
+          } finally {
+            if (processed % 10 === 0 || processed === selectedStudentIds.length) {
+              await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed, skippedCount: missing });
+            }
           }
         }
 
-        if (!parentPhone && !parentEmail) {
-          missing++;
-          continue;
-        }
+        return {
+          processedCount: processed,
+          successCount: sent,
+          failedCount: failed,
+          skippedCount: missing,
+          errorSummary: errors.length ? errors.slice(0, 20).join("; ") : null,
+          metadata: { sent, missing, failed, errors: errors.slice(0, 10) },
+        };
+      });
 
-        const summaryLine = `Total: $${total.toFixed(2)} | Paid: $${paid.toFixed(2)} | Balance: $${balance.toFixed(2)} | Status: ${statusTxt}${maxBalance > 0 ? ` (max allowed balance: $${maxBalance.toFixed(2)})` : ""}`;
+      logActivity(req, {
+        action: "create",
+        category: "fees",
+        description: `Queued fees reminders for ${selectedStudentIds.length} student${selectedStudentIds.length === 1 ? "" : "s"}`,
+        targetType: "communication_job",
+        targetId: job.id,
+        schoolId,
+        metadata: { jobType: "fees_reminder", studentCount: selectedStudentIds.length },
+      });
 
-        const smsMessage = `${schoolName} Fees Reminder: ${name} (${classLabel}). ${summaryLine}. Please clear any arrears as soon as possible. Thank you.`;
-
-        if (parentPhone) {
-          await communicationService.sendSms({
-            to: parentPhone,
-            message: smsMessage,
-            schoolId,
-            recipientType: "parent",
-            recipientId: student.parentId || undefined,
-            recipientName: parentName,
-            category: "fees_reminder",
-            sentBy: userId,
-          });
-        }
-
-        if (parentEmail) {
-          const emailBody = `Dear Parent/Guardian,\n\nThis is a friendly reminder of the current fee position for your child:\n\nStudent: ${name}\nClass: ${classLabel}\n${summaryLine}\n\nIf you have recently made payment, please ignore this message.\n\nThank you,\n${schoolName}`;
-          await communicationService.sendEmail({
-            to: parentEmail,
-            subject: `${schoolName} Fees Reminder - ${name}`,
-            text: emailBody,
-            html: emailBody.replace(/\n/g, "<br>"),
-            schoolId,
-            recipientType: "parent",
-            recipientId: student.parentId || undefined,
-            recipientName: parentName,
-            category: "fees_reminder",
-            sentBy: userId,
-          });
-        }
-
-        sent++;
-      }
-
-      res.json({ success: true, sent, missing });
+      res.status(202).json({ success: true, queued: true, jobId: job.id, sent: 0, missing: 0, message: `Fees reminders queued for ${selectedStudentIds.length} student${selectedStudentIds.length === 1 ? "" : "s"}. Sending will continue in the background.` });
     } catch (error) {
       next(error);
     }
   });
+
 
   // Student Fees Management - Get students present but in arrears (for attendance register popup)
   // Matches PHP fcgs_att_fees_arrears_list: cross-references attendance records with fee balances
@@ -7230,88 +7387,139 @@ export async function registerRoutes(
 
       const isNewlyPublished = (req.body.isPublished === true || req.body.status === "published")
         && existing && !existing.isPublished && updated.schoolId;
+      let communicationJobId: number | null = null;
+
       if (isNewlyPublished) {
         const channels: string[] = updated.channels || [];
-        const shouldSendInApp = channels.includes("in_app") || channels.length === 0;
-        if (shouldSendInApp) {
-          await createBroadcastNotifications({
-            schoolId: updated.schoolId!,
-            targetAudience: updated.targetAudience || "all",
-            title: updated.title,
-            message: updated.content,
-            channel: "newsletter",
-            actorUserId: currentUser.id,
-            link: `/newsletters`,
-          });
-        }
+        const schoolId = updated.schoolId!;
+        const audience = updated.targetAudience || "all";
+        const plainText = updated.content.replace(/<[^>]*>/g, '');
 
-        if (channels.includes("email")) {
-          try {
-            const schoolId = updated.schoolId!;
-            const audience = updated.targetAudience || "all";
-            let allRecipients: Array<{ email: string; id: number; name: string }> = [];
+        const job = await queueCommunicationBackgroundJob({
+          schoolId,
+          requestedBy: currentUser.id,
+          jobType: "newsletter_publish",
+          title: `Publish newsletter - ${updated.title}`,
+          totalCount: 0,
+          metadata: { newsletterId: updated.id, channels, audience, title: updated.title },
+        }, async (jobId) => {
+          let processed = 0;
+          let sent = 0;
+          let failed = 0;
+          const errors: string[] = [];
+          const shouldSendInApp = channels.includes("in_app") || channels.length === 0;
 
-            if (audience === "all" || audience === "parents") {
-              const parents = await storage.getParentsBySchool(schoolId);
-              allRecipients.push(...parents.filter(p => p.email).map(p => ({ email: p.email!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
-            }
-            if (audience === "all" || audience === "staff") {
-              const staffMembers = await storage.getStaffBySchool(schoolId);
-              allRecipients.push(...staffMembers.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-            }
-            if (audience === "all" || audience === "students") {
-              const studentsList = await storage.getStudentsBySchool(schoolId);
-              allRecipients.push(...studentsList.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-            }
-
-            if (allRecipients.length > 0) {
-              communicationService.sendBulkEmail(allRecipients, updated.title, updated.content, {
+          if (shouldSendInApp) {
+            try {
+              await createBroadcastNotifications({
                 schoolId,
-                recipientType: "staff",
-                sentBy: currentUser.id,
-                category: "newsletter",
-              }).catch(err => console.error("[Newsletter] Email send error:", err));
+                targetAudience: audience,
+                title: updated.title,
+                message: updated.content,
+                channel: "newsletter",
+                actorUserId: currentUser.id,
+                link: `/newsletters`,
+              });
+              sent++;
+            } catch (err) {
+              failed++;
+              errors.push(`In-app: ${err instanceof Error ? err.message : 'unknown error'}`);
             }
-          } catch (err) {
-            console.error("[Newsletter] Failed to send emails:", err);
+            processed++;
+            await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed });
           }
-        }
 
-        if (channels.includes("sms")) {
-          try {
-            const schoolId = updated.schoolId!;
-            const audience = updated.targetAudience || "all";
-            let allRecipients: Array<{ phone: string; id: number; name: string }> = [];
-
-            if (audience === "all" || audience === "parents") {
-              const parents = await storage.getParentsBySchool(schoolId);
-              allRecipients.push(...parents.filter(p => p.phone).map(p => ({ phone: p.phone!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
+          if (channels.includes("email")) {
+            try {
+              let allRecipients: Array<{ email: string; id: number; name: string }> = [];
+              if (audience === "all" || audience === "parents") {
+                const parents = await storage.getParentsBySchool(schoolId);
+                allRecipients.push(...parents.filter(p => p.email).map(p => ({ email: p.email!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
+              }
+              if (audience === "all" || audience === "staff") {
+                const staffMembers = await storage.getStaffBySchool(schoolId);
+                allRecipients.push(...staffMembers.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
+              }
+              if (audience === "all" || audience === "students") {
+                const studentsList = await storage.getStudentsBySchool(schoolId);
+                allRecipients.push(...studentsList.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
+              }
+              if (allRecipients.length > 0) {
+                const result = await communicationService.sendBulkEmail(allRecipients, updated.title, updated.content, {
+                  schoolId,
+                  recipientType: "staff",
+                  sentBy: currentUser.id,
+                  category: "newsletter",
+                });
+                sent += result.sent;
+                failed += result.failed;
+                processed += allRecipients.length;
+                if (result.errors) errors.push(...result.errors);
+              }
+            } catch (err) {
+              failed++;
+              errors.push(`Email: ${err instanceof Error ? err.message : 'unknown error'}`);
             }
-            if (audience === "all" || audience === "staff") {
-              const staffMembers = await storage.getStaffBySchool(schoolId);
-              allRecipients.push(...staffMembers.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-            }
-            if (audience === "all" || audience === "students") {
-              const studentsList = await storage.getStudentsBySchool(schoolId);
-              allRecipients.push(...studentsList.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-            }
-
-            const plainText = updated.content.replace(/<[^>]*>/g, '');
-            if (allRecipients.length > 0) {
-              communicationService.sendBulkSms(allRecipients, plainText.length > 160 ? plainText.substring(0, 157) + "..." : plainText, {
-                schoolId,
-                recipientType: "staff",
-                sentBy: currentUser.id,
-                category: "newsletter",
-              }).catch(err => console.error("[Newsletter] SMS send error:", err));
-            }
-          } catch (err) {
-            console.error("[Newsletter] Failed to send SMS:", err);
+            await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed });
           }
-        }
+
+          if (channels.includes("sms")) {
+            try {
+              let allRecipients: Array<{ phone: string; id: number; name: string }> = [];
+              if (audience === "all" || audience === "parents") {
+                const parents = await storage.getParentsBySchool(schoolId);
+                allRecipients.push(...parents.filter(p => p.phone).map(p => ({ phone: p.phone!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
+              }
+              if (audience === "all" || audience === "staff") {
+                const staffMembers = await storage.getStaffBySchool(schoolId);
+                allRecipients.push(...staffMembers.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
+              }
+              if (audience === "all" || audience === "students") {
+                const studentsList = await storage.getStudentsBySchool(schoolId);
+                allRecipients.push(...studentsList.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
+              }
+              if (allRecipients.length > 0) {
+                const result = await communicationService.sendBulkSms(allRecipients, plainText.length > 160 ? plainText.substring(0, 157) + "..." : plainText, {
+                  schoolId,
+                  recipientType: "staff",
+                  sentBy: currentUser.id,
+                  category: "newsletter",
+                });
+                sent += result.sent;
+                failed += result.failed;
+                processed += allRecipients.length;
+                if (result.errors) errors.push(...result.errors);
+              }
+            } catch (err) {
+              failed++;
+              errors.push(`SMS: ${err instanceof Error ? err.message : 'unknown error'}`);
+            }
+          }
+
+          return {
+            processedCount: processed,
+            successCount: sent,
+            failedCount: failed,
+            skippedCount: 0,
+            errorSummary: errors.length ? errors.slice(0, 20).join("; ") : null,
+            metadata: { sent, failed, errors: errors.slice(0, 10) },
+          };
+        });
+        communicationJobId = job.id;
+
+        logActivity(req, {
+          action: "create",
+          category: "communication",
+          description: `Queued published newsletter: ${updated.title}`,
+          targetType: "communication_job",
+          targetId: job.id,
+          schoolId,
+          metadata: { jobType: "newsletter_publish", newsletterId: updated.id, channels, audience },
+        });
       }
 
-      res.json(updated);
+
+      res.json(communicationJobId ? { ...updated, communicationJobId, queued: true } : updated);
     } catch (error) {
       next(error);
     }
@@ -8297,6 +8505,29 @@ export async function registerRoutes(
     });
   });
 
+
+  app.get("/api/communication/jobs/:id", requireAuth, async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const jobId = parseInt(req.params.id);
+      if (!Number.isFinite(jobId)) return res.status(400).json({ message: "Invalid job id" });
+
+      const [job] = await db.select().from(communicationJobs).where(eq(communicationJobs.id, jobId)).limit(1);
+      if (!job) return res.status(404).json({ message: "Communication job not found" });
+
+      if (currentUser.role !== "org_admin") {
+        const userSchoolId = getSchoolContext(req) || currentUser.schoolId;
+        if (job.schoolId && userSchoolId && job.schoolId !== userSchoolId) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+
+      res.json(job);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   const sendNotificationSchema = z.object({
     channel: z.enum(["email", "sms", "in_app"]).optional(),
     channels: z.array(z.enum(["email", "sms", "in_app"])).optional(),
@@ -8311,19 +8542,15 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const data = sendNotificationSchema.parse(req.body);
-      
-      // Support both single channel (legacy) and multiple channels
+
       const channelsToUse = data.channels || (data.channel ? [data.channel] : []);
-      
       if (channelsToUse.length === 0) {
         return res.status(400).json({ message: "No channels specified" });
       }
-      
-      // Use provided schoolId (from frontend context) or fall back to user's schoolId
+
       const targetSchoolId = data.schoolId || currentUser.schoolId || 0;
-      
       let recipients: Array<{ id: number; email?: string | null; phone?: string | null; name: string }> = [];
-      
+
       if (data.recipientType === "staff") {
         const staffList = await storage.getStaffBySchool(targetSchoolId);
         recipients = staffList
@@ -8345,53 +8572,100 @@ export async function registerRoutes(
         return res.status(400).json({ message: "No valid recipients found" });
       }
 
-      let totalSent = 0;
-      let totalFailed = 0;
-      const allErrors: string[] = [];
+      const job = await queueCommunicationBackgroundJob({
+        schoolId: targetSchoolId || null,
+        requestedBy: currentUser.id,
+        jobType: "notice_send",
+        title: `Send notice to ${recipients.length} ${data.recipientType}${recipients.length === 1 ? "" : "s"}`,
+        totalCount: recipients.length * channelsToUse.length,
+        metadata: {
+          channels: channelsToUse,
+          recipientType: data.recipientType,
+          subject: data.subject || "Notification",
+        },
+      }, async (jobId) => {
+        let totalSent = 0;
+        let totalFailed = 0;
+        let processed = 0;
+        const allErrors: string[] = [];
 
-      for (const channel of channelsToUse) {
-        if (channel === "email") {
-          const emailRecipients = recipients.filter(r => r.email).map(r => ({ email: r.email!, id: r.id, name: r.name }));
-          if (emailRecipients.length > 0) {
-            const result = await communicationService.sendBulkEmail(emailRecipients, data.subject || "Notification", data.message, {
-              schoolId: currentUser.schoolId || undefined,
+        for (const channel of channelsToUse) {
+          if (channel === "email") {
+            const emailRecipients = recipients.filter(r => r.email).map(r => ({ email: r.email!, id: r.id, name: r.name }));
+            if (emailRecipients.length > 0) {
+              const result = await communicationService.sendBulkEmail(emailRecipients, data.subject || "Notification", data.message, {
+                schoolId: targetSchoolId || undefined,
+                recipientType: data.recipientType,
+                sentBy: currentUser.id,
+                category: "notices",
+              });
+              totalSent += result.sent;
+              totalFailed += result.failed;
+              processed += emailRecipients.length;
+              if (result.errors) allErrors.push(...result.errors);
+              await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: totalSent, failedCount: totalFailed });
+            }
+          } else if (channel === "sms") {
+            const smsRecipients = recipients.filter(r => r.phone).map(r => ({ phone: r.phone!, id: r.id, name: r.name }));
+            if (smsRecipients.length > 0) {
+              const result = await communicationService.sendBulkSms(smsRecipients, data.message, {
+                schoolId: targetSchoolId || undefined,
+                recipientType: data.recipientType,
+                sentBy: currentUser.id,
+                category: "notices",
+              });
+              totalSent += result.sent;
+              totalFailed += result.failed;
+              processed += smsRecipients.length;
+              if (result.errors) allErrors.push(...result.errors);
+              await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: totalSent, failedCount: totalFailed });
+            }
+          } else if (channel === "in_app") {
+            const { createInAppNotifications } = await import("./communication");
+            await createInAppNotifications({
               recipientType: data.recipientType,
-              sentBy: currentUser.id,
-              category: "notices",
+              recipientIds: data.recipientIds,
+              title: data.subject || "Notification",
+              message: data.message,
+              channel: "in_app",
+              schoolId: targetSchoolId || undefined,
+              actorUserId: currentUser.id,
             });
-            totalSent += result.sent;
-            totalFailed += result.failed;
-            if (result.errors) allErrors.push(...result.errors);
+            totalSent += recipients.length;
+            processed += recipients.length;
+            await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: totalSent, failedCount: totalFailed });
           }
-        } else if (channel === "sms") {
-          const smsRecipients = recipients.filter(r => r.phone).map(r => ({ phone: r.phone!, id: r.id, name: r.name }));
-          if (smsRecipients.length > 0) {
-            const result = await communicationService.sendBulkSms(smsRecipients, data.message, {
-              schoolId: currentUser.schoolId || undefined,
-              recipientType: data.recipientType,
-              sentBy: currentUser.id,
-              category: "notices",
-            });
-            totalSent += result.sent;
-            totalFailed += result.failed;
-            if (result.errors) allErrors.push(...result.errors);
-          }
-        } else if (channel === "in_app") {
-          const { createInAppNotifications } = await import("./communication");
-          await createInAppNotifications({
-            recipientType: data.recipientType,
-            recipientIds: data.recipientIds,
-            title: data.subject || "Notification",
-            message: data.message,
-            channel: "in_app",
-            schoolId: targetSchoolId || undefined,
-            actorUserId: currentUser.id,
-          });
-          totalSent += recipients.length;
         }
-      }
 
-      res.json({ success: true, sent: totalSent, failed: totalFailed, errors: allErrors });
+        const skipped = Math.max(0, recipients.length * channelsToUse.length - processed);
+        return {
+          processedCount: processed,
+          successCount: totalSent,
+          failedCount: totalFailed,
+          skippedCount: skipped,
+          errorSummary: allErrors.length ? allErrors.slice(0, 20).join("; ") : null,
+        };
+      });
+
+      logActivity(req, {
+        action: "create",
+        category: "communication",
+        description: `Queued notice for ${recipients.length} ${data.recipientType}${recipients.length === 1 ? "" : "s"} via ${channelsToUse.join(", ")}`,
+        targetType: "communication_job",
+        targetId: job.id,
+        schoolId: targetSchoolId || null,
+        metadata: { jobType: "notice_send", channels: channelsToUse, recipientType: data.recipientType, recipientCount: recipients.length },
+      });
+
+      res.status(202).json({
+        success: true,
+        queued: true,
+        jobId: job.id,
+        sent: 0,
+        failed: 0,
+        errors: [],
+        message: `Notification queued for ${recipients.length} recipient${recipients.length === 1 ? "" : "s"}. Sending will continue in the background.`,
+      });
     } catch (error) {
       next(error);
     }
@@ -11097,83 +11371,125 @@ export async function registerRoutes(
     try {
       const { examId, classId } = req.body;
       if (!examId || !classId) return res.status(400).json({ message: "Missing examId or classId" });
-      
+
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
-      
-      const school = await storage.getSchool(schoolId);
-      const classInfo = await storage.getClass(classId);
-      const students = await storage.getStudentsByClass(classId);
-      const exam = await storage.getExam(examId);
-      const userId = (req.user as any).id;
+      if (!schoolId || !currentUser) return res.status(400).json({ message: "School context required" });
+
+      const [school, classInfo, students, exam] = await Promise.all([
+        storage.getSchool(schoolId),
+        storage.getClass(classId),
+        storage.getStudentsByClass(classId),
+        storage.getExam(examId),
+      ]);
+      if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+
+      const userId = currentUser.id;
       const schoolName = school?.name || 'School';
       const className = classInfo?.className || `Class ${classId}`;
       const examName = exam?.examName || `Exam ${examId}`;
-      
-      let sent = 0, skipped = 0, noParent = 0, noResults = 0, smsCount = 0, emailCount = 0;
-      const errors: string[] = [];
-      
-      for (const student of students) {
-        if (!student.parentId) { noParent++; continue; }
-        const parent = await storage.getParent(student.parentId);
-        if (!parent) { noParent++; continue; }
-        if (!parent.phone && !parent.email) { skipped++; continue; }
-        
-        const name = `${student.firstName} ${student.lastName}`;
-        const regNo = student.admissionNo || '';
 
-        const msg = await buildReportCardMessage(student.id, examId, schoolId, schoolName, className, examName, name, regNo);
-        if (!msg) { noResults++; continue; }
-        
-        let anySent = false;
-        
-        if (parent.phone) {
-          const smsResult = await communicationService.sendSms({
-            to: parent.phone,
-            message: msg,
-            schoolId,
-            recipientType: "parent",
-            recipientId: parent.id,
-            sentBy: userId,
-            category: "academic_reports",
-            recipientName: `${parent.firstName} ${parent.lastName}`,
-          });
-          if (smsResult.success) { smsCount++; anySent = true; }
-          else if (smsResult.error) errors.push(`SMS to ${parent.phone}: ${smsResult.error}`);
-        }
-        
-        if (parent.email) {
+      const job = await queueCommunicationBackgroundJob({
+        schoolId,
+        requestedBy: userId,
+        jobType: "report_cards_send_all",
+        title: `Send report cards - ${className} - ${examName}`,
+        totalCount: students.length,
+        metadata: { examId, classId, className, examName, studentCount: students.length },
+      }, async (jobId) => {
+        let sent = 0, skipped = 0, noParent = 0, noResults = 0, smsCount = 0, emailCount = 0, processed = 0;
+        const errors: string[] = [];
+
+        for (const student of students) {
+          processed++;
           try {
-            const pdfData = await buildReportCardPdfData(student.id, examId, schoolId, school, classInfo, exam);
-            const pdfBuffer = pdfData ? await generateReportCardPdf(pdfData) : null;
-            const emailResult = await communicationService.sendEmail({
-              to: parent.email,
-              subject: `Report Card - ${name} | ${examName}`,
-              html: `<p>Dear Parent/Guardian,</p><p>Please find attached the report card for <strong>${name}</strong> (${regNo}).</p><p>Hardwork - Discipline - Changing Lives</p>`,
-              text: msg,
-              attachments: pdfBuffer ? [{ filename: `Report_Card_${name.replace(/\s+/g, '_')}.pdf`, content: pdfBuffer }] : undefined,
-              schoolId,
-              recipientType: "parent",
-              recipientId: parent.id,
-              sentBy: userId,
-              category: "academic_reports",
-              recipientName: `${parent.firstName} ${parent.lastName}`,
-            });
-            if (emailResult.success) { emailCount++; anySent = true; }
-            else if (emailResult.error) errors.push(`Email to ${parent.email}: ${emailResult.error}`);
-          } catch (pdfErr) {
-            errors.push(`PDF/Email for ${name}: ${pdfErr instanceof Error ? pdfErr.message : 'unknown error'}`);
+            if (!student.parentId) { noParent++; continue; }
+            const parent = await storage.getParent(student.parentId);
+            if (!parent) { noParent++; continue; }
+            if (!parent.phone && !parent.email) { skipped++; continue; }
+
+            const name = `${student.firstName} ${student.lastName}`;
+            const regNo = student.admissionNo || '';
+            const msg = await buildReportCardMessage(student.id, examId, schoolId, schoolName, className, examName, name, regNo);
+            if (!msg) { noResults++; continue; }
+
+            let anySent = false;
+            if (parent.phone) {
+              const smsResult = await communicationService.sendSms({
+                to: parent.phone,
+                message: msg,
+                schoolId,
+                recipientType: "parent",
+                recipientId: parent.id,
+                sentBy: userId,
+                category: "academic_reports",
+                recipientName: `${parent.firstName} ${parent.lastName}`,
+              });
+              if (smsResult.success) { smsCount++; anySent = true; }
+              else if (smsResult.error) errors.push(`SMS to ${parent.phone}: ${smsResult.error}`);
+            }
+
+            if (parent.email) {
+              try {
+                const pdfData = await buildReportCardPdfData(student.id, examId, schoolId, school, classInfo, exam);
+                const pdfBuffer = pdfData ? await generateReportCardPdf(pdfData) : null;
+                const emailResult = await communicationService.sendEmail({
+                  to: parent.email,
+                  subject: `Report Card - ${name} | ${examName}`,
+                  html: `<p>Dear Parent/Guardian,</p><p>Please find attached the report card for <strong>${name}</strong> (${regNo}).</p><p>Hardwork - Discipline - Changing Lives</p>`,
+                  text: msg,
+                  attachments: pdfBuffer ? [{ filename: `Report_Card_${name.replace(/\s+/g, '_')}.pdf`, content: pdfBuffer }] : undefined,
+                  schoolId,
+                  recipientType: "parent",
+                  recipientId: parent.id,
+                  sentBy: userId,
+                  category: "academic_reports",
+                  recipientName: `${parent.firstName} ${parent.lastName}`,
+                });
+                if (emailResult.success) { emailCount++; anySent = true; }
+                else if (emailResult.error) errors.push(`Email to ${parent.email}: ${emailResult.error}`);
+              } catch (pdfErr) {
+                errors.push(`PDF/Email for ${name}: ${pdfErr instanceof Error ? pdfErr.message : 'unknown error'}`);
+              }
+            }
+
+            if (anySent) sent++; else skipped++;
+          } catch (studentErr) {
+            skipped++;
+            errors.push(`Student ${student.id}: ${studentErr instanceof Error ? studentErr.message : 'unknown error'}`);
+          } finally {
+            if (processed % 10 === 0 || processed === students.length) {
+              await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: skipped, skippedCount: noParent + noResults });
+            }
           }
         }
-        
-        if (anySent) sent++; else skipped++;
-      }
-      
-      res.json({ 
-        success: true, 
-        message: `Sent report cards for ${sent} student(s). Skipped ${skipped}. No parent: ${noParent}. No results: ${noResults}. [SMS: ${smsCount}, Email: ${emailCount}]`,
-        details: { sent, skipped, noParent, noResults, smsCount, emailCount, errors: errors.slice(0, 10) },
+
+        return {
+          processedCount: processed,
+          successCount: sent,
+          failedCount: skipped,
+          skippedCount: noParent + noResults,
+          errorSummary: errors.length ? errors.slice(0, 20).join("; ") : null,
+          metadata: { sent, skipped, noParent, noResults, smsCount, emailCount, errors: errors.slice(0, 10) },
+        };
+      });
+
+      logActivity(req, {
+        action: "create",
+        category: "academic_reports",
+        description: `Queued report cards for ${className} - ${examName}`,
+        targetType: "communication_job",
+        targetId: job.id,
+        schoolId,
+        metadata: { jobType: "report_cards_send_all", examId, classId, studentCount: students.length },
+      });
+
+      res.status(202).json({
+        success: true,
+        queued: true,
+        jobId: job.id,
+        message: `Report cards queued for ${students.length} student${students.length === 1 ? "" : "s"}. Sending will continue in the background.`,
       });
     } catch (error) {
       next(error);
@@ -11338,11 +11654,11 @@ export async function registerRoutes(
             .filter(m => m.percentage !== null && m.percentage !== undefined)
             .map(m => m.studentId)
         );
-        const progressPct = totalStudents > 0 ? Math.round((studentsWithMarks.size / totalStudents) * 100) : null;
+        const progressPct = totalStudents > 0 ? (clampPercentage((studentsWithMarks.size / totalStudents) * 100) ?? 0) : null;
 
         const marksWithPct = streamMarks.filter(m => m.percentage !== null && m.percentage !== undefined);
         const avgPct = marksWithPct.length > 0
-          ? Math.round(marksWithPct.reduce((sum, m) => sum + parseFloat(m.percentage), 0) / marksWithPct.length)
+          ? (clampPercentage(marksWithPct.reduce((sum, m) => sum + clampPercentageNumber(parseFloat(m.percentage)), 0) / marksWithPct.length) ?? 0)
           : null;
 
         return {
@@ -11513,11 +11829,11 @@ export async function registerRoutes(
             .filter(m => m.percentage !== null && m.percentage !== undefined)
             .map(m => m.studentId)
         );
-        const progressPct = subjectTotalStudents > 0 ? Math.round((studentsWithMarks.size / subjectTotalStudents) * 100) : 0;
+        const progressPct = clampPercentage(subjectTotalStudents > 0 ? (studentsWithMarks.size / subjectTotalStudents) * 100 : 0) ?? 0;
 
         const marksWithPct = subjectMarks.filter(m => m.percentage !== null && m.percentage !== undefined);
         const avgPct = marksWithPct.length > 0
-          ? Math.round(marksWithPct.reduce((sum, m) => sum + parseFloat(m.percentage), 0) / marksWithPct.length)
+          ? (clampPercentage(marksWithPct.reduce((sum, m) => sum + clampPercentageNumber(parseFloat(m.percentage)), 0) / marksWithPct.length) ?? 0)
           : null;
 
         return {
@@ -11792,6 +12108,139 @@ export async function registerRoutes(
     return syllabusCode ? `${base} (${syllabusCode})` : base;
   }
 
+  async function getAnalyticsTeacherDisplayName(staffId: number) {
+    const staffMember = await storage.getStaff(staffId);
+    if (!staffMember) return `Staff #${staffId}`;
+
+    const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
+    const normalizedGender = (staffMember.gender || "").toString().toLowerCase();
+    const title = normalizedGender === "male" ? "Mr." : normalizedGender === "female" ? "Ms." : "";
+    const firstName = ((staffMember.firstName || user?.firstName || "") as string).trim();
+    const lastName = ((staffMember.lastName || user?.lastName || "") as string).trim();
+    const firstInitial = firstName ? `${firstName.charAt(0).toUpperCase()}.` : "";
+
+    if (lastName) {
+      return [title, firstInitial, lastName].filter(Boolean).join(" ").trim();
+    }
+
+    const fallbackName = user
+      ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
+      : `${staffMember.firstName || ""} ${staffMember.lastName || ""}`.trim();
+
+    return fallbackName || `Staff #${staffId}`;
+  }
+
+  async function resolveClassSubjectTeacherNames(schoolId: number, classId: number, subjectIds: number[]) {
+    const teacherMap = new Map<number, string>();
+    const subjectIdSet = new Set(subjectIds.map((id) => Number(id)).filter((id) => Number.isFinite(id)));
+    const teacherNameCache = new Map<number, string>();
+
+    const getCachedTeacherName = async (staffId: number) => {
+      const id = Number(staffId);
+      if (teacherNameCache.has(id)) return teacherNameCache.get(id)!;
+      const name = await getAnalyticsTeacherDisplayName(id);
+      teacherNameCache.set(id, name);
+      return name;
+    };
+
+    const setTeacherIfNeeded = async (subjectId: number, staffId: number | null | undefined) => {
+      const normalizedSubjectId = Number(subjectId);
+      if (!subjectIdSet.has(normalizedSubjectId) || !staffId || teacherMap.has(normalizedSubjectId)) return;
+      teacherMap.set(normalizedSubjectId, await getCachedTeacherName(Number(staffId)));
+    };
+
+    if (subjectIdSet.size === 0) return teacherMap;
+
+    // Primary source: Staff Management → exact Class + Subject assignments.
+    try {
+      const subjectTeacherRows = await db.select({
+        staffId: staffSubjects.staffId,
+        subjectId: staffSubjects.subjectId,
+      }).from(staffSubjects).where(eq(staffSubjects.classId, classId));
+
+      for (const row of subjectTeacherRows) {
+        await setTeacherIfNeeded(Number(row.subjectId), row.staffId);
+      }
+    } catch (error) {
+      console.warn("[ANALYTICS_TEACHER_ASSIGNMENTS_ERROR]", error);
+    }
+
+    // Fallback source: Timetable slots for the same Class + Subject.
+    try {
+      const timetableTeacherRows = await db.select({
+        teacherId: timetableSlotsTable.teacherId,
+        subjectId: timetableSlotsTable.subjectId,
+      }).from(timetableSlotsTable).where(eq(timetableSlotsTable.classId, classId));
+
+      const countsBySubject = new Map<number, Map<number, number>>();
+      for (const row of timetableTeacherRows) {
+        const subjectId = Number(row.subjectId);
+        if (!row.teacherId || !subjectIdSet.has(subjectId) || teacherMap.has(subjectId)) continue;
+        const subjectCounts = countsBySubject.get(subjectId) || new Map<number, number>();
+        subjectCounts.set(Number(row.teacherId), (subjectCounts.get(Number(row.teacherId)) || 0) + 1);
+        countsBySubject.set(subjectId, subjectCounts);
+      }
+
+      for (const [subjectId, teacherCounts] of countsBySubject.entries()) {
+        const [topTeacherId] = Array.from(teacherCounts.entries()).sort((a, b) => b[1] - a[1])[0] || [];
+        await setTeacherIfNeeded(subjectId, topTeacherId);
+      }
+    } catch (error) {
+      console.warn("[ANALYTICS_TIMETABLE_TEACHER_ERROR]", error);
+    }
+
+    // Last safe fallback: legacy staff_subjects rows where class_id is NULL.
+    // Only use this when exactly one staff member in this school is assigned to the subject.
+    try {
+      const legacyRows = await db.select({
+        staffId: staffSubjects.staffId,
+        subjectId: staffSubjects.subjectId,
+      }).from(staffSubjects).where(sql`${staffSubjects.classId} IS NULL`);
+
+      const legacyBySubject = new Map<number, number[]>();
+      for (const row of legacyRows) {
+        const subjectId = Number(row.subjectId);
+        if (!subjectIdSet.has(subjectId) || teacherMap.has(subjectId)) continue;
+        const staffMember = await storage.getStaff(Number(row.staffId));
+        if (!staffMember || staffMember.schoolId !== schoolId) continue;
+        const current = legacyBySubject.get(subjectId) || [];
+        current.push(Number(row.staffId));
+        legacyBySubject.set(subjectId, current);
+      }
+
+      for (const [subjectId, staffIds] of legacyBySubject.entries()) {
+        const uniqueStaffIds = Array.from(new Set(staffIds));
+        if (uniqueStaffIds.length === 1) {
+          await setTeacherIfNeeded(subjectId, uniqueStaffIds[0]);
+        }
+      }
+    } catch (error) {
+      console.warn("[ANALYTICS_LEGACY_TEACHER_ASSIGNMENTS_ERROR]", error);
+    }
+
+    return teacherMap;
+  }
+
+  async function resolveStreamSubjectTeacherNames(schoolId: number, classIds: number[], subjectIds: number[]) {
+    const teachersBySubject = new Map<number, Set<string>>();
+
+    for (const classId of classIds) {
+      const classTeacherMap = await resolveClassSubjectTeacherNames(schoolId, classId, subjectIds);
+      for (const [subjectId, teacherName] of classTeacherMap.entries()) {
+        if (!teacherName) continue;
+        const existing = teachersBySubject.get(subjectId) || new Set<string>();
+        existing.add(teacherName);
+        teachersBySubject.set(subjectId, existing);
+      }
+    }
+
+    const result = new Map<number, string>();
+    for (const [subjectId, names] of teachersBySubject.entries()) {
+      result.set(subjectId, Array.from(names).sort((a, b) => a.localeCompare(b)).join(", "));
+    }
+    return result;
+  }
+
   function orderAnalyticsGrades(grades: any[]) {
     return [...grades].sort((a, b) => {
       const upperDiff = Number(b.upperLimit ?? -1) - Number(a.upperLimit ?? -1);
@@ -11939,6 +12388,7 @@ export async function registerRoutes(
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const validSubjects = subjectsData.filter(Boolean);
       const validSubjectIdSet = new Set(validSubjects.map((subject: any) => Number(subject.id)));
+      const teacherMap = await resolveClassSubjectTeacherNames(schoolId, classId, subjectIds.map((id) => Number(id)));
 
       const assessmentIds = classAssessments.map(a => a.id);
       let classMarks: any[] = [];
@@ -11996,12 +12446,17 @@ export async function registerRoutes(
 
       let enteredCells = 0;
       let overallSum = 0;
+      const countedStudentSubjectPairs = new Set<string>();
 
       for (const mark of classMarks) {
         if (mark.percentage === null || mark.percentage === undefined) continue;
-        if (!eligibleStudentSubjectPairs.has(`${mark.studentId}-${mark.subjectId}`)) continue;
-        const pct = parseFloat(mark.percentage);
-        if (Number.isNaN(pct)) continue;
+        const studentSubjectKey = `${mark.studentId}-${mark.subjectId}`;
+        if (!eligibleStudentSubjectPairs.has(studentSubjectKey)) continue;
+        if (countedStudentSubjectPairs.has(studentSubjectKey)) continue;
+        countedStudentSubjectPairs.add(studentSubjectKey);
+        const parsedPct = parseFloat(mark.percentage);
+        if (Number.isNaN(parsedPct)) continue;
+        const pct = clampPercentageNumber(parsedPct);
 
         const stats = subjectStats[mark.subjectId];
         if (!stats) continue;
@@ -12023,21 +12478,22 @@ export async function registerRoutes(
       }
 
       const expectedCells = Object.values(subjectStats).reduce((sum, stats) => sum + stats.expected, 0);
-      const completion = expectedCells > 0 ? Math.round((enteredCells / expectedCells) * 100) : 0;
-      const overallAvg = enteredCells > 0 ? Math.round(overallSum / enteredCells) : 0;
+      const completion = clampPercentage(expectedCells > 0 ? (enteredCells / expectedCells) * 100 : 0) ?? 0;
+      const overallAvg = clampPercentage(enteredCells > 0 ? overallSum / enteredCells : 0) ?? 0;
 
       const subjectSummary = validSubjects.map(subject => {
         if (!subject) return null;
         const stats = subjectStats[subject.id];
         if (!stats) return null;
-        const avg = stats.have > 0 ? Math.round(stats.sum / stats.have) : 0;
-        const subCompletion = stats.expected > 0 ? Math.round((stats.have / stats.expected) * 100) : 0;
+        const avg = clampPercentage(stats.have > 0 ? stats.sum / stats.have : 0) ?? 0;
+        const subCompletion = clampPercentage(stats.expected > 0 ? (stats.have / stats.expected) * 100 : 0) ?? 0;
         const gradedTotal = stats.pass + stats.fail;
-        const passRate = gradedTotal > 0 ? Math.round((stats.pass / gradedTotal) * 100) : 0;
+        const passRate = clampPercentage(gradedTotal > 0 ? (stats.pass / gradedTotal) * 100 : 0) ?? 0;
 
         return {
           subjectId: subject.id,
           subjectName: getReportSubjectLabel(subject),
+          teacherName: teacherMap.get(Number(subject.id)) || null,
           avg,
           completion: subCompletion,
           passed: stats.pass,
@@ -12167,8 +12623,9 @@ export async function registerRoutes(
         const subject = subjectById.get(Number(mark.subjectId));
         if (!subject) continue;
 
-        const pct = parseFloat(mark.percentage);
-        if (Number.isNaN(pct)) continue;
+        const parsedPct = parseFloat(mark.percentage);
+        if (Number.isNaN(parsedPct)) continue;
+        const pct = clampPercentageNumber(parsedPct);
 
         const subjectId = Number(mark.subjectId);
         if (target.raw[subjectId] === undefined) {
@@ -12298,6 +12755,7 @@ export async function registerRoutes(
       for (const subject of subjectsData) {
         if (subject) subjectById.set(Number(subject.id), subject);
       }
+      const teacherMap = await resolveStreamSubjectTeacherNames(schoolId, classIds, subjectIds.map((id) => Number(id)));
 
       const gradeColumns: string[] = [];
       const gradeCandidatesBySubjectClass = new Map<string, any[]>();
@@ -12332,14 +12790,20 @@ export async function registerRoutes(
         subjectType?: string | null;
       }> = {};
 
+      const countedStreamStudentSubjectPairs = new Set<string>();
+
       for (const mark of allMarks) {
         if (mark.percentage === null || mark.percentage === undefined) continue;
         if (!streamStudentIds.has(Number(mark.studentId))) continue;
+        const studentSubjectKey = `${mark.studentId}-${mark.subjectId}`;
+        if (countedStreamStudentSubjectPairs.has(studentSubjectKey)) continue;
+        countedStreamStudentSubjectPairs.add(studentSubjectKey);
         const eligibleSubjectIds = studentSubjectIdsByStudent.get(mark.studentId);
         if (eligibleSubjectIds && eligibleSubjectIds.size > 0 && !eligibleSubjectIds.has(Number(mark.subjectId))) continue;
 
-        const pct = parseFloat(mark.percentage);
-        if (Number.isNaN(pct)) continue;
+        const parsedPct = parseFloat(mark.percentage);
+        if (Number.isNaN(parsedPct)) continue;
+        const pct = clampPercentageNumber(parsedPct);
         const subId = Number(mark.subjectId);
         let subject = subjectById.get(subId);
         if (!subject) {
@@ -12373,13 +12837,14 @@ export async function registerRoutes(
         if (!subject) subject = await storage.getSubject(parseInt(subId));
         if (!subject) continue;
 
-        const avg = stats.cnt > 0 ? Math.round(stats.sum / stats.cnt) : 0;
+        const avg = clampPercentage(stats.cnt > 0 ? stats.sum / stats.cnt : 0) ?? 0;
         const total = stats.pass + stats.fail;
-        const passRate = total > 0 ? Math.round((stats.pass / total) * 100) : 0;
+        const passRate = clampPercentage(total > 0 ? (stats.pass / total) * 100 : 0) ?? 0;
 
         rows.push({
           subjectId: parseInt(subId),
           subjectName: getReportSubjectLabel(subject),
+          teacherName: teacherMap.get(Number(subId)) || null,
           avg,
           passed: stats.pass,
           failed: stats.fail,

@@ -393,7 +393,7 @@ function BorrowerLookupDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-3xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader>
           <DialogTitle>{record.type === "student" ? "Student Borrowing Lookup" : "Staff Borrowing Lookup"}</DialogTitle>
           <DialogDescription>
@@ -662,7 +662,7 @@ function LibrarySetupModal({
   const deleteShelf = useMutation({ mutationFn: async (id: number) => apiRequest("DELETE", `/api/library/shelves/${id}?replacement=${encodeURIComponent("N/A")}`), onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["/api/library/shelves"] }); queryClient.invalidateQueries({ queryKey: ["/api/library/books"] }); setEditingShelf(null); setShelfName(""); setShelfDescription(""); toast({ title: "Bookshelf deleted. Books moved to N/A." }); } });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-4xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
         <DialogHeader><DialogTitle>Library Setup</DialogTitle><DialogDescription>Manage Policies, Categories and Bookshelves from one place.</DialogDescription></DialogHeader>
         <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
           <TabsList className="mb-4 grid h-auto w-full grid-cols-1 gap-2 sm:grid-cols-3"><TabsTrigger value="policies">Manage Policies</TabsTrigger><TabsTrigger value="categories">Manage Categories</TabsTrigger><TabsTrigger value="shelves">Manage Bookshelves</TabsTrigger></TabsList>
@@ -1413,7 +1413,7 @@ function CatalogTab({
 
     return (
       <Dialog open={open} onOpenChange={(v) => { onOpenChange(v); if (!v) resetAutoFill(); }}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-3xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle className="text-xl font-bold">{isEditing ? "Edit Book" : "BOOK"}</DialogTitle>
             <DialogDescription>{isEditing ? "Update book details" : "Add a new book to the catalog. Type a title to see existing books for auto-fill."}</DialogDescription>
@@ -1778,7 +1778,7 @@ function CatalogTab({
       {bookFormDialog(editingBook !== null, (v) => !v && setEditingBook(null), editingBook)}
 
       <Dialog open={isLibrarySetupOpen} onOpenChange={setIsLibrarySetupOpen}>
-        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Library Setup</DialogTitle>
             <DialogDescription>Manage Policies, Categories and Bookshelves from one place.</DialogDescription>
@@ -2308,7 +2308,7 @@ function CatalogTab({
       />
 
       <Dialog open={!!selectedCopy} onOpenChange={(open) => { if (!open) { setSelectedCopy(null); setIsCopyEditing(false); setCopyEditBanner(false); setCopyAttachmentFiles([]); setAttachmentsCopy(null); setSelectedAttachment(null); } }}>
-        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <div className="space-y-3">
               <div>
@@ -2424,7 +2424,7 @@ function CatalogTab({
       </Dialog>
 
       <Dialog open={!!attachmentsCopy && !!selectedAttachment} onOpenChange={(open) => { if (!open) setSelectedAttachment(null); }}>
-        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Attachment Viewer</DialogTitle>
             <DialogDescription>Preview, download, and manage this copy attachment.</DialogDescription>
@@ -2446,7 +2446,7 @@ function CatalogTab({
       </Dialog>
 
       <Dialog open={!!viewCopiesBookId} onOpenChange={(open) => { if (!open) setViewCopiesBookId(null); }}>
-        <DialogContent className="max-w-6xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-6xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Book Copies</DialogTitle>
             <DialogDescription>
@@ -3032,7 +3032,7 @@ function CirculationTab({
       </div>
 
       <Dialog open={isCommunicateAlertsOpen} onOpenChange={setIsCommunicateAlertsOpen}>
-        <DialogContent className="max-w-5xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-5xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Communicate Alerts</DialogTitle>
             <DialogDescription>
@@ -3195,7 +3195,7 @@ function CirculationTab({
       />
 
       <Dialog open={isIssueOpen} onOpenChange={(open) => { setIsIssueOpen(open); if (!open) resetIssueModal(); }}>
-        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Issue / Return Book</DialogTitle>
             <DialogDescription>

@@ -132,7 +132,7 @@ export default function SchemesPage() {
               Add Entry
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
             <DialogHeader>
               <DialogTitle>Add Scheme Entry</DialogTitle>
               <DialogDescription>Add a new scheme of work entry</DialogDescription>

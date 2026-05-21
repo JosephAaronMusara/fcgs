@@ -373,7 +373,7 @@ export default function ParentsPage() {
                 PARENT
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
               <DialogHeader>
                 <DialogTitle>Add New Parent</DialogTitle>
               </DialogHeader>
@@ -489,7 +489,7 @@ export default function ParentsPage() {
                               <Eye className="w-4 h-4" />
                             </Button>
                           </DialogTrigger>
-                          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                          <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
                             <DialogHeader>
                               <DialogTitle>View Parent</DialogTitle>
                             </DialogHeader>
@@ -506,7 +506,7 @@ export default function ParentsPage() {
                         </Dialog>
 
                         <Dialog open={editingParent?.id === p.id} onOpenChange={(open) => !open && setEditingParent(null)}>
-                          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                          <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
                             <DialogHeader>
                               <DialogTitle>Edit Parent</DialogTitle>
                             </DialogHeader>

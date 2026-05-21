@@ -914,6 +914,32 @@ export const insertCommunicationLogSchema = createInsertSchema(communicationLogs
 export type InsertCommunicationLog = z.infer<typeof insertCommunicationLogSchema>;
 export type CommunicationLog = typeof communicationLogs.$inferSelect;
 
+export const communicationJobStatusEnum = pgEnum("communication_job_status", ["queued", "running", "completed", "failed"]);
+
+export const communicationJobs = pgTable("communication_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id),
+  jobType: text("job_type").notNull(),
+  title: text("title").notNull(),
+  status: communicationJobStatusEnum("status").notNull().default("queued"),
+  requestedBy: integer("requested_by").references(() => users.id),
+  totalCount: integer("total_count").notNull().default(0),
+  processedCount: integer("processed_count").notNull().default(0),
+  successCount: integer("success_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  skippedCount: integer("skipped_count").notNull().default(0),
+  errorSummary: text("error_summary"),
+  metadata: jsonb("metadata"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertCommunicationJobSchema = createInsertSchema(communicationJobs).omit({ id: true, createdAt: true, updatedAt: true, startedAt: true, completedAt: true });
+export type InsertCommunicationJob = z.infer<typeof insertCommunicationJobSchema>;
+export type CommunicationJob = typeof communicationJobs.$inferSelect;
+
 // Assessment Types (lookup table)
 export const assessmentTypes = pgTable("assessment_types", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),

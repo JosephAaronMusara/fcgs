@@ -475,7 +475,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
                 Upload from CSV
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
               <DialogHeader>
                 <DialogTitle>Upload / Update from Excel (CSV)</DialogTitle>
                 <DialogDescription>
@@ -534,7 +534,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
                 Record Payment
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+            <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-lg">
               <DialogHeader>
                 <DialogTitle>Record New Payment</DialogTitle>
                 <DialogDescription>Enter payment details for a student.</DialogDescription>

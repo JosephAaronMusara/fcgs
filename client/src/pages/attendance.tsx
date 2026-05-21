@@ -429,7 +429,7 @@ export default function AttendancePage() {
   };
 
   const renderMarkingRows = (targetStudents: AttendanceGridStudent[]) => (
-    <div className="max-h-[60vh] overflow-auto">
+    <div className="min-h-0 flex-1 overflow-auto overscroll-contain [-webkit-overflow-scrolling:touch]">
       {targetStudents.length > 0 ? (
         <div>
           {targetStudents.map((student, idx) => {
@@ -686,7 +686,7 @@ export default function AttendancePage() {
       </Card>
 
       <Dialog open={markDialogOpen} onOpenChange={(open) => !open && handleCloseMarkDialog()}>
-        <DialogContent className="w-[calc(100vw-1.5rem)] max-w-5xl p-0 overflow-hidden">
+        <DialogContent className="w-[calc(100dvw-2rem)] max-w-5xl max-h-[calc(100dvh-2rem)] p-0 overflow-hidden flex flex-col">
           <DialogHeader className="sr-only">
             <DialogTitle>Mark Attendance</DialogTitle>
           </DialogHeader>
@@ -744,7 +744,7 @@ export default function AttendancePage() {
       </Dialog>
 
       <Dialog open={Boolean(singleEditTarget)} onOpenChange={(open) => !open && handleCloseSingleEdit()}>
-        <DialogContent className="w-[calc(100vw-1.5rem)] max-w-3xl p-0 overflow-hidden">
+        <DialogContent className="w-[calc(100dvw-2rem)] max-w-3xl max-h-[calc(100dvh-2rem)] p-0 overflow-hidden flex flex-col">
           <DialogHeader className="sr-only">
             <DialogTitle>Edit Attendance</DialogTitle>
           </DialogHeader>
@@ -794,7 +794,7 @@ export default function AttendancePage() {
       </Dialog>
 
       <Dialog open={arrearsModalOpen} onOpenChange={setArrearsModalOpen}>
-        <DialogContent className="w-[calc(100vw-1.5rem)] max-w-2xl">
+        <DialogContent className="w-[calc(100dvw-2rem)] max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
           <DialogHeader>
             <DialogTitle>Fees Arrears Alert</DialogTitle>
           </DialogHeader>
