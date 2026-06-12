@@ -345,6 +345,8 @@ export default function ParentsPage() {
             recipientType="parent"
             recipients={getNotifyRecipients()}
             schoolId={currentSchoolId}
+            selectedIds={selectedIds}
+            search={debouncedSearch}
           />
 
           <input

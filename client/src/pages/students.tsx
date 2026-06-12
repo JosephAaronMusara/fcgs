@@ -430,7 +430,7 @@ export default function StudentsPage() {
       "First Name": s.firstName,
       "Last Name": s.lastName,
       "Email": s.email || "",
-      "Phone": s.phone || "",
+      "Student Phone": s.phone || "",
       "Gender": s.gender?.toUpperCase() || "",
       "Date of Birth": s.dateOfBirth || "",
       "Street Address": s.streetAddress || "",
@@ -480,7 +480,7 @@ export default function StudentsPage() {
           firstName: (row["First Name"] || row["first_name"] || row["FirstName"] || "").trim(),
           lastName: (row["Last Name"] || row["last_name"] || row["LastName"] || "").trim(),
           email: row["Email"] || row["email"] || "",
-          phone: row["Phone"] || row["phone"] || "",
+          phone: row["Student Phone"] || row["student_phone"] || row["Phone"] || row["phone"] || "",
           gender: normalizeGender(row["Gender"] || row["gender"]),
           dateOfBirth: row["D.O.B"] || row["Date of Birth"] || row["dob"] || row["DOB"] || "",
           streetAddress: row["Street Address"] || row["street_address"] || "",
@@ -551,6 +551,10 @@ export default function StudentsPage() {
             recipientType="student"
             recipients={getNotifyRecipients()}
             schoolId={currentSchoolId}
+            selectedIds={selectedStudentIds}
+            search={debouncedSearch}
+            classFilter={classFilter}
+            statusFilter={statusFilter}
           />
 
           <input
@@ -1227,7 +1231,7 @@ function StudentView({
           <div className="rounded-md border px-3 py-2 text-sm">{student.passportNumber || "-"}</div>
         </div>
         <div className="space-y-1">
-          <Label>Phone</Label>
+          <Label>Student Phone</Label>
           <div className="rounded-md border px-3 py-2 text-sm">{student.phone || "-"}</div>
         </div>
         <div className="space-y-1">
@@ -1720,7 +1724,7 @@ function StudentForm({
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="phone">Phone</Label>
+          <Label htmlFor="phone">Student Phone</Label>
           <Input
             id="phone"
             name="phone"

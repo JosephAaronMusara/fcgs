@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
+import { enqueueOfflineRequest, isLikelyNetworkError } from "@/lib/offlineQueue";
+import { saveLocalDraft, removeLocalDraft } from "@/lib/localDrafts";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -416,10 +418,44 @@ export default function MarksEntryPage() {
 
   const saveMutationRef = useRef<any>(null);
 
+  const queueMarksPayload = useCallback((data: any) => {
+    const student = marksDataRef.current?.students.find((item) => item.id === data.studentId);
+    const assessment = marksDataRef.current?.assessment;
+    const draftKey = `marks:${data.assessmentId}:${data.studentId}`;
+    saveLocalDraft(draftKey, "marks", `Marks Entry - ${student?.firstName || ""} ${student?.lastName || ""}`.trim(), data);
+    enqueueOfflineRequest({
+      id: `marks:${data.assessmentId}:${data.studentId}`,
+      module: "marks",
+      title: "Marks Entry",
+      subtitle: `${assessment?.name || "Assessment"} • ${student ? `${student.firstName || ""} ${student.lastName || ""}`.trim() : `Student ${data.studentId}`}`,
+      method: "POST",
+      url: "/api/marks-entry",
+      body: data,
+      invalidateKeys: ["/api/marks-entry"],
+    });
+    return draftKey;
+  }, []);
+
   const saveMutation = useMutation({
     mutationFn: async (data: any) => {
-      const res = await apiRequest("POST", "/api/marks-entry", data);
-      return res.json();
+      const student = marksDataRef.current?.students.find((item) => item.id === data.studentId);
+      const draftKey = `marks:${data.assessmentId}:${data.studentId}`;
+      saveLocalDraft(draftKey, "marks", `Marks Entry - ${student?.firstName || ""} ${student?.lastName || ""}`.trim(), data);
+
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        queueMarksPayload(data);
+        return { offlineQueued: true, ...data };
+      }
+
+      try {
+        const res = await apiRequest("POST", "/api/marks-entry", data);
+        removeLocalDraft(draftKey);
+        return res.json();
+      } catch (error) {
+        if (!isLikelyNetworkError(error)) throw error;
+        queueMarksPayload(data);
+        return { offlineQueued: true, ...data };
+      }
     },
     onSuccess: (data, variables) => {
       savingStudents.current.delete(variables.studentId);
@@ -432,9 +468,10 @@ export default function MarksEntryPage() {
           autoCommentSnapshot: data.autoCommentSnapshot || prev[variables.studentId]?.autoCommentSnapshot,
         },
       }));
-      queryClient.setQueryData(["/api/marks-entry", String(variables.assessmentId)], (old: MarksEntryData | undefined) => {
-        if (!old) return old;
-        return {
+      if (!data?.offlineQueued) {
+        queryClient.setQueryData(["/api/marks-entry", String(variables.assessmentId)], (old: MarksEntryData | undefined) => {
+          if (!old) return old;
+          return {
           ...old,
           marksByStudent: {
             ...old.marksByStudent,
@@ -453,8 +490,9 @@ export default function MarksEntryPage() {
               })),
             },
           },
-        };
-      });
+          };
+        });
+      }
       setTimeout(() => {
         const latestMark = studentMarksRef.current[variables.studentId];
         if (latestMark?.isDirty) {

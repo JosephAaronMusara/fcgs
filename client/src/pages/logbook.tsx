@@ -129,12 +129,33 @@ function calculateDuration(clockIn: string | Date | null, clockOut: string | Dat
   return `${hours}h ${minutes}m`;
 }
 
+const ATTENDANCE_DEVICE_TOKEN_KEY = "fcgs_attendance_device_token";
+
 function buildDeviceSignature(): string {
   if (typeof window === "undefined") return "server";
   const nav = window.navigator;
   const screenPart = typeof window.screen !== "undefined" ? `${window.screen.width}x${window.screen.height}` : "unknown-screen";
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown-tz";
   return [nav.userAgent, nav.language, nav.platform, screenPart, timezone].join("|").slice(0, 255);
+}
+
+function getOrCreateAttendanceDeviceToken(): string {
+  if (typeof window === "undefined") return "server";
+
+  try {
+    const existing = window.localStorage.getItem(ATTENDANCE_DEVICE_TOKEN_KEY);
+    if (existing && existing.trim()) return existing.trim().slice(0, 255);
+
+    const token =
+      typeof window.crypto?.randomUUID === "function"
+        ? window.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+
+    window.localStorage.setItem(ATTENDANCE_DEVICE_TOKEN_KEY, token);
+    return token.slice(0, 255);
+  } catch {
+    return buildDeviceSignature();
+  }
 }
 
 async function getLocationWithRetry(): Promise<{ latitude: number; longitude: number; accuracy: number; attemptCount: number }> {
@@ -303,6 +324,7 @@ export default function LogbookPage() {
         longitude: location.longitude.toString(),
         accuracy: Math.round(location.accuracy),
         attemptCount: location.attemptCount,
+        deviceToken: getOrCreateAttendanceDeviceToken(),
         deviceSignature: buildDeviceSignature(),
       });
     },
@@ -323,6 +345,7 @@ export default function LogbookPage() {
         longitude: location.longitude.toString(),
         accuracy: Math.round(location.accuracy),
         attemptCount: location.attemptCount,
+        deviceToken: getOrCreateAttendanceDeviceToken(),
         deviceSignature: buildDeviceSignature(),
       });
     },

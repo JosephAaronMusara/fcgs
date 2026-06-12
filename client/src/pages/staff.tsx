@@ -367,6 +367,8 @@ export default function StaffPage() {
             recipientType="staff"
             recipients={getNotifyRecipients()}
             schoolId={currentSchoolId}
+            selectedIds={selectedStaffIds}
+            search={debouncedSearch}
           />
 
           <input

@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
+import { OfflineSyncStatus } from "@/components/offline-sync-status";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -683,6 +684,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
                 <Clock className="w-3.5 h-3.5" />
                 <span>{currentTime} (CAT)</span>
               </div>
+              <OfflineSyncStatus />
               <Sheet open={notificationsOpen} onOpenChange={setNotificationsOpen}>
                 <Button
                   variant="ghost"

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { enqueueOfflineRequest, isLikelyNetworkError } from "@/lib/offlineQueue";
+import { saveLocalDraft, removeLocalDraft } from "@/lib/localDrafts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -324,35 +326,81 @@ export default function AttendancePage() {
     setAttendanceState(newState);
   };
 
+  const buildAttendancePayload = () => {
+    const targetStudents = singleEditTarget ? [singleEditTarget.student] : studentsForMarking;
+    const targetStudentIds = new Set(targetStudents.map((student) => student.id));
+    const records = Object.entries(attendanceState)
+      .filter(([studentId, val]) => targetStudentIds.has(Number(studentId)) && val.status !== "")
+      .map(([studentId, val]) => {
+        const student = targetStudents.find((item) => item.id === Number(studentId));
+        if (!student?.classId) throw new Error("Selected student does not have a class assigned");
+        return {
+          studentId: Number(studentId),
+          classId: Number(student.classId),
+          date: singleEditTarget?.date || selectedDate,
+          status: val.status,
+          reason: val.reason || "",
+          notifyParent,
+        };
+      });
+
+    if (records.length === 0) throw new Error("No attendance marked");
+
+    return {
+      records,
+      notifyParent,
+      className: singleEditTarget?.student.className || selectedClassName || "Selected class",
+      date: singleEditTarget?.date || selectedDate,
+    };
+  };
+
+  const queueAttendancePayload = useCallback((payload: ReturnType<typeof buildAttendancePayload>) => {
+    const classId = payload.records[0]?.classId || selectedClass || "unknown";
+    const draftKey = `attendance:${classId}:${payload.date}`;
+    saveLocalDraft(draftKey, "attendance", `Attendance Register - ${payload.className}`, payload);
+    enqueueOfflineRequest({
+      id: `attendance:${classId}:${payload.date}`,
+      module: "attendance",
+      title: "Attendance Register",
+      subtitle: `${payload.className} • ${payload.date} • ${payload.records.length} record${payload.records.length === 1 ? "" : "s"}`,
+      method: "POST",
+      url: "/api/attendance/bulk",
+      body: { records: payload.records, notifyParent: payload.notifyParent },
+      invalidateKeys: ["/api/attendance/by-class", "/api/attendance/grid", "/api/dashboard/stats"],
+    });
+    return draftKey;
+  }, [selectedClass]);
+
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const targetStudents = singleEditTarget ? [singleEditTarget.student] : studentsForMarking;
-      const targetStudentIds = new Set(targetStudents.map((student) => student.id));
-      const records = Object.entries(attendanceState)
-        .filter(([studentId, val]) => targetStudentIds.has(Number(studentId)) && val.status !== "")
-        .map(([studentId, val]) => {
-          const student = targetStudents.find((item) => item.id === Number(studentId));
-          if (!student?.classId) throw new Error("Selected student does not have a class assigned");
-          return {
-            studentId: Number(studentId),
-            classId: Number(student.classId),
-            date: singleEditTarget?.date || selectedDate,
-            status: val.status,
-            reason: val.reason || "",
-            notifyParent,
-          };
+      const payload = buildAttendancePayload();
+      const draftKey = `attendance:${payload.records[0]?.classId || selectedClass}:${payload.date}`;
+      saveLocalDraft(draftKey, "attendance", `Attendance Register - ${payload.className}`, payload);
+
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        queueAttendancePayload(payload);
+        return { offlineQueued: true };
+      }
+
+      try {
+        const res = await apiRequest("POST", "/api/attendance/bulk", {
+          records: payload.records,
+          notifyParent: payload.notifyParent,
         });
-
-      if (records.length === 0) throw new Error("No attendance marked");
-
-      const res = await apiRequest("POST", "/api/attendance/bulk", {
-        records,
-        notifyParent,
-      });
-      return res.json();
+        removeLocalDraft(draftKey);
+        return res.json();
+      } catch (error) {
+        if (!isLikelyNetworkError(error)) throw error;
+        queueAttendancePayload(payload);
+        return { offlineQueued: true };
+      }
     },
-    onSuccess: () => {
-      toast({ title: "Saved", description: "Attendance saved successfully" });
+    onSuccess: (data: any) => {
+      if (data?.offlineQueued) {
+        toast({ title: "Saved offline", description: "Attendance is saved on this device and will sync automatically when the network returns." });
+      } else {
+        toast({ title: "Saved", description: "Attendance saved successfully" });
+      }
       if (singleEditTarget) {
         handleCloseSingleEdit();
       } else {
@@ -363,6 +411,22 @@ export default function AttendancePage() {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     },
   });
+
+
+  useEffect(() => {
+    if (!attendanceStateTouchedRef.current) return;
+    if (!markDialogOpen && !singleEditTarget) return;
+    try {
+      const payload = buildAttendancePayload();
+      const draftKey = `attendance:${payload.records[0]?.classId || selectedClass}:${payload.date}`;
+      saveLocalDraft(draftKey, "attendance", `Attendance Register - ${payload.className}`, payload);
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        queueAttendancePayload(payload);
+      }
+    } catch {
+      // Incomplete drafts are ignored until at least one mark exists.
+    }
+  }, [attendanceState, markDialogOpen, singleEditTarget, notifyParent, queueAttendancePayload]);
 
   const handleDownload = () => {
     if (!gridData) return;

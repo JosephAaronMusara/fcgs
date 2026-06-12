@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
@@ -3022,6 +3022,7 @@ export async function registerRoutes(
       const { page, pageSize, offset } = parsePagination(req);
       const search = normalizeSearch(req.query.search);
       const classId = req.query.classId && req.query.classId !== "all" ? Number.parseInt(String(req.query.classId), 10) : null;
+      const streamId = req.query.streamId && req.query.streamId !== "all" ? Number.parseInt(String(req.query.streamId), 10) : null;
       const conditions: any[] = [];
       if (schoolId) conditions.push(eq(studentsTable.schoolId, schoolId));
       if (status === "archived") {
@@ -3033,6 +3034,7 @@ export async function registerRoutes(
         }
       }
       if (Number.isFinite(classId)) conditions.push(eq(studentsTable.classId, classId as number));
+      if (Number.isFinite(streamId)) conditions.push(eq(studentsTable.streamId, streamId as number));
       if (search) {
         const q = `%${search}%`;
         conditions.push(sql`(
@@ -4211,6 +4213,37 @@ export async function registerRoutes(
         delete (rec as any).notifiedReason;
         return rec;
       });
+
+      const currentUserForRegister = req.user as User;
+      if (currentUserForRegister.role === "teacher") {
+        const [currentStaff] = await db.select().from(staff).where(eq(staff.userId, currentUserForRegister.id)).limit(1);
+        if (!currentStaff) {
+          return res.status(403).json({ message: "Only the currently assigned class teacher can mark this class register" });
+        }
+
+        const classIdsToMark = Array.from(new Set(parsed.map((rec: any) => Number(rec.classId)).filter(Number.isFinite)));
+        for (const classId of classIdsToMark) {
+          const classInfo = await storage.getClass(classId);
+          if (!classInfo) {
+            return res.status(404).json({ message: `Class ${classId} not found` });
+          }
+
+          const isCurrentClassTeacher = Number(classInfo.classTeacherId) === Number(currentStaff.id);
+          const activeAssignment = await db.select().from(classTeacherAssignmentsTable).where(and(
+            eq(classTeacherAssignmentsTable.classId, classId),
+            eq(classTeacherAssignmentsTable.teacherId, currentStaff.id),
+            sql`(${classTeacherAssignmentsTable.effectiveTo} IS NULL OR ${classTeacherAssignmentsTable.effectiveTo} > now())`
+          )).limit(1);
+
+          if (!isCurrentClassTeacher && activeAssignment.length === 0) {
+            return res.status(403).json({
+              message: "Only the currently assigned class teacher can mark this class register",
+              classId,
+              className: classInfo.className,
+            });
+          }
+        }
+      }
 
       const absentSlugs = ['absent', 'sick', 'fees', 'suspended', 'absconding', 'excused', 'late'];
       const unknownReasons = ['', 'no reason'];
@@ -6694,10 +6727,20 @@ ${schoolName}`;
   // Staff Attendance routes
   const ATTENDANCE_GPS_ACCURACY_THRESHOLD_METERS = 150;
 
-  function getAttendanceDeviceSignature(req: Request): string | null {
+  function getAttendanceDeviceFingerprint(req: Request): string | null {
     const raw = typeof req.body?.deviceSignature === "string" ? req.body.deviceSignature.trim() : "";
     if (raw) return raw.slice(0, 255);
     return null;
+  }
+
+  function getAttendanceDeviceToken(req: Request): string | null {
+    const raw = typeof req.body?.deviceToken === "string" ? req.body.deviceToken.trim() : "";
+    if (!raw) return null;
+    return `token:${raw}`.slice(0, 255);
+  }
+
+  function getAttendanceDeviceSignature(req: Request): string | null {
+    return getAttendanceDeviceToken(req) || getAttendanceDeviceFingerprint(req);
   }
 
   function getAttendanceRadiusMeters(school: { schoolRadiusMeters?: number | null } | undefined | null): number {
@@ -6732,6 +6775,7 @@ ${schoolName}`;
     const attemptCountRaw = req.body?.attemptCount;
     const attemptCount = typeof attemptCountRaw === "number" ? attemptCountRaw : typeof attemptCountRaw === "string" && attemptCountRaw.trim() ? Number(attemptCountRaw) : 1;
     const deviceSignature = getAttendanceDeviceSignature(req);
+    const deviceFingerprint = getAttendanceDeviceFingerprint(req);
 
     const school = await storage.getSchool(schoolId);
     if (!school) {
@@ -6798,7 +6842,7 @@ ${schoolName}`;
       });
     }
 
-    return { ok: true as const, latitude, longitude, accuracy: Math.round(accuracy), attemptCount, deviceSignature, school };
+    return { ok: true as const, latitude, longitude, accuracy: Math.round(accuracy), attemptCount, deviceSignature, deviceFingerprint, school };
   }
 
   async function hasAnyAttendancePermission(userId: number, permissions: string[]): Promise<boolean> {
@@ -6973,6 +7017,7 @@ ${schoolName}`;
       if (!staffRecord) return res.status(400).json({ message: "Staff record not found" });
 
       const currentDeviceId = locationCheck.deviceSignature;
+      const legacyDeviceFingerprint = locationCheck.deviceFingerprint;
       if (!currentDeviceId) {
         return res.status(400).json({ message: "Device signature not available for attendance." });
       }
@@ -6998,27 +7043,53 @@ ${schoolName}`;
         return res.status(403).json({ message: `This device is not registered to your account. It is currently registered to ${registeredOwner.firstName} ${registeredOwner.lastName}. Please contact an administrator if this device needs to be reassigned.` });
       }
 
-      if (staffRecord.mobileId && staffRecord.mobileId !== currentDeviceId) {
-        logActivity(req, {
-          action: "wrong_device_clock_in_attempt",
-          category: "staff_attendance",
-          description: "Denied clock-in attempt from an unregistered device for this staff member",
-          targetType: "staff_attendance",
-          targetId: staffRecord.id,
-          targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
-          schoolId: user.schoolId,
-          metadata: {
-            attemptedStaffId: staffRecord.id,
-            attemptedUserId: user.id,
-            deviceId: currentDeviceId,
-            registeredDeviceId: staffRecord.mobileId,
-          },
-        });
-        return res.status(403).json({ message: "This device is not registered to your account. Please use your registered device or ask an administrator to reset your device ID." });
+      let registeredDeviceId = staffRecord.mobileId;
+      if (registeredDeviceId && registeredDeviceId !== currentDeviceId) {
+        const canUpgradeLegacyFingerprint =
+          !!legacyDeviceFingerprint &&
+          registeredDeviceId === legacyDeviceFingerprint &&
+          currentDeviceId.startsWith("token:");
+
+        if (canUpgradeLegacyFingerprint) {
+          await storage.updateStaff(staffRecord.id, { mobileId: currentDeviceId });
+          registeredDeviceId = currentDeviceId;
+          logActivity(req, {
+            action: "attendance_device_token_upgraded",
+            category: "staff_attendance",
+            description: "Upgraded registered attendance device from browser fingerprint to device token",
+            targetType: "staff",
+            targetId: staffRecord.id,
+            targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
+            schoolId: user.schoolId,
+            metadata: {
+              previousDeviceId: legacyDeviceFingerprint,
+              newDeviceId: currentDeviceId,
+            },
+          });
+        } else {
+          logActivity(req, {
+            action: "wrong_device_clock_in_attempt",
+            category: "staff_attendance",
+            description: "Denied clock-in attempt from an unregistered device for this staff member",
+            targetType: "staff_attendance",
+            targetId: staffRecord.id,
+            targetName: `${staffRecord.firstName} ${staffRecord.lastName}`,
+            schoolId: user.schoolId,
+            metadata: {
+              attemptedStaffId: staffRecord.id,
+              attemptedUserId: user.id,
+              deviceId: currentDeviceId,
+              legacyDeviceFingerprint,
+              registeredDeviceId,
+            },
+          });
+          return res.status(403).json({ message: "This device is not registered to your account. Please use your registered device or ask an administrator to reset your device ID." });
+        }
       }
 
-      if (!staffRecord.mobileId) {
+      if (!registeredDeviceId) {
         await storage.updateStaff(staffRecord.id, { mobileId: currentDeviceId });
+        registeredDeviceId = currentDeviceId;
         logActivity(req, {
           action: "attendance_device_registered",
           category: "staff_attendance",
@@ -7029,6 +7100,7 @@ ${schoolName}`;
           schoolId: user.schoolId,
           metadata: {
             deviceId: currentDeviceId,
+            legacyDeviceFingerprint,
           },
         });
       }
@@ -8532,41 +8604,143 @@ ${schoolName}`;
     channel: z.enum(["email", "sms", "in_app"]).optional(),
     channels: z.array(z.enum(["email", "sms", "in_app"])).optional(),
     recipientType: z.enum(["staff", "student", "parent"]),
-    recipientIds: z.array(z.number()),
+    recipientIds: z.array(z.number()).default([]),
+    targetAudience: z.enum(["selected", "all", "streams", "classes", "individuals"]).optional().default("selected"),
+    streamIds: z.array(z.number()).optional().default([]),
+    classIds: z.array(z.number()).optional().default([]),
+    studentIds: z.array(z.number()).optional().default([]),
+    staffIds: z.array(z.number()).optional().default([]),
+    search: z.string().optional(),
+    classFilter: z.string().optional(),
+    statusFilter: z.string().optional(),
     subject: z.string().optional(),
-    message: z.string(),
+    message: z.string().optional(),
     schoolId: z.number().optional(),
+  });
+
+  type NotifyRecipientForSend = { id: number; email?: string | null; phone?: string | null; name: string };
+
+  async function resolveCommunicationRecipients(currentUser: User, req: Request, data: z.infer<typeof sendNotificationSchema>): Promise<{ schoolId: number; recipients: NotifyRecipientForSend[] }> {
+    const targetSchoolId = data.schoolId || getSchoolContext(req) || currentUser.schoolId || 0;
+    const selectedRecipientIds = data.recipientIds || [];
+    const normalize = (value: unknown) => String(value || "").trim().toLowerCase();
+    const matchesSearch = (parts: unknown[], searchTerm?: string) => {
+      const term = normalize(searchTerm);
+      if (!term) return true;
+      return parts.some((part) => normalize(part).includes(term));
+    };
+
+    let recipients: NotifyRecipientForSend[] = [];
+
+    if (data.recipientType === "staff") {
+      const staffList = await storage.getStaffBySchool(targetSchoolId);
+      let selectedStaff = staffList;
+      if (data.targetAudience === "selected") {
+        selectedStaff = staffList.filter(s => selectedRecipientIds.includes(s.id));
+      } else if (data.targetAudience === "individuals") {
+        const selectedStaffIds = new Set((data.staffIds || []).map(Number));
+        selectedStaff = staffList.filter(s => selectedStaffIds.has(s.id));
+      } else {
+        selectedStaff = staffList.filter(s => matchesSearch([s.firstName, s.lastName, s.staffId, s.position, s.phone, s.email], data.search));
+      }
+      recipients = selectedStaff.map(s => ({ id: s.id, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
+    } else if (data.recipientType === "student") {
+      const studentList = await storage.getStudentsBySchool(targetSchoolId);
+      let selectedStudents = studentList;
+
+      if (data.targetAudience === "selected") {
+        selectedStudents = studentList.filter(s => selectedRecipientIds.includes(s.id));
+      } else if (data.targetAudience === "streams") {
+        const selectedStreamIds = new Set((data.streamIds || []).map(Number));
+        const schoolClasses = await storage.getClassesBySchool(targetSchoolId);
+        const classIdsForSelectedStreams = new Set(schoolClasses
+          .filter(c => typeof c.streamId === "number" && selectedStreamIds.has(c.streamId))
+          .map(c => c.id));
+        selectedStudents = studentList.filter(s => typeof s.classId === "number" && classIdsForSelectedStreams.has(s.classId));
+      } else if (data.targetAudience === "classes") {
+        const selectedClassIds = new Set((data.classIds || []).map(Number));
+        const schoolClasses = await storage.getClassesBySchool(targetSchoolId);
+        const validClassIds = new Set(schoolClasses.filter(c => selectedClassIds.has(c.id)).map(c => c.id));
+        selectedStudents = studentList.filter(s => typeof s.classId === "number" && validClassIds.has(s.classId));
+      } else if (data.targetAudience === "individuals") {
+        const selectedStudentIds = new Set((data.studentIds || []).map(Number));
+        selectedStudents = studentList.filter(s => selectedStudentIds.has(s.id));
+      } else {
+        selectedStudents = studentList.filter(s => {
+          const classOk = !data.classFilter || data.classFilter === "all" || s.classId === Number(data.classFilter);
+          const statusOk = !data.statusFilter || data.statusFilter === "all" || s.status === data.statusFilter;
+          const searchOk = matchesSearch([s.firstName, s.lastName, s.admissionNo, s.phone, s.email], data.search);
+          return classOk && statusOk && searchOk;
+        });
+      }
+      recipients = selectedStudents.map(s => ({ id: s.id, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
+    } else if (data.recipientType === "parent") {
+      const parentList = await storage.getParentsBySchool(targetSchoolId);
+      let selectedParents = parentList;
+
+      if (data.targetAudience === "selected") {
+        selectedParents = parentList.filter(p => selectedRecipientIds.includes(p.id));
+      } else if (["streams", "classes", "individuals"].includes(data.targetAudience)) {
+        const studentList = await storage.getStudentsBySchool(targetSchoolId);
+        const schoolClasses = await storage.getClassesBySchool(targetSchoolId);
+        const validClassIds = new Set(schoolClasses.filter(c => (data.classIds || []).includes(c.id)).map(c => c.id));
+        const selectedStreamIds = new Set((data.streamIds || []).map(Number));
+        const classIdsForSelectedStreams = new Set(schoolClasses
+          .filter(c => typeof c.streamId === "number" && selectedStreamIds.has(c.streamId))
+          .map(c => c.id));
+        const selectedStudentIds = new Set((data.studentIds || []).map(Number));
+
+        const parentIds = new Set(studentList
+          .filter(s => {
+            if (!s.parentId) return false;
+            if (data.targetAudience === "streams") return typeof s.classId === "number" && classIdsForSelectedStreams.has(s.classId);
+            if (data.targetAudience === "classes") return typeof s.classId === "number" && validClassIds.has(s.classId);
+            return selectedStudentIds.has(s.id);
+          })
+          .map(s => s.parentId)
+          .filter((id): id is number => typeof id === "number"));
+
+        selectedParents = parentList.filter(p => parentIds.has(p.id));
+      } else {
+        selectedParents = parentList.filter(p => matchesSearch([p.firstName, p.lastName, p.phone, p.email, p.relationship], data.search));
+      }
+      recipients = selectedParents.map(p => ({ id: p.id, email: p.email, phone: p.phone, name: `${p.firstName} ${p.lastName}` }));
+    }
+
+    return { schoolId: targetSchoolId, recipients };
+  }
+
+  app.post("/api/communication/preview-recipients", requireAuth, async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const data = sendNotificationSchema.parse(req.body);
+      const { recipients } = await resolveCommunicationRecipients(currentUser, req, data);
+      res.json({
+        total: recipients.length,
+        email: recipients.filter(r => !!r.email).length,
+        sms: recipients.filter(r => !!r.phone).length,
+        inApp: recipients.length,
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/api/communication/send", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const data = sendNotificationSchema.parse(req.body);
+      if (!data.message?.trim()) {
+        return res.status(400).json({ message: "Message is required" });
+      }
+      const notificationMessage = data.message.trim();
 
       const channelsToUse = data.channels || (data.channel ? [data.channel] : []);
       if (channelsToUse.length === 0) {
         return res.status(400).json({ message: "No channels specified" });
       }
 
-      const targetSchoolId = data.schoolId || currentUser.schoolId || 0;
-      let recipients: Array<{ id: number; email?: string | null; phone?: string | null; name: string }> = [];
-
-      if (data.recipientType === "staff") {
-        const staffList = await storage.getStaffBySchool(targetSchoolId);
-        recipients = staffList
-          .filter(s => data.recipientIds.includes(s.id))
-          .map(s => ({ id: s.id, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
-      } else if (data.recipientType === "student") {
-        const studentList = await storage.getStudentsBySchool(targetSchoolId);
-        recipients = studentList
-          .filter(s => data.recipientIds.includes(s.id))
-          .map(s => ({ id: s.id, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
-      } else if (data.recipientType === "parent") {
-        const parentList = await storage.getParentsBySchool(targetSchoolId);
-        recipients = parentList
-          .filter(p => data.recipientIds.includes(p.id))
-          .map(p => ({ id: p.id, email: p.email, phone: p.phone, name: `${p.firstName} ${p.lastName}` }));
-      }
+      const { schoolId: targetSchoolId, recipients } = await resolveCommunicationRecipients(currentUser, req, data);
 
       if (recipients.length === 0) {
         return res.status(400).json({ message: "No valid recipients found" });
@@ -8593,7 +8767,7 @@ ${schoolName}`;
           if (channel === "email") {
             const emailRecipients = recipients.filter(r => r.email).map(r => ({ email: r.email!, id: r.id, name: r.name }));
             if (emailRecipients.length > 0) {
-              const result = await communicationService.sendBulkEmail(emailRecipients, data.subject || "Notification", data.message, {
+              const result = await communicationService.sendBulkEmail(emailRecipients, data.subject || "Notification", notificationMessage, {
                 schoolId: targetSchoolId || undefined,
                 recipientType: data.recipientType,
                 sentBy: currentUser.id,
@@ -8608,7 +8782,7 @@ ${schoolName}`;
           } else if (channel === "sms") {
             const smsRecipients = recipients.filter(r => r.phone).map(r => ({ phone: r.phone!, id: r.id, name: r.name }));
             if (smsRecipients.length > 0) {
-              const result = await communicationService.sendBulkSms(smsRecipients, data.message, {
+              const result = await communicationService.sendBulkSms(smsRecipients, notificationMessage, {
                 schoolId: targetSchoolId || undefined,
                 recipientType: data.recipientType,
                 sentBy: currentUser.id,
@@ -8624,9 +8798,9 @@ ${schoolName}`;
             const { createInAppNotifications } = await import("./communication");
             await createInAppNotifications({
               recipientType: data.recipientType,
-              recipientIds: data.recipientIds,
+              recipientIds: recipients.map((recipient) => recipient.id),
               title: data.subject || "Notification",
-              message: data.message,
+              message: notificationMessage,
               channel: "in_app",
               schoolId: targetSchoolId || undefined,
               actorUserId: currentUser.id,
