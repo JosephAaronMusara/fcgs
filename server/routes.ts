@@ -3194,15 +3194,12 @@ export async function registerRoutes(
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const data = insertStudentSchema.parse(req.body);
-      if (!data.nationalIdNumber?.trim()) {
-        return res.status(400).json({ message: "National ID Number is required" });
-      }
       const effectiveSchoolId = data.schoolId || schoolId || currentUser.schoolId || undefined;
       const enrollmentReferenceDate = data.enrollmentDate || new Date();
       const normalizedData: any = {
         ...data,
         admissionNo: (data.admissionNo || (await storage.getNextAdmissionNo({ schoolId: effectiveSchoolId, referenceDate: enrollmentReferenceDate }))).toUpperCase(),
-        nationalIdNumber: data.nationalIdNumber.trim(),
+        nationalIdNumber: data.nationalIdNumber?.trim() || null,
         passportNumber: data.passportNumber?.trim() || null,
         schoolId: effectiveSchoolId,
       };
@@ -3241,11 +3238,8 @@ export async function registerRoutes(
       }
       const normalizedData: any = { ...req.body };
       if (typeof normalizedData.admissionNo === "string") normalizedData.admissionNo = normalizedData.admissionNo.toUpperCase();
-      if (typeof normalizedData.nationalIdNumber === "string") normalizedData.nationalIdNumber = normalizedData.nationalIdNumber.trim();
+      if (typeof normalizedData.nationalIdNumber === "string") normalizedData.nationalIdNumber = normalizedData.nationalIdNumber.trim() || null;
       if (typeof normalizedData.passportNumber === "string") normalizedData.passportNumber = normalizedData.passportNumber.trim() || null;
-      if ("nationalIdNumber" in normalizedData && !normalizedData.nationalIdNumber) {
-        return res.status(400).json({ message: "National ID Number is required" });
-      }
       if (Object.prototype.hasOwnProperty.call(normalizedData, "isDayScholar")) {
         if (normalizedData.isDayScholar) {
           normalizedData.isBoarding = false;

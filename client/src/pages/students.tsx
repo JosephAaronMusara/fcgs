@@ -380,7 +380,7 @@ export default function StudentsPage() {
       admissionNo: formData.get("admissionNo") as string,
       firstName: formData.get("firstName") as string,
       lastName: formData.get("lastName") as string,
-      nationalIdNumber: formData.get("nationalIdNumber") as string,
+      nationalIdNumber: ((formData.get("nationalIdNumber") as string) || "").trim() || undefined,
       passportNumber: (formData.get("passportNumber") as string) || undefined,
       email: formData.get("email") as string || undefined,
       phone: formData.get("phone") as string || undefined,
@@ -1554,7 +1554,6 @@ function StudentForm({
             name="nationalIdNumber"
             defaultValue={defaultValues?.nationalIdNumber}
             placeholder="e.g. 00-000000A00"
-            required
             data-testid="input-national-id-number"
           />
         </div>
