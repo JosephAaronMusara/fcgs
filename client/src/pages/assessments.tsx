@@ -604,6 +604,9 @@ export default function AssessmentsPage() {
         classes={classes || []}
         grades={grades || []}
         streams={streams || []}
+        classSubjects={classSubjectRows || []}
+        teacherAssignments={currentStaffAssignments || []}
+        currentUserRole={user?.role || null}
         schoolType={normalizeSchoolType(currentSchool?.schoolType)}
         examinationBoard={normalizeExamBoard(currentSchool?.examinationBoard)}
       />
@@ -1095,6 +1098,9 @@ interface CommentsDialogProps {
   classes: ClassType[];
   grades: Grade[];
   streams: Stream[];
+  classSubjects: ClassSubjectRow[];
+  teacherAssignments: StaffAssignment[];
+  currentUserRole: string | null;
 }
 
 function MultiSelectPicker({ label, options, selected, onChange, testId }: {
@@ -1174,7 +1180,20 @@ function MultiSelectPicker({ label, options, selected, onChange, testId }: {
   );
 }
 
-function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grades, streams, schoolType, examinationBoard }: CommentsDialogProps & { schoolType: "primary" | "secondary"; examinationBoard: "ZIMSEC" | "Cambridge" }) {
+function CommentsDialog({
+  open,
+  onOpenChange,
+  comments,
+  subjects,
+  classes,
+  grades,
+  streams,
+  classSubjects,
+  teacherAssignments,
+  currentUserRole,
+  schoolType,
+  examinationBoard,
+}: CommentsDialogProps & { schoolType: "primary" | "secondary"; examinationBoard: "ZIMSEC" | "Cambridge" }) {
   const { toast } = useToast();
   const [commentText, setCommentText] = useState("");
   const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
@@ -1192,16 +1211,87 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
   const [pendingText, setPendingText] = useState("");
   const [pendingGradeId, setPendingGradeId] = useState<number>(0);
 
+  const teacherScopedDialog = currentUserRole === "teacher" || currentUserRole === "assistant_teacher";
+  const teacherAssignmentsWithClass = useMemo(
+    () => (teacherAssignments || []).filter((row) => row.classId !== null && row.classId !== undefined),
+    [teacherAssignments],
+  );
   const streamMap = useMemo(() => new Map((streams || []).map((stream) => [stream.id, stream.name])), [streams]);
+  const classMap = useMemo(() => new Map((classes || []).map((klass) => [klass.id, klass])), [classes]);
+  const subjectMap = useMemo(() => new Map((subjects || []).map((subject) => [subject.id, subject])), [subjects]);
+  const selectedClasses = useMemo(
+    () => selectedClassIds.map((id) => classMap.get(id)).filter((item): item is ClassType => Boolean(item)),
+    [selectedClassIds, classMap],
+  );
+
+  const subjectIsCompatibleWithClass = (subject: Subject, klass: ClassType) => {
+    const classStreamId = klass.streamId;
+    const streamIds = Array.isArray((subject as any).streamIds) && (subject as any).streamIds.length > 0
+      ? (subject as any).streamIds.map((id: any) => Number(id))
+      : (subject as any).streamId ? [Number((subject as any).streamId)] : [];
+    const streamCompatible = !classStreamId || streamIds.length === 0 || streamIds.includes(Number(classStreamId));
+    if (!streamCompatible) return false;
+
+    const explicitSubjectIds = (classSubjects || [])
+      .filter((row) => Number(row.classId) === Number(klass.id))
+      .map((row) => Number(row.subjectId));
+    if (explicitSubjectIds.length > 0) {
+      return explicitSubjectIds.includes(Number(subject.id));
+    }
+
+    return true;
+  };
+
   const classOptions = useMemo(() => (classes || [])
     .filter((klass) => {
-      if (!activeTab) return true;
-      const streamName = klass.streamId ? streamMap.get(klass.streamId) : klass.className;
-      return profileMatchesStreamName(activeTab, streamName);
+      if (activeTab) {
+        const streamName = klass.streamId ? streamMap.get(klass.streamId) : klass.className;
+        if (!profileMatchesStreamName(activeTab, streamName)) return false;
+      }
+
+      if (selectedSubjectIds.length > 0) {
+        const selectedSubjects = selectedSubjectIds
+          .map((subjectId) => subjectMap.get(subjectId))
+          .filter((subject): subject is Subject => Boolean(subject));
+        if (selectedSubjects.length !== selectedSubjectIds.length) return false;
+        if (!selectedSubjects.every((subject) => subjectIsCompatibleWithClass(subject, klass))) return false;
+      }
+
+      if (!teacherScopedDialog) return true;
+
+      const hasAnyAssignmentForClass = teacherAssignmentsWithClass.some((row) => Number(row.classId) === Number(klass.id));
+      if (!hasAnyAssignmentForClass) return false;
+
+      if (selectedSubjectIds.length === 0) return true;
+      return selectedSubjectIds.every((subjectId) =>
+        teacherAssignmentsWithClass.some((row) =>
+          Number(row.classId) === Number(klass.id) && Number(row.subjectId) === Number(subjectId)
+        )
+      );
     })
-    .map(c => ({ id: c.id, name: c.className })), [classes, activeTab, streamMap]);
+    .map(c => ({ id: c.id, name: c.className })), [classes, activeTab, streamMap, selectedSubjectIds, subjectMap, classSubjects, teacherScopedDialog, teacherAssignmentsWithClass]);
   const classOptionIds = useMemo(() => new Set(classOptions.map((option) => option.id)), [classOptions]);
-  const subjectOptions = (subjects || []).map(s => ({ id: s.id, name: s.name }));
+
+  const subjectOptions = useMemo(() => (subjects || [])
+    .filter((subject) => {
+      if (selectedClasses.length > 0 && !selectedClasses.every((klass) => subjectIsCompatibleWithClass(subject, klass))) {
+        return false;
+      }
+
+      if (!teacherScopedDialog) return true;
+
+      if (selectedClassIds.length === 0) {
+        return teacherAssignmentsWithClass.some((row) => Number(row.subjectId) === Number(subject.id));
+      }
+
+      return selectedClassIds.every((classId) =>
+        teacherAssignmentsWithClass.some((row) =>
+          Number(row.classId) === Number(classId) && Number(row.subjectId) === Number(subject.id)
+        )
+      );
+    })
+    .map(s => ({ id: s.id, name: s.name })), [subjects, selectedClasses, teacherScopedDialog, selectedClassIds, teacherAssignmentsWithClass, classSubjects]);
+  const subjectOptionIds = useMemo(() => new Set(subjectOptions.map((option) => option.id)), [subjectOptions]);
 
   useEffect(() => {
     if (!activeTab && profileTabs.length > 0) {
@@ -1212,6 +1302,10 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
   useEffect(() => {
     setSelectedClassIds((prev) => prev.filter((id) => classOptionIds.has(id)));
   }, [classOptionIds]);
+
+  useEffect(() => {
+    setSelectedSubjectIds((prev) => prev.filter((id) => subjectOptionIds.has(id)));
+  }, [subjectOptionIds]);
 
   const gradeMap = useMemo(() => new Map((grades || []).map((grade) => [grade.id, grade])), [grades]);
   const gradeRankMap: Record<string, number> = { 'A*': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'U': 6 };
@@ -1227,11 +1321,17 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
   const filteredComments = useMemo(
     () =>
       (comments || []).filter((comment) => {
+        if (teacherScopedDialog && !teacherAssignmentsWithClass.some((row) =>
+          Number(row.classId) === Number(comment.classId) && Number(row.subjectId) === Number(comment.subjectId)
+        )) {
+          return false;
+        }
+
         if (!activeTab) return true;
         const grade = gradeMap.get(comment.gradeId);
         return grade?.gradeLevel === activeTab;
       }),
-    [comments, activeTab, gradeMap],
+    [comments, activeTab, gradeMap, teacherScopedDialog, teacherAssignmentsWithClass],
   );
 
   const createMutation = useMutation({
@@ -1308,6 +1408,23 @@ function CommentsDialog({ open, onOpenChange, comments, subjects, classes, grade
     }
     if (!commentText.trim()) {
       toast({ title: "Error", description: "Enter a comment", variant: "destructive" }); return;
+    }
+    if (teacherScopedDialog) {
+      const hasUnassignedPair = selectedClassIds.some((classId) =>
+        selectedSubjectIds.some((subjectId) =>
+          !teacherAssignmentsWithClass.some((row) =>
+            Number(row.classId) === Number(classId) && Number(row.subjectId) === Number(subjectId)
+          )
+        )
+      );
+      if (hasUnassignedPair) {
+        toast({
+          title: "Error",
+          description: "You can only manage comments for your assigned class and subject workload.",
+          variant: "destructive",
+        });
+        return;
+      }
     }
 
     try {

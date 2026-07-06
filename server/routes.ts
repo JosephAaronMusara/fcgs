@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
@@ -29,7 +29,7 @@ import {
   insertHostelSchema, insertHostelRollCallSchema, insertStudentApplicationSchema,
   hostels as hostelsTable,
   insertPermissionSchema, insertAccessGroupSchema,
-  type User, type InsertStudent, type InsertActivityLog
+  type User, type AccessGroup, type Staff, type InsertStudent, type InsertActivityLog
 } from "@shared/schema";
 import { ECD_DOMAIN_SEEDS, filterItemsByGradeProfileKey, getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, getSubjectTypeOptionsForSchool, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, type GradeProfileKey } from "@shared/academic-profiles";
 
@@ -416,52 +416,99 @@ function generateResetToken(): string {
 }
 
 
-function mapStaffRoleToUserRole(staffRole: string | null | undefined): User["role"] {
-  switch (staffRole) {
-    case "teacher":
-      return "teacher";
-    case "assistant_teacher":
-      return "assistant_teacher";
-    case "librarian":
-      return "librarian";
-    case "quality_control_officer":
-      return "quality_control_officer";
-    default:
-      return "school_admin";
-  }
+const USER_ROLE_VALUES: User["role"][] = [
+  "org_admin",
+  "school_admin",
+  "teacher",
+  "quality_control_officer",
+  "assistant_teacher",
+  "librarian",
+  "student",
+  "parent",
+];
+
+const STAFF_ACCOUNT_ROLE_VALUES = USER_ROLE_VALUES.filter(
+  (role) => !["org_admin", "student", "parent"].includes(role)
+);
+
+function normalizeAccessLookupKey(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return normalized || null;
 }
 
-function getDefaultAccessGroupNamesForUser(role: User["role"], staffRole?: string | null): string[] {
-  if (role === "org_admin") return ["Org HQ"];
-  if (role === "student") return [];
-  if (role === "parent") return [];
+function findMatchingStaffAccountRole(candidates: Array<string | null | undefined>): User["role"] | undefined {
+  const candidateKeys = new Set(
+    candidates
+      .map((candidate) => normalizeAccessLookupKey(candidate))
+      .filter((candidate): candidate is string => Boolean(candidate))
+  );
+  if (candidateKeys.size === 0) return undefined;
 
-  switch (staffRole || role) {
-    case "teacher":
-      return ["Teacher"];
-    case "assistant_teacher":
-      return ["Assistant Teacher"];
-    case "librarian":
-      return ["Librarian"];
-    case "quality_control_officer":
-      return ["Quality Control Officer"];
-    case "accountant":
-      return ["Accountant"];
-    default:
-      return [role === "school_admin" ? "School Admin" : "Teacher"];
-  }
+  return STAFF_ACCOUNT_ROLE_VALUES.find((role) => {
+    const roleKey = normalizeAccessLookupKey(role);
+    return roleKey ? candidateKeys.has(roleKey) : false;
+  });
 }
 
-async function assignDefaultAccessGroupsToUser(userId: number, role: User["role"], staffRole?: string | null): Promise<void> {
-  const groupNames = getDefaultAccessGroupNamesForUser(role, staffRole);
-  if (!groupNames.length) return;
+async function resolveAccessGroupForStaffRecord(staffMember: Pick<Staff, "role" | "accessGroupId">): Promise<AccessGroup | undefined> {
+  if (staffMember.accessGroupId) {
+    const group = await storage.getAccessGroup(staffMember.accessGroupId);
+    if (group) return group;
+  }
 
-  const accessGroups = await storage.getAllAccessGroups();
-  for (const groupName of groupNames) {
-    const group = accessGroups.find(currentGroup => currentGroup.name === groupName);
-    if (group) {
-      await storage.addUserToAccessGroup({ userId, accessGroupId: group.id });
+  const [configuredRole] = staffMember.role
+    ? await db.select().from(staffRoles).where(eq(staffRoles.name, staffMember.role))
+    : [];
+
+  const candidateKeys = new Set(
+    [staffMember.role, configuredRole?.name, configuredRole?.label]
+      .map((candidate) => normalizeAccessLookupKey(candidate))
+      .filter((candidate): candidate is string => Boolean(candidate))
+  );
+  if (candidateKeys.size === 0) return undefined;
+
+  const allGroups = await storage.getAllAccessGroups();
+  return allGroups.find((group) => {
+    const groupKey = normalizeAccessLookupKey(group.name);
+    return groupKey ? candidateKeys.has(groupKey) : false;
+  });
+}
+
+function resolveUserRoleForStaffRecord(staffMember: Pick<Staff, "role">, accessGroup?: AccessGroup): User["role"] {
+  return findMatchingStaffAccountRole([accessGroup?.name, staffMember.role]) || "teacher";
+}
+
+async function replaceUserAccessGroupsWithPrimary(userId: number, primaryAccessGroupId: number): Promise<void> {
+  const currentGroups = await storage.getUserAccessGroups(userId);
+  for (const group of currentGroups) {
+    if (group.id !== primaryAccessGroupId) {
+      await storage.removeUserFromAccessGroup(userId, group.id);
     }
+  }
+  await storage.addUserToAccessGroup({ userId, accessGroupId: primaryAccessGroupId });
+}
+
+async function syncLinkedUserFromStaffRecord(staffMember: Staff): Promise<void> {
+  if (!staffMember.userId) return;
+
+  const accessGroup = await resolveAccessGroupForStaffRecord(staffMember);
+  const userRole = resolveUserRoleForStaffRecord(staffMember, accessGroup);
+
+  await storage.updateUser(staffMember.userId, {
+    firstName: staffMember.firstName,
+    lastName: staffMember.lastName,
+    email: staffMember.email || null,
+    phone: staffMember.phone || null,
+    schoolId: staffMember.schoolId || null,
+    role: userRole,
+    isActive: staffMember.status !== "inactive",
+  });
+
+  if (accessGroup) {
+    await replaceUserAccessGroupsWithPrimary(staffMember.userId, accessGroup.id);
+  } else {
+    await storage.normalizeUserBaselineAccess(staffMember.userId);
   }
 }
 
@@ -1381,6 +1428,42 @@ async function validateAssessmentPayloadForSchool(
   return { classInfo, subjectInfo };
 }
 
+async function ensureAssessmentCommentPairAllowed(
+  req: Request,
+  res: Response,
+  schoolId: number,
+  classId: number,
+  subjectId: number,
+) {
+  const classInfo = await ensureClassInSchool(Number(classId), schoolId, res);
+  if (!classInfo) return null;
+
+  const subjectInfo = await ensureSubjectInSchool(Number(subjectId), schoolId, res);
+  if (!subjectInfo) return null;
+
+  if (!isSubjectAvailableForClass(subjectInfo, classInfo)) {
+    res.status(400).json({ message: "Selected subject is not available for the chosen class stream" });
+    return null;
+  }
+
+  const classSubjectRows = await storage.getClassSubjects(classInfo.id);
+  if (classSubjectRows.length > 0 && !classSubjectRows.some((row) => Number(row.subjectId) === Number(subjectInfo.id))) {
+    res.status(400).json({ message: "Selected subject is not assigned to the chosen class" });
+    return null;
+  }
+
+  const hasTeacherAssignment = await ensureTeacherAssignmentForAssessment(
+    req,
+    res,
+    schoolId,
+    Number(classInfo.id),
+    Number(subjectInfo.id),
+  );
+  if (!hasTeacherAssignment) return null;
+
+  return { classInfo, subjectInfo };
+}
+
 async function getScopedAssessmentCommentOrRespond(req: Request, res: Response, id: number) {
   const schoolId = await requireSchoolScope(req, res);
   if (!schoolId) return null;
@@ -1396,7 +1479,16 @@ async function getScopedAssessmentCommentOrRespond(req: Request, res: Response, 
     return null;
   }
 
-  return { schoolId, comment };
+  const pair = await ensureAssessmentCommentPairAllowed(
+    req,
+    res,
+    schoolId,
+    Number(comment.classId),
+    Number(comment.subjectId),
+  );
+  if (!pair) return null;
+
+  return { schoolId, comment, ...pair };
 }
 
 async function getScopedAssessmentMarkOrRespond(req: Request, res: Response, id: number) {
@@ -1866,6 +1958,17 @@ export async function registerRoutes(
       if (typeof payload.staffNo === "string") payload.staffNo = payload.staffNo.toUpperCase();
       if (typeof payload.nationalIdNumber === "string") payload.nationalIdNumber = payload.nationalIdNumber.trim();
       if (typeof payload.passportNumber === "string") payload.passportNumber = payload.passportNumber.trim() || null;
+      if (payload.accessGroupId !== undefined && payload.accessGroupId !== null) {
+        const parsedAccessGroupId = Number(payload.accessGroupId);
+        if (!Number.isInteger(parsedAccessGroupId) || parsedAccessGroupId <= 0) {
+          return res.status(400).json({ message: "Invalid access group" });
+        }
+        const selectedAccessGroup = await storage.getAccessGroup(parsedAccessGroupId);
+        if (!selectedAccessGroup) {
+          return res.status(400).json({ message: "Access group not found" });
+        }
+        payload.accessGroupId = parsedAccessGroupId;
+      }
       if ("nationalIdNumber" in payload && !payload.nationalIdNumber) {
         return res.status(400).json({ message: "National ID Number is required" });
       }
@@ -1873,6 +1976,7 @@ export async function registerRoutes(
       if (!updated) {
         return res.status(404).json({ message: "Staff not found" });
       }
+      await syncLinkedUserFromStaffRecord(updated);
       res.json(updated);
     } catch (error) {
       next(error);
@@ -2248,7 +2352,8 @@ export async function registerRoutes(
         passwordToSend = password;
       }
 
-      const userRole = mapStaffRoleToUserRole(staffMember.role);
+      const accessGroup = await resolveAccessGroupForStaffRecord(staffMember);
+      const userRole = resolveUserRoleForStaffRecord(staffMember, accessGroup);
       const newUser = await storage.createUser({
         username,
         password: hashedPassword,
@@ -2261,8 +2366,15 @@ export async function registerRoutes(
         isActive: true,
         ...tokenData,
       });
-      await assignDefaultAccessGroupsToUser(newUser.id, userRole, staffMember.role);
-      await storage.updateStaff(staffId, { userId: newUser.id });
+      const linkedStaff = await storage.updateStaff(staffId, { userId: newUser.id });
+      if (accessGroup) {
+        await replaceUserAccessGroupsWithPrimary(newUser.id, accessGroup.id);
+      } else {
+        await storage.normalizeUserBaselineAccess(newUser.id);
+      }
+      if (linkedStaff) {
+        await syncLinkedUserFromStaffRecord(linkedStaff);
+      }
 
       const name = `${staffMember.firstName} ${staffMember.lastName}`;
       const schoolId = staffMember.schoolId;
@@ -8316,13 +8428,10 @@ ${schoolName}`;
     return { allowed: true, targetUser };
   }
 
-  const SCHOOL_ASSIGNABLE_ACCESS_GROUP_NAMES = new Set([
-    "Teacher",
-    "Assistant Teacher",
-    "Quality Control Officer",
-    "Librarian",
-    "Accountant",
-  ]);
+  function isOrganizationOnlyAccessGroup(group: AccessGroup): boolean {
+    const groupKey = normalizeAccessLookupKey(group.name);
+    return groupKey === normalizeAccessLookupKey("Org HQ");
+  }
 
   async function canViewAccessRights(currentUser: User): Promise<boolean> {
     if (currentUser.role === 'org_admin') return true;
@@ -8340,14 +8449,14 @@ ${schoolName}`;
   async function getVisibleAccessGroupsForUser(currentUser: User) {
     const groups = await storage.getAllAccessGroups();
     if (currentUser.role === 'org_admin') return groups;
-    return groups.filter(group => SCHOOL_ASSIGNABLE_ACCESS_GROUP_NAMES.has(group.name));
+    return groups.filter(group => !isOrganizationOnlyAccessGroup(group));
   }
 
   async function getAssignableAccessGroupForUser(currentUser: User, accessGroupId: number) {
     const group = await storage.getAccessGroup(accessGroupId);
     if (!group) return { allowed: false as const, error: 'Access group not found' };
     if (currentUser.role === 'org_admin') return { allowed: true as const, group };
-    if (!SCHOOL_ASSIGNABLE_ACCESS_GROUP_NAMES.has(group.name)) {
+    if (isOrganizationOnlyAccessGroup(group)) {
       return { allowed: false as const, error: 'That access group is reserved for organization administrators' };
     }
     return { allowed: true as const, group };
@@ -8391,6 +8500,19 @@ ${schoolName}`;
       if (!allowedGroup.allowed) {
         return res.status(403).json({ message: allowedGroup.error });
       }
+      const [linkedStaff] = await db.select().from(staff).where(eq(staff.userId, targetUserId)).limit(1);
+      if (linkedStaff) {
+        const updatedStaff = await storage.updateStaff(linkedStaff.id, { accessGroupId });
+        if (updatedStaff) {
+          await syncLinkedUserFromStaffRecord(updatedStaff);
+        }
+        const mapping = await storage.addUserToAccessGroup({
+          userId: targetUserId,
+          accessGroupId
+        });
+        return res.status(201).json(mapping);
+      }
+
       const mapping = await storage.addUserToAccessGroup({
         userId: targetUserId,
         accessGroupId
@@ -8416,6 +8538,10 @@ ${schoolName}`;
       const allowedGroup = await getAssignableAccessGroupForUser(currentUser, groupId);
       if (!allowedGroup.allowed) {
         return res.status(403).json({ message: allowedGroup.error });
+      }
+      const [linkedStaff] = await db.select().from(staff).where(eq(staff.userId, targetUserId)).limit(1);
+      if (linkedStaff?.accessGroupId === groupId) {
+        await storage.updateStaff(linkedStaff.id, { accessGroupId: null });
       }
       await storage.removeUserFromAccessGroup(targetUserId, groupId);
       res.json({ success: true });
@@ -9226,7 +9352,17 @@ ${schoolName}`;
         if (!subjectInfo) return;
       }
 
-      const comments = await storage.getAssessmentComments(schoolId, classId, subjectId);
+      let comments = await storage.getAssessmentComments(schoolId, classId, subjectId);
+      const teacherScope = await getTeacherAssignmentScope(req, schoolId);
+      if (teacherScope) {
+        comments = comments.filter((comment) =>
+          isPairInTeacherAssignments(
+            teacherScope.assignments,
+            Number(comment.classId),
+            Number(comment.subjectId),
+          )
+        );
+      }
 
       const gradeRankMap: Record<string, number> = { 'A*': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'U': 6 };
 
@@ -9277,12 +9413,9 @@ ${schoolName}`;
 
       let created = 0;
       for (const cid of classIds) {
-        const classInfo = await ensureClassInSchool(Number(cid), schoolId, res);
-        if (!classInfo) return;
-
         for (const sid of subjectIds) {
-          const subjectInfo = await ensureSubjectInSchool(Number(sid), schoolId, res);
-          if (!subjectInfo) return;
+          const pair = await ensureAssessmentCommentPairAllowed(req, res, schoolId, Number(cid), Number(sid));
+          if (!pair) return;
 
           const existing = await storage.findAssessmentComment(Number(cid), Number(sid), Number(grade.id));
           if (existing) continue;
@@ -9321,12 +9454,10 @@ ${schoolName}`;
       const missingPairs: any[] = [];
 
       for (const cid of classIds) {
-        const cls = await ensureClassInSchool(Number(cid), schoolId, res);
-        if (!cls) return;
-
         for (const sid of subjectIds) {
-          const subject = await ensureSubjectInSchool(Number(sid), schoolId, res);
-          if (!subject) return;
+          const pair = await ensureAssessmentCommentPairAllowed(req, res, schoolId, Number(cid), Number(sid));
+          if (!pair) return;
+          const { classInfo: cls, subjectInfo: subject } = pair;
 
           const existing = await storage.findAssessmentComment(Number(cid), Number(sid), Number(gradeId));
 
@@ -9392,11 +9523,14 @@ ${schoolName}`;
       let created = 0;
       if (Array.isArray(missingPairs)) {
         for (const pair of missingPairs) {
-          const classInfo = await ensureClassInSchool(Number(pair.classId), schoolId, res);
-          if (!classInfo) return;
-
-          const subjectInfo = await ensureSubjectInSchool(Number(pair.subjectId), schoolId, res);
-          if (!subjectInfo) return;
+          const allowedPair = await ensureAssessmentCommentPairAllowed(
+            req,
+            res,
+            schoolId,
+            Number(pair.classId),
+            Number(pair.subjectId),
+          );
+          if (!allowedPair) return;
 
           const existing = await storage.findAssessmentComment(Number(pair.classId), Number(pair.subjectId), Number(grade.id));
           if (existing) continue;

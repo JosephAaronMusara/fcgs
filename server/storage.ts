@@ -6,7 +6,7 @@ import {
   disciplineRecords, clinicRecords, feesPayments, organizations, schools, libraryResources, libraryCategories, libraryShelves, libraryBooks, libraryBookCopies, libraryLoans, libraryFines, libraryReservations, libraryPolicies,
   timetableSlots, logbookEntries, posItems, posSales, posSaleItems,
   newsletters, schemes, hostels, hostelRollCall, studentApplications, staffAttendanceLogs,
-  permissions, accessGroups, accessGroupPermissions, userAccessGroups, userPermissionOverrides, userSchoolAccess,
+  permissions, accessGroups, accessGroupPermissions, userAccessGroups, userPermissionOverrides, userSchoolAccess, staffRoles,
   communicationLogs, assessmentTypes, examTypes, exams, assessmentPapers, assessmentComments,
   assessmentMarks, assessmentMarkPapers, reportComments,
   ecdAssessmentDomains, ecdAssessmentItems, ecdAssessmentRecords, ecdAssessmentResponses,
@@ -2726,72 +2726,53 @@ export class DatabaseStorage implements IStorage {
   }
 
   // User Access Groups
-  private normalizeRoleKey(value: string | null | undefined): string | null {
+  private normalizeAccessLookupKey(value: string | null | undefined): string | null {
     if (!value) return null;
-    return value.trim().toLowerCase().replace(/\s+/g, "_");
+    const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+    return normalized || null;
   }
 
-  private async resolveBaselineAccessGroupForUser(userId: number, user: User): Promise<AccessGroup | undefined> {
-    let targetGroup: AccessGroup | undefined;
+  private async findAccessGroupByLookupKey(candidates: Array<string | null | undefined>): Promise<AccessGroup | undefined> {
+    const candidateKeys = new Set(
+      candidates
+        .map((candidate) => this.normalizeAccessLookupKey(candidate))
+        .filter((candidate): candidate is string => Boolean(candidate))
+    );
+    if (candidateKeys.size === 0) return undefined;
+
+    const groups = await this.getAllAccessGroups();
+    return groups.find((group) => {
+      const groupKey = this.normalizeAccessLookupKey(group.name);
+      return groupKey ? candidateKeys.has(groupKey) : false;
+    });
+  }
+
+  private async resolveBaselineAccessGroupForUser(userId: number, user: User): Promise<{ group?: AccessGroup; authoritative: boolean }> {
     const [staffMember] = await db.select().from(staff).where(eq(staff.userId, userId));
 
     if (staffMember?.accessGroupId) {
-      targetGroup = await this.getAccessGroup(staffMember.accessGroupId);
+      const explicitGroup = await this.getAccessGroup(staffMember.accessGroupId);
+      if (explicitGroup) return { group: explicitGroup, authoritative: true };
     }
 
-    if (!targetGroup) {
-      const normalizedStaffRole = this.normalizeRoleKey(staffMember?.role);
-      const roleToGroupName: Record<string, string> = {
-        teacher: "Teacher",
-        assistant_teacher: "Assistant Teacher",
-        assistantteacher: "Assistant Teacher",
-        librarian: "Librarian",
-        quality_control_officer: "Quality Control Officer",
-        quality_control: "Quality Control Officer",
-        qualitycontrol: "Quality Control Officer",
-        qc: "Quality Control Officer",
-        quality: "Quality Control Officer",
-        quality_assurance: "Quality Control Officer",
-        accountant: "Accountant",
-        accounts: "Accountant",
-        bursar: "Accountant",
-        administrator: "School Admin",
-        admin: "School Admin",
-        school_admin: "School Admin",
-        schooladmin: "School Admin",
-        deputy_head: "School Admin",
-        deputyhead: "School Admin",
-        head: "School Admin",
-        headmaster: "School Admin",
-        headmistress: "School Admin",
-      };
-      if (normalizedStaffRole && roleToGroupName[normalizedStaffRole]) {
-        targetGroup = await this.getAccessGroupByName(roleToGroupName[normalizedStaffRole]);
-      }
+    if (staffMember?.role) {
+      const [configuredRole] = await db.select().from(staffRoles).where(eq(staffRoles.name, staffMember.role));
+      const matchedGroup = await this.findAccessGroupByLookupKey([
+        staffMember.role,
+        configuredRole?.name,
+        configuredRole?.label,
+      ]);
+      if (matchedGroup) return { group: matchedGroup, authoritative: true };
     }
 
-    if (!targetGroup) {
-      const userRoleToGroupName: Partial<Record<User["role"], string>> = {
-        school_admin: "School Admin",
-        teacher: "Teacher",
-        assistant_teacher: "Assistant Teacher",
-        librarian: "Librarian",
-        quality_control_officer: "Quality Control Officer",
-      };
-      const mappedName = userRoleToGroupName[user.role];
-      if (mappedName) {
-        targetGroup = await this.getAccessGroupByName(mappedName);
-      }
-    }
-
-    return targetGroup;
+    const roleMatchedGroup = await this.findAccessGroupByLookupKey([user.role]);
+    return { group: roleMatchedGroup, authoritative: false };
   }
 
   async ensureUserBaselineAccessGroups(userId: number): Promise<void> {
     const [user] = await db.select().from(users).where(eq(users.id, userId));
     if (!user) return;
 
-    const existingMappings = await db.select().from(userAccessGroups).where(eq(userAccessGroups.userId, userId));
     const existingGroups = await db
       .select({ group: accessGroups })
       .from(userAccessGroups)
@@ -2800,7 +2781,7 @@ export class DatabaseStorage implements IStorage {
     const currentGroupIds = new Set(existingGroups.map(({ group }) => group.id));
 
     if (user.role === "org_admin") {
-      const orgHqGroup = await this.getAccessGroupByName("Org HQ");
+      const orgHqGroup = await this.findAccessGroupByLookupKey(["org_hq", "org admin", "organization hq"]);
       if (!orgHqGroup) return;
 
       if (!currentGroupIds.has(orgHqGroup.id)) {
@@ -2820,15 +2801,25 @@ export class DatabaseStorage implements IStorage {
       return;
     }
 
-    const targetGroup = await this.resolveBaselineAccessGroupForUser(userId, user);
+    const { group: targetGroup, authoritative } = await this.resolveBaselineAccessGroupForUser(userId, user);
     if (!targetGroup) return;
 
-    if (!currentGroupIds.has(targetGroup.id)) {
-      await this.addUserToAccessGroup({ userId, accessGroupId: targetGroup.id });
-      return;
+    if (authoritative) {
+      const staleGroupIds = existingGroups
+        .map(({ group }) => group.id)
+        .filter((groupId) => groupId !== targetGroup.id);
+
+      if (staleGroupIds.length > 0) {
+        await db.delete(userAccessGroups).where(
+          and(
+            eq(userAccessGroups.userId, userId),
+            inArray(userAccessGroups.accessGroupId, staleGroupIds)
+          )
+        );
+      }
     }
 
-    if (existingMappings.length === 0) {
+    if (!currentGroupIds.has(targetGroup.id)) {
       await this.addUserToAccessGroup({ userId, accessGroupId: targetGroup.id });
     }
   }
