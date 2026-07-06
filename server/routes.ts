@@ -3170,7 +3170,14 @@ export async function registerRoutes(
       const items = await db.select().from(studentsTable).where(whereClause).orderBy(desc(status === "archived" ? studentsTable.archivedAt : studentsTable.createdAt), desc(studentsTable.createdAt)).limit(pageSize).offset(offset);
       const parentIds = Array.from(new Set(items.map((student) => student.parentId).filter((id): id is number => typeof id === "number")));
       const parentRows = parentIds.length
-        ? await db.select({ id: parentsTable.id, firstName: parentsTable.firstName, lastName: parentsTable.lastName, phone: parentsTable.phone, email: parentsTable.email }).from(parentsTable).where(inArray(parentsTable.id, parentIds))
+        ? await db.select({
+          id: parentsTable.id,
+          firstName: parentsTable.firstName,
+          lastName: parentsTable.lastName,
+          phone: parentsTable.phone,
+          email: parentsTable.email,
+          relationship: parentsTable.relationship,
+        }).from(parentsTable).where(inArray(parentsTable.id, parentIds))
         : [];
       const parentsById = new Map(parentRows.map((parent) => [parent.id, parent]));
       const itemsWithParentDetails = items.map((student) => {
@@ -3180,6 +3187,7 @@ export async function registerRoutes(
           parentName: `${parent.firstName || ""} ${parent.lastName || ""}`.trim(),
           parentPhone: parent.phone,
           parentEmail: parent.email,
+          parentRelationship: parent.relationship,
         } : student;
       });
       return res.json(toPaginatedResult(itemsWithParentDetails, Number(totalCount), page, pageSize));
@@ -3295,7 +3303,25 @@ export async function registerRoutes(
       if (!student) {
         return res.status(404).json({ message: "Student not found" });
       }
-      res.json(student);
+
+      const schoolId = getSchoolContext(req);
+      if (schoolId && student.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const parent = student.parentId ? await storage.getParent(student.parentId) : undefined;
+      if (!parent) {
+        return res.json(student);
+      }
+
+      res.json({
+        ...student,
+        parent,
+        parentName: `${parent.firstName || ""} ${parent.lastName || ""}`.trim(),
+        parentPhone: parent.phone,
+        parentEmail: parent.email,
+        parentRelationship: parent.relationship,
+      });
     } catch (error) {
       next(error);
     }

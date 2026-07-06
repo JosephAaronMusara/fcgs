@@ -15,7 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Trash2, GraduationCap, Download, Bell, Upload, BookOpen, UserCog, KeyRound, Eye, EyeOff, ArrowRightLeft, UserPlus, Camera, X, ChevronDown, Phone, Mail, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Search, Trash2, GraduationCap, Download, Bell, Upload, BookOpen, UserCog, KeyRound, Eye, EyeOff, ArrowRightLeft, UserPlus, Camera, X, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import type { Student, Class, Parent, Subject, Stream, User, School, Hostel, Staff } from "@shared/schema";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
@@ -32,6 +32,14 @@ type PaginatedResponse<T> = {
   totalPages: number;
 };
 
+type StudentRecord = Student & {
+  parent?: Parent | null;
+  parentName?: string | null;
+  parentPhone?: string | null;
+  parentEmail?: string | null;
+  parentRelationship?: string | null;
+};
+
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 export default function StudentsPage() {
@@ -44,13 +52,13 @@ export default function StudentsPage() {
   const [pageSize, setPageSize] = useState(25);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
-  const [viewingStudent, setViewingStudent] = useState<Student | null>(null);
-  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  const [viewingStudent, setViewingStudent] = useState<StudentRecord | null>(null);
+  const [editingStudent, setEditingStudent] = useState<StudentRecord | null>(null);
   const [isNotifyOpen, setIsNotifyOpen] = useState(false);
   const [selectedStudentIds, setSelectedStudentIds] = useState<number[]>([]);
-  const [subjectsDialogStudent, setSubjectsDialogStudent] = useState<Student | null>(null);
-  const [accountDialogStudent, setAccountDialogStudent] = useState<Student | null>(null);
-  const [transferDialogStudent, setTransferDialogStudent] = useState<Student | null>(null);
+  const [subjectsDialogStudent, setSubjectsDialogStudent] = useState<StudentRecord | null>(null);
+  const [accountDialogStudent, setAccountDialogStudent] = useState<StudentRecord | null>(null);
+  const [transferDialogStudent, setTransferDialogStudent] = useState<StudentRecord | null>(null);
   const [quickAddParentOpen, setQuickAddParentOpen] = useState(false);
   const [recentQuickAddedParent, setRecentQuickAddedParent] = useState<Parent | null>(null);
   const quickAddParentFlowRef = useRef(false);
@@ -112,7 +120,7 @@ export default function StudentsPage() {
 
   const studentListMode = statusFilter === "archived" ? "archived" : "records";
 
-  const { data: studentPageData, isLoading } = useQuery<PaginatedResponse<Student>>({
+  const { data: studentPageData, isLoading } = useQuery<PaginatedResponse<StudentRecord>>({
     queryKey: ["/api/students", studentListMode, page, pageSize, debouncedSearch, classFilter, statusFilter],
     queryFn: async () => {
       const params = new URLSearchParams({
@@ -133,6 +141,20 @@ export default function StudentsPage() {
       return res.json();
     },
     placeholderData: (previousData) => previousData,
+  });
+
+  const { data: viewingStudentDetails, isFetching: isViewingStudentFetching } = useQuery<StudentRecord>({
+    queryKey: ["/api/students", viewingStudent?.id],
+    enabled: !!viewingStudent?.id,
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/students/${viewingStudent!.id}`);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status}: ${text || res.statusText}`);
+      }
+
+      return res.json();
+    },
   });
 
   const students = studentPageData?.items || [];
@@ -323,11 +345,41 @@ export default function StudentsPage() {
     return parents?.find((p) => p.id === parentId);
   };
 
-  const getParentName = (parentId: number | null | undefined, student?: Student) => {
-    const parentName = (student as any)?.parentName;
+  const getEmbeddedParent = (student?: StudentRecord | null) => {
+    const embeddedParent = student?.parent;
+    return embeddedParent && typeof embeddedParent === "object" ? embeddedParent : undefined;
+  };
+
+  const getStudentParent = (student?: StudentRecord | null) => {
+    return getEmbeddedParent(student) || getParent(student?.parentId);
+  };
+
+  const getParentName = (parentId: number | null | undefined, student?: StudentRecord) => {
+    const parentName = student?.parentName?.trim();
     if (parentName) return parentName;
+    const embeddedParent = getEmbeddedParent(student);
+    if (embeddedParent) return `${embeddedParent.firstName || ""} ${embeddedParent.lastName || ""}`.trim() || "-";
     const parent = getParent(parentId);
     return parent ? `${parent.firstName} ${parent.lastName}` : "-";
+  };
+
+  const getParentPhone = (student: StudentRecord) => {
+    return student.parentPhone || getEmbeddedParent(student)?.phone || getParent(student.parentId)?.phone || "";
+  };
+
+  const getParentEmail = (student: StudentRecord) => {
+    return student.parentEmail || getEmbeddedParent(student)?.email || getParent(student.parentId)?.email || "";
+  };
+
+  const getParentRelationship = (student: StudentRecord) => {
+    return student.parentRelationship || getEmbeddedParent(student)?.relationship || getParent(student.parentId)?.relationship || "";
+  };
+
+  const getParentAddressLine = (parent?: Partial<Parent> | null) => {
+    const parts = [parent?.streetAddress, parent?.residentialArea, parent?.address]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    return parts.length ? parts.join(", ") : "-";
   };
 
   const displayValue = (value: unknown) => {
@@ -429,7 +481,7 @@ export default function StudentsPage() {
       "Admission No": s.admissionNo,
       "First Name": s.firstName,
       "Last Name": s.lastName,
-      "Email": s.email || "",
+      "Student Email": s.email || "",
       "Student Phone": s.phone || "",
       "Gender": s.gender?.toUpperCase() || "",
       "Date of Birth": s.dateOfBirth || "",
@@ -479,7 +531,7 @@ export default function StudentsPage() {
           admissionNo: row["Reg No."] || row["Admission No"] || row["admission_no"] || row["RegNo"] || "",
           firstName: (row["First Name"] || row["first_name"] || row["FirstName"] || "").trim(),
           lastName: (row["Last Name"] || row["last_name"] || row["LastName"] || "").trim(),
-          email: row["Email"] || row["email"] || "",
+          email: row["Student Email"] || row["student_email"] || row["Email"] || row["email"] || "",
           phone: row["Student Phone"] || row["student_phone"] || row["Phone"] || row["phone"] || "",
           gender: normalizeGender(row["Gender"] || row["gender"]),
           dateOfBirth: row["D.O.B"] || row["Date of Birth"] || row["dob"] || row["DOB"] || "",
@@ -762,19 +814,34 @@ export default function StudentsPage() {
                               <DialogHeader>
                                 <DialogTitle>View Student</DialogTitle>
                               </DialogHeader>
-                              <StudentView
-                                student={s}
-                                className={getClassName(s.classId)}
-                                parentName={getParentName(s.parentId, s)}
-                                parent={getParent(s.parentId)}
-                                streamName={streams?.find((st) => st.id === s.streamId)?.name || "-"}
-                                hostelName={getHostelName(s) || "-"}
-                                isBoardingSchool={isBoardingSchool}
-                                onEdit={() => {
-                                  setViewingStudent(null);
-                                  setEditingStudent(s);
-                                }}
-                              />
+                              {viewingStudent?.id === s.id && isViewingStudentFetching && !viewingStudentDetails ? (
+                                <div className="space-y-4 py-2" data-testid={`loading-view-student-${s.id}`}>
+                                  <Skeleton className="h-20 w-full" />
+                                  <Skeleton className="h-32 w-full" />
+                                </div>
+                              ) : (() => {
+                                const studentForView = viewingStudent?.id === s.id ? (viewingStudentDetails || s) : s;
+                                const parentForView = getStudentParent(studentForView);
+                                return (
+                                  <StudentView
+                                    student={studentForView}
+                                    className={getClassName(studentForView.classId)}
+                                    parentName={getParentName(studentForView.parentId, studentForView)}
+                                    parent={parentForView}
+                                    parentPhone={getParentPhone(studentForView)}
+                                    parentEmail={getParentEmail(studentForView)}
+                                    parentRelationship={getParentRelationship(studentForView)}
+                                    parentAddress={getParentAddressLine(parentForView)}
+                                    streamName={streams?.find((st) => st.id === studentForView.streamId)?.name || "-"}
+                                    hostelName={getHostelName(studentForView) || "-"}
+                                    isBoardingSchool={isBoardingSchool}
+                                    onEdit={() => {
+                                      setViewingStudent(null);
+                                      setEditingStudent(studentForView);
+                                    }}
+                                  />
+                                );
+                              })()}
                             </DialogContent>
                           </Dialog>
 
@@ -899,9 +966,8 @@ export default function StudentsPage() {
 
               <div className="mobile-record-list">
                 {(sortedStudents ?? []).map((s) => {
-                  const parent = getParent(s.parentId);
-                  const parentName = displayValue(parent ? `${parent.firstName} ${parent.lastName}` : "");
-                  const parentPhone = parent?.phone || "___";
+                  const parentName = displayValue(getParentName(s.parentId, s));
+                  const parentPhone = displayValue(getParentPhone(s));
                   const classLabel = displayValue(getClassName(s.classId));
                   const hostelLabel = getHostelName(s);
                   const learnerType = s.isDayScholar ? "Day Scholar" : "Boarder";
@@ -950,19 +1016,6 @@ export default function StudentsPage() {
 
                         <div className="mobile-record-details">
                           <div className="mobile-record-details-grid mobile-record-two-col">
-                            <div className="mobile-record-field">
-                              <Phone className="h-3 w-3 shrink-0" />
-                              <span className="shrink-0">:</span>
-                              <span className="mobile-record-truncate">{s.phone || "___"}</span>
-                            </div>
-                            <div className="mobile-record-field">
-                              <Mail className="h-3 w-3 shrink-0" />
-                              <span className="shrink-0">:</span>
-                              <span className="mobile-record-truncate">{s.email || "___"}</span>
-                            </div>
-                          </div>
-
-                          <div className="mobile-record-details-grid mobile-record-two-col mt-1">
                             <span className="mobile-record-truncate"><span className="mobile-record-label">Gender:</span> {getGenderLabel(s.gender)}</span>
                             <span className="mobile-record-truncate"><span className="mobile-record-label">Type:</span> {learnerType}</span>
                           </div>
@@ -1142,21 +1195,37 @@ function StudentView({
   className,
   parentName,
   parent,
+  parentPhone,
+  parentEmail,
+  parentRelationship,
+  parentAddress,
   streamName,
   hostelName,
   isBoardingSchool,
   onEdit,
 }: {
-  student: Student;
+  student: StudentRecord;
   className: string;
   parentName: string;
   parent?: Parent;
+  parentPhone: string;
+  parentEmail: string;
+  parentRelationship: string;
+  parentAddress: string;
   streamName: string;
   hostelName: string;
   isBoardingSchool: boolean;
   onEdit: () => void;
 }) {
   const studentType = student.isDayScholar ? "Day Scholar" : "Boarder";
+  const formatValue = (value: unknown) => {
+    const text = String(value ?? "").trim();
+    return text && text !== "___" ? text : "-";
+  };
+  const studentAddressLine = [student.streetAddress, student.residentialArea, student.address]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <div className="space-y-6">
@@ -1196,19 +1265,23 @@ function StudentView({
         )}
         <div className="space-y-1">
           <Label>Parent / Guardian</Label>
-          <div className="rounded-md border px-3 py-2 text-sm">{parentName}</div>
+          <div className="rounded-md border px-3 py-2 text-sm">{formatValue(parentName)}</div>
         </div>
         <div className="space-y-1">
           <Label>Parent Phone</Label>
-          <div className="rounded-md border px-3 py-2 text-sm" data-testid="text-student-parent-phone">{parent?.phone || "-"}</div>
+          <div className="rounded-md border px-3 py-2 text-sm" data-testid="text-student-parent-phone">{formatValue(parentPhone || parent?.phone)}</div>
         </div>
         <div className="space-y-1">
           <Label>Parent Email</Label>
-          <div className="rounded-md border px-3 py-2 text-sm break-all" data-testid="text-student-parent-email">{parent?.email || "-"}</div>
+          <div className="rounded-md border px-3 py-2 text-sm break-all" data-testid="text-student-parent-email">{formatValue(parentEmail || parent?.email)}</div>
         </div>
         <div className="space-y-1">
           <Label>Relationship</Label>
-          <div className="rounded-md border px-3 py-2 text-sm capitalize" data-testid="text-student-parent-relationship">{parent?.relationship || "-"}</div>
+          <div className="rounded-md border px-3 py-2 text-sm capitalize" data-testid="text-student-parent-relationship">{formatValue(parentRelationship || parent?.relationship)}</div>
+        </div>
+        <div className="space-y-1 sm:col-span-2">
+          <Label>Parent Address</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{formatValue(parentAddress)}</div>
         </div>
         <div className="space-y-1">
           <Label>Gender</Label>
@@ -1235,8 +1308,24 @@ function StudentView({
           <div className="rounded-md border px-3 py-2 text-sm">{student.phone || "-"}</div>
         </div>
         <div className="space-y-1">
-          <Label>Email</Label>
+          <Label>Student Email</Label>
           <div className="rounded-md border px-3 py-2 text-sm break-all">{student.email || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Street Address</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.streetAddress || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Residential Area / Suburb</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.residentialArea || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>City</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{student.address || "-"}</div>
+        </div>
+        <div className="space-y-1">
+          <Label>Full Address</Label>
+          <div className="rounded-md border px-3 py-2 text-sm">{studentAddressLine || "-"}</div>
         </div>
       </div>
 
@@ -1248,6 +1337,7 @@ function StudentView({
     </div>
   );
 }
+
 
 function StudentForm({
   onSubmit,
@@ -1268,7 +1358,7 @@ function StudentForm({
   parents: Parent[];
   staff: Staff[];
   streams: Stream[];
-  defaultValues?: Student;
+  defaultValues?: StudentRecord;
   defaultAdmissionNo?: string;
   isLoading: boolean;
   onQuickAddParent: () => void;
@@ -1276,13 +1366,17 @@ function StudentForm({
   hostels: Hostel[];
   quickAddedParent?: Parent | null;
 }) {
-  const defaultParent = defaultValues?.parentId
-    ? parents.find(p => p.id === defaultValues.parentId)
+  const defaultEmbeddedParent = defaultValues?.parent && typeof defaultValues.parent === "object"
+    ? defaultValues.parent
     : undefined;
+  const defaultParent = defaultValues?.parentId
+    ? parents.find(p => p.id === defaultValues.parentId) || defaultEmbeddedParent
+    : undefined;
+  const defaultParentName = defaultParent
+    ? `${defaultParent.firstName} ${defaultParent.lastName}`.trim()
+    : defaultValues?.parentName || "";
 
-  const [parentSearch, setParentSearch] = useState(
-    defaultParent ? `${defaultParent.firstName} ${defaultParent.lastName}` : ""
-  );
+  const [parentSearch, setParentSearch] = useState(defaultParentName);
   const [selectedParentId, setSelectedParentId] = useState<number | null>(
     defaultValues?.parentId || null
   );
@@ -1294,8 +1388,13 @@ function StudentForm({
       setSelectedParentId(quickAddedParent.id);
       setParentSearch(`${quickAddedParent.firstName} ${quickAddedParent.lastName}`);
       setShowParentSuggestions(false);
+      return;
     }
-  }, [quickAddedParent]);
+
+    setSelectedParentId(defaultValues?.parentId || null);
+    setParentSearch(defaultParentName);
+    setShowParentSuggestions(false);
+  }, [quickAddedParent, defaultValues?.id, defaultValues?.parentId, defaultParentName]);
 
   const parentSuggestions = parentSearch.trim().length >= 1
     ? [
@@ -1713,7 +1812,7 @@ function StudentForm({
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
-          <Label htmlFor="email">Email</Label>
+          <Label htmlFor="email">Student Email</Label>
           <Input
             id="email"
             name="email"
