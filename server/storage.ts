@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { compareStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { eq, ne, desc, asc, and, or, sql, count as drizzleCount, like, gte, lte, lt, isNull, inArray, notLike } from "drizzle-orm";
 import {
   users, staff, streams, classes, classTeacherAssignments, parents, students, subjects,
@@ -931,26 +932,6 @@ export class DatabaseStorage implements IStorage {
         }
       }
 
-      const streamChanged = existingClass.streamId !== updated.streamId;
-      const schoolChanged = existingClass.schoolId !== updated.schoolId;
-      if (streamChanged || schoolChanged) {
-        const classStudents = await tx
-          .select({ id: students.id })
-          .from(students)
-          .where(eq(students.classId, id));
-
-        await tx
-          .update(students)
-          .set({ schoolId: updated.schoolId, streamId: updated.streamId })
-          .where(eq(students.classId, id));
-
-        if (streamChanged && classStudents.length > 0) {
-          await tx
-            .delete(studentSubjects)
-            .where(inArray(studentSubjects.studentId, classStudents.map((student) => student.id)));
-        }
-      }
-
       return updated;
     });
   }
@@ -1031,17 +1012,6 @@ export class DatabaseStorage implements IStorage {
   }
   
   async migrateStudents(fromClassId: number, toClassId: number, studentIds?: number[]): Promise<number> {
-    const destinationClass = await this.getClass(toClassId);
-    if (!destinationClass || destinationClass.archivedAt) {
-      throw new Error("Destination class was not found");
-    }
-    if (!destinationClass.schoolId) {
-      throw new Error("Destination class is not linked to a school");
-    }
-    if (!destinationClass.streamId) {
-      throw new Error("Destination class is not linked to a stream");
-    }
-
     const conditions = [
       eq(students.classId, fromClassId),
       activeEnrolledStudentCondition(),
@@ -1056,20 +1026,10 @@ export class DatabaseStorage implements IStorage {
       .from(students)
       .where(and(...conditions));
 
-    if (studentsToMigrate.length === 0) return 0;
-
-    await db.transaction(async (tx) => {
-      const ids = studentsToMigrate.map((student) => student.id);
-      await tx
-        .update(students)
-        .set({
-          classId: destinationClass.id,
-          schoolId: destinationClass.schoolId,
-          streamId: destinationClass.streamId,
-        })
-        .where(inArray(students.id, ids));
-      await tx.delete(studentSubjects).where(inArray(studentSubjects.studentId, ids));
-    });
+    for (const student of studentsToMigrate) {
+      await db.update(students).set({ classId: toClassId }).where(eq(students.id, student.id));
+      await db.delete(studentSubjects).where(eq(studentSubjects.studentId, student.id));
+    }
 
     return studentsToMigrate.length;
   }
@@ -1107,7 +1067,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(students)
       .where(nonArchivedStudentCondition())
-      .orderBy(desc(students.createdAt));
+      .orderBy(...studentFirstNameOrder);
   }
 
   async getStudentsBySchool(schoolId: number): Promise<Student[]> {
@@ -1115,7 +1075,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(students)
       .where(and(eq(students.schoolId, schoolId), nonArchivedStudentCondition()))
-      .orderBy(desc(students.createdAt));
+      .orderBy(...studentFirstNameOrder);
   }
 
   async getArchivedStudents(): Promise<Student[]> {
@@ -1123,7 +1083,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(students)
       .where(archivedStudentCondition())
-      .orderBy(desc(students.archivedAt), desc(students.createdAt));
+      .orderBy(...studentFirstNameOrder);
   }
 
   async getArchivedStudentsBySchool(schoolId: number): Promise<Student[]> {
@@ -1131,7 +1091,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(students)
       .where(and(eq(students.schoolId, schoolId), archivedStudentCondition()))
-      .orderBy(desc(students.archivedAt), desc(students.createdAt));
+      .orderBy(...studentFirstNameOrder);
   }
 
   async getStudent(id: number): Promise<Student | undefined> {
@@ -1143,14 +1103,16 @@ export class DatabaseStorage implements IStorage {
     return db
       .select()
       .from(students)
-      .where(and(eq(students.classId, classId), activeEnrolledStudentCondition()));
+      .where(and(eq(students.classId, classId), activeEnrolledStudentCondition()))
+      .orderBy(...studentFirstNameOrder);
   }
 
   async getStudentsByParent(parentId: number): Promise<Student[]> {
     return db
       .select()
       .from(students)
-      .where(and(eq(students.parentId, parentId), nonArchivedStudentCondition()));
+      .where(and(eq(students.parentId, parentId), nonArchivedStudentCondition()))
+      .orderBy(...studentFirstNameOrder);
   }
 
   async createStudent(studentData: InsertStudent): Promise<Student> {
@@ -1159,26 +1121,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateStudent(id: number, studentData: Partial<InsertStudent>): Promise<Student | undefined> {
-    return db.transaction(async (tx) => {
-      const [existing] = await tx
-        .select()
-        .from(students)
-        .where(and(eq(students.id, id), isNull(students.archivedAt)));
-      if (!existing) return undefined;
-
-      const [updated] = await tx
-        .update(students)
-        .set(studentData)
-        .where(and(eq(students.id, id), isNull(students.archivedAt)))
-        .returning();
-
-      const classWasProvided = Object.prototype.hasOwnProperty.call(studentData, "classId");
-      if (classWasProvided && existing.classId !== updated.classId) {
-        await tx.delete(studentSubjects).where(eq(studentSubjects.studentId, id));
-      }
-
-      return updated;
-    });
+    const [updated] = await db
+      .update(students)
+      .set(studentData)
+      .where(and(eq(students.id, id), isNull(students.archivedAt)))
+      .returning();
+    return updated;
   }
 
   async deleteStudent(id: number): Promise<boolean> {
@@ -3087,7 +3035,7 @@ export class DatabaseStorage implements IStorage {
       );
     }).slice(0, 20);
 
-    const allStudents = await db.select().from(students).limit(100);
+    const allStudents = await db.select().from(students).orderBy(...studentFirstNameOrder).limit(100);
     const studentResults = allStudents.filter(s => {
       const searchLower = query.toLowerCase();
       return (
@@ -3097,7 +3045,7 @@ export class DatabaseStorage implements IStorage {
         s.phone?.includes(query) ||
         s.admissionNo?.toLowerCase().includes(searchLower)
       );
-    }).slice(0, 20);
+    }).sort(compareStudentsByFirstName).slice(0, 20);
 
     const allParents = await db.select().from(parents).limit(100);
     const parentResults = allParents.filter(p => {

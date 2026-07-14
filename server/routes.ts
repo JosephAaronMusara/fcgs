@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
+import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
 import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
 import multer from "multer";
@@ -1003,11 +1004,7 @@ async function getHistoricalStudentsForAssessments(params: {
       )
     );
 
-  students.sort((a: any, b: any) =>
-    `${a.lastName}${a.firstName}`.localeCompare(`${b.lastName}${b.firstName}`)
-  );
-
-  return students;
+  return sortStudentsByFirstName(students);
 }
 
 function subjectMatchesHierarchyStream(subject: any, streamId: number | null | undefined): boolean {
@@ -3255,7 +3252,7 @@ export async function registerRoutes(
       }
       const whereClause = conditions.length ? and(...conditions) : undefined;
       const [{ count: totalCount }] = await db.select({ count: drizzleCount() }).from(studentsTable).where(whereClause);
-      const items = await db.select().from(studentsTable).where(whereClause).orderBy(desc(status === "archived" ? studentsTable.archivedAt : studentsTable.createdAt), desc(studentsTable.createdAt)).limit(pageSize).offset(offset);
+      const items = await db.select().from(studentsTable).where(whereClause).orderBy(...studentFirstNameOrder).limit(pageSize).offset(offset);
       const parentIds = Array.from(new Set(items.map((student) => student.parentId).filter((id): id is number => typeof id === "number")));
       const parentRows = parentIds.length
         ? await db.select({
@@ -3322,6 +3319,7 @@ export async function registerRoutes(
           const admNo = (s.admissionNo || "").toLowerCase();
           return firstName.includes(query) || lastName.includes(query) || fullName.includes(query) || admNo.includes(query);
         })
+        .sort(compareStudentsByFirstName)
         .slice(0, 20)
         .map(s => ({
           id: s.id,
@@ -4714,7 +4712,7 @@ export async function registerRoutes(
               records: recordIndex[s.id] || {},
             };
           })
-          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || String(a.admissionNo || '').localeCompare(String(b.admissionNo || ''))),
+          .sort(compareStudentsByFirstName),
         present: presentCount,
         absent: absentCount,
         total: students.length,
@@ -13371,8 +13369,7 @@ ${schoolName}`;
           id: student.id,
           fullName: `${student.firstName} ${student.lastName}`.trim(),
           admissionNo: student.admissionNo,
-        }))
-        .sort((a, b) => a.fullName.localeCompare(b.fullName));
+        }));
 
       res.json(rows);
     } catch (error) {
@@ -13770,9 +13767,9 @@ ${schoolName}`;
       if (!cls || cls.schoolId !== schoolId) return res.status(404).json({ message: "Class not found" });
 
       const allStudents = await storage.getAllStudents();
-      const classStudents = allStudents
-        .filter(s => s.classId === classId && s.schoolId === schoolId && s.status === "active")
-        .sort((a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`));
+      const classStudents = sortStudentsByFirstName(
+        allStudents.filter(s => s.classId === classId && s.schoolId === schoolId && s.status === "active"),
+      );
 
       const classQcReports = await db.select().from(qcReports).where(
         and(

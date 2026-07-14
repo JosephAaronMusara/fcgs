@@ -1315,11 +1315,12 @@ export default function MarksEntryPage() {
           if (!studentMap.has(student.id)) studentMap.set(student.id, student);
         });
       });
-      const students = Array.from(studentMap.values()).sort((a, b) => {
-        const aName = `${a.lastName || ""} ${a.firstName || ""}`.trim();
-        const bName = `${b.lastName || ""} ${b.firstName || ""}`.trim();
-        return aName.localeCompare(bName);
-      });
+      const students = Array.from(studentMap.values()).sort((a, b) =>
+        (a.firstName || "").localeCompare(b.firstName || "", undefined, { sensitivity: "base", numeric: true }) ||
+        (a.lastName || "").localeCompare(b.lastName || "", undefined, { sensitivity: "base", numeric: true }) ||
+        (a.admissionNo || "").localeCompare(b.admissionNo || "", undefined, { sensitivity: "base", numeric: true }) ||
+        a.id - b.id,
+      );
 
       const headerRow: any[] = [
         "Student ID",
@@ -2160,7 +2161,7 @@ export default function MarksEntryPage() {
 
       return (
         <>
-          <TableCell className="border-l px-1 py-1 align-middle sm:px-2">
+          <TableCell className="border-l px-1 py-0.5 align-middle sm:py-1 sm:px-2">
             <Select
               value={entry.attStatus || "none"}
               onValueChange={(value) =>
@@ -2168,7 +2169,7 @@ export default function MarksEntryPage() {
               }
             >
               <SelectTrigger
-                className="h-8 w-[82px] px-2 text-xs [&>span]:truncate"
+                className="h-7 w-[68px] px-1 text-[10px] sm:h-8 sm:w-[76px] sm:px-2 sm:text-xs md:w-[82px] [&>span]:truncate"
                 data-testid={`select-status-${assessmentId}-${studentId}`}
               >
                 <SelectValue />
@@ -2185,7 +2186,7 @@ export default function MarksEntryPage() {
           {data.papers.map((paper) => (
             <TableCell
               key={paper.id}
-              className="px-1 py-1 text-center align-middle sm:px-2"
+              className="px-0.5 py-0.5 text-center align-middle sm:px-2 sm:py-1"
             >
               <Input
                 type="number"
@@ -2194,7 +2195,7 @@ export default function MarksEntryPage() {
                 step={1}
                 inputMode="numeric"
                 pattern="[0-9]*"
-                className="mx-auto h-8 w-20 px-1 text-center text-sm"
+                className="mx-auto h-7 w-14 px-1 text-center text-xs sm:h-8 sm:w-16 sm:text-sm md:w-20"
                 value={entry.paperMarks[paper.id] || ""}
                 onChange={(event) =>
                   handlePaperMarkChange(
@@ -2327,7 +2328,7 @@ export default function MarksEntryPage() {
 
     return (
       <>
-        <TableCell className="border-l px-1 py-1 align-middle sm:px-2">
+        <TableCell className="border-l px-1 py-0.5 align-middle sm:py-1 sm:px-2">
           <Select
             value={entry.attStatus || "none"}
             onValueChange={(value) =>
@@ -2335,7 +2336,7 @@ export default function MarksEntryPage() {
             }
           >
             <SelectTrigger
-              className="h-8 w-[82px] px-2 text-xs [&>span]:truncate"
+              className="h-7 w-[68px] px-1 text-[10px] sm:h-8 sm:w-[76px] sm:px-2 sm:text-xs md:w-[82px] [&>span]:truncate"
               data-testid={`select-status-${assessmentId}-${studentId}`}
             >
               <SelectValue />
@@ -2352,7 +2353,7 @@ export default function MarksEntryPage() {
         {data.papers.map((paper) => (
           <TableCell
             key={paper.id}
-            className="px-1 py-1 text-center align-middle sm:px-2"
+            className="px-0.5 py-0.5 text-center align-middle sm:px-2 sm:py-1"
           >
             <Input
               type="number"
@@ -2361,7 +2362,7 @@ export default function MarksEntryPage() {
               step={1}
               inputMode="numeric"
               pattern="[0-9]*"
-              className="mx-auto h-8 w-20 px-1 text-center text-sm"
+              className="mx-auto h-7 w-14 px-1 text-center text-xs sm:h-8 sm:w-16 sm:text-sm md:w-20"
               value={entry.paperMarks[paper.id] || ""}
               onChange={(event) =>
                 handlePaperMarkChange(
@@ -2376,14 +2377,14 @@ export default function MarksEntryPage() {
             />
           </TableCell>
         ))}
-        <TableCell className="px-2 py-1 text-center font-semibold align-middle">
+        <TableCell className="px-1 py-0.5 text-center text-[10px] font-semibold align-middle sm:px-2 sm:py-1 sm:text-xs md:text-sm">
           {result.percentage !== null ? `${result.percentage}%` : "-"}
         </TableCell>
-        <TableCell className="px-2 py-1 text-center align-middle">
+        <TableCell className="px-1 py-0.5 text-center align-middle sm:px-2 sm:py-1">
           {result.gradeName ? (
             <Badge
               className={cn(
-                "border px-1.5 py-0 text-xs",
+                "border px-1 py-0 text-[9px] sm:px-1.5 sm:text-xs",
                 getGradeColor(result.gradeName),
               )}
             >
@@ -2393,10 +2394,10 @@ export default function MarksEntryPage() {
             <span className="text-muted-foreground">-</span>
           )}
         </TableCell>
-        <TableCell className="px-2 py-1 align-middle">
+        <TableCell className="px-1 py-0.5 align-middle sm:px-2 sm:py-1">
           <Textarea
             rows={1}
-            className="h-9 min-h-9 max-h-9 w-[250px] resize-none overflow-hidden px-2 py-1 text-xs"
+            className="h-8 min-h-8 max-h-8 w-[190px] resize-none overflow-hidden px-1.5 py-1 text-[10px] sm:h-9 sm:min-h-9 sm:max-h-9 sm:w-[220px] sm:px-2 sm:text-xs md:w-[250px]"
             placeholder={poolComment || "No comment available"}
             value={displayComment || ""}
             onChange={(event) =>
@@ -2409,10 +2410,10 @@ export default function MarksEntryPage() {
             data-testid={`input-comment-${assessmentId}-${studentId}`}
           />
         </TableCell>
-        <TableCell className="px-2 py-1 align-middle">
+        <TableCell className="px-1 py-0.5 align-middle sm:px-2 sm:py-1">
           <Button
             size="sm"
-            className="h-8 px-3 text-xs"
+            className="h-7 px-2 text-[10px] sm:h-8 sm:px-3 sm:text-xs"
             onClick={() => handleManualSave(assessmentId, studentId)}
             disabled={entry.isSaving || !entry.isDirty}
             data-testid={`button-save-${assessmentId}-${studentId}`}
@@ -2616,7 +2617,7 @@ export default function MarksEntryPage() {
                                   {assessment.name}
                                 </span>
                                 {assessment.assessmentDate ? (
-                                  <span className="text-xs text-muted-foreground">
+                                  <span className="truncate text-[9px] text-muted-foreground sm:text-[10px] md:text-xs">
                                     {assessment.assessmentDate}
                                   </span>
                                 ) : null}
@@ -2968,14 +2969,14 @@ export default function MarksEntryPage() {
               </div>
             ) : (
               <>
-                <div className="hidden md:block">
-                  <div className="relative max-w-full overflow-x-auto rounded-md border">
-                    <Table className="w-max min-w-full table-auto text-sm">
+                <div className="block min-w-0">
+                  <div className="relative max-w-full overflow-x-auto overscroll-x-contain rounded-md border touch-pan-x">
+                    <Table className="w-max min-w-full table-auto text-[11px] sm:text-xs md:text-sm">
                       <TableHeader>
                         <TableRow>
                           <TableHead
                             rowSpan={2}
-                            className="sticky left-0 z-40 min-w-[170px] border-r bg-background px-2"
+                            className="sticky left-0 z-40 w-[126px] min-w-[126px] max-w-[126px] border-r bg-background px-1 py-1 text-[11px] shadow-[2px_0_0_0_hsl(var(--border))] sm:w-[145px] sm:min-w-[145px] sm:max-w-[145px] sm:px-2 sm:text-xs md:w-[170px] md:min-w-[170px] md:max-w-[170px] md:text-sm"
                           >
                             Student
                           </TableHead>
@@ -2989,9 +2990,9 @@ export default function MarksEntryPage() {
                                   data,
                                   isMultiAssessmentMode,
                                 )}
-                                className="border-l bg-muted/40 px-2 py-2 text-center"
+                                className="border-l bg-muted/40 px-1 py-1 text-center sm:px-2 sm:py-2"
                               >
-                                <div className="max-w-[360px] truncate font-semibold">
+                                <div className="max-w-[210px] truncate text-[10px] font-semibold leading-tight sm:max-w-[280px] sm:text-xs md:max-w-[360px] md:text-sm">
                                   {data.assessment.name}
                                 </div>
                               </TableHead>
@@ -3000,7 +3001,7 @@ export default function MarksEntryPage() {
                           {isMultiAssessmentMode && (
                             <TableHead
                               rowSpan={2}
-                              className="min-w-[104px] border-l bg-background px-2 text-center"
+                              className="min-w-[74px] border-l bg-background px-1 text-center text-[10px] sm:min-w-[88px] sm:px-2 sm:text-xs md:min-w-[104px] md:text-sm"
                             >
                               Save
                             </TableHead>
@@ -3013,17 +3014,17 @@ export default function MarksEntryPage() {
                             const commonColumns = [
                               <TableHead
                                 key={`${assessmentId}-status`}
-                                className="min-w-[96px] border-l px-2"
+                                className="min-w-[72px] border-l px-1 text-[10px] sm:min-w-[84px] sm:px-2 sm:text-xs md:min-w-[96px] md:text-sm"
                               >
                                 Status
                               </TableHead>,
                               ...data.papers.map((paper) => (
                                 <TableHead
                                   key={`${assessmentId}-paper-${paper.id}`}
-                                  className="min-w-[92px] px-2 text-center"
+                                  className="min-w-[68px] px-1 text-center text-[10px] leading-tight sm:min-w-[80px] sm:px-2 sm:text-xs md:min-w-[92px] md:text-sm"
                                 >
                                   {paper.paperName}
-                                  <div className="text-xs font-normal text-muted-foreground">
+                                  <div className="text-[9px] font-normal text-muted-foreground sm:text-[10px] md:text-xs">
                                     /{paper.paperMarks}
                                   </div>
                                 </TableHead>
@@ -3034,25 +3035,25 @@ export default function MarksEntryPage() {
                               ...commonColumns,
                               <TableHead
                                 key={`${assessmentId}-pct`}
-                                className="min-w-[62px] px-2 text-center"
+                                className="min-w-[48px] px-1 text-center text-[10px] sm:min-w-[56px] sm:px-2 sm:text-xs md:min-w-[62px] md:text-sm"
                               >
                                 %
                               </TableHead>,
                               <TableHead
                                 key={`${assessmentId}-grade`}
-                                className="min-w-[64px] px-2 text-center"
+                                className="min-w-[50px] px-1 text-center text-[10px] sm:min-w-[58px] sm:px-2 sm:text-xs md:min-w-[64px] md:text-sm"
                               >
                                 Grade
                               </TableHead>,
                               <TableHead
                                 key={`${assessmentId}-comment`}
-                                className="min-w-[270px] px-2"
+                                className="min-w-[200px] px-1 text-[10px] sm:min-w-[230px] sm:px-2 sm:text-xs md:min-w-[270px] md:text-sm"
                               >
                                 Comment
                               </TableHead>,
                               <TableHead
                                 key={`${assessmentId}-action`}
-                                className="min-w-[88px] px-2"
+                                className="min-w-[70px] px-1 text-[10px] sm:min-w-[78px] sm:px-2 sm:text-xs md:min-w-[88px] md:text-sm"
                               >
                                 Action
                               </TableHead>,
@@ -3067,12 +3068,12 @@ export default function MarksEntryPage() {
                           );
                           return (
                             <TableRow key={student.id}>
-                              <TableCell className="sticky left-0 z-30 border-r bg-background px-2 py-1 font-medium">
+                              <TableCell className="sticky left-0 z-30 w-[126px] min-w-[126px] max-w-[126px] border-r bg-background px-1 py-1 font-medium shadow-[2px_0_0_0_hsl(var(--border))] sm:w-[145px] sm:min-w-[145px] sm:max-w-[145px] sm:px-2 md:w-[170px] md:min-w-[170px] md:max-w-[170px]">
                                 <div className="flex flex-col leading-tight">
-                                  <span>
+                                  <span className="line-clamp-2 break-words text-[11px] sm:text-xs md:text-sm">
                                     {student.firstName} {student.lastName}
                                   </span>
-                                  <span className="text-xs text-muted-foreground">
+                                  <span className="truncate text-[9px] text-muted-foreground sm:text-[10px] md:text-xs">
                                     {student.admissionNo}
                                   </span>
                                 </div>
@@ -3092,7 +3093,7 @@ export default function MarksEntryPage() {
                                         data,
                                         isMultiAssessmentMode,
                                       )}
-                                      className="border-l text-center text-xs text-muted-foreground"
+                                      className="border-l px-1 py-1 text-center text-[9px] text-muted-foreground sm:text-xs"
                                     >
                                       Not in assessment roster
                                     </TableCell>
@@ -3110,10 +3111,10 @@ export default function MarksEntryPage() {
                                 );
                               })}
                               {isMultiAssessmentMode && (
-                                <TableCell className="border-l px-2 py-1 text-center align-middle">
+                                <TableCell className="border-l px-1 py-0.5 text-center align-middle sm:px-2 sm:py-1">
                                   <Button
                                     size="sm"
-                                    className="h-8 px-3 text-xs"
+                                    className="h-7 px-2 text-[10px] sm:h-8 sm:px-3 sm:text-xs"
                                     onClick={() =>
                                       handleSaveStudentRow(student.id)
                                     }
@@ -3147,73 +3148,6 @@ export default function MarksEntryPage() {
                   </div>
                 </div>
 
-                <div className="space-y-3 md:hidden">
-                  {displayedStudents.map((student) => {
-                    const rowSaveState = getStudentRowSaveState(student.id);
-                    return (
-                      <div key={student.id} className="rounded-lg border p-3">
-                        <div className="mb-3 border-b pb-2">
-                          <div className="font-medium">
-                            {student.firstName} {student.lastName}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {student.admissionNo}
-                          </div>
-                        </div>
-                        <div className="space-y-4">
-                          {selectedAssessmentNumbers.map((assessmentId) => {
-                            const data = marksDataByAssessment[assessmentId];
-                            if (!data) return null;
-                            return (
-                              <div
-                                key={assessmentId}
-                                className="rounded-md bg-muted/30 p-3"
-                              >
-                                <div className="mb-3 text-sm font-semibold">
-                                  {data.assessment.name}
-                                </div>
-                                {renderAssessmentFields(
-                                  assessmentId,
-                                  student.id,
-                                  true,
-                                  isMultiAssessmentMode,
-                                )}
-                              </div>
-                            );
-                          })}
-                          {isMultiAssessmentMode && (
-                            <Button
-                              size="sm"
-                              className="h-9 w-full text-xs"
-                              onClick={() => handleSaveStudentRow(student.id)}
-                              disabled={
-                                rowSaveState.isSaving || !rowSaveState.isDirty
-                              }
-                              data-testid={`button-save-row-mobile-${student.id}`}
-                            >
-                              {rowSaveState.isSaving ? (
-                                <>
-                                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                  Saving
-                                </>
-                              ) : rowSaveState.isDirty ? (
-                                <>
-                                  <Save className="mr-1 h-4 w-4" />
-                                  Save student row
-                                </>
-                              ) : (
-                                <>
-                                  <CheckCircle2 className="mr-1 h-4 w-4" />
-                                  Saved
-                                </>
-                              )}
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
               </>
             )}
           </CardContent>
