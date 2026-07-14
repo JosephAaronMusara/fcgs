@@ -931,6 +931,26 @@ export class DatabaseStorage implements IStorage {
         }
       }
 
+      const streamChanged = existingClass.streamId !== updated.streamId;
+      const schoolChanged = existingClass.schoolId !== updated.schoolId;
+      if (streamChanged || schoolChanged) {
+        const classStudents = await tx
+          .select({ id: students.id })
+          .from(students)
+          .where(eq(students.classId, id));
+
+        await tx
+          .update(students)
+          .set({ schoolId: updated.schoolId, streamId: updated.streamId })
+          .where(eq(students.classId, id));
+
+        if (streamChanged && classStudents.length > 0) {
+          await tx
+            .delete(studentSubjects)
+            .where(inArray(studentSubjects.studentId, classStudents.map((student) => student.id)));
+        }
+      }
+
       return updated;
     });
   }
@@ -1011,6 +1031,17 @@ export class DatabaseStorage implements IStorage {
   }
   
   async migrateStudents(fromClassId: number, toClassId: number, studentIds?: number[]): Promise<number> {
+    const destinationClass = await this.getClass(toClassId);
+    if (!destinationClass || destinationClass.archivedAt) {
+      throw new Error("Destination class was not found");
+    }
+    if (!destinationClass.schoolId) {
+      throw new Error("Destination class is not linked to a school");
+    }
+    if (!destinationClass.streamId) {
+      throw new Error("Destination class is not linked to a stream");
+    }
+
     const conditions = [
       eq(students.classId, fromClassId),
       activeEnrolledStudentCondition(),
@@ -1025,10 +1056,20 @@ export class DatabaseStorage implements IStorage {
       .from(students)
       .where(and(...conditions));
 
-    for (const student of studentsToMigrate) {
-      await db.update(students).set({ classId: toClassId }).where(eq(students.id, student.id));
-      await db.delete(studentSubjects).where(eq(studentSubjects.studentId, student.id));
-    }
+    if (studentsToMigrate.length === 0) return 0;
+
+    await db.transaction(async (tx) => {
+      const ids = studentsToMigrate.map((student) => student.id);
+      await tx
+        .update(students)
+        .set({
+          classId: destinationClass.id,
+          schoolId: destinationClass.schoolId,
+          streamId: destinationClass.streamId,
+        })
+        .where(inArray(students.id, ids));
+      await tx.delete(studentSubjects).where(inArray(studentSubjects.studentId, ids));
+    });
 
     return studentsToMigrate.length;
   }
@@ -1118,12 +1159,26 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateStudent(id: number, studentData: Partial<InsertStudent>): Promise<Student | undefined> {
-    const [updated] = await db
-      .update(students)
-      .set(studentData)
-      .where(and(eq(students.id, id), isNull(students.archivedAt)))
-      .returning();
-    return updated;
+    return db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(students)
+        .where(and(eq(students.id, id), isNull(students.archivedAt)));
+      if (!existing) return undefined;
+
+      const [updated] = await tx
+        .update(students)
+        .set(studentData)
+        .where(and(eq(students.id, id), isNull(students.archivedAt)))
+        .returning();
+
+      const classWasProvided = Object.prototype.hasOwnProperty.call(studentData, "classId");
+      if (classWasProvided && existing.classId !== updated.classId) {
+        await tx.delete(studentSubjects).where(eq(studentSubjects.studentId, id));
+      }
+
+      return updated;
+    });
   }
 
   async deleteStudent(id: number): Promise<boolean> {

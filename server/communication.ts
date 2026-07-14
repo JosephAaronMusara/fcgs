@@ -161,6 +161,21 @@ class CommunicationService {
     return this.smsConfig !== null;
   }
 
+  async verifyEmailConfiguration(): Promise<{ success: boolean; error?: string }> {
+    if (!this.emailTransporter || !this.emailConfig) {
+      return { success: false, error: "Email not configured" };
+    }
+    try {
+      await this.emailTransporter.verify();
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown SMTP verification error",
+      };
+    }
+  }
+
   async sendEmail(params: SendEmailParams): Promise<{ success: boolean; error?: string; logId?: number }> {
     if (this._communicationsDisabled) {
       return { success: false, error: "All communication channels are currently disabled by the IT Administrator." };
@@ -542,17 +557,32 @@ export async function createBroadcastNotifications(params: {
 export function initializeCommunication() {
   // Configure Email (SMTP)
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    const smtpPort = Number.parseInt(process.env.SMTP_PORT || "587", 10);
+    const secureSetting = String(process.env.SMTP_SECURE || "").trim().toLowerCase();
+    const smtpSecure = secureSetting
+      ? ["true", "1", "yes", "on"].includes(secureSetting)
+      : smtpPort === 465;
+
     communicationService.configureEmail({
       host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT || "587"),
-      secure: process.env.SMTP_SECURE === "true",
+      port: Number.isFinite(smtpPort) ? smtpPort : 587,
+      secure: smtpSecure,
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS,
       },
-      from: process.env.SMTP_FROM || "noreply@firstchoicegroup.co.zw",
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
     });
     console.log("Email service configured");
+    void communicationService.verifyEmailConfiguration().then((result) => {
+      if (result.success) {
+        console.log("SMTP connection verified");
+      } else {
+        console.error(`SMTP verification failed: ${result.error || "unknown error"}`);
+      }
+    });
+  } else {
+    console.error("Email service is not configured: SMTP_HOST, SMTP_USER and SMTP_PASS are required");
   }
 
   // Configure SMS (Econet Gateway)

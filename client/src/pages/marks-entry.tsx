@@ -465,6 +465,7 @@ export default function MarksEntryPage() {
           ...prev[variables.studentId],
           isDirty: false,
           isSaving: false,
+          attStatus: data.attStatus || variables.attStatus || "none",
           autoCommentSnapshot: data.autoCommentSnapshot || prev[variables.studentId]?.autoCommentSnapshot,
         },
       }));
@@ -529,6 +530,10 @@ export default function MarksEntryPage() {
       assessmentPaperId: paper.id,
       markObtained: studentMark.paperMarks[paper.id] ? parseFloat(studentMark.paperMarks[paper.id]) : null,
     }));
+    const hasSavedMark = paperMarks.some((paper) => paper.markObtained !== null);
+    const attStatusForSave = !hasSavedMark && studentMark.attStatus === "present"
+      ? "none"
+      : studentMark.attStatus;
     
     savingStudents.current.add(studentId);
     setStudentMarks((prev) => ({
@@ -540,7 +545,7 @@ export default function MarksEntryPage() {
       assessmentId: parseInt(currentAssessmentId),
       studentId,
       paperMarks,
-      attStatus: studentMark.attStatus,
+      attStatus: attStatusForSave,
       commentSource: studentMark.commentSource,
       customCommentText: studentMark.commentSource === "custom" ? studentMark.customCommentText : null,
       autoCommentSnapshot: studentMark.autoCommentSnapshot,
@@ -562,8 +567,11 @@ export default function MarksEntryPage() {
     const currentState = studentMarks[studentId] || {};
     
     if (!hasMark) {
+      const blankMarkStatus = ["present", "absent", "sick", "excused"].includes(newAttStatus)
+        ? newAttStatus
+        : "none";
       return {
-        attStatus: "none",
+        attStatus: blankMarkStatus,
         commentSource: "pool",
         customCommentText: "",
         autoCommentSnapshot: "",

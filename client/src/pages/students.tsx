@@ -428,6 +428,18 @@ export default function StudentsPage() {
       return;
     }
 
+    const selectedClassId = formData.get("classId") ? parseInt(formData.get("classId") as string) : undefined;
+    const derivedStreamId = formData.get("streamId") ? parseInt(formData.get("streamId") as string) : undefined;
+
+    if (selectedClassId && !derivedStreamId) {
+      toast({
+        title: "Class setup incomplete",
+        description: "The selected class is not linked to a stream. Assign a stream to the class before saving the student.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const data: Partial<Student> = {
       admissionNo: formData.get("admissionNo") as string,
       firstName: formData.get("firstName") as string,
@@ -441,9 +453,9 @@ export default function StudentsPage() {
       streetAddress: formData.get("streetAddress") as string || undefined,
       residentialArea: formData.get("residentialArea") as string || undefined,
       address: formData.get("address") as string || undefined,
-      classId: formData.get("classId") ? parseInt(formData.get("classId") as string) : undefined,
+      classId: selectedClassId,
       parentId: formData.get("parentId") ? parseInt(formData.get("parentId") as string) : undefined,
-      streamId: formData.get("streamId") ? parseInt(formData.get("streamId") as string) : undefined,
+      streamId: derivedStreamId,
       status: formData.get("status") as "active" | "inactive" | "transferred" | "graduated" || "active",
       enrollmentDate: formData.get("enrollmentDate") as string || new Date().toISOString().split("T")[0],
       isDayScholar: formData.get("isDayScholar") === "true",
@@ -1493,6 +1505,16 @@ function StudentForm({
   const [studentTypeValue, setStudentTypeValue] = useState<string>(getDefaultDayScholar());
   const [selectedHostelId, setSelectedHostelId] = useState<string>(defaultValues?.hostelId?.toString() || "none");
   const [selectedGender, setSelectedGender] = useState<string>(getDefaultGender());
+  const [selectedClassId, setSelectedClassId] = useState<string>(defaultValues?.classId?.toString() || "");
+
+  const selectedClass = useMemo(
+    () => classes.find((classItem) => classItem.id.toString() === selectedClassId),
+    [classes, selectedClassId],
+  );
+  const selectedStream = useMemo(
+    () => streams.find((stream) => stream.id === selectedClass?.streamId),
+    [streams, selectedClass?.streamId],
+  );
 
   useEffect(() => {
     setStudentTypeValue(getDefaultDayScholar());
@@ -1505,6 +1527,10 @@ function StudentForm({
   useEffect(() => {
     setSelectedGender(getDefaultGender());
   }, [defaultValues?.id, defaultValues?.gender]);
+
+  useEffect(() => {
+    setSelectedClassId(defaultValues?.classId?.toString() || "");
+  }, [defaultValues?.id, defaultValues?.classId]);
 
   useEffect(() => {
     if (studentTypeValue === "true") {
@@ -1694,7 +1720,8 @@ function StudentForm({
       <div className={`grid grid-cols-1 gap-4 ${isBoardingSchool ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
         <div className="space-y-2">
           <Label htmlFor="classId">Class</Label>
-          <Select name="classId" defaultValue={defaultValues?.classId?.toString() || ""}>
+          <input type="hidden" name="classId" value={selectedClassId} />
+          <Select value={selectedClassId} onValueChange={setSelectedClassId}>
             <SelectTrigger data-testid="select-class">
               <SelectValue placeholder="Select class" />
             </SelectTrigger>
@@ -1728,18 +1755,22 @@ function StudentForm({
         )}
         <div className="space-y-2">
           <Label htmlFor="streamId">Stream</Label>
-          <Select name="streamId" defaultValue={defaultValues?.streamId?.toString() || ""}>
-            <SelectTrigger data-testid="select-stream">
-              <SelectValue placeholder="Select stream" />
-            </SelectTrigger>
-            <SelectContent>
-              {streams.map((st) => (
-                <SelectItem key={st.id} value={st.id.toString()}>
-                  {st.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <input type="hidden" name="streamId" value={selectedClass?.streamId?.toString() || ""} />
+          <Input
+            id="streamId"
+            value={
+              selectedClassId
+                ? selectedStream?.name || "Class has no assigned stream"
+                : "Select a class first"
+            }
+            readOnly
+            aria-readonly="true"
+            className="bg-muted"
+            data-testid="select-stream"
+          />
+          <p className="text-xs text-muted-foreground">
+            Stream is automatically determined by the selected class.
+          </p>
         </div>
       </div>
       <div className="space-y-2">

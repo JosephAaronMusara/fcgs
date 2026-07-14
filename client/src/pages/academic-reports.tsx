@@ -886,8 +886,9 @@ function ReportCardSlip({
   data,
   studentReport,
   onSendIndividual,
-  onPrintIndividual,
+  onDownloadIndividual,
   sendingId,
+  downloadingId,
   editableComments,
   commentValues,
   commentSaveStates,
@@ -899,8 +900,9 @@ function ReportCardSlip({
   data: ReportCardData;
   studentReport: ReportStudent;
   onSendIndividual: (studentId: number) => void;
-  onPrintIndividual: (studentId: number) => void;
+  onDownloadIndividual: (studentId: number) => void;
   sendingId: number | null;
+  downloadingId: number | null;
   editableComments: boolean;
   commentValues?: { principal: string; class_teacher: string };
   commentSaveStates?: { principal: ReportCardCommentStatus; class_teacher: ReportCardCommentStatus };
@@ -1740,10 +1742,15 @@ function ReportCardSlip({
         <Button
           size="sm"
           variant="outline"
-          onClick={() => onPrintIndividual(student.id)}
+          onClick={() => onDownloadIndividual(student.id)}
+          disabled={downloadingId === student.id}
           data-testid={`button-download-${student.id}`}
         >
-          <Download className="w-4 h-4 mr-1" />
+          {downloadingId === student.id ? (
+            <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+          ) : (
+            <Download className="w-4 h-4 mr-1" />
+          )}
           Download
         </Button>
         <Button
@@ -2650,6 +2657,7 @@ export default function AcademicReportsPage() {
   const [selectedStreamName, setSelectedStreamName] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
   const [sendingId, setSendingId] = useState<number | null>(null);
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
   const [sendingAll, setSendingAll] = useState(false);
   const [printStudentId, setPrintStudentId] = useState<number | null>(null);
   const originalTitleRef = useRef<string | null>(null);
@@ -3039,14 +3047,52 @@ export default function AcademicReportsPage() {
     triggerPrintPreview(`Report_Cards_${classLabel}_${examLabel}`);
   };
 
-  const handlePrintIndividual = (studentId: number) => {
+  const handleDownloadIndividual = async (studentId: number) => {
     const rc = filteredStudents.find((row) => row.student.id === studentId);
-    if (!rc) return;
+    if (!rc || !selectedExamId || !selectedClassId) return;
 
-    const studentName = `${rc.student.firstName}_${rc.student.lastName}`.replace(/\s+/g, "_");
-    const examLabel = selectedExamName?.replace(/\s+/g, "_") || "Exam";
-    const classLabel = selectedClassName?.replace(/\s+/g, "_") || "Class";
-    triggerPrintPreview(`Report_Card_${studentName}_${classLabel}_${examLabel}`, studentId);
+    setDownloadingId(studentId);
+    try {
+      const params = new URLSearchParams({ classId: selectedClassId });
+      const response = await schoolFetch(
+        `/api/report-cards/${selectedExamId}/student/${studentId}/download?${params.toString()}`,
+      );
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        throw new Error(errorBody?.message || "Failed to download report card");
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const plainFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+      const studentName = `${rc.student.firstName}_${rc.student.lastName}`.replace(/\s+/g, "_");
+      const examLabel = selectedExamName?.replace(/\s+/g, "_") || "Exam";
+      const classLabel = selectedClassName?.replace(/\s+/g, "_") || "Class";
+      const fallbackFilename = `Report_Card_${studentName}_${classLabel}_${examLabel}.pdf`;
+      const filename = encodedFilename
+        ? decodeURIComponent(encodedFilename)
+        : plainFilename || fallbackFilename;
+
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = filename;
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+    } catch (error: any) {
+      toast({
+        title: "Download failed",
+        description: error?.message || "Failed to download this report card.",
+        variant: "destructive",
+      });
+    } finally {
+      setDownloadingId(null);
+    }
   };
 
   const navigateToClassLevel = (
@@ -3555,8 +3601,9 @@ export default function AcademicReportsPage() {
                   data={reportCardData}
                   studentReport={rc}
                   onSendIndividual={handleSendIndividual}
-                  onPrintIndividual={handlePrintIndividual}
+                  onDownloadIndividual={handleDownloadIndividual}
                   sendingId={sendingId}
+                  downloadingId={downloadingId}
                   editableComments
                   commentValues={reportCardCommentDrafts[rc.student.id]}
                   commentSaveStates={{
@@ -3580,8 +3627,9 @@ export default function AcademicReportsPage() {
                     data={reportCardData}
                     studentReport={rc}
                     onSendIndividual={handleSendIndividual}
-                    onPrintIndividual={handlePrintIndividual}
+                    onDownloadIndividual={handleDownloadIndividual}
                     sendingId={sendingId}
+                    downloadingId={downloadingId}
                     editableComments={false}
                     commentValues={reportCardCommentDrafts[rc.student.id]}
                     commentSaveStates={{ principal: "idle", class_teacher: "idle" }}

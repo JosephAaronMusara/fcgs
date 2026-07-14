@@ -86,17 +86,17 @@ export default function ResetPasswordToken() {
           <p className="text-sm text-muted-foreground mt-2">
             {isLinkFlow
               ? "Choose your new password to complete the reset."
-              : "Enter your username and we will send a one-time password reset link to all available channels."}
+              : "Enter your username or email address and we will send a one-time password reset link to the contact details saved on your account."}
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
           {!isLinkFlow ? (
             <>
               <div className="space-y-2">
-                <Label htmlFor="username">Username</Label>
+                <Label htmlFor="username">Username or Email</Label>
                 <Input
                   id="username"
-                  placeholder="Enter your username"
+                  placeholder="Enter your username or email"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   data-testid="input-username"

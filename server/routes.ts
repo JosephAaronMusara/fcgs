@@ -1101,6 +1101,68 @@ async function getSystemUrl(schoolId?: number | null): Promise<string> {
   return "";
 }
 
+function normalizePortalBaseUrl(value?: string | null): string {
+  const trimmed = String(value || "").trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(trimmed)) return `http://${trimmed}`;
+  return `https://${trimmed}`;
+}
+
+function getRequestBaseUrl(req: Request): string {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
+    .split(",")[0]
+    .trim();
+  const forwardedHost = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+    .split(",")[0]
+    .trim();
+  const protocol = forwardedProto || req.protocol || "https";
+  return forwardedHost ? normalizePortalBaseUrl(`${protocol}://${forwardedHost}`) : "";
+}
+
+async function findUserForPasswordReset(identifier: string): Promise<User | undefined> {
+  const normalized = identifier.trim().toLowerCase();
+  if (!normalized) return undefined;
+
+  const [directUser] = await db
+    .select()
+    .from(users)
+    .where(
+      or(
+        sql`lower(${users.username}) = ${normalized}`,
+        sql`lower(coalesce(${users.email}, '')) = ${normalized}`,
+      ),
+    )
+    .limit(1);
+
+  if (directUser) return directUser;
+  if (!normalized.includes("@")) return undefined;
+
+  const linkedUserIds: number[] = [];
+  const [staffMatch] = await db
+    .select({ userId: staffTable.userId })
+    .from(staffTable)
+    .where(sql`lower(coalesce(${staffTable.email}, '')) = ${normalized}`)
+    .limit(1);
+  const [parentMatch] = await db
+    .select({ userId: parentsTable.userId })
+    .from(parentsTable)
+    .where(sql`lower(coalesce(${parentsTable.email}, '')) = ${normalized}`)
+    .limit(1);
+  const [studentMatch] = await db
+    .select({ userId: studentsTable.userId })
+    .from(studentsTable)
+    .where(sql`lower(coalesce(${studentsTable.email}, '')) = ${normalized}`)
+    .limit(1);
+
+  for (const match of [staffMatch, parentMatch, studentMatch]) {
+    if (match?.userId && !linkedUserIds.includes(match.userId)) linkedUserIds.push(match.userId);
+  }
+
+  if (linkedUserIds.length === 0) return undefined;
+  return storage.getUser(linkedUserIds[0]);
+}
+
 
 function buildSchoolSequenceCode(schoolId?: number | null): string {
   const value = Number(schoolId || 0);
@@ -1197,6 +1259,7 @@ async function issuePasswordSetupLink(user: User, options?: {
   sentBy?: number;
   usernameOverride?: string;
   subjectPrefix?: string;
+  requestBaseUrl?: string;
 }) {
   const resetToken = crypto.randomBytes(24).toString("hex");
   const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
@@ -1208,45 +1271,58 @@ async function issuePasswordSetupLink(user: User, options?: {
   });
 
   const systemUrl = await getSystemUrl(options?.schoolId);
-  const baseUrl = systemUrl?.trim() || process.env.APP_BASE_URL || "";
+  const baseUrl =
+    normalizePortalBaseUrl(options?.requestBaseUrl) ||
+    normalizePortalBaseUrl(systemUrl) ||
+    normalizePortalBaseUrl(process.env.APP_BASE_URL);
   const resetPath = `/reset-password?token=${encodeURIComponent(resetToken)}`;
-  const resetLink = baseUrl ? `${baseUrl.replace(/\/$/, "")}${resetPath}` : resetPath;
+  const resetLink = baseUrl ? `${baseUrl}${resetPath}` : resetPath;
 
   const displayName = options?.recipientName || [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username;
   const username = options?.usernameOverride || user.username;
-  const messageText = `Dear ${displayName},\nYour account is ready.\nUsername: ${username}\nUse this one-time link to set or reset your password (valid for 1 hour):\n${resetLink}\n\nHardwork - Discipline - Changing Lives`;
+  const isPasswordReset = options?.subjectPrefix === "Password Reset";
+  const introduction = isPasswordReset
+    ? "A password reset was requested for your account."
+    : "Your account is ready.";
+  const messageText = `Dear ${displayName},\n${introduction}\nUsername: ${username}\nUse this one-time link to set or reset your password (valid for 1 hour):\n${resetLink}\n\nIf you did not request this change, you can ignore this message.\n\nHardwork - Discipline - Changing Lives`;
   const messageHtml = messageText.replace(/\n/g, "<br>");
   const subject = `${options?.subjectPrefix || "Password Setup"} Link`;
 
   const channels = await getUserExternalChannels(user);
-  const results = await Promise.all(channels.map((channel) => {
-    if (channel.type === "email") {
-      return communicationService.sendEmail({
-        to: channel.value,
-        subject,
-        text: messageText,
-        html: messageHtml,
-        schoolId: options?.schoolId || 0,
-        recipientType: options?.recipientType,
-        recipientId: options?.recipientId || undefined,
-        recipientName: displayName,
-        category: "account",
-        sentBy: options?.sentBy,
-      });
-    }
-    return communicationService.sendSms({
-      to: channel.value,
-      message: messageText,
-      schoolId: options?.schoolId || 0,
-      recipientType: options?.recipientType,
-      recipientId: options?.recipientId || undefined,
-      recipientName: displayName,
-      category: "account",
-      sentBy: options?.sentBy,
-    });
+  const deliveries = await Promise.all(channels.map(async (channel) => {
+    const result = channel.type === "email"
+      ? await communicationService.sendEmail({
+          to: channel.value,
+          subject,
+          text: messageText,
+          html: messageHtml,
+          schoolId: options?.schoolId || undefined,
+          recipientType: options?.recipientType,
+          recipientId: options?.recipientId || undefined,
+          recipientName: displayName,
+          category: "account",
+          sentBy: options?.sentBy,
+        })
+      : await communicationService.sendSms({
+          to: channel.value,
+          message: messageText,
+          schoolId: options?.schoolId || undefined,
+          recipientType: options?.recipientType,
+          recipientId: options?.recipientId || undefined,
+          recipientName: displayName,
+          category: "account",
+          sentBy: options?.sentBy,
+        });
+    return { channel, result };
   }));
 
-  return { resetToken, resetLink, channels, results };
+  return {
+    resetToken,
+    resetLink,
+    channels,
+    results: deliveries.map((delivery) => delivery.result),
+    deliveries,
+  };
 }
 
 async function findReusableParentForApplication(options: {
@@ -1522,24 +1598,36 @@ export async function registerRoutes(
 
   app.post("/api/auth/request-password-reset", async (req, res, next) => {
     try {
-      const username = String(req.body?.username || "").trim();
-      if (!username) {
-        return res.status(400).json({ message: "Username is required" });
+      const identifier = String(req.body?.username || req.body?.identifier || "").trim();
+      if (!identifier) {
+        return res.status(400).json({ message: "Username or email is required" });
       }
 
-      const user = await storage.getUserByUsername(username);
+      const user = await findUserForPasswordReset(identifier);
       if (user && user.isActive) {
-        await issuePasswordSetupLink(user, {
+        const delivery = await issuePasswordSetupLink(user, {
           schoolId: user.schoolId || undefined,
           recipientType: user.role,
           recipientName: [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username,
           usernameOverride: user.username,
           subjectPrefix: "Password Reset",
+          requestBaseUrl: getRequestBaseUrl(req),
         });
+
+        const emailDeliveries = delivery.deliveries.filter((item) => item.channel.type === "email");
+        const successfulEmail = emailDeliveries.some((item) => item.result.success);
+        if (!successfulEmail) {
+          const reasons = emailDeliveries.length > 0
+            ? emailDeliveries.map((item) => `${item.channel.value}: ${item.result.error || "delivery failed"}`).join("; ")
+            : "no email address is linked to this account";
+          console.error(`[Password Reset] Email delivery failed for user ${user.id}: ${reasons}`);
+        }
       }
 
-      return res.json({ message: "If an account exists, password reset instructions have been sent." });
+      // Keep this response generic so the endpoint does not reveal whether an account exists.
+      return res.json({ message: "If an active account exists, password reset instructions have been sent." });
     } catch (error) {
+      console.error("[Password Reset] Request failed:", error);
       next(error);
     }
   });
@@ -10404,6 +10492,21 @@ ${schoolName}`;
         return { ...pm, markObtained: numericMark.toString() };
       });
 
+      const hasAnyPaperMark = normalizedPaperMarks.some(
+        (pm: any) => pm.markObtained !== null && pm.markObtained !== undefined && pm.markObtained !== "",
+      );
+      const allowedMarkStatuses = new Set(["none", "present", "absent", "sick", "excused"]);
+      const requestedStatus = String(attStatus || "none").trim().toLowerCase();
+      let normalizedAttStatus = allowedMarkStatuses.has(requestedStatus) ? requestedStatus : "none";
+
+      // A numeric mark always means the learner was present. A blank row explicitly
+      // marked Present is incomplete, so it is saved as the neutral --- status.
+      if (hasAnyPaperMark) {
+        normalizedAttStatus = "present";
+      } else if (normalizedAttStatus === "present") {
+        normalizedAttStatus = "none";
+      }
+
       // Calculate weighted percentage
       let totalWeightedScore = 0;
       let totalWeight = 0;
@@ -10471,7 +10574,7 @@ ${schoolName}`;
           subjectId,
           percentage: percentage?.toString() || null,
           gradeId,
-          attStatus: attStatus || "present",
+          attStatus: normalizedAttStatus as "none" | "present" | "absent" | "sick" | "excused",
           commentId: finalCommentSource === "pool" ? commentId : null,
           customCommentText: finalCustomText,
           autoCommentSnapshot,
@@ -10486,7 +10589,7 @@ ${schoolName}`;
           subjectId,
           percentage: percentage?.toString() || null,
           gradeId,
-          attStatus: attStatus || "present",
+          attStatus: normalizedAttStatus as "none" | "present" | "absent" | "sick" | "excused",
           commentId: finalCommentSource === "pool" ? commentId : null,
           customCommentText: finalCustomText,
           autoCommentSnapshot,
