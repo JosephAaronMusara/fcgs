@@ -4,7 +4,7 @@ import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, parents as parentsTable, staff as staffTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
@@ -1579,7 +1579,283 @@ async function getScopedAssessmentMarkOrRespond(req: Request, res: Response, id:
     return null;
   }
 
-  return { schoolId, mark };
+  const assessment = await storage.getAssessment(mark.assessmentId);
+  if (!assessment || assessment.schoolId !== schoolId) {
+    res.status(404).json({ message: "Assessment not found" });
+    return null;
+  }
+
+  return { schoolId, mark, assessment };
+}
+
+
+const ACKNOWLEDGED_NOT_WRITTEN_STATUSES = new Set(["absent", "sick", "excused"]);
+
+function markStatusLabel(status: unknown): string {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "absent") return "Absent";
+  if (normalized === "sick") return "Sick";
+  if (normalized === "excused") return "Excused";
+  return "";
+}
+
+async function getClassExamPublication(examId: number, classId: number) {
+  const [row] = await db
+    .select()
+    .from(assessmentPublications)
+    .where(and(eq(assessmentPublications.examId, examId), eq(assessmentPublications.classId, classId)))
+    .limit(1);
+  return row;
+}
+
+async function isClassExamPublished(examId: number | null | undefined, classId: number | null | undefined): Promise<boolean> {
+  if (!examId || !classId) return false;
+  const publication = await getClassExamPublication(Number(examId), Number(classId));
+  return publication?.isPublished === true;
+}
+
+async function rejectIfAssessmentPublished(assessment: { examId?: number | null; classId?: number | null }, res: Response): Promise<boolean> {
+  if (await isClassExamPublished(assessment.examId, assessment.classId)) {
+    res.status(423).json({
+      message: "This exercise/exam has been published for the class. Marks and assessment structure are read-only until it is unpublished.",
+      code: "ASSESSMENT_PUBLISHED",
+    });
+    return true;
+  }
+  return false;
+}
+
+async function userHasAnyPermission(userId: number, codes: string[]): Promise<boolean> {
+  for (const code of codes) {
+    if (await storage.userHasPermission(userId, code)) return true;
+  }
+  return false;
+}
+
+async function ensurePublishedPortalAccess(args: {
+  user: User;
+  examId: number;
+  classId: number;
+  studentId?: number | null;
+  res: Response;
+}): Promise<boolean> {
+  if (args.user.role !== "student" && args.user.role !== "parent") return true;
+
+  if (!(await isClassExamPublished(args.examId, args.classId))) {
+    args.res.status(403).json({ message: "These results have not been published" });
+    return false;
+  }
+
+  if (args.user.role === "student") {
+    const [student] = await db.select().from(studentsTable).where(eq(studentsTable.userId, args.user.id)).limit(1);
+    if (!student || Number(student.classId) !== Number(args.classId) || (args.studentId && Number(student.id) !== Number(args.studentId))) {
+      args.res.status(403).json({ message: "Access denied" });
+      return false;
+    }
+    return true;
+  }
+
+  const [parent] = await db.select().from(parentsTable).where(eq(parentsTable.userId, args.user.id)).limit(1);
+  if (!parent) {
+    args.res.status(403).json({ message: "Parent profile not found" });
+    return false;
+  }
+  const linkedChildren = await db.select().from(studentsTable).where(eq(studentsTable.parentId, parent.id));
+  const allowed = linkedChildren.some((student: any) =>
+    Number(student.classId) === Number(args.classId) && (!args.studentId || Number(student.id) === Number(args.studentId))
+  );
+  if (!allowed) {
+    args.res.status(403).json({ message: "Access denied" });
+    return false;
+  }
+  return true;
+}
+
+type ClassExamSubjectProgress = {
+  subjectId: number;
+  subjectName: string;
+  assessmentId: number | null;
+  assessmentCreated: boolean;
+  totalStudents: number;
+  markedCount: number;
+  acknowledgedCount: number;
+  partialCount: number;
+  unrecordedCount: number;
+  progressPct: number | null;
+  withMarksPct: number;
+  acknowledgedPct: number;
+  unrecordedPct: number;
+  avgPct: number | null;
+};
+
+async function buildClassExamProgress(examId: number, classId: number): Promise<{
+  classInfo: any;
+  students: any[];
+  subjects: ClassExamSubjectProgress[];
+  totals: {
+    expectedEntries: number;
+    withMarks: number;
+    acknowledged: number;
+    partial: number;
+    unrecorded: number;
+    offeredSubjects: number;
+    assessmentsCreated: number;
+    assessmentsMissing: number;
+  };
+}> {
+  const classInfo = await storage.getClass(classId);
+  if (!classInfo) throw new Error("Class not found");
+
+  const students = await storage.getStudentsByClass(classId);
+  const classSubjectRows = await storage.getClassSubjects(classId);
+  const offeredSubjectIds = Array.from(new Set(classSubjectRows.map((row: any) => Number(row.subjectId))));
+  const offeredSubjects = (await Promise.all(offeredSubjectIds.map((id) => storage.getSubject(id))))
+    .filter(Boolean)
+    .sort((a: any, b: any) => String(a.name || "").localeCompare(String(b.name || "")));
+
+  const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+  await Promise.all(students.map(async (student: any) => {
+    const rows = await storage.getStudentSubjects(student.id);
+    studentSubjectIdsByStudent.set(student.id, new Set(rows.map((row: any) => Number(row.subjectId))));
+  }));
+
+  const allAssessments = await storage.getAssessmentsByExam(examId);
+  const classAssessments = allAssessments.filter((assessment: any) => Number(assessment.classId) === classId);
+  const assessmentBySubject = new Map<number, any>();
+  for (const assessment of classAssessments) {
+    if (!assessmentBySubject.has(Number(assessment.subjectId))) {
+      assessmentBySubject.set(Number(assessment.subjectId), assessment);
+    }
+  }
+
+  const assessmentIds = classAssessments.map((assessment: any) => assessment.id);
+  const marks = assessmentIds.length ? await storage.getAssessmentMarksByAssessments(assessmentIds) : [];
+  const papersByAssessment = new Map<number, any[]>();
+  await Promise.all(classAssessments.map(async (assessment: any) => {
+    papersByAssessment.set(assessment.id, await storage.getAssessmentPapers(assessment.id));
+  }));
+  const paperMarksByMark = new Map<number, any[]>();
+  await Promise.all(marks.map(async (mark: any) => {
+    paperMarksByMark.set(mark.id, await storage.getMarkPapers(mark.id));
+  }));
+
+  const result: ClassExamSubjectProgress[] = [];
+  let expectedEntries = 0;
+  let totalWithMarks = 0;
+  let totalAcknowledged = 0;
+  let totalPartial = 0;
+  let totalUnrecorded = 0;
+
+  for (const subject of offeredSubjects as any[]) {
+    const eligibleStudents = students.filter((student: any) => studentSubjectIdsByStudent.get(student.id)?.has(Number(subject.id)));
+    const eligibleIds = new Set(eligibleStudents.map((student: any) => Number(student.id)));
+    const totalStudents = eligibleStudents.length;
+    const assessment = assessmentBySubject.get(Number(subject.id));
+
+    expectedEntries += totalStudents;
+
+    if (!assessment) {
+      totalUnrecorded += totalStudents;
+      result.push({
+        subjectId: subject.id,
+        subjectName: subject.name,
+        assessmentId: null,
+        assessmentCreated: false,
+        totalStudents,
+        markedCount: 0,
+        acknowledgedCount: 0,
+        partialCount: 0,
+        unrecordedCount: totalStudents,
+        progressPct: null,
+        withMarksPct: 0,
+        acknowledgedPct: 0,
+        unrecordedPct: 100,
+        avgPct: null,
+      });
+      continue;
+    }
+
+    const subjectMarks = marks.filter((mark: any) => Number(mark.assessmentId) === Number(assessment.id) && eligibleIds.has(Number(mark.studentId)));
+    const markByStudent = new Map(subjectMarks.map((mark: any) => [Number(mark.studentId), mark]));
+    const requiredPapers = papersByAssessment.get(assessment.id) || [];
+    let withMarks = 0;
+    let acknowledged = 0;
+    let partial = 0;
+    const completedPercentages: number[] = [];
+
+    for (const student of eligibleStudents) {
+      const mark: any = markByStudent.get(Number(student.id));
+      if (!mark) continue;
+      const status = String(mark.attStatus || "none").toLowerCase();
+      if (ACKNOWLEDGED_NOT_WRITTEN_STATUSES.has(status)) {
+        acknowledged++;
+        continue;
+      }
+
+      const savedPaperRows = paperMarksByMark.get(mark.id) || [];
+      const savedByPaperId = new Map(savedPaperRows.map((row: any) => [Number(row.assessmentPaperId), row.markObtained]));
+      const completedPaperCount = requiredPapers.filter((paper: any) => {
+        const value = savedByPaperId.get(Number(paper.id));
+        return value !== null && value !== undefined && value !== "";
+      }).length;
+      const allPapersComplete = requiredPapers.length > 0 && completedPaperCount === requiredPapers.length;
+
+      if (allPapersComplete && mark.percentage !== null && mark.percentage !== undefined) {
+        withMarks++;
+        const pct = Number(mark.percentage);
+        if (Number.isFinite(pct)) completedPercentages.push(pct);
+      } else if (completedPaperCount > 0 || status === "present") {
+        partial++;
+      }
+    }
+
+    const unrecorded = Math.max(0, totalStudents - withMarks - acknowledged - partial);
+    const progressPct = totalStudents > 0 ? Math.round(((withMarks + acknowledged) / totalStudents) * 100) : 0;
+    const withMarksPct = totalStudents > 0 ? Math.round((withMarks / totalStudents) * 100) : 0;
+    const acknowledgedPct = totalStudents > 0 ? Math.round((acknowledged / totalStudents) * 100) : 0;
+    const unrecordedPct = Math.max(0, 100 - withMarksPct - acknowledgedPct);
+    const avgPct = completedPercentages.length
+      ? Math.round(completedPercentages.reduce((sum, value) => sum + value, 0) / completedPercentages.length)
+      : null;
+
+    totalWithMarks += withMarks;
+    totalAcknowledged += acknowledged;
+    totalPartial += partial;
+    totalUnrecorded += unrecorded;
+
+    result.push({
+      subjectId: subject.id,
+      subjectName: subject.name,
+      assessmentId: assessment.id,
+      assessmentCreated: true,
+      totalStudents,
+      markedCount: withMarks,
+      acknowledgedCount: acknowledged,
+      partialCount: partial,
+      unrecordedCount: unrecorded,
+      progressPct,
+      withMarksPct,
+      acknowledgedPct,
+      unrecordedPct,
+      avgPct,
+    });
+  }
+
+  return {
+    classInfo,
+    students,
+    subjects: result,
+    totals: {
+      expectedEntries,
+      withMarks: totalWithMarks,
+      acknowledged: totalAcknowledged,
+      partial: totalPartial,
+      unrecorded: totalUnrecorded,
+      offeredSubjects: offeredSubjects.length,
+      assessmentsCreated: result.filter((row) => row.assessmentCreated).length,
+      assessmentsMissing: result.filter((row) => !row.assessmentCreated).length,
+    },
+  };
 }
 
 export async function registerRoutes(
@@ -1921,6 +2197,266 @@ export async function registerRoutes(
       const items = await db.select().from(staffTable).where(whereClause).orderBy(desc(staffTable.createdAt)).limit(pageSize).offset(offset);
       return res.json(toPaginatedResult(items, Number(totalCount), page, pageSize));
     } catch (error) {
+      next(error);
+    }
+  });
+
+
+  const internalTransferStudentSchema = z.object({
+    studentId: z.coerce.number().int().positive(),
+    destinationSchoolId: z.coerce.number().int().positive(),
+    destinationClassId: z.coerce.number().int().positive(),
+    admissionNo: z.string().trim().optional().nullable(),
+    effectiveDate: z.string().min(4),
+    reason: z.string().trim().min(3),
+    notes: z.string().trim().optional().nullable(),
+  });
+
+  const internalTransferStaffSchema = z.object({
+    staffId: z.coerce.number().int().positive(),
+    destinationSchoolId: z.coerce.number().int().positive(),
+    destinationRole: z.string().trim().min(1),
+    destinationAccessGroupId: z.coerce.number().int().positive().optional().nullable(),
+    effectiveDate: z.string().min(4),
+    reason: z.string().trim().min(3),
+    notes: z.string().trim().optional().nullable(),
+  });
+
+  async function getInternalTransferSchools(req: Request, sourceSchoolId?: number | null) {
+    const currentUser = req.user as User;
+    const contextSchoolId = sourceSchoolId || getSchoolContext(req) || currentUser.schoolId || null;
+    const contextSchool = contextSchoolId ? await storage.getSchool(contextSchoolId) : undefined;
+    const allSchools = await storage.getAllSchools();
+
+    const organizationId = contextSchool?.organizationId || currentUser.organizationId || null;
+    const configuredOrganizationIds = new Set(
+      allSchools
+        .map((school) => school.organizationId)
+        .filter((value): value is number => value !== null && value !== undefined)
+        .map(Number),
+    );
+
+    let visibleSchools = organizationId
+      ? allSchools.filter((school) => Number(school.organizationId) === Number(organizationId))
+      : [];
+
+    // Older installations can contain schools created before organisation linkage was
+    // enforced. When the database clearly represents a single organisation, include those
+    // unlinked schools so a valid internal transfer destination is not silently omitted.
+    if (configuredOrganizationIds.size <= 1) {
+      const legacyUnlinkedSchools = allSchools.filter(
+        (school) => school.organizationId === null || school.organizationId === undefined,
+      );
+      visibleSchools = Array.from(
+        new Map([...visibleSchools, ...legacyUnlinkedSchools].map((school) => [school.id, school])).values(),
+      );
+    }
+
+    if (!organizationId && configuredOrganizationIds.size <= 1) {
+      visibleSchools = allSchools;
+    }
+
+    if (!visibleSchools.length) {
+      throw Object.assign(new Error("No schools are available in the current organisation"), { status: 400 });
+    }
+
+    if (currentUser.role === "school_admin" && currentUser.schoolId && contextSchoolId !== currentUser.schoolId) {
+      throw Object.assign(new Error("You can only initiate transfers from your assigned school"), { status: 403 });
+    }
+
+    if (
+      currentUser.role === "org_admin" &&
+      currentUser.organizationId &&
+      contextSchool?.organizationId &&
+      Number(contextSchool.organizationId) !== Number(currentUser.organizationId)
+    ) {
+      throw Object.assign(new Error("The source school is outside your organisation"), { status: 403 });
+    }
+
+    return visibleSchools.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  }
+
+  async function ensureInternalTransferSchoolLinkage(
+    req: Request,
+    sourceSchoolId: number,
+    destinationSchoolId: number,
+  ) {
+    const currentUser = req.user as User;
+    const sourceSchool = await storage.getSchool(sourceSchoolId);
+    const destinationSchool = await storage.getSchool(destinationSchoolId);
+    if (!sourceSchool || !destinationSchool) {
+      throw Object.assign(new Error("Source or destination school not found"), { status: 404 });
+    }
+
+    const knownOrganizationIds = new Set(
+      [currentUser.organizationId, sourceSchool.organizationId, destinationSchool.organizationId]
+        .filter((value): value is number => value !== null && value !== undefined)
+        .map(Number),
+    );
+    if (knownOrganizationIds.size > 1) {
+      throw Object.assign(new Error("Transfers are only allowed within the same organisation"), { status: 403 });
+    }
+
+    let organizationId = Array.from(knownOrganizationIds)[0] || null;
+    if (!organizationId) {
+      const organisationRows = await db.select({ id: organizations.id }).from(organizations).limit(2);
+      if (organisationRows.length !== 1) {
+        throw Object.assign(new Error("The organisation could not be determined for these schools"), { status: 400 });
+      }
+      organizationId = organisationRows[0].id;
+    }
+
+    // Repair legacy school rows that pre-date mandatory organisation linkage. This is only
+    // reached after the same-organisation checks above have established an unambiguous org.
+    if (!sourceSchool.organizationId) {
+      await db.update(schoolsTable).set({ organizationId }).where(eq(schoolsTable.id, sourceSchool.id));
+    }
+    if (!destinationSchool.organizationId) {
+      await db.update(schoolsTable).set({ organizationId }).where(eq(schoolsTable.id, destinationSchool.id));
+    }
+
+    return organizationId;
+  }
+
+  app.get("/api/internal-transfers/destinations", requireAuth, requirePermission("internal_transfers.view"), async (req, res, next) => {
+    try {
+      const sourceSchoolId = req.query.sourceSchoolId ? Number(req.query.sourceSchoolId) : null;
+      if (sourceSchoolId !== null && (!Number.isInteger(sourceSchoolId) || sourceSchoolId <= 0)) {
+        return res.status(400).json({ message: "Valid source school is required" });
+      }
+      res.json(await getInternalTransferSchools(req, sourceSchoolId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/internal-transfers/destinations/:schoolId/classes", requireAuth, requirePermission("internal_transfers.view"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const destinationSchoolId = Number(req.params.schoolId);
+      if (!Number.isInteger(destinationSchoolId) || destinationSchoolId <= 0) {
+        return res.status(400).json({ message: "Valid destination school is required" });
+      }
+
+      const destinationSchool = await storage.getSchool(destinationSchoolId);
+      const allowedSchools = await getInternalTransferSchools(req, getSchoolContext(req) || currentUser.schoolId || null);
+      if (!destinationSchool || !allowedSchools.some((school) => school.id === destinationSchoolId)) {
+        return res.status(403).json({ message: "Destination school is outside your organisation" });
+      }
+
+      const destinationClasses = await storage.getClassesBySchool(destinationSchoolId);
+      res.json(destinationClasses.sort((a, b) => String(a.className || "").localeCompare(String(b.className || ""))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  async function buildTransferReferenceMaps(transfers: any[]) {
+    const schoolIds = Array.from(new Set(transfers.flatMap((t) => [t.sourceSchoolId, t.destinationSchoolId]).filter(Boolean)));
+    const classIds = Array.from(new Set(transfers.flatMap((t) => [t.sourceClassId, t.destinationClassId]).filter(Boolean)));
+    const schoolRows = schoolIds.length ? await Promise.all(schoolIds.map((id) => storage.getSchool(Number(id)))) : [];
+    const classRows = classIds.length ? await Promise.all(classIds.map((id) => storage.getClass(Number(id)))) : [];
+    return {
+      schoolsById: new Map(schoolRows.filter(Boolean).map((school: any) => [school.id, school])),
+      classesById: new Map(classRows.filter(Boolean).map((classInfo: any) => [classInfo.id, classInfo])),
+    };
+  }
+
+  app.get("/api/internal-transfers", requireAuth, requirePermission("internal_transfers.view"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req);
+      const personType = String(req.query.personType || "all");
+      const transfers = await storage.getInternalTransfers({
+        organizationId: currentUser.organizationId || undefined,
+        schoolId: schoolId || undefined,
+        personType,
+      });
+      const { schoolsById, classesById } = await buildTransferReferenceMaps(transfers);
+      res.json(transfers.map((transfer: any) => ({
+        ...transfer,
+        sourceSchoolName: schoolsById.get(transfer.sourceSchoolId)?.name || "Source school",
+        destinationSchoolName: schoolsById.get(transfer.destinationSchoolId)?.name || "Destination school",
+        sourceClassName: transfer.sourceClassId ? classesById.get(transfer.sourceClassId)?.className || null : null,
+        destinationClassName: transfer.destinationClassId ? classesById.get(transfer.destinationClassId)?.className || null : null,
+      })));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/internal-transfers/students", requireAuth, requirePermission("internal_transfers.transfer.student"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req);
+      const data = internalTransferStudentSchema.parse(req.body);
+      const student = await storage.getStudent(data.studentId);
+      if (!student || student.archivedAt) {
+        return res.status(404).json({ message: "Student not found" });
+      }
+      if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) {
+        return res.status(403).json({ message: "You can only transfer students from your current school" });
+      }
+      await ensureInternalTransferSchoolLinkage(req, Number(student.schoolId), data.destinationSchoolId);
+      const result = await storage.transferStudentWithinOrganization({
+        ...data,
+        userId: currentUser.id,
+      });
+      logActivity(req, {
+        action: "transfer",
+        category: "students",
+        description: `Transferred student ${result.student.firstName} ${result.student.lastName} to another school`,
+        targetType: "student",
+        targetId: result.student.id,
+        targetName: `${result.student.firstName} ${result.student.lastName}`,
+        schoolId: student.schoolId,
+      });
+      res.status(201).json({ message: "Student transferred successfully", ...result });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid transfer data", errors: error.errors });
+      }
+      if (error?.message) {
+        return res.status(400).json({ message: error.message });
+      }
+      next(error);
+    }
+  });
+
+  app.post("/api/internal-transfers/staff", requireAuth, requirePermission("internal_transfers.transfer.staff"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req);
+      const data = internalTransferStaffSchema.parse(req.body);
+      const staffMember = await storage.getStaff(data.staffId);
+      if (!staffMember) {
+        return res.status(404).json({ message: "Staff member not found" });
+      }
+      if (currentUser.role !== "org_admin" && schoolId && staffMember.schoolId !== schoolId) {
+        return res.status(403).json({ message: "You can only transfer staff from your current school" });
+      }
+      await ensureInternalTransferSchoolLinkage(req, Number(staffMember.schoolId), data.destinationSchoolId);
+      const result = await storage.transferStaffWithinOrganization({
+        ...data,
+        userId: currentUser.id,
+      });
+      logActivity(req, {
+        action: "transfer",
+        category: "staff",
+        description: `Transferred staff member ${result.staff.firstName} ${result.staff.lastName} to another school`,
+        targetType: "staff",
+        targetId: result.staff.id,
+        targetName: `${result.staff.firstName} ${result.staff.lastName}`,
+        schoolId: staffMember.schoolId,
+      });
+      res.status(201).json({ message: "Staff member transferred successfully", ...result });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid transfer data", errors: error.errors });
+      }
+      if (error?.message) {
+        return res.status(400).json({ message: error.message });
+      }
       next(error);
     }
   });
@@ -4307,6 +4843,7 @@ export async function registerRoutes(
     try {
       const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.id));
       if (!scoped) return;
+      if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
       await storage.deleteAssessment(scoped.assessment.id);
       res.json({ message: "Assessment deleted successfully" });
@@ -9436,6 +9973,7 @@ ${schoolName}`;
     try {
       const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
       if (!scoped) return;
+      if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
       const papers = Array.isArray(req.body.papers) ? req.body.papers : [];
       const papersWithAssessmentId = papers.map((p: any, i: number) => ({ ...p, assessmentId: scoped.assessment.id, sortOrder: i }));
@@ -10048,6 +10586,7 @@ ${schoolName}`;
       if (!assessment || Number(assessment.schoolId) !== Number(schoolId)) {
         return res.status(404).json({ message: "Assessment not found" });
       }
+      if (await rejectIfAssessmentPublished(assessment, res)) return;
 
       const student = await ensureStudentInSchool(studentId, schoolId, res);
       if (!student) return;
@@ -10119,6 +10658,9 @@ ${schoolName}`;
       const student = await storage.getStudent(studentId);
       if (!student || Number(student.schoolId) !== Number(schoolId)) {
         return res.status(404).json({ message: "Student not found" });
+      }
+      if (student.classId && await isClassExamPublished(examId, Number(student.classId))) {
+        return res.status(423).json({ message: "This report has been published. Comments are read-only until it is unpublished.", code: "ASSESSMENT_PUBLISHED" });
       }
 
       const overrideKey = buildReportCardOverrideKey(studentId, examId);
@@ -10257,6 +10799,10 @@ ${schoolName}`;
       const validatedRefs = await validateAssessmentPayloadForSchool(schoolId, assessmentData, res);
       if (!validatedRefs) return;
 
+      if (assessmentData.examId && await isClassExamPublished(Number(assessmentData.examId), Number(assessmentData.classId))) {
+        return res.status(423).json({ message: "This exercise/exam has already been published for the class. New assessments cannot be added until it is unpublished.", code: "ASSESSMENT_PUBLISHED" });
+      }
+
       const hasTeacherAssignment = await ensureTeacherAssignmentForAssessment(
         req,
         res,
@@ -10297,6 +10843,7 @@ ${schoolName}`;
     try {
       const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.id));
       if (!scoped) return;
+      if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
       const { papers, schoolId: _ignoredSchoolId, ...assessmentData } = req.body;
 
@@ -10398,6 +10945,7 @@ ${schoolName}`;
 
       const comments = await storage.getAssessmentComments(assessment.schoolId || undefined, assessment.classId, assessment.subjectId);
 
+      const publication = assessment.examId ? await getClassExamPublication(Number(assessment.examId), Number(assessment.classId)) : undefined;
       res.json({
         assessment,
         papers,
@@ -10406,6 +10954,10 @@ ${schoolName}`;
         grades,
         comments,
         gradeProfileKey: profileKey,
+        publication: {
+          isPublished: publication?.isPublished === true,
+          status: publication?.isPublished ? (publication.lastAction === "republished" ? "Republished" : "Published") : "Unpublished",
+        },
       });
     } catch (error) {
       next(error);
@@ -10440,6 +10992,7 @@ ${schoolName}`;
     try {
       const scoped = await getScopedAssessmentOrRespond(req, res, Number(req.body.assessmentId));
       if (!scoped) return;
+      if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
       const { studentId, paperMarks, attStatus, customCommentText, commentSource } = req.body;
       if (!Array.isArray(paperMarks)) {
@@ -10519,9 +11072,15 @@ ${schoolName}`;
         }
       }
       
-      const percentage = totalWeight > 0 ? Math.round(totalWeightedScore) : null;
+      const allRequiredPapersMarked = papers.length > 0 && papers.every((paper: any) =>
+        normalizedPaperMarks.some((pm: any) =>
+          Number(pm.assessmentPaperId) === Number(paper.id) &&
+          pm.markObtained !== null && pm.markObtained !== undefined && pm.markObtained !== ""
+        )
+      );
+      const percentage = allRequiredPapersMarked && totalWeight > 0 ? Math.round(totalWeightedScore) : null;
       
-      // Get grade from percentage
+      // Get grade from percentage only after every required paper has been recorded.
       const allGrades = await storage.getGradesBySchool(schoolId);
       const { profileKey } = await resolveGradeProfileContext({
         schoolId,
@@ -10543,6 +11102,12 @@ ${schoolName}`;
           autoCommentSnapshot = poolComment.commentText;
         }
       }
+
+      const statusOnlyComment = markStatusLabel(normalizedAttStatus);
+      if (statusOnlyComment) {
+        commentId = null;
+        autoCommentSnapshot = statusOnlyComment;
+      }
       
       // Smart comment source detection (matches PHP behavior):
       // Treat as POOL if custom text is empty OR matches the auto snapshot
@@ -10553,6 +11118,10 @@ ${schoolName}`;
         finalCustomText = null;
       } else {
         finalCommentSource = "custom";
+      }
+      if (statusOnlyComment) {
+        finalCommentSource = "pool";
+        finalCustomText = null;
       }
       
       // Check if mark exists for this student/assessment
@@ -10620,6 +11189,7 @@ ${schoolName}`;
     try {
       const scopedMark = await getScopedAssessmentMarkOrRespond(req, res, parseInt(req.params.markId));
       if (!scopedMark) return;
+      if (await rejectIfAssessmentPublished(scopedMark.assessment, res)) return;
 
       await storage.deleteAssessmentMark(scopedMark.mark.id);
       res.json({ message: "Mark deleted successfully" });
@@ -10787,7 +11357,28 @@ ${schoolName}`;
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
       
-      const exams = await storage.getExamsBySchool(schoolId);
+      let exams = await storage.getExamsBySchool(schoolId);
+      if (currentUser?.role === "student" || currentUser?.role === "parent") {
+        let classIds: number[] = [];
+        if (currentUser.role === "student") {
+          const [student] = await db.select().from(studentsTable).where(eq(studentsTable.userId, currentUser.id)).limit(1);
+          if (student?.classId) classIds = [Number(student.classId)];
+        } else {
+          const [parent] = await db.select().from(parentsTable).where(eq(parentsTable.userId, currentUser.id)).limit(1);
+          if (parent) {
+            const children = await db.select().from(studentsTable).where(eq(studentsTable.parentId, parent.id));
+            classIds = Array.from(new Set(children.map((student: any) => Number(student.classId)).filter(Boolean)));
+          }
+        }
+        if (!classIds.length) return res.json([]);
+        const publishedRows = await db.select().from(assessmentPublications).where(and(
+          eq(assessmentPublications.schoolId, schoolId),
+          eq(assessmentPublications.isPublished, true),
+          inArray(assessmentPublications.classId, classIds),
+        ));
+        const publishedExamIds = new Set(publishedRows.map((row: any) => Number(row.examId)));
+        exams = exams.filter((exam: any) => publishedExamIds.has(Number(exam.id)));
+      }
       res.json(exams);
     } catch (error) {
       next(error);
@@ -10803,6 +11394,9 @@ ${schoolName}`;
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       
       if (!schoolId) return res.status(400).json({ message: "School context required" });
+      if (currentUser?.role === "student" || currentUser?.role === "parent") {
+        return res.status(403).json({ message: "Class-wide report data is not available in the student or parent portal" });
+      }
       
       const school = await storage.getSchool(schoolId);
       const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : undefined;
@@ -10820,7 +11414,9 @@ ${schoolName}`;
       }
       
       const students = await storage.getStudentsByClass(classId);
-      const allAssessments = await storage.getAssessmentsByExam(examId);
+      const allAssessments = (await storage.getAssessmentsByExam(examId))
+        .filter((assessment: any) => Number(assessment.classId) === Number(classId));
+      const publication = await getClassExamPublication(examId, classId);
       
       const subjectIds = [...new Set(allAssessments.map(a => a.subjectId))];
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
@@ -10903,12 +11499,13 @@ ${schoolName}`;
           
           if (!mark) continue;
           
-          const pctRaw = mark.percentage ? parseFloat(mark.percentage) : null;
-          if (pctRaw === null) continue;
+          const pctRaw = mark.percentage !== null && mark.percentage !== undefined ? parseFloat(mark.percentage) : null;
+          const statusComment = markStatusLabel(mark.attStatus);
+          if (pctRaw === null && !statusComment) continue;
           
           let gradeName = "";
           let gradePoints = 0;
-          if (mark.gradeId) {
+          if (pctRaw !== null && mark.gradeId) {
             const grade = grades.find(g => g.id === mark.gradeId);
             if (grade) {
               gradeName = grade.gradeName;
@@ -10916,10 +11513,12 @@ ${schoolName}`;
             }
           }
           
-          const comment = mark.customCommentText || mark.autoCommentSnapshot || "";
+          const comment = statusComment || mark.customCommentText || mark.autoCommentSnapshot || "";
           
-          if (!bySubject[subject.id]) bySubject[subject.id] = {};
-          bySubject[subject.id][student.id] = pctRaw;
+          if (pctRaw !== null) {
+            if (!bySubject[subject.id]) bySubject[subject.id] = {};
+            bySubject[subject.id][student.id] = pctRaw;
+          }
           
           if (!studentSubjectRows[student.id]) studentSubjectRows[student.id] = {};
           studentSubjectRows[student.id][subject.id] = {
@@ -11019,6 +11618,7 @@ ${schoolName}`;
       const reportCards = await Promise.all(students.map(async (student) => {
         const rows = studentSubjectRows[student.id] || {};
         const subjectResults: Array<{
+          assessmentId?: number;
           subjectId: number;
           subjectName: string;
           mark: string;
@@ -11027,6 +11627,7 @@ ${schoolName}`;
           grade: string;
           rank: string;
           comment: string;
+          commentPool?: string;
           teacher: string;
           gradePoints: number;
         }> = [];
@@ -11045,33 +11646,35 @@ ${schoolName}`;
         const chartClassAvgs: (number | null)[] = [];
         
         for (const row of sortedSubjects) {
-          const pct = row.percentage ?? 0;
-          sumMarks += pct;
-          nSubjects++;
-          
-          if (pct >= 60) passed++;
-          
-          points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
+          const pct = row.percentage;
+          const hasNumericMark = pct !== null && Number.isFinite(pct);
+          if (hasNumericMark) {
+            sumMarks += pct as number;
+            nSubjects++;
+            if ((pct as number) >= 60) passed++;
+            points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
+          }
           
           const avgVal = subjectAvg[row.subjectId];
-          const classAvgStr = avgVal !== undefined
+          const classAvgStr = hasNumericMark && avgVal !== undefined
             ? parseFloat(avgVal.toFixed(1)).toString()
             : '';
           
-          const rankStr = subjectRank[row.subjectId]?.[student.id] || '';
-          
-          const markStr = parseFloat(pct.toFixed(1)).toString();
+          const rankStr = hasNumericMark ? (subjectRank[row.subjectId]?.[student.id] || '') : '';
+          const markStr = hasNumericMark ? parseFloat((pct as number).toFixed(1)).toString() : '';
           
           const prevKey = `${student.id}-${row.subjectId}`;
           const prevPct = prevPctMap[prevKey];
-          let dev: string;
-          if (prevPct === undefined) {
-            dev = '+NEW';
-          } else {
-            const diff = Math.round(pct - prevPct);
-            if (diff > 0) dev = `+${diff}`;
-            else if (diff < 0) dev = `${diff}`;
-            else dev = '0';
+          let dev = '';
+          if (hasNumericMark) {
+            if (prevPct === undefined) {
+              dev = '+NEW';
+            } else {
+              const diff = Math.round((pct as number) - prevPct);
+              if (diff > 0) dev = `+${diff}`;
+              else if (diff < 0) dev = `${diff}`;
+              else dev = '0';
+            }
           }
           
           subjectResults.push({
@@ -11089,9 +11692,11 @@ ${schoolName}`;
             gradePoints: row.gradePoints,
           });
           
-          chartSubjectLabels.push(row.subjectName);
-          chartStudentMarks.push(parseFloat(pct.toFixed(1)));
-          chartClassAvgs.push(avgVal !== undefined ? parseFloat(avgVal.toFixed(1)) : null);
+          if (hasNumericMark) {
+            chartSubjectLabels.push(row.subjectName);
+            chartStudentMarks.push(parseFloat((pct as number).toFixed(1)));
+            chartClassAvgs.push(avgVal !== undefined ? parseFloat(avgVal.toFixed(1)) : null);
+          }
         }
         
         const totalMark = nSubjects > 0 ? `${Math.round(sumMarks)}/${100 * nSubjects}` : '';
@@ -11213,6 +11818,12 @@ ${schoolName}`;
         exam,
         subjects,
         reportCards,
+        publication: {
+          isPublished: publication?.isPublished === true,
+          status: publication?.isPublished ? (publication.lastAction === "republished" ? "Republished" : "Published") : "Unpublished",
+          publicationVersion: publication?.publicationVersion || 0,
+          publishedAt: publication?.publishedAt || null,
+        },
       });
     } catch (error) {
       next(error);
@@ -11237,8 +11848,10 @@ ${schoolName}`;
       const classInfo = student.classId ? await storage.getClass(student.classId) : null;
       const exam = await storage.getExam(examId);
       if (!exam) return res.status(404).json({ message: "Exam not found" });
+      if (!classInfo) return res.status(400).json({ message: "Student class context required" });
+      if (!currentUser || !(await ensurePublishedPortalAccess({ user: currentUser, examId, classId: classInfo.id, studentId, res }))) return;
       
-      const allAssessments = await storage.getAssessmentsByExam(examId);
+      const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
       const grades = await storage.getGradesBySchool(schoolId);
       
       const subjectResults: Array<{
@@ -11344,7 +11957,7 @@ ${schoolName}`;
     classInfo: any,
     examInfo: any,
   ): Promise<ReportCardPdfData | null> {
-    const allAssessments = await storage.getAssessmentsByExam(examId);
+    const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
 
     const subjectIds = [...new Set(allAssessments.map(a => a.subjectId))];
     const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
@@ -11413,12 +12026,13 @@ ${schoolName}`;
         const mark = marksMap.get(markKey);
         if (!mark) continue;
 
-        const pctRaw = mark.percentage ? parseFloat(mark.percentage as string) : null;
-        if (pctRaw === null) continue;
+        const pctRaw = mark.percentage !== null && mark.percentage !== undefined ? parseFloat(mark.percentage as string) : null;
+        const statusComment = markStatusLabel(mark.attStatus);
+        if (pctRaw === null && !statusComment) continue;
 
         let gradeName = '';
         let gradePoints = 0;
-        if (mark.gradeId) {
+        if (pctRaw !== null && mark.gradeId) {
           const grade = grades.find(g => g.id === mark.gradeId);
           if (grade) {
             gradeName = grade.gradeName;
@@ -11426,10 +12040,12 @@ ${schoolName}`;
           }
         }
 
-        const comment = mark.customCommentText || mark.autoCommentSnapshot || '';
+        const comment = statusComment || mark.customCommentText || mark.autoCommentSnapshot || '';
 
-        if (!bySubject[subject.id]) bySubject[subject.id] = {};
-        bySubject[subject.id][stu.id] = pctRaw;
+        if (pctRaw !== null) {
+          if (!bySubject[subject.id]) bySubject[subject.id] = {};
+          bySubject[subject.id][stu.id] = pctRaw;
+        }
 
         if (!studentSubjectRows[stu.id]) studentSubjectRows[stu.id] = {};
         studentSubjectRows[stu.id][subject.id] = {
@@ -11485,27 +12101,32 @@ ${schoolName}`;
     const pdfSubjects: Array<{ subjectName: string; mark: string; dev: string; classAvg: string; grade: string; rank: string; comment: string; teacher: string }> = [];
 
     for (const row of sortedRows) {
-      const pct = row.percentage ?? 0;
-      sumMarks += pct;
-      nSubjects++;
-      if (pct >= 60) passed++;
-      points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
+      const pct = row.percentage;
+      const hasNumericMark = pct !== null && Number.isFinite(pct);
+      if (hasNumericMark) {
+        sumMarks += pct as number;
+        nSubjects++;
+        if ((pct as number) >= 60) passed++;
+        points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
+      }
 
       const avgVal = subjectAvg[row.subjectId];
-      const classAvgStr = avgVal !== undefined ? parseFloat(avgVal.toFixed(1)).toString() : '';
-      const rankStr = subjectRank[row.subjectId]?.[studentId] || '';
-      const markStr = parseFloat(pct.toFixed(1)).toString();
+      const classAvgStr = hasNumericMark && avgVal !== undefined ? parseFloat(avgVal.toFixed(1)).toString() : '';
+      const rankStr = hasNumericMark ? (subjectRank[row.subjectId]?.[studentId] || '') : '';
+      const markStr = hasNumericMark ? parseFloat((pct as number).toFixed(1)).toString() : '';
       const teacher = teacherMap.get(`${row.subjectId}-${classInfo.id}`) || '';
 
       const prevVal = pdfPrevPctMap[`${studentId}-${row.subjectId}`];
-      let dev: string;
-      if (prevVal === undefined) {
-        dev = '+NEW';
-      } else {
-        const diff = Math.round(pct - prevVal);
-        if (diff > 0) dev = `+${diff}`;
-        else if (diff < 0) dev = `${diff}`;
-        else dev = '0';
+      let dev = '';
+      if (hasNumericMark) {
+        if (prevVal === undefined) {
+          dev = '+NEW';
+        } else {
+          const diff = Math.round((pct as number) - prevVal);
+          if (diff > 0) dev = `+${diff}`;
+          else if (diff < 0) dev = `${diff}`;
+          else dev = '0';
+        }
       }
 
       pdfSubjects.push({
@@ -11628,7 +12249,8 @@ ${schoolName}`;
     studentName: string,
     regNo: string,
   ): Promise<string | null> {
-    const allAssessments = await storage.getAssessmentsByExam(examId);
+    const studentForClass = await storage.getStudent(studentId);
+    const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => !studentForClass?.classId || Number(assessment.classId) === Number(studentForClass.classId));
     const grades = await storage.getGradesBySchool(schoolId);
     const exam = await storage.getExam(examId);
     const termId = exam?.termId;
@@ -11647,7 +12269,7 @@ ${schoolName}`;
       return '';
     };
 
-    const lines: Array<{ subject: string; pct: string; grade: string }> = [];
+    const lines: Array<{ subject: string; pct: string; grade: string; statusComment: string }> = [];
     let totalPct = 0;
     let subjectCount = 0;
     let totalGradePoints = 0;
@@ -11657,16 +12279,19 @@ ${schoolName}`;
       if (!subject) continue;
 
       const mark = await storage.getAssessmentMarkByStudentAssessment(studentId, assessment.id);
-      if (!mark || mark.percentage === null || mark.percentage === undefined) continue;
+      if (!mark) continue;
 
-      const pctNum = parseFloat(mark.percentage as string);
-      if (isNaN(pctNum)) continue;
+      const statusComment = markStatusLabel(mark.attStatus);
+      const pctNum = mark.percentage !== null && mark.percentage !== undefined ? parseFloat(mark.percentage as string) : null;
+      if ((pctNum === null || Number.isNaN(pctNum)) && !statusComment) continue;
 
-      const pctStr = pctNum % 1 === 0 ? String(Math.round(pctNum)) : pctNum.toFixed(1);
+      const pctStr = pctNum !== null && !Number.isNaN(pctNum)
+        ? (pctNum % 1 === 0 ? String(Math.round(pctNum)) : pctNum.toFixed(1))
+        : '';
       let gradeName = '';
       let gradePoints = 0;
 
-      if (mark.gradeId) {
+      if (pctNum !== null && !Number.isNaN(pctNum) && mark.gradeId) {
         const grade = grades.find(g => g.id === mark.gradeId);
         if (grade) {
           gradeName = grade.gradeName;
@@ -11674,10 +12299,12 @@ ${schoolName}`;
         }
       }
 
-      lines.push({ subject: subject.name, pct: pctStr, grade: gradeName });
-      totalPct += pctNum;
-      totalGradePoints += gradePoints;
-      subjectCount++;
+      lines.push({ subject: subject.name, pct: pctStr, grade: gradeName, statusComment });
+      if (pctNum !== null && !Number.isNaN(pctNum)) {
+        totalPct += pctNum;
+        totalGradePoints += gradePoints;
+        subjectCount++;
+      }
     }
 
     lines.sort((a, b) => a.subject.localeCompare(b.subject));
@@ -11700,6 +12327,7 @@ ${schoolName}`;
     if (lines.length < 1 && ecdBlocks.length < 1) return null;
 
     const resultLines = lines.map(l => {
+      if (l.statusComment) return `${l.subject}: ${l.statusComment}`;
       const gradeStr = l.grade ? ` (${l.grade})` : '';
       return `${l.subject}: ${l.pct}%${gradeStr}`;
     });
@@ -11779,6 +12407,7 @@ ${schoolName}`;
       if (classInfo.schoolId && classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
       if (!exam) return res.status(404).json({ message: "Exam not found" });
       if (exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      if (!currentUser || !(await ensurePublishedPortalAccess({ user: currentUser, examId, classId: activeClassId, studentId, res }))) return;
 
       const pdfData = await buildReportCardPdfData(studentId, examId, schoolId, school, classInfo, exam);
       if (!pdfData) return res.status(404).json({ message: "No report card data available for this student" });
@@ -11804,6 +12433,12 @@ ${schoolName}`;
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId || !currentUser) return res.status(400).json({ message: "School context required" });
+      if (!(await userHasAnyPermission(currentUser.id, ["academic_reports.send.class", "academic_reports.send.stream"]))) {
+        return res.status(403).json({ message: "Permission required to send academic reports" });
+      }
+      if (!(await isClassExamPublished(Number(examId), Number(classId)))) {
+        return res.status(409).json({ message: "Publish this exercise/exam for the class before sending reports" });
+      }
 
       const [school, classInfo, students, exam] = await Promise.all([
         storage.getSchool(schoolId),
@@ -11904,6 +12539,21 @@ ${schoolName}`;
         };
       });
 
+      const publication = await getClassExamPublication(Number(examId), Number(classId));
+      await db.insert(assessmentPublicationEvents).values({
+        publicationId: publication?.id || null,
+        schoolId,
+        examId: Number(examId),
+        classId: Number(classId),
+        streamId: classInfo?.streamId || null,
+        action: "report_sent",
+        publicationVersion: publication?.publicationVersion || 0,
+        audience: "parents",
+        channels: ["sms", "email"],
+        performedByUserId: currentUser.id,
+        metadata: { jobId: job.id, studentCount: students.length },
+      });
+
       logActivity(req, {
         action: "create",
         category: "academic_reports",
@@ -11932,7 +12582,13 @@ ${schoolName}`;
       
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      if (!schoolId || !currentUser) return res.status(400).json({ message: "School context required" });
+      if (!(await storage.userHasPermission(currentUser.id, "academic_reports.send.class"))) {
+        return res.status(403).json({ message: "Permission required: academic_reports.send.class" });
+      }
+      if (!(await isClassExamPublished(Number(examId), Number(classId)))) {
+        return res.status(409).json({ message: "Publish this exercise/exam for the class before sending reports" });
+      }
       
       const school = await storage.getSchool(schoolId);
       const classInfo = await storage.getClass(classId);
@@ -12010,6 +12666,21 @@ ${schoolName}`;
         });
       }
       
+      const publication = await getClassExamPublication(Number(examId), Number(classId));
+      await db.insert(assessmentPublicationEvents).values({
+        publicationId: publication?.id || null,
+        schoolId,
+        examId: Number(examId),
+        classId: Number(classId),
+        streamId: classInfo?.streamId || null,
+        action: "report_sent",
+        publicationVersion: publication?.publicationVersion || 0,
+        audience: "parents",
+        channels: ["sms", "email"],
+        performedByUserId: currentUser.id,
+        metadata: { studentId, smsCount, emailCount },
+      });
+
       res.json({ 
         success: true, 
         message: `Report card sent. [SMS: ${smsCount}, Email: ${emailCount}]`,
@@ -12041,7 +12712,254 @@ ${schoolName}`;
     }
   });
 
-  // Get stream-level stats for an exam (progress, avg for each stream)
+  const publicationActionSchema = z.object({
+    examId: z.coerce.number().int().positive(),
+    classId: z.coerce.number().int().positive().optional(),
+    streamId: z.coerce.number().int().positive().optional(),
+    publish: z.boolean(),
+    reason: z.string().trim().optional().nullable(),
+  });
+
+  async function setClassPublication(args: {
+    schoolId: number;
+    examId: number;
+    classId: number;
+    streamId?: number | null;
+    publish: boolean;
+    reason?: string | null;
+    userId: number;
+  }) {
+    return db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(assessmentPublications).where(and(
+        eq(assessmentPublications.examId, args.examId),
+        eq(assessmentPublications.classId, args.classId),
+      )).limit(1);
+
+      if (!args.publish && !args.reason?.trim()) {
+        throw new Error("A reason is required when unpublishing results");
+      }
+
+      const now = new Date();
+      let publication: any;
+      let action = args.publish ? "published" : "unpublished";
+      let version = existing?.publicationVersion || 0;
+
+      if (args.publish) {
+        if (existing?.isPublished) return { publication: existing, changed: false, action: existing.lastAction || "published" };
+        version += 1;
+        action = version > 1 ? "republished" : "published";
+        const values = {
+          schoolId: args.schoolId,
+          examId: args.examId,
+          classId: args.classId,
+          streamId: args.streamId || null,
+          isPublished: true,
+          publicationVersion: version,
+          lastAction: action,
+          publishedByUserId: args.userId,
+          publishedAt: now,
+          unpublishedByUserId: null,
+          unpublishedAt: null,
+          unpublishReason: null,
+          updatedAt: now,
+        };
+        if (existing) {
+          [publication] = await tx.update(assessmentPublications).set(values).where(eq(assessmentPublications.id, existing.id)).returning();
+        } else {
+          [publication] = await tx.insert(assessmentPublications).values(values).returning();
+        }
+      } else {
+        if (!existing?.isPublished) return { publication: existing, changed: false, action: "unpublished" };
+        [publication] = await tx.update(assessmentPublications).set({
+          isPublished: false,
+          lastAction: "unpublished",
+          unpublishedByUserId: args.userId,
+          unpublishedAt: now,
+          unpublishReason: args.reason?.trim() || null,
+          updatedAt: now,
+        }).where(eq(assessmentPublications.id, existing.id)).returning();
+      }
+
+      await tx.insert(assessmentPublicationEvents).values({
+        publicationId: publication?.id || existing?.id || null,
+        schoolId: args.schoolId,
+        examId: args.examId,
+        classId: args.classId,
+        streamId: args.streamId || null,
+        action,
+        publicationVersion: version,
+        reason: args.publish ? null : args.reason?.trim() || null,
+        performedByUserId: args.userId,
+      });
+
+      return { publication, changed: true, action };
+    });
+  }
+
+  app.get("/api/report-hub/publication-status/:examId", requireAuth, async (req, res, next) => {
+    try {
+      const examId = Number(req.params.examId);
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+
+      const exam = await storage.getExam(examId);
+      if (!exam) return res.status(404).json({ message: "Exercise/exam not found" });
+      if (exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+
+      const schoolClasses = await storage.getClassesBySchool(schoolId);
+      const rows = await db.select().from(assessmentPublications).where(and(
+        eq(assessmentPublications.schoolId, schoolId),
+        eq(assessmentPublications.examId, examId),
+      ));
+      const byClass = new Map(rows.map((row: any) => [Number(row.classId), row]));
+
+      res.json({
+        examId,
+        classes: schoolClasses.map((classInfo: any) => {
+          const publication: any = byClass.get(Number(classInfo.id));
+          return {
+            classId: classInfo.id,
+            streamId: classInfo.streamId,
+            isPublished: publication?.isPublished === true,
+            status: publication?.isPublished ? (publication.lastAction === "republished" ? "Republished" : "Published") : "Unpublished",
+            publicationVersion: publication?.publicationVersion || 0,
+            publishedAt: publication?.publishedAt || null,
+          };
+        }),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/report-hub/publication/class", requireAuth, async (req, res, next) => {
+    try {
+      const data = publicationActionSchema.parse(req.body);
+      if (!data.classId) return res.status(400).json({ message: "classId is required" });
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId || !currentUser) return res.status(400).json({ message: "School context required" });
+
+      const permission = data.publish ? "academic_reports.publish.class" : "academic_reports.unpublish";
+      if (!(await storage.userHasPermission(currentUser.id, permission))) {
+        return res.status(403).json({ message: `Permission required: ${permission}` });
+      }
+
+      const classInfo = await storage.getClass(data.classId);
+      const exam = await storage.getExam(data.examId);
+      if (!classInfo || classInfo.schoolId !== schoolId) return res.status(404).json({ message: "Class not found" });
+      if (!exam || (exam.schoolId && exam.schoolId !== schoolId)) return res.status(404).json({ message: "Exercise/exam not found" });
+
+      const progress = await buildClassExamProgress(data.examId, data.classId);
+      const result = await setClassPublication({
+        schoolId,
+        examId: data.examId,
+        classId: data.classId,
+        streamId: classInfo.streamId,
+        publish: data.publish,
+        reason: data.reason,
+        userId: currentUser.id,
+      });
+
+      logActivity(req, {
+        action: data.publish ? "publish" : "unpublish",
+        category: "academic_reports",
+        description: `${result.action === "republished" ? "Republished" : data.publish ? "Published" : "Unpublished"} ${exam.examName} for ${classInfo.className}`,
+        targetType: "exam_class_publication",
+        targetId: result.publication?.id,
+        targetName: `${exam.examName} - ${classInfo.className}`,
+        schoolId,
+        metadata: { examId: data.examId, classId: data.classId, reason: data.publish ? undefined : data.reason, summary: progress.totals },
+      });
+
+      res.json({
+        changed: result.changed,
+        action: result.action,
+        isPublished: result.publication?.isPublished === true,
+        status: result.publication?.isPublished ? (result.action === "republished" ? "Republished" : "Published") : "Unpublished",
+        summary: progress.totals,
+      });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid publication request", errors: error.errors });
+      if (error?.message) return res.status(400).json({ message: error.message });
+      next(error);
+    }
+  });
+
+  app.post("/api/report-hub/publication/stream", requireAuth, async (req, res, next) => {
+    try {
+      const data = publicationActionSchema.parse(req.body);
+      if (!data.streamId) return res.status(400).json({ message: "streamId is required" });
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId || !currentUser) return res.status(400).json({ message: "School context required" });
+
+      const permission = data.publish ? "academic_reports.publish.stream" : "academic_reports.unpublish";
+      if (!(await storage.userHasPermission(currentUser.id, permission))) {
+        return res.status(403).json({ message: `Permission required: ${permission}` });
+      }
+
+      const exam = await storage.getExam(data.examId);
+      if (!exam || (exam.schoolId && exam.schoolId !== schoolId)) return res.status(404).json({ message: "Exercise/exam not found" });
+      const classes = (await storage.getClassesBySchool(schoolId)).filter((classInfo: any) => Number(classInfo.streamId) === Number(data.streamId));
+      if (!classes.length) return res.status(404).json({ message: "No classes found for the selected stream" });
+
+      const changedClasses: number[] = [];
+      const summaries: any[] = [];
+      for (const classInfo of classes) {
+        const current = await getClassExamPublication(data.examId, classInfo.id);
+        if (data.publish && current?.isPublished) continue;
+        if (!data.publish && !current?.isPublished) continue;
+        const progress = await buildClassExamProgress(data.examId, classInfo.id);
+        summaries.push({ classId: classInfo.id, className: classInfo.className, ...progress.totals });
+        const result = await setClassPublication({
+          schoolId,
+          examId: data.examId,
+          classId: classInfo.id,
+          streamId: data.streamId,
+          publish: data.publish,
+          reason: data.reason,
+          userId: currentUser.id,
+        });
+        if (result.changed) changedClasses.push(classInfo.id);
+      }
+
+      const rows = await db.select().from(assessmentPublications).where(and(
+        eq(assessmentPublications.schoolId, schoolId),
+        eq(assessmentPublications.examId, data.examId),
+        eq(assessmentPublications.streamId, data.streamId),
+      ));
+      const publishedClassIds = new Set(rows.filter((row: any) => row.isPublished).map((row: any) => Number(row.classId)));
+      const allPublished = classes.every((classInfo: any) => publishedClassIds.has(Number(classInfo.id)));
+
+      logActivity(req, {
+        action: data.publish ? "publish" : "unpublish",
+        category: "academic_reports",
+        description: `${data.publish ? "Published" : "Unpublished"} ${exam.examName} for ${changedClasses.length} class${changedClasses.length === 1 ? "" : "es"} in a stream`,
+        targetType: "exam_stream_publication",
+        targetId: data.streamId,
+        targetName: exam.examName,
+        schoolId,
+        metadata: { examId: data.examId, streamId: data.streamId, changedClasses, reason: data.publish ? undefined : data.reason, summaries },
+      });
+
+      res.json({
+        changedClassIds: changedClasses,
+        classCount: classes.length,
+        publishedCount: classes.filter((classInfo: any) => publishedClassIds.has(Number(classInfo.id))).length,
+        allPublished,
+        status: allPublished ? "Published" : "Unpublished",
+        summaries,
+      });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid publication request", errors: error.errors });
+      if (error?.message) return res.status(400).json({ message: error.message });
+      next(error);
+    }
+  });
+
+  // Get stream-level stats for an exam (all offered subjects and expected learner-subject entries)
   app.get("/api/report-hub/stream-stats/:examId", requireAuth, async (req, res, next) => {
     try {
       const examId = parseInt(req.params.examId);
@@ -12050,64 +12968,78 @@ ${schoolName}`;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
       const allStreams = await storage.getAllStreams();
-      const allClasses = await storage.getAllClasses();
-      const schoolClasses = allClasses.filter(c => c.schoolId === schoolId);
+      const schoolClasses = await storage.getClassesBySchool(schoolId);
+      const publicationRows = await db.select().from(assessmentPublications).where(and(
+        eq(assessmentPublications.schoolId, schoolId),
+        eq(assessmentPublications.examId, examId),
+      ));
+      const publicationByClass = new Map(publicationRows.map((row: any) => [Number(row.classId), row]));
 
-      const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
-      const assessmentIds = allAssessmentsRaw.map(a => a.id);
+      const streamStats = await Promise.all(allStreams.map(async (stream: any) => {
+        const streamClasses = schoolClasses.filter((classInfo: any) => Number(classInfo.streamId) === Number(stream.id));
+        if (!streamClasses.length) return null;
 
-      let allMarks: any[] = [];
-      if (assessmentIds.length > 0) {
-        allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
-      }
+        const classProgress = await Promise.all(streamClasses.map((classInfo: any) => buildClassExamProgress(examId, classInfo.id)));
+        const expectedEntries = classProgress.reduce((sum, item) => sum + item.totals.expectedEntries, 0);
+        const withMarks = classProgress.reduce((sum, item) => sum + item.totals.withMarks, 0);
+        const acknowledged = classProgress.reduce((sum, item) => sum + item.totals.acknowledged, 0);
+        const partial = classProgress.reduce((sum, item) => sum + item.totals.partial, 0);
+        const unrecorded = classProgress.reduce((sum, item) => sum + item.totals.unrecorded, 0);
+        const assessmentCreatedCount = classProgress.reduce((sum, item) => sum + item.totals.assessmentsCreated, 0);
+        const assessmentMissingCount = classProgress.reduce((sum, item) => sum + item.totals.assessmentsMissing, 0);
 
-      const streamStats = await Promise.all(allStreams.map(async (stream) => {
-        const streamClasses = schoolClasses.filter(c => c.streamId === stream.id);
-        const classIds = streamClasses.map(c => c.id);
-
-        if (classIds.length === 0) {
-          return { streamId: stream.id, streamName: stream.name, classes: [], progressPct: null, avgPct: null, classCount: 0, studentCount: 0 };
-        }
-
-        let totalStudents = 0;
-        const classesForStream: { id: number; name: string }[] = [];
-        for (const cls of streamClasses) {
-          classesForStream.push({ id: cls.id, name: cls.className });
-          const classStudents = await storage.getStudentsByClass(cls.id);
-          totalStudents += classStudents.length;
-        }
-
-        const streamMarks = allMarks.filter(m => classIds.includes(m.classId));
-        const studentsWithMarks = new Set(
-          streamMarks
-            .filter(m => m.percentage !== null && m.percentage !== undefined)
-            .map(m => m.studentId)
-        );
-        const progressPct = totalStudents > 0 ? (clampPercentage((studentsWithMarks.size / totalStudents) * 100) ?? 0) : null;
-
-        const marksWithPct = streamMarks.filter(m => m.percentage !== null && m.percentage !== undefined);
-        const avgPct = marksWithPct.length > 0
-          ? (clampPercentage(marksWithPct.reduce((sum, m) => sum + clampPercentageNumber(parseFloat(m.percentage)), 0) / marksWithPct.length) ?? 0)
+        const weightedAverages = classProgress.flatMap((item) => item.subjects)
+          .filter((subject) => subject.avgPct !== null && subject.markedCount > 0)
+          .map((subject) => ({ value: Number(subject.avgPct), weight: subject.markedCount }));
+        const totalAverageWeight = weightedAverages.reduce((sum, item) => sum + item.weight, 0);
+        const avgPct = totalAverageWeight > 0
+          ? Math.round(weightedAverages.reduce((sum, item) => sum + item.value * item.weight, 0) / totalAverageWeight)
           : null;
+
+        const publishedCount = streamClasses.filter((classInfo: any) => publicationByClass.get(Number(classInfo.id))?.isPublished === true).length;
+        const allPublished = publishedCount === streamClasses.length;
+        const anyPublished = publishedCount > 0;
+        const progressPct = expectedEntries > 0 ? Math.round(((withMarks + acknowledged) / expectedEntries) * 100) : 0;
+        const withMarksPct = expectedEntries > 0 ? Math.round((withMarks / expectedEntries) * 100) : 0;
+        const acknowledgedPct = expectedEntries > 0 ? Math.round((acknowledged / expectedEntries) * 100) : 0;
 
         return {
           streamId: stream.id,
           streamName: stream.name,
-          classes: classesForStream,
+          classes: streamClasses.map((classInfo: any) => ({
+            id: classInfo.id,
+            name: classInfo.className,
+            isPublished: publicationByClass.get(Number(classInfo.id))?.isPublished === true,
+          })),
           progressPct,
+          withMarksPct,
+          acknowledgedPct,
+          unrecordedPct: Math.max(0, 100 - withMarksPct - acknowledgedPct),
           avgPct,
-          classCount: classIds.length,
-          studentCount: totalStudents,
+          classCount: streamClasses.length,
+          studentCount: classProgress.reduce((sum, item) => sum + item.students.length, 0),
+          expectedEntries,
+          withMarksCount: withMarks,
+          acknowledgedCount: acknowledged,
+          partialCount: partial,
+          unrecordedCount: unrecorded,
+          assessmentCreatedCount,
+          assessmentMissingCount,
+          publishedCount,
+          allPublished,
+          anyPublished,
+          publicationStatus: allPublished ? "Published" : anyPublished ? "Partially published" : "Unpublished",
         };
       }));
 
-      res.json(streamStats.filter(s => s.classCount > 0));
+      res.json(streamStats.filter(Boolean));
     } catch (error) {
       next(error);
     }
   });
 
-  // Get class-level subject progress for an exam
+  // Get class-level subject progress for an exam. Subjects are driven by the class offering,
+  // not by the assessments that happen to have been created.
   app.get("/api/report-hub/class-progress/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
       const examId = parseInt(req.params.examId);
@@ -12116,178 +13048,72 @@ ${schoolName}`;
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const classInfo = await storage.getClass(classId);
-      if (!classInfo) return res.status(404).json({ message: "Class not found" });
-      if (classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      const progress = await buildClassExamProgress(examId, classId);
+      if (progress.classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
-      const students = await storage.getStudentsByClass(classId);
-      const totalStudents = students.length;
-
-      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
-      await Promise.all(students.map(async (student: any) => {
-        const rows = await storage.getStudentSubjects(student.id);
-        studentSubjectIdsByStudent.set(
-          student.id,
-          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
-        );
-      }));
-
-      const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
-      const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
-
-      const subjectIds = [...new Set(classAssessments.map(a => a.subjectId))];
-      const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
-      const validSubjects = subjectsData.filter(Boolean);
-
+      const subjectIds = new Set(progress.subjects.map((subject) => Number(subject.subjectId)));
       const teacherMap = new Map<number, string>();
-      const subjectIdSet = new Set(validSubjects.map((subject: any) => Number(subject.id)));
       const getTeacherDisplayName = async (staffId: number) => {
         const staffMember = await storage.getStaff(staffId);
         if (!staffMember) return `Staff #${staffId}`;
-
         const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
-        const normalizedGender = (staffMember.gender || "").toString().toLowerCase();
+        const normalizedGender = String(staffMember.gender || "").toLowerCase();
         const title = normalizedGender === "male" ? "Mr." : normalizedGender === "female" ? "Ms." : "";
-        const firstName = ((staffMember.firstName || user?.firstName || "") as string).trim();
-        const lastName = ((staffMember.lastName || user?.lastName || "") as string).trim();
+        const firstName = String(staffMember.firstName || user?.firstName || "").trim();
+        const lastName = String(staffMember.lastName || user?.lastName || "").trim();
         const firstInitial = firstName ? `${firstName.charAt(0).toUpperCase()}.` : "";
-
-        if (lastName) {
-          return [title, firstInitial, lastName].filter(Boolean).join(" ").trim();
-        }
-
-        const fallbackName = user
-          ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
-          : `${staffMember.firstName || ""} ${staffMember.lastName || ""}`.trim();
-
-        return fallbackName || `Staff #${staffId}`;
+        return lastName ? [title, firstInitial, lastName].filter(Boolean).join(" ") : `${firstName} ${lastName}`.trim() || `Staff #${staffId}`;
       };
 
-      const setTeacherIfNeeded = async (subjectId: number, staffId: number | null | undefined) => {
-        if (!subjectIdSet.has(Number(subjectId)) || !staffId || teacherMap.has(Number(subjectId))) return;
-        teacherMap.set(Number(subjectId), await getTeacherDisplayName(Number(staffId)));
-      };
-
-      // Primary source: Staff Management → subject assignments (exact Class + Subject).
-      try {
-        const subjectTeacherRows = await db.select({
-          staffId: staffSubjects.staffId,
-          subjectId: staffSubjects.subjectId,
-        }).from(staffSubjects).where(eq(staffSubjects.classId, classId));
-
-        for (const row of subjectTeacherRows) {
-          await setTeacherIfNeeded(Number(row.subjectId), row.staffId);
+      const exactAssignments = await db.select({
+        staffId: staffSubjects.staffId,
+        subjectId: staffSubjects.subjectId,
+      }).from(staffSubjects).where(eq(staffSubjects.classId, classId));
+      for (const row of exactAssignments) {
+        if (subjectIds.has(Number(row.subjectId)) && !teacherMap.has(Number(row.subjectId))) {
+          teacherMap.set(Number(row.subjectId), await getTeacherDisplayName(Number(row.staffId)));
         }
-      } catch (error) {
-        console.warn("[CLASS_PROGRESS_TEACHER_ASSIGNMENTS_ERROR]", error);
       }
 
-      // Fallback source: Timetable slots for the same Class + Subject.
-      // This covers schools that assigned teachers through Timetable before the newer
-      // Staff Management class-subject assignment screen was used.
-      try {
-        const timetableTeacherRows = await db.select({
-          teacherId: timetableSlotsTable.teacherId,
-          subjectId: timetableSlotsTable.subjectId,
-        }).from(timetableSlotsTable).where(eq(timetableSlotsTable.classId, classId));
-
-        const countsBySubject = new Map<number, Map<number, number>>();
-        for (const row of timetableTeacherRows) {
-          if (!row.teacherId || !subjectIdSet.has(Number(row.subjectId)) || teacherMap.has(Number(row.subjectId))) continue;
-          const subjectCounts = countsBySubject.get(Number(row.subjectId)) || new Map<number, number>();
-          subjectCounts.set(Number(row.teacherId), (subjectCounts.get(Number(row.teacherId)) || 0) + 1);
-          countsBySubject.set(Number(row.subjectId), subjectCounts);
-        }
-
-        for (const [subjectId, teacherCounts] of countsBySubject.entries()) {
-          const [topTeacherId] = Array.from(teacherCounts.entries()).sort((a, b) => b[1] - a[1])[0] || [];
-          await setTeacherIfNeeded(subjectId, topTeacherId);
-        }
-      } catch (error) {
-        console.warn("[CLASS_PROGRESS_TIMETABLE_TEACHER_ERROR]", error);
+      const timetableRows = await db.select({
+        teacherId: timetableSlotsTable.teacherId,
+        subjectId: timetableSlotsTable.subjectId,
+      }).from(timetableSlotsTable).where(eq(timetableSlotsTable.classId, classId));
+      const timetableCounts = new Map<number, Map<number, number>>();
+      for (const row of timetableRows) {
+        if (!row.teacherId || !subjectIds.has(Number(row.subjectId)) || teacherMap.has(Number(row.subjectId))) continue;
+        const counts = timetableCounts.get(Number(row.subjectId)) || new Map<number, number>();
+        counts.set(Number(row.teacherId), (counts.get(Number(row.teacherId)) || 0) + 1);
+        timetableCounts.set(Number(row.subjectId), counts);
+      }
+      for (const [subjectId, counts] of Array.from(timetableCounts.entries())) {
+        const top = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0];
+        if (top) teacherMap.set(subjectId, await getTeacherDisplayName(top[0]));
       }
 
-      // Last safe fallback: legacy staff_subjects rows where class_id is NULL.
-      // Only use this when exactly one staff member in this school is assigned to the subject;
-      // otherwise the class-specific teacher would be ambiguous.
-      try {
-        const legacyRows = await db.select({
-          staffId: staffSubjects.staffId,
-          subjectId: staffSubjects.subjectId,
-        }).from(staffSubjects).where(sql`${staffSubjects.classId} IS NULL`);
-
-        const legacyBySubject = new Map<number, number[]>();
-        for (const row of legacyRows) {
-          const subjectId = Number(row.subjectId);
-          if (!subjectIdSet.has(subjectId) || teacherMap.has(subjectId)) continue;
-          const staffMember = await storage.getStaff(Number(row.staffId));
-          if (!staffMember || staffMember.schoolId !== schoolId) continue;
-          const current = legacyBySubject.get(subjectId) || [];
-          current.push(Number(row.staffId));
-          legacyBySubject.set(subjectId, current);
-        }
-
-        for (const [subjectId, staffIds] of legacyBySubject.entries()) {
-          const uniqueStaffIds = Array.from(new Set(staffIds));
-          if (uniqueStaffIds.length === 1) {
-            await setTeacherIfNeeded(subjectId, uniqueStaffIds[0]);
-          }
-        }
-      } catch (error) {
-        console.warn("[CLASS_PROGRESS_LEGACY_TEACHER_ASSIGNMENTS_ERROR]", error);
-      }
-
-      const assessmentIds = classAssessments.map(a => a.id);
-      let classMarks: any[] = [];
-      if (assessmentIds.length > 0) {
-        classMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
-      }
-
-      const subjectProgress = validSubjects.map(subject => {
-        if (!subject) return null;
-        const eligibleStudents = students.filter((student: any) =>
-          studentSubjectIdsByStudent.get(student.id)?.has(subject.id)
-        );
-        const eligibleStudentIds = new Set(eligibleStudents.map((student: any) => student.id));
-        const subjectTotalStudents = eligibleStudents.length;
-        const subjectMarks = classMarks.filter(m =>
-          m.subjectId === subject.id && eligibleStudentIds.has(m.studentId)
-        );
-        const studentsWithMarks = new Set(
-          subjectMarks
-            .filter(m => m.percentage !== null && m.percentage !== undefined)
-            .map(m => m.studentId)
-        );
-        const progressPct = clampPercentage(subjectTotalStudents > 0 ? (studentsWithMarks.size / subjectTotalStudents) * 100 : 0) ?? 0;
-
-        const marksWithPct = subjectMarks.filter(m => m.percentage !== null && m.percentage !== undefined);
-        const avgPct = marksWithPct.length > 0
-          ? (clampPercentage(marksWithPct.reduce((sum, m) => sum + clampPercentageNumber(parseFloat(m.percentage)), 0) / marksWithPct.length) ?? 0)
-          : null;
-
-        return {
-          subjectId: subject.id,
-          subjectName: subject.name,
-          teacherName: teacherMap.get(subject.id) || null,
-          totalStudents: subjectTotalStudents,
-          markedCount: studentsWithMarks.size,
-          progressPct,
-          avgPct,
-        };
-      }).filter(Boolean);
-
+      const publication = await getClassExamPublication(examId, classId);
       res.json({
         classId,
-        className: classInfo.className,
-        totalStudents,
-        subjects: subjectProgress,
+        className: progress.classInfo.className,
+        totalStudents: progress.students.length,
+        subjects: progress.subjects.map((subject) => ({
+          ...subject,
+          teacherName: teacherMap.get(Number(subject.subjectId)) || null,
+        })),
+        totals: progress.totals,
+        publication: {
+          isPublished: publication?.isPublished === true,
+          status: publication?.isPublished ? (publication.lastAction === "republished" ? "Republished" : "Published") : "Unpublished",
+          publicationVersion: publication?.publicationVersion || 0,
+          publishedAt: publication?.publishedAt || null,
+        },
       });
     } catch (error) {
       next(error);
     }
   });
 
-  // Missing marks for a class (grouped by subject)
+  // Missing marks for a class (grouped by every subject offered by the class)
   app.get("/api/report-hub/missing-marks/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
       const examId = parseInt(req.params.examId);
@@ -12297,59 +13123,97 @@ ${schoolName}`;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
       const classInfo = await storage.getClass(classId);
-      if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      if (!classInfo || Number(classInfo.schoolId) !== Number(schoolId)) return res.status(403).json({ message: "Access denied" });
 
       const students = await storage.getStudentsByClass(classId);
-
       const studentSubjectIdsByStudent = new Map<number, Set<number>>();
       await Promise.all(students.map(async (student: any) => {
         const rows = await storage.getStudentSubjects(student.id);
-        studentSubjectIdsByStudent.set(
-          student.id,
-          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
-        );
+        studentSubjectIdsByStudent.set(student.id, new Set(rows.map((row: any) => Number(row.subjectId))));
       }));
 
-      const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
-      const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
+      const classSubjectRows = await storage.getClassSubjects(classId);
+      const offeredSubjectIds = Array.from(new Set(classSubjectRows.map((row: any) => Number(row.subjectId))));
+      const offeredSubjects = (await Promise.all(offeredSubjectIds.map((id) => storage.getSubject(id))))
+        .filter(Boolean)
+        .sort((a: any, b: any) => String(a.name || "").localeCompare(String(b.name || "")));
 
-      const subjectIds = [...new Set(classAssessments.map(a => a.subjectId))];
-      const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
-      const validSubjects = subjectsData.filter(Boolean);
-
-      const assessmentIds = classAssessments.map(a => a.id);
-      let classMarks: any[] = [];
-      if (assessmentIds.length > 0) {
-        classMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
+      const classAssessments = (await storage.getAssessmentsByExam(examId))
+        .filter((assessment: any) => Number(assessment.classId) === classId);
+      const assessmentBySubject = new Map<number, any>();
+      for (const assessment of classAssessments) {
+        if (!assessmentBySubject.has(Number(assessment.subjectId))) assessmentBySubject.set(Number(assessment.subjectId), assessment);
       }
 
-      const missingBySubject = validSubjects.map(subject => {
-        if (!subject) return null;
-        const eligibleStudents = students.filter((student: any) =>
-          studentSubjectIdsByStudent.get(student.id)?.has(subject.id)
-        );
-        const eligibleStudentIds = new Set(eligibleStudents.map((student: any) => student.id));
-        const subjectMarks = classMarks.filter(m =>
-          m.subjectId === subject.id && eligibleStudentIds.has(m.studentId)
-        );
-        const markedStudentIds = new Set(
-          subjectMarks
-            .filter(m => m.percentage !== null && m.percentage !== undefined)
-            .map(m => m.studentId)
-        );
+      const assessmentIds = classAssessments.map((assessment: any) => assessment.id);
+      const marks = assessmentIds.length ? await storage.getAssessmentMarksByAssessments(assessmentIds) : [];
+      const papersByAssessment = new Map<number, any[]>();
+      await Promise.all(classAssessments.map(async (assessment: any) => {
+        papersByAssessment.set(assessment.id, await storage.getAssessmentPapers(assessment.id));
+      }));
+      const paperMarksByMark = new Map<number, any[]>();
+      await Promise.all(marks.map(async (mark: any) => {
+        paperMarksByMark.set(mark.id, await storage.getMarkPapers(mark.id));
+      }));
 
-        const missing = eligibleStudents
-          .filter((s: any) => !markedStudentIds.has(s.id))
-          .map((s: any) => ({ id: s.id, name: `${s.firstName} ${s.lastName}`, admissionNo: s.admissionNo }));
+      const missingBySubject = offeredSubjects.map((subject: any) => {
+        const eligibleStudents = students.filter((student: any) => studentSubjectIdsByStudent.get(student.id)?.has(Number(subject.id)));
+        const assessment = assessmentBySubject.get(Number(subject.id));
+        if (!assessment) {
+          return {
+            subjectId: subject.id,
+            subjectName: subject.name,
+            assessmentCreated: false,
+            totalStudents: eligibleStudents.length,
+            missingCount: eligibleStudents.length,
+            missingStudents: eligibleStudents.map((student: any) => ({
+              id: student.id,
+              name: `${student.firstName} ${student.lastName}`,
+              admissionNo: student.admissionNo,
+              reason: "Assessment not created",
+            })),
+          };
+        }
+
+        const markByStudent = new Map(
+          marks
+            .filter((mark: any) => Number(mark.assessmentId) === Number(assessment.id))
+            .map((mark: any) => [Number(mark.studentId), mark]),
+        );
+        const requiredPapers = papersByAssessment.get(assessment.id) || [];
+        const missingStudents = eligibleStudents.flatMap((student: any) => {
+          const mark: any = markByStudent.get(Number(student.id));
+          const normalizedStatus = String(mark?.attStatus || "").toLowerCase();
+          if (ACKNOWLEDGED_NOT_WRITTEN_STATUSES.has(normalizedStatus)) return [];
+
+          let reason = "Not recorded";
+          if (mark) {
+            if (requiredPapers.length > 0) {
+              const paperMarks = paperMarksByMark.get(mark.id) || [];
+              const valueByPaper = new Map(paperMarks.map((row: any) => [Number(row.assessmentPaperId), row.markObtained]));
+              const completed = requiredPapers.filter((paper: any) => {
+                const value = valueByPaper.get(Number(paper.id));
+                return value !== null && value !== undefined && String(value).trim() !== "";
+              }).length;
+              if (completed === requiredPapers.length) return [];
+              if (completed > 0) reason = "Partial papers recorded";
+            } else if (mark.percentage !== null && mark.percentage !== undefined) {
+              return [];
+            }
+          }
+
+          return [{ id: student.id, name: `${student.firstName} ${student.lastName}`, admissionNo: student.admissionNo, reason }];
+        });
 
         return {
           subjectId: subject.id,
           subjectName: subject.name,
+          assessmentCreated: true,
           totalStudents: eligibleStudents.length,
-          missingCount: missing.length,
-          missingStudents: missing,
+          missingCount: missingStudents.length,
+          missingStudents,
         };
-      }).filter(Boolean);
+      });
 
       res.json(missingBySubject);
     } catch (error) {
@@ -14353,31 +15217,53 @@ ${schoolName}`;
     } catch (error) { next(error); }
   });
 
-  // Student: get my grades/marks
+  async function getPublishedPortalGradesForStudent(student: any) {
+    if (!student?.classId) return [];
+    const markRows = await db.select().from(assessmentMarksSchema).where(eq(assessmentMarksSchema.studentId, student.id));
+    const results: any[] = [];
+    for (const mark of markRows) {
+      const assessment = await storage.getAssessment(mark.assessmentId);
+      if (!assessment || Number(assessment.classId) !== Number(student.classId) || !assessment.examId) continue;
+      const publication = await getClassExamPublication(Number(assessment.examId), Number(student.classId));
+      if (!publication?.isPublished) continue;
+      const [subject, grade, exam, assessmentType] = await Promise.all([
+        storage.getSubject(Number(assessment.subjectId)),
+        mark.gradeId ? storage.getGrade(Number(mark.gradeId)) : Promise.resolve(undefined),
+        storage.getExam(Number(assessment.examId)),
+        assessment.assessmentTypeId ? storage.getAssessmentType(Number(assessment.assessmentTypeId)) : Promise.resolve(undefined),
+      ]);
+      const statusComment = markStatusLabel(mark.attStatus);
+      results.push({
+        id: mark.id,
+        percentage: mark.percentage,
+        grade: statusComment ? null : grade?.gradeName || null,
+        comment: statusComment || mark.customCommentText || mark.autoCommentSnapshot || null,
+        assessmentName: assessment.name || exam?.examName || "Assessment",
+        assessmentType: assessmentType?.name || "Assessment",
+        subjectName: subject?.name || "Unknown",
+        subjectCode: subject?.syllabusCode || null,
+        term: assessment.termId ? `Term ${assessment.termId}` : null,
+        year: assessment.year ? String(assessment.year) : null,
+        examId: assessment.examId,
+        examName: exam?.examName || null,
+        publicationStatus: publication.lastAction === "republished" ? "Republished" : "Published",
+      });
+    }
+    return results.sort((a, b) =>
+      String(b.year || "").localeCompare(String(a.year || "")) ||
+      String(a.term || "").localeCompare(String(b.term || "")) ||
+      String(a.subjectName || "").localeCompare(String(b.subjectName || ""))
+    );
+  }
+
+  // Student: only published grades/marks are visible in the portal.
   app.get("/api/me/grades", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       if (currentUser.role !== "student") return res.status(403).json({ message: "Students only" });
-      const allStudents = await storage.getAllStudents();
-      const student = allStudents.find(s => s.userId === currentUser.id);
+      const [student] = await db.select().from(studentsTable).where(eq(studentsTable.userId, currentUser.id)).limit(1);
       if (!student) return res.status(404).json({ message: "Student record not found" });
-      const marks = await storage.getMarksByStudent(student.id);
-      const allAssessments = await storage.getAllAssessments();
-      const allSubjects = await storage.getAllSubjects();
-      const enrichedMarks = marks.map(mark => {
-        const assessment = allAssessments.find(a => a.id === mark.assessmentId);
-        const subject = assessment ? allSubjects.find(s => s.id === assessment.subjectId) : null;
-        return {
-          ...mark,
-          assessmentName: assessment?.name || "Unknown",
-          assessmentType: assessment?.type || "Unknown",
-          subjectName: subject?.name || "Unknown",
-          subjectCode: subject?.syllabusCode || null,
-          term: assessment?.term || null,
-          year: assessment?.year || null,
-        };
-      });
-      res.json(enrichedMarks);
+      res.json(await getPublishedPortalGradesForStudent(student));
     } catch (error) { next(error); }
   });
 
@@ -14398,34 +15284,18 @@ ${schoolName}`;
     } catch (error) { next(error); }
   });
 
-  // Parent: get children's grades
+  // Parent: only published grades for linked children are visible in the portal.
   app.get("/api/me/children-grades", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       if (currentUser.role !== "parent") return res.status(403).json({ message: "Parents only" });
-      const allParents = await storage.getAllParents();
-      const parent = allParents.find(p => p.userId === currentUser.id);
+      const [parent] = await db.select().from(parentsTable).where(eq(parentsTable.userId, currentUser.id)).limit(1);
       if (!parent) return res.status(404).json({ message: "Parent record not found" });
       const children = await storage.getStudentsByParent(parent.id);
-      const allAssessments = await storage.getAllAssessments();
-      const allSubjects = await storage.getAllSubjects();
-      const result = await Promise.all(children.map(async child => {
-        const marks = await storage.getMarksByStudent(child.id);
-        const enrichedMarks = marks.map(mark => {
-          const assessment = allAssessments.find(a => a.id === mark.assessmentId);
-          const subject = assessment ? allSubjects.find(s => s.id === assessment.subjectId) : null;
-          return {
-            ...mark,
-            assessmentName: assessment?.name || "Unknown",
-            assessmentType: assessment?.type || "Unknown",
-            subjectName: subject?.name || "Unknown",
-            subjectCode: subject?.syllabusCode || null,
-            term: assessment?.term || null,
-            year: assessment?.year || null,
-          };
-        });
-        return { student: child, marks: enrichedMarks };
-      }));
+      const result = await Promise.all(children.map(async (child: any) => ({
+        student: child,
+        marks: await getPublishedPortalGradesForStudent(child),
+      })));
       res.json(result);
     } catch (error) { next(error); }
   });

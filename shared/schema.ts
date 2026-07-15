@@ -15,6 +15,9 @@ export const staffStatusEnum = pgEnum("staff_status", ["active", "inactive"]);
 
 export const studentStatusEnum = pgEnum("student_status", ["active", "inactive", "transferred", "graduated"]);
 
+export const internalTransferPersonTypeEnum = pgEnum("internal_transfer_person_type", ["student", "staff"]);
+export const internalTransferStatusEnum = pgEnum("internal_transfer_status", ["completed"]);
+
 export const subjectAssignmentModeEnum = pgEnum("subject_assignment_mode", ["add", "remove"]);
 
 export const hostelStatusEnum = pgEnum("hostel_status", ["present", "absent", "leave", "sick"]);
@@ -279,6 +282,34 @@ export const studentSubjects = pgTable("student_subjects", {
   studentId: integer("student_id").references(() => students.id).notNull(),
   subjectId: integer("subject_id").references(() => subjects.id).notNull(),
   assignmentMode: subjectAssignmentModeEnum("assignment_mode").notNull().default("add"),
+});
+
+export const internalTransfers = pgTable("internal_transfers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  personType: internalTransferPersonTypeEnum("person_type").notNull(),
+  personId: integer("person_id").notNull(),
+  personName: text("person_name").notNull(),
+  sourceSchoolId: integer("source_school_id").references(() => schools.id).notNull(),
+  destinationSchoolId: integer("destination_school_id").references(() => schools.id).notNull(),
+  sourceClassId: integer("source_class_id").references(() => classes.id),
+  destinationClassId: integer("destination_class_id").references(() => classes.id),
+  sourceStreamId: integer("source_stream_id").references(() => streams.id),
+  destinationStreamId: integer("destination_stream_id").references(() => streams.id),
+  sourceRole: text("source_role"),
+  destinationRole: text("destination_role"),
+  sourceAccessGroupId: integer("source_access_group_id").references(() => accessGroups.id),
+  destinationAccessGroupId: integer("destination_access_group_id").references(() => accessGroups.id),
+  sourceAdmissionNo: text("source_admission_no"),
+  destinationAdmissionNo: text("destination_admission_no"),
+  effectiveDate: date("effective_date").notNull(),
+  reason: text("reason").notNull(),
+  status: internalTransferStatusEnum("status").notNull().default("completed"),
+  requestedByUserId: integer("requested_by_user_id").references(() => users.id),
+  completedByUserId: integer("completed_by_user_id").references(() => users.id),
+  completedAt: timestamp("completed_at").defaultNow(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const gradeLevelEnum = pgEnum("grade_level", ["A_Level", "O_Level", "IGCSE", "SEC_ZIM_A", "SEC_ZIM_O", "SEC_CAM_A", "SEC_CAM_O", "SEC_CAM_IGCSE", "PRI_ZIM_ECD", "PRI_ZIM_G12", "PRI_ZIM_G37", "PRI_CAM_ECD", "PRI_CAM_G12", "PRI_CAM_G37"]);
@@ -759,6 +790,7 @@ export const insertStudentSchema = createInsertSchema(students).omit({ id: true,
 export const insertSubjectSchema = createInsertSchema(subjects).omit({ id: true });
 export const insertStaffSubjectSchema = createInsertSchema(staffSubjects).omit({ id: true });
 export const insertStudentSubjectSchema = createInsertSchema(studentSubjects).omit({ id: true });
+export const insertInternalTransferSchema = createInsertSchema(internalTransfers).omit({ id: true, createdAt: true, completedAt: true });
 export const insertClassSubjectSchema = createInsertSchema(classSubjects).omit({ id: true });
 export const insertGradeSchema = createInsertSchema(grades).omit({ id: true });
 export const insertAssessmentSchema = createInsertSchema(assessments).omit({ id: true, createdAt: true });
@@ -817,6 +849,8 @@ export type Subject = typeof subjects.$inferSelect;
 export type InsertStaffSubject = z.infer<typeof insertStaffSubjectSchema>;
 export type StaffSubject = typeof staffSubjects.$inferSelect;
 export type InsertStudentSubject = z.infer<typeof insertStudentSubjectSchema>;
+export type InternalTransfer = typeof internalTransfers.$inferSelect;
+export type InsertInternalTransfer = z.infer<typeof insertInternalTransferSchema>;
 export type StudentSubject = typeof studentSubjects.$inferSelect;
 export type InsertClassSubject = z.infer<typeof insertClassSubjectSchema>;
 export type ClassSubject = typeof classSubjects.$inferSelect;
@@ -970,6 +1004,45 @@ export const exams = pgTable("exams", {
   startDate: date("start_date"),
   endDate: date("end_date"),
   isPublished: boolean("is_published").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Publication is stored per linked exercise/exam and class. Stream publication is a
+// bulk operation over these class rows, which keeps class and stream state synchronized.
+export const assessmentPublications = pgTable("assessment_publications", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  examId: integer("exam_id").references(() => exams.id).notNull(),
+  classId: integer("class_id").references(() => classes.id).notNull(),
+  streamId: integer("stream_id").references(() => streams.id),
+  isPublished: boolean("is_published").notNull().default(false),
+  publicationVersion: integer("publication_version").notNull().default(0),
+  lastAction: text("last_action").notNull().default("unpublished"),
+  publishedByUserId: integer("published_by_user_id").references(() => users.id),
+  publishedAt: timestamp("published_at"),
+  unpublishedByUserId: integer("unpublished_by_user_id").references(() => users.id),
+  unpublishedAt: timestamp("unpublished_at"),
+  unpublishReason: text("unpublish_reason"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  examClassUnique: uniqueIndex("assessment_publications_exam_class_uidx").on(table.examId, table.classId),
+}));
+
+export const assessmentPublicationEvents = pgTable("assessment_publication_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  publicationId: integer("publication_id").references(() => assessmentPublications.id),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  examId: integer("exam_id").references(() => exams.id).notNull(),
+  classId: integer("class_id").references(() => classes.id),
+  streamId: integer("stream_id").references(() => streams.id),
+  action: text("action").notNull(),
+  publicationVersion: integer("publication_version").notNull().default(0),
+  reason: text("reason"),
+  audience: text("audience"),
+  channels: text("channels").array(),
+  performedByUserId: integer("performed_by_user_id").references(() => users.id),
+  metadata: jsonb("metadata"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -1348,6 +1421,8 @@ export type EcdAssessmentResponse = typeof ecdAssessmentResponses.$inferSelect;
 export const insertAssessmentTypeSchema = createInsertSchema(assessmentTypes).omit({ id: true, createdAt: true });
 export const insertExamTypeSchema = createInsertSchema(examTypes).omit({ id: true, createdAt: true });
 export const insertExamSchema = createInsertSchema(exams).omit({ id: true, createdAt: true });
+export const insertAssessmentPublicationSchema = createInsertSchema(assessmentPublications).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertAssessmentPublicationEventSchema = createInsertSchema(assessmentPublicationEvents).omit({ id: true, createdAt: true });
 export const insertAssessmentPaperSchema = createInsertSchema(assessmentPapers).omit({ id: true });
 export const insertAssessmentCommentSchema = createInsertSchema(assessmentComments).omit({ id: true, createdAt: true });
 export const insertAssessmentMarkSchema = createInsertSchema(assessmentMarks).omit({ id: true, markedAt: true });
@@ -1359,6 +1434,10 @@ export type InsertExamType = z.infer<typeof insertExamTypeSchema>;
 export type ExamType = typeof examTypes.$inferSelect;
 export type InsertExam = z.infer<typeof insertExamSchema>;
 export type Exam = typeof exams.$inferSelect;
+export type InsertAssessmentPublication = z.infer<typeof insertAssessmentPublicationSchema>;
+export type AssessmentPublication = typeof assessmentPublications.$inferSelect;
+export type InsertAssessmentPublicationEvent = z.infer<typeof insertAssessmentPublicationEventSchema>;
+export type AssessmentPublicationEvent = typeof assessmentPublicationEvents.$inferSelect;
 export type InsertAssessmentPaper = z.infer<typeof insertAssessmentPaperSchema>;
 export type AssessmentPaper = typeof assessmentPapers.$inferSelect;
 export type InsertAssessmentComment = z.infer<typeof insertAssessmentCommentSchema>;

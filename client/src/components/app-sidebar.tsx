@@ -52,6 +52,7 @@ import {
   User,
   Bell,
   Package,
+  ArrowRightLeft,
 } from "lucide-react";
 import type { School as SchoolType } from "@shared/schema";
 
@@ -90,6 +91,7 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, requiredPermissions: ["dashboard.view"] },
       { title: "Calendar", url: "/calendar", icon: Calendar, requiredPermissions: ["calendar.view"] },
       { title: "Applications", url: "/applications", icon: FileText, requiredPermissions: ["applications.view"] },
+      { title: "Internal Transfers", url: "/internal-transfers", icon: ArrowRightLeft, requiredPermissions: ["internal_transfers.view"] },
       { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport", badge: "In Production" },
     ],
   },

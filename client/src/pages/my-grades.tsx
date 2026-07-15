@@ -18,6 +18,7 @@ interface EnrichedMark {
   subjectCode: string | null;
   term: string | null;
   year: string | null;
+  publicationStatus?: "Published" | "Republished";
 }
 
 export default function MyGradesPage() {
@@ -177,7 +178,12 @@ export default function MyGradesPage() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell>{mark.assessmentName}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span>{mark.assessmentName}</span>
+                        {mark.publicationStatus && <Badge className="bg-blue-600 text-white hover:bg-blue-600">{mark.publicationStatus}</Badge>}
+                      </div>
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline">{mark.assessmentType}</Badge>
                     </TableCell>
