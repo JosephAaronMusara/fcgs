@@ -1688,7 +1688,7 @@ type ClassExamSubjectProgress = {
   avgPct: number | null;
 };
 
-async function buildClassExamProgress(examId: number, classId: number): Promise<{
+type ClassExamProgress = {
   classInfo: any;
   students: any[];
   subjects: ClassExamSubjectProgress[];
@@ -1702,42 +1702,172 @@ async function buildClassExamProgress(examId: number, classId: number): Promise<
     assessmentsCreated: number;
     assessmentsMissing: number;
   };
-}> {
-  const classInfo = await storage.getClass(classId);
-  if (!classInfo) throw new Error("Class not found");
+};
 
-  const students = await storage.getStudentsByClass(classId);
-  const classSubjectRows = await storage.getClassSubjects(classId);
-  const offeredSubjectIds = Array.from(new Set(classSubjectRows.map((row: any) => Number(row.subjectId))));
-  const offeredSubjects = (await Promise.all(offeredSubjectIds.map((id) => storage.getSubject(id))))
-    .filter(Boolean)
-    .sort((a: any, b: any) => String(a.name || "").localeCompare(String(b.name || "")));
+type ExamProgressContext = {
+  schoolId: number;
+  examId: number;
+  classesById: Map<number, any>;
+  studentsByClass: Map<number, any[]>;
+  subjectsById: Map<number, any>;
+  classSubjectIdsByClass: Map<number, Set<number>>;
+  studentSubjectIdsByStudent: Map<number, Set<number>>;
+  assessmentByClassSubject: Map<string, any>;
+  marksByAssessmentStudent: Map<number, Map<number, any>>;
+  papersByAssessment: Map<number, any[]>;
+  paperMarksByMark: Map<number, any[]>;
+  publicationByClass: Map<number, any>;
+};
 
-  const studentSubjectIdsByStudent = new Map<number, Set<number>>();
-  await Promise.all(students.map(async (student: any) => {
-    const rows = await storage.getStudentSubjects(student.id);
-    studentSubjectIdsByStudent.set(student.id, new Set(rows.map((row: any) => Number(row.subjectId))));
-  }));
+function classSubjectKey(classId: number, subjectId: number): string {
+  return `${classId}:${subjectId}`;
+}
 
-  const allAssessments = await storage.getAssessmentsByExam(examId);
-  const classAssessments = allAssessments.filter((assessment: any) => Number(assessment.classId) === classId);
-  const assessmentBySubject = new Map<number, any>();
-  for (const assessment of classAssessments) {
-    if (!assessmentBySubject.has(Number(assessment.subjectId))) {
-      assessmentBySubject.set(Number(assessment.subjectId), assessment);
-    }
+function subjectMatchesProgressStream(subject: any, streamId: number | null | undefined): boolean {
+  if (streamId === null || streamId === undefined) return false;
+  const normalizedStreamId = Number(streamId);
+  if (subject?.streamId !== null && subject?.streamId !== undefined) {
+    return Number(subject.streamId) === normalizedStreamId;
+  }
+  const streamIds = Array.isArray(subject?.streamIds) ? subject.streamIds.map((id: any) => Number(id)) : [];
+  return streamIds.includes(normalizedStreamId);
+}
+
+async function loadExamProgressContext(schoolId: number, examId: number): Promise<ExamProgressContext> {
+  const [schoolClasses, schoolStudents, allSubjects, allAssessments, publicationRows] = await Promise.all([
+    storage.getClassesBySchool(schoolId),
+    storage.getActiveStudentsBySchool(schoolId),
+    storage.getAllSubjects(),
+    storage.getAssessmentsByExam(examId),
+    db.select().from(assessmentPublications).where(and(
+      eq(assessmentPublications.schoolId, schoolId),
+      eq(assessmentPublications.examId, examId),
+    )),
+  ]);
+
+  const classIds = schoolClasses.map((classInfo: any) => Number(classInfo.id));
+  const classIdSet = new Set(classIds);
+  const students = schoolStudents.filter((student: any) => student.classId && classIdSet.has(Number(student.classId)));
+  const studentIds = students.map((student: any) => Number(student.id));
+  const assessments = allAssessments.filter((assessment: any) => classIdSet.has(Number(assessment.classId)));
+  const assessmentIds = assessments.map((assessment: any) => Number(assessment.id));
+
+  const [classSubjectOverrides, studentSubjectOverrides, assessmentPapers, assessmentMarks] = await Promise.all([
+    storage.getClassSubjectOverridesByClasses(classIds),
+    storage.getStudentSubjectOverridesByStudents(studentIds),
+    storage.getAssessmentPapersByAssessments(assessmentIds),
+    storage.getAssessmentMarksByAssessments(assessmentIds),
+  ]);
+  const paperMarks = await storage.getMarkPapersByMarks(assessmentMarks.map((mark: any) => Number(mark.id)));
+
+  const classesById = new Map(schoolClasses.map((classInfo: any) => [Number(classInfo.id), classInfo]));
+  const studentsByClass = new Map<number, any[]>();
+  for (const student of students) {
+    const classId = Number(student.classId);
+    const bucket = studentsByClass.get(classId) || [];
+    bucket.push(student);
+    studentsByClass.set(classId, bucket);
   }
 
-  const assessmentIds = classAssessments.map((assessment: any) => assessment.id);
-  const marks = assessmentIds.length ? await storage.getAssessmentMarksByAssessments(assessmentIds) : [];
+  const subjectsById = new Map(allSubjects.map((subject: any) => [Number(subject.id), subject]));
+  const schoolSubjects = allSubjects.filter((subject: any) => Number(subject.schoolId) === Number(schoolId));
+  const classOverridesByClass = new Map<number, any[]>();
+  for (const row of classSubjectOverrides) {
+    const classId = Number(row.classId);
+    const bucket = classOverridesByClass.get(classId) || [];
+    bucket.push(row);
+    classOverridesByClass.set(classId, bucket);
+  }
+
+  const classSubjectIdsByClass = new Map<number, Set<number>>();
+  for (const classInfo of schoolClasses) {
+    const classId = Number(classInfo.id);
+    const resolved = new Set<number>(
+      schoolSubjects
+        .filter((subject: any) => subjectMatchesProgressStream(subject, classInfo.streamId))
+        .map((subject: any) => Number(subject.id)),
+    );
+    for (const row of classOverridesByClass.get(classId) || []) {
+      if (String(row.assignmentMode || "add") === "remove") resolved.delete(Number(row.subjectId));
+      else resolved.add(Number(row.subjectId));
+    }
+    classSubjectIdsByClass.set(classId, resolved);
+  }
+
+  const studentOverridesByStudent = new Map<number, any[]>();
+  for (const row of studentSubjectOverrides) {
+    const studentId = Number(row.studentId);
+    const bucket = studentOverridesByStudent.get(studentId) || [];
+    bucket.push(row);
+    studentOverridesByStudent.set(studentId, bucket);
+  }
+
+  const studentSubjectIdsByStudent = new Map<number, Set<number>>();
+  for (const student of students) {
+    const studentId = Number(student.id);
+    const resolved = new Set<number>(classSubjectIdsByClass.get(Number(student.classId)) || []);
+    for (const row of studentOverridesByStudent.get(studentId) || []) {
+      if (String(row.assignmentMode || "add") === "remove") resolved.delete(Number(row.subjectId));
+      else resolved.add(Number(row.subjectId));
+    }
+    studentSubjectIdsByStudent.set(studentId, resolved);
+  }
+
+  const assessmentByClassSubject = new Map<string, any>();
+  for (const assessment of assessments) {
+    const key = classSubjectKey(Number(assessment.classId), Number(assessment.subjectId));
+    if (!assessmentByClassSubject.has(key)) assessmentByClassSubject.set(key, assessment);
+  }
+
+  const marksByAssessmentStudent = new Map<number, Map<number, any>>();
+  for (const mark of assessmentMarks) {
+    const assessmentId = Number(mark.assessmentId);
+    const byStudent = marksByAssessmentStudent.get(assessmentId) || new Map<number, any>();
+    byStudent.set(Number(mark.studentId), mark);
+    marksByAssessmentStudent.set(assessmentId, byStudent);
+  }
+
   const papersByAssessment = new Map<number, any[]>();
-  await Promise.all(classAssessments.map(async (assessment: any) => {
-    papersByAssessment.set(assessment.id, await storage.getAssessmentPapers(assessment.id));
-  }));
+  for (const paper of assessmentPapers) {
+    const assessmentId = Number(paper.assessmentId);
+    const bucket = papersByAssessment.get(assessmentId) || [];
+    bucket.push(paper);
+    papersByAssessment.set(assessmentId, bucket);
+  }
+
   const paperMarksByMark = new Map<number, any[]>();
-  await Promise.all(marks.map(async (mark: any) => {
-    paperMarksByMark.set(mark.id, await storage.getMarkPapers(mark.id));
-  }));
+  for (const paperMark of paperMarks) {
+    const markId = Number(paperMark.assessmentMarkId);
+    const bucket = paperMarksByMark.get(markId) || [];
+    bucket.push(paperMark);
+    paperMarksByMark.set(markId, bucket);
+  }
+
+  return {
+    schoolId,
+    examId,
+    classesById,
+    studentsByClass,
+    subjectsById,
+    classSubjectIdsByClass,
+    studentSubjectIdsByStudent,
+    assessmentByClassSubject,
+    marksByAssessmentStudent,
+    papersByAssessment,
+    paperMarksByMark,
+    publicationByClass: new Map(publicationRows.map((row: any) => [Number(row.classId), row])),
+  };
+}
+
+function buildClassExamProgress(context: ExamProgressContext, classId: number): ClassExamProgress {
+  const classInfo = context.classesById.get(Number(classId));
+  if (!classInfo) throw new Error("Class not found");
+
+  const students = context.studentsByClass.get(Number(classId)) || [];
+  const offeredSubjects = Array.from(context.classSubjectIdsByClass.get(Number(classId)) || [])
+    .map((subjectId) => context.subjectsById.get(Number(subjectId)))
+    .filter(Boolean)
+    .sort((a: any, b: any) => String(a.name || "").localeCompare(String(b.name || "")));
 
   const result: ClassExamSubjectProgress[] = [];
   let expectedEntries = 0;
@@ -1747,17 +1877,17 @@ async function buildClassExamProgress(examId: number, classId: number): Promise<
   let totalUnrecorded = 0;
 
   for (const subject of offeredSubjects as any[]) {
-    const eligibleStudents = students.filter((student: any) => studentSubjectIdsByStudent.get(student.id)?.has(Number(subject.id)));
-    const eligibleIds = new Set(eligibleStudents.map((student: any) => Number(student.id)));
+    const subjectId = Number(subject.id);
+    const eligibleStudents = students.filter((student: any) => context.studentSubjectIdsByStudent.get(Number(student.id))?.has(subjectId));
     const totalStudents = eligibleStudents.length;
-    const assessment = assessmentBySubject.get(Number(subject.id));
+    const assessment = context.assessmentByClassSubject.get(classSubjectKey(Number(classId), subjectId));
 
     expectedEntries += totalStudents;
 
     if (!assessment) {
       totalUnrecorded += totalStudents;
       result.push({
-        subjectId: subject.id,
+        subjectId,
         subjectName: subject.name,
         assessmentId: null,
         assessmentCreated: false,
@@ -1775,9 +1905,8 @@ async function buildClassExamProgress(examId: number, classId: number): Promise<
       continue;
     }
 
-    const subjectMarks = marks.filter((mark: any) => Number(mark.assessmentId) === Number(assessment.id) && eligibleIds.has(Number(mark.studentId)));
-    const markByStudent = new Map(subjectMarks.map((mark: any) => [Number(mark.studentId), mark]));
-    const requiredPapers = papersByAssessment.get(assessment.id) || [];
+    const markByStudent = context.marksByAssessmentStudent.get(Number(assessment.id)) || new Map<number, any>();
+    const requiredPapers = context.papersByAssessment.get(Number(assessment.id)) || [];
     let withMarks = 0;
     let acknowledged = 0;
     let partial = 0;
@@ -1792,7 +1921,7 @@ async function buildClassExamProgress(examId: number, classId: number): Promise<
         continue;
       }
 
-      const savedPaperRows = paperMarksByMark.get(mark.id) || [];
+      const savedPaperRows = context.paperMarksByMark.get(Number(mark.id)) || [];
       const savedByPaperId = new Map(savedPaperRows.map((row: any) => [Number(row.assessmentPaperId), row.markObtained]));
       const completedPaperCount = requiredPapers.filter((paper: any) => {
         const value = savedByPaperId.get(Number(paper.id));
@@ -1824,9 +1953,9 @@ async function buildClassExamProgress(examId: number, classId: number): Promise<
     totalUnrecorded += unrecorded;
 
     result.push({
-      subjectId: subject.id,
+      subjectId,
       subjectName: subject.name,
-      assessmentId: assessment.id,
+      assessmentId: Number(assessment.id),
       assessmentCreated: true,
       totalStudents,
       markedCount: withMarks,
@@ -12851,7 +12980,8 @@ ${schoolName}`;
       if (!classInfo || classInfo.schoolId !== schoolId) return res.status(404).json({ message: "Class not found" });
       if (!exam || (exam.schoolId && exam.schoolId !== schoolId)) return res.status(404).json({ message: "Exercise/exam not found" });
 
-      const progress = await buildClassExamProgress(data.examId, data.classId);
+      const progressContext = await loadExamProgressContext(schoolId, data.examId);
+      const progress = buildClassExamProgress(progressContext, data.classId);
       const result = await setClassPublication({
         schoolId,
         examId: data.examId,
@@ -12904,14 +13034,15 @@ ${schoolName}`;
       if (!exam || (exam.schoolId && exam.schoolId !== schoolId)) return res.status(404).json({ message: "Exercise/exam not found" });
       const classes = (await storage.getClassesBySchool(schoolId)).filter((classInfo: any) => Number(classInfo.streamId) === Number(data.streamId));
       if (!classes.length) return res.status(404).json({ message: "No classes found for the selected stream" });
+      const progressContext = await loadExamProgressContext(schoolId, data.examId);
 
       const changedClasses: number[] = [];
       const summaries: any[] = [];
       for (const classInfo of classes) {
-        const current = await getClassExamPublication(data.examId, classInfo.id);
+        const current = progressContext.publicationByClass.get(Number(classInfo.id));
         if (data.publish && current?.isPublished) continue;
         if (!data.publish && !current?.isPublished) continue;
-        const progress = await buildClassExamProgress(data.examId, classInfo.id);
+        const progress = buildClassExamProgress(progressContext, classInfo.id);
         summaries.push({ classId: classInfo.id, className: classInfo.className, ...progress.totals });
         const result = await setClassPublication({
           schoolId,
@@ -12967,19 +13098,18 @@ ${schoolName}`;
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const allStreams = await storage.getAllStreams();
-      const schoolClasses = await storage.getClassesBySchool(schoolId);
-      const publicationRows = await db.select().from(assessmentPublications).where(and(
-        eq(assessmentPublications.schoolId, schoolId),
-        eq(assessmentPublications.examId, examId),
-      ));
-      const publicationByClass = new Map(publicationRows.map((row: any) => [Number(row.classId), row]));
+      const [allStreams, progressContext] = await Promise.all([
+        storage.getAllStreams(),
+        loadExamProgressContext(schoolId, examId),
+      ]);
+      const schoolClasses = Array.from(progressContext.classesById.values());
+      const publicationByClass = progressContext.publicationByClass;
 
-      const streamStats = await Promise.all(allStreams.map(async (stream: any) => {
+      const streamStats = allStreams.map((stream: any) => {
         const streamClasses = schoolClasses.filter((classInfo: any) => Number(classInfo.streamId) === Number(stream.id));
         if (!streamClasses.length) return null;
 
-        const classProgress = await Promise.all(streamClasses.map((classInfo: any) => buildClassExamProgress(examId, classInfo.id)));
+        const classProgress = streamClasses.map((classInfo: any) => buildClassExamProgress(progressContext, classInfo.id));
         const expectedEntries = classProgress.reduce((sum, item) => sum + item.totals.expectedEntries, 0);
         const withMarks = classProgress.reduce((sum, item) => sum + item.totals.withMarks, 0);
         const acknowledged = classProgress.reduce((sum, item) => sum + item.totals.acknowledged, 0);
@@ -13030,7 +13160,7 @@ ${schoolName}`;
           anyPublished,
           publicationStatus: allPublished ? "Published" : anyPublished ? "Partially published" : "Unpublished",
         };
-      }));
+      });
 
       res.json(streamStats.filter(Boolean));
     } catch (error) {
@@ -13048,7 +13178,8 @@ ${schoolName}`;
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const progress = await buildClassExamProgress(examId, classId);
+      const progressContext = await loadExamProgressContext(schoolId, examId);
+      const progress = buildClassExamProgress(progressContext, classId);
       if (progress.classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
       const subjectIds = new Set(progress.subjects.map((subject) => Number(subject.subjectId)));

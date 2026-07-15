@@ -118,7 +118,7 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Parent Records", url: "/parents", icon: UserCheck, requiredPermissions: ["parents.view"] },
       { title: "Clinic Records", url: "/clinic", icon: Stethoscope, requiredPermissions: ["clinic.view"], featureKey: "enableHostel" },
       { title: "Disciplinary Records", url: "/discipline", icon: Shield, requiredPermissions: ["discipline.view"] },
-      { title: "Quality Control Records", url: "/qc-reports", icon: ClipboardList, requiredPermissions: ["qc_reports.view"] },
+      { title: "Quality Control Reports", url: "/qc-reports", icon: ClipboardList, requiredPermissions: ["qc_reports.view"] },
       { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view"] },
       { title: "Hostel Attendance Register", url: "/hostel", icon: Building, requiredPermissions: ["hostel.view"], featureKey: "enableHostel" },
     ],

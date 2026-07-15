@@ -121,6 +121,7 @@ export interface IStorage {
   getStudentCountByClass(classId: number): Promise<number>;
   
   getClassSubjects(classId: number): Promise<ClassSubject[]>;
+  getClassSubjectOverridesByClasses(classIds: number[]): Promise<ClassSubject[]>;
   addClassSubject(classId: number, subjectId: number): Promise<ClassSubject>;
   removeClassSubject(classId: number, subjectId: number): Promise<boolean>;
   setClassSubjects(classId: number, subjectIds: number[]): Promise<void>;
@@ -135,6 +136,7 @@ export interface IStorage {
 
   getAllStudents(): Promise<Student[]>;
   getStudentsBySchool(schoolId: number): Promise<Student[]>;
+  getActiveStudentsBySchool(schoolId: number): Promise<Student[]>;
   getArchivedStudents(): Promise<Student[]>;
   getArchivedStudentsBySchool(schoolId: number): Promise<Student[]>;
   getStudent(id: number): Promise<Student | undefined>;
@@ -160,6 +162,7 @@ export interface IStorage {
   updateStaffClasses(staffId: number, classIds: number[]): Promise<void>;
   
   getStudentSubjects(studentId: number): Promise<StudentSubject[]>;
+  getStudentSubjectOverridesByStudents(studentIds: number[]): Promise<StudentSubject[]>;
   updateStudentSubjects(studentId: number, subjectIds: number[]): Promise<void>;
 
   getAllGrades(): Promise<Grade[]>;
@@ -431,6 +434,7 @@ export interface IStorage {
 
   // Assessment Papers
   getAssessmentPapers(assessmentId: number): Promise<AssessmentPaper[]>;
+  getAssessmentPapersByAssessments(assessmentIds: number[]): Promise<AssessmentPaper[]>;
   createAssessmentPaper(paper: InsertAssessmentPaper): Promise<AssessmentPaper>;
   updateAssessmentPaper(id: number, paper: Partial<InsertAssessmentPaper>): Promise<AssessmentPaper | undefined>;
   deleteAssessmentPaper(id: number): Promise<boolean>;
@@ -466,6 +470,7 @@ export interface IStorage {
   
   // Assessment Mark Papers
   getMarkPapers(assessmentMarkId: number): Promise<AssessmentMarkPaper[]>;
+  getMarkPapersByMarks(assessmentMarkIds: number[]): Promise<AssessmentMarkPaper[]>;
   setMarkPapers(assessmentMarkId: number, papers: { assessmentPaperId: number; markObtained: number | null }[]): Promise<AssessmentMarkPaper[]>;
 
   // Notifications
@@ -1189,6 +1194,11 @@ export class DatabaseStorage implements IStorage {
       assignmentMode: "add",
     } as ClassSubject));
   }
+
+  async getClassSubjectOverridesByClasses(classIds: number[]): Promise<ClassSubject[]> {
+    if (classIds.length === 0) return [];
+    return db.select().from(classSubjects).where(inArray(classSubjects.classId, classIds));
+  }
   
   async addClassSubject(classId: number, subjectId: number): Promise<ClassSubject> {
     const resolved = new Set((await this.getClassSubjects(classId)).map((row) => row.subjectId));
@@ -1296,6 +1306,14 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(students)
       .where(and(eq(students.schoolId, schoolId), nonArchivedStudentCondition()))
+      .orderBy(...studentFirstNameOrder);
+  }
+
+  async getActiveStudentsBySchool(schoolId: number): Promise<Student[]> {
+    return db
+      .select()
+      .from(students)
+      .where(and(eq(students.schoolId, schoolId), activeEnrolledStudentCondition()))
       .orderBy(...studentFirstNameOrder);
   }
 
@@ -1506,6 +1524,11 @@ export class DatabaseStorage implements IStorage {
       subjectId,
       assignmentMode: "add",
     } as StudentSubject));
+  }
+
+  async getStudentSubjectOverridesByStudents(studentIds: number[]): Promise<StudentSubject[]> {
+    if (studentIds.length === 0) return [];
+    return db.select().from(studentSubjects).where(inArray(studentSubjects.studentId, studentIds));
   }
 
   async updateStudentSubjects(studentId: number, subjectIds: number[]): Promise<void> {
@@ -3481,6 +3504,11 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(assessmentPapers).where(eq(assessmentPapers.assessmentId, assessmentId));
   }
 
+  async getAssessmentPapersByAssessments(assessmentIds: number[]): Promise<AssessmentPaper[]> {
+    if (assessmentIds.length === 0) return [];
+    return db.select().from(assessmentPapers).where(inArray(assessmentPapers.assessmentId, assessmentIds));
+  }
+
   async createAssessmentPaper(paper: InsertAssessmentPaper): Promise<AssessmentPaper> {
     const [created] = await db.insert(assessmentPapers).values(paper).returning();
     return created;
@@ -3670,6 +3698,11 @@ export class DatabaseStorage implements IStorage {
   // Assessment Mark Papers methods
   async getMarkPapers(assessmentMarkId: number): Promise<AssessmentMarkPaper[]> {
     return db.select().from(assessmentMarkPapers).where(eq(assessmentMarkPapers.assessmentMarkId, assessmentMarkId));
+  }
+
+  async getMarkPapersByMarks(assessmentMarkIds: number[]): Promise<AssessmentMarkPaper[]> {
+    if (assessmentMarkIds.length === 0) return [];
+    return db.select().from(assessmentMarkPapers).where(inArray(assessmentMarkPapers.assessmentMarkId, assessmentMarkIds));
   }
 
   async setMarkPapers(assessmentMarkId: number, papers: { assessmentPaperId: number; markObtained: number | null }[]): Promise<AssessmentMarkPaper[]> {

@@ -47,7 +47,7 @@ interface SubjectProgressData {
 
 function statusPill(status: string) {
   switch (status) {
-    case "completed":
+    case "complete":
       return (
         <span className="qc-pill qc-pill-ok">
           <CheckCircle2 className="h-3 w-3" /> Completed
@@ -108,7 +108,7 @@ export default function QCReportsClassPage() {
     return name.includes(q) || (s.admissionNo || "").toLowerCase().includes(q);
   }) || [];
 
-  const completedCount = data?.students.filter(s => s.qcStatus === "completed").length || 0;
+  const completedCount = data?.students.filter(s => s.qcStatus === "complete").length || 0;
   const totalCount = data?.students.length || 0;
 
   return (
@@ -384,7 +384,7 @@ export default function QCReportsClassPage() {
                 </div>
                 <div style={{ padding: "14px", fontSize: "12px", color: "var(--qc-muted)" }}>
                   {student.hasReport
-                    ? `Report ${student.qcStatus === "completed" ? "completed" : "in progress"} — click View / Edit to open`
+                    ? `Report ${student.qcStatus === "complete" ? "complete" : "in progress"} — click View / Edit to open`
                     : "No report started yet — click Start to create"}
                 </div>
               </div>

@@ -51,6 +51,8 @@ import ApplicationsPage from "@/pages/applications";
 import MessagesPage from "@/pages/messages";
 import ApplyPage from "@/pages/apply";
 import QCReportsPage from "@/pages/qc-reports";
+import QCReportsClassPage from "@/pages/qc-reports-class";
+import QCReportsStudentPage from "@/pages/qc-reports-student";
 import RecordOfMarksPage from "@/pages/record-of-marks";
 import MyClassesPage from "@/pages/my-classes";
 import MyAttendancePage from "@/pages/my-attendance";
@@ -849,8 +851,8 @@ function AuthenticatedRoutes() {
         <Route path="/marks-entry"><ProtectedRoute component={MarksEntryPage} /></Route>
         <Route path="/academic-reports"><ProtectedRoute component={AcademicReportsPage} /></Route>
         <Route path="/qc-reports"><ProtectedRoute component={QCReportsPage} /></Route>
-        <Route path="/qc-reports/class/:classId"><Redirect to="/qc-reports" /></Route>
-        <Route path="/qc-reports/student/:studentId"><Redirect to="/qc-reports" /></Route>
+        <Route path="/qc-reports/class/:classId"><ProtectedRoute component={QCReportsClassPage} /></Route>
+        <Route path="/qc-reports/student/:studentId"><ProtectedRoute component={QCReportsStudentPage} /></Route>
         <Route path="/attendance"><ProtectedRoute component={AttendancePage} /></Route>
         <Route path="/fees"><ProtectedRoute component={FeesRoutePage} /></Route>
         <Route path="/clinic"><ProtectedRoute component={ClinicPage} /></Route>

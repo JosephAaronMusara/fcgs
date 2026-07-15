@@ -396,7 +396,7 @@ export default function QCReportsStudentPage() {
             </button>
             <button
               className="qc-btn qc-btn-ok"
-              onClick={() => saveMutation.mutate("completed")}
+              onClick={() => saveMutation.mutate("complete")}
               disabled={saveMutation.isPending}
               data-testid="button-complete"
             >
@@ -637,7 +637,7 @@ export default function QCReportsStudentPage() {
                   >
                     <option value="not_started">Not started</option>
                     <option value="in_progress">In progress</option>
-                    <option value="completed">Complete</option>
+                    <option value="complete">Complete</option>
                   </select>
                 </div>
                 <div className="qc-field">
@@ -655,7 +655,7 @@ export default function QCReportsStudentPage() {
               <div className="qc-form-actions">
                 <button
                   className="qc-btn qc-btn-ok"
-                  onClick={() => saveMutation.mutate(qcStatus === "completed" ? "completed" : "in_progress")}
+                  onClick={() => saveMutation.mutate(qcStatus === "complete" ? "complete" : "in_progress")}
                   disabled={saveMutation.isPending}
                   data-testid="button-save-qc"
                 >
