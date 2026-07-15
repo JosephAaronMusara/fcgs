@@ -127,6 +127,7 @@ interface MarksEntryData {
   marksByStudent: Record<number, AssessmentMark>;
   grades: Grade[];
   comments: AssessmentComment[];
+  publication?: { isPublished: boolean; status: string };
 }
 
 interface StudentMarkState {
@@ -200,6 +201,7 @@ interface PendingImportAssessment {
   recordCount: number;
   skippedCount: number;
   isCurrentlySelected: boolean;
+  isPublished: boolean;
   entries: ImportedAssessmentEntry[];
   data: MarksEntryData;
 }
@@ -446,6 +448,11 @@ export default function MarksEntryPage() {
     const data = marksQueries[index]?.data;
     if (data) marksDataByAssessment[assessmentId] = data;
   });
+
+  const isAssessmentPublished = useCallback(
+    (assessmentId: number) => marksDataByAssessmentRef.current[assessmentId]?.publication?.isPublished === true,
+    [],
+  );
 
   const selectedAssessments = useMemo(
     () =>
@@ -721,8 +728,12 @@ export default function MarksEntryPage() {
 
       if (!hasAnyMark)
         return { percentage: null, gradeName: "", gradeId: null };
+      const allRequiredPapersMarked = data.papers.length > 0 && data.papers.every((paper) => {
+        const value = paperMarks[paper.id];
+        return value !== "" && value !== undefined;
+      });
       const percentage =
-        totalWeight > 0 ? Math.round(totalWeightedScore) : null;
+        allRequiredPapersMarked && totalWeight > 0 ? Math.round(totalWeightedScore) : null;
       if (percentage === null)
         return { percentage, gradeName: "", gradeId: null };
 
@@ -755,15 +766,15 @@ export default function MarksEntryPage() {
       const currentState = studentMarksRef.current[assessmentId]?.[studentId];
 
       if (!hasMark) {
+        const normalizedStatus = ["present", "absent", "sick", "excused"].includes(newAttStatus)
+          ? newAttStatus
+          : "none";
+        const statusComment = STATUS_OPTIONS.find((option) => option.value === normalizedStatus)?.label || "";
         return {
-          attStatus: ["present", "absent", "sick", "excused"].includes(
-            newAttStatus,
-          )
-            ? newAttStatus
-            : "none",
+          attStatus: normalizedStatus,
           commentSource: "pool",
           customCommentText: "",
-          autoCommentSnapshot: "",
+          autoCommentSnapshot: ["absent", "sick", "excused"].includes(normalizedStatus) ? statusComment : "",
         };
       }
 
@@ -815,6 +826,7 @@ export default function MarksEntryPage() {
     const currentEntry = studentMarksRef.current[assessmentId]?.[studentId];
     const data = marksDataByAssessmentRef.current[assessmentId];
     const key = entryKey(assessmentId, studentId);
+    if (data?.publication?.isPublished) return;
     if (
       !currentEntry?.isDirty ||
       !data ||
@@ -1018,7 +1030,7 @@ export default function MarksEntryPage() {
       rawValue: string,
     ) => {
       const data = marksDataByAssessmentRef.current[assessmentId];
-      if (!data) return;
+      if (!data || data.publication?.isPublished) return;
       const value = rawValue.replace(/[^0-9]/g, "");
       if (rawValue !== value) {
         setValidationWarnings((current) => [
@@ -1097,7 +1109,7 @@ export default function MarksEntryPage() {
     (assessmentId: number, studentId: number, value: string) => {
       const data = marksDataByAssessmentRef.current[assessmentId];
       const existing = studentMarksRef.current[assessmentId]?.[studentId];
-      if (!data || !existing) return;
+      if (!data || data.publication?.isPublished || !existing) return;
 
       const shouldClearMarks =
         value === "absent" || value === "sick" || value === "excused";
@@ -1126,6 +1138,7 @@ export default function MarksEntryPage() {
 
   const handleCustomCommentChange = useCallback(
     (assessmentId: number, studentId: number, value: string) => {
+      if (isAssessmentPublished(assessmentId)) return;
       updateEntry(assessmentId, studentId, (current) => ({
         ...current,
         customCommentText: value,
@@ -1135,7 +1148,7 @@ export default function MarksEntryPage() {
       }));
       triggerAutoSave(assessmentId, studentId);
     },
-    [triggerAutoSave, updateEntry],
+    [isAssessmentPublished, triggerAutoSave, updateEntry],
   );
 
   const handleManualSave = useCallback(
@@ -1152,6 +1165,7 @@ export default function MarksEntryPage() {
     (studentId: number) => {
       let queued = 0;
       selectedAssessmentNumbers.forEach((assessmentId) => {
+        if (isAssessmentPublished(assessmentId)) return;
         const entry = studentMarksRef.current[assessmentId]?.[studentId];
         if (!entry?.isDirty || entry.isSaving) return;
         const key = entryKey(assessmentId, studentId);
@@ -1168,12 +1182,13 @@ export default function MarksEntryPage() {
         });
       }
     },
-    [doSave, selectedAssessmentNumbers, toast],
+    [doSave, isAssessmentPublished, selectedAssessmentNumbers, toast],
   );
 
   const getStudentRowSaveState = useCallback(
     (studentId: number) => {
       const entries = selectedAssessmentNumbers
+        .filter((assessmentId) => !marksDataByAssessment[assessmentId]?.publication?.isPublished)
         .map((assessmentId) => studentMarks[assessmentId]?.[studentId])
         .filter((entry): entry is StudentMarkState => Boolean(entry));
       return {
@@ -1181,12 +1196,13 @@ export default function MarksEntryPage() {
         isSaving: entries.some((entry) => entry.isSaving),
       };
     },
-    [selectedAssessmentNumbers, studentMarks],
+    [marksDataByAssessment, selectedAssessmentNumbers, studentMarks],
   );
 
   const handleSaveAll = useCallback(() => {
     let queued = 0;
     selectedAssessmentNumbers.forEach((assessmentId) => {
+      if (isAssessmentPublished(assessmentId)) return;
       Object.entries(studentMarksRef.current[assessmentId] || {}).forEach(
         ([studentIdKey, entry]) => {
           if (!entry.isDirty || entry.isSaving) return;
@@ -1205,7 +1221,7 @@ export default function MarksEntryPage() {
         description: "There are no unsaved changes.",
       });
     }
-  }, [doSave, selectedAssessmentNumbers, toast]);
+  }, [doSave, isAssessmentPublished, selectedAssessmentNumbers, toast]);
 
   const toggleAssessment = useCallback(
     (assessmentId: string) => {
@@ -1625,6 +1641,7 @@ export default function MarksEntryPage() {
             recordCount: entries.length,
             skippedCount,
             isCurrentlySelected: true,
+            isPublished: data.publication?.isPublished === true,
             entries,
             data,
           },
@@ -1653,7 +1670,7 @@ export default function MarksEntryPage() {
           setPendingImport(legacyPreview);
           setSelectedImportAssessmentIds(
             legacyPreview.assessments
-              .filter((item) => item.recordCount > 0)
+              .filter((item) => item.recordCount > 0 && !item.isPublished)
               .map((item) => item.assessmentId),
           );
           return;
@@ -1861,6 +1878,7 @@ export default function MarksEntryPage() {
               isCurrentlySelected: selectedAssessmentIds.includes(
                 String(metadataAssessment.id),
               ),
+              isPublished: data.publication?.isPublished === true,
               entries,
               data,
             };
@@ -1879,7 +1897,7 @@ export default function MarksEntryPage() {
         setPendingImport(preview);
         setSelectedImportAssessmentIds(
           previewAssessments
-            .filter((item) => item.recordCount > 0)
+            .filter((item) => item.recordCount > 0 && !item.isPublished)
             .map((item) => item.assessmentId),
         );
       } catch (error: any) {
@@ -1907,18 +1925,20 @@ export default function MarksEntryPage() {
   );
 
   const toggleImportAssessment = useCallback((assessmentId: number) => {
+    const item = pendingImport?.assessments.find((assessment) => assessment.assessmentId === assessmentId);
+    if (!item || item.isPublished || item.recordCount === 0) return;
     setSelectedImportAssessmentIds((current) =>
       current.includes(assessmentId)
         ? current.filter((id) => id !== assessmentId)
         : [...current, assessmentId],
     );
-  }, []);
+  }, [pendingImport]);
 
   const applyPendingImport = useCallback(async () => {
     if (!pendingImport || selectedImportAssessmentIds.length === 0) return;
     setIsApplyingImport(true);
     const selectedItems = pendingImport.assessments.filter((item) =>
-      selectedImportAssessmentIds.includes(item.assessmentId),
+      selectedImportAssessmentIds.includes(item.assessmentId) && !item.isPublished,
     );
     const saveTargets: Array<{ assessmentId: number; studentId: number }> = [];
 
@@ -2093,8 +2113,10 @@ export default function MarksEntryPage() {
         : { percentage: null, gradeName: "", gradeId: null };
     const poolComment = getPoolComment(assessmentId, result.gradeId);
     const displayComment =
-      entry.commentSource === "custom" ? entry.customCommentText : poolComment;
+      entry.commentSource === "custom" ? entry.customCommentText : (entry.autoCommentSnapshot || poolComment);
+    const published = data.publication?.isPublished === true;
     const blocksMarks =
+      published ||
       entry.attStatus === "absent" ||
       entry.attStatus === "sick" ||
       entry.attStatus === "excused";
@@ -2107,6 +2129,7 @@ export default function MarksEntryPage() {
               <Label className="text-xs">Status</Label>
               <Select
                 value={entry.attStatus || "none"}
+                disabled={published}
                 onValueChange={(value) =>
                   handleAttStatusChange(assessmentId, studentId, value)
                 }
@@ -2164,6 +2187,7 @@ export default function MarksEntryPage() {
           <TableCell className="border-l px-1 py-0.5 align-middle sm:py-1 sm:px-2">
             <Select
               value={entry.attStatus || "none"}
+              disabled={published}
               onValueChange={(value) =>
                 handleAttStatusChange(assessmentId, studentId, value)
               }
@@ -2222,6 +2246,7 @@ export default function MarksEntryPage() {
               <Label className="text-xs">Status</Label>
               <Select
                 value={entry.attStatus || "none"}
+                disabled={published}
                 onValueChange={(value) =>
                   handleAttStatusChange(assessmentId, studentId, value)
                 }
@@ -2293,6 +2318,7 @@ export default function MarksEntryPage() {
             <Label className="text-xs">Comment</Label>
             <Textarea
               rows={2}
+              disabled={published}
               className="min-h-16 resize-y text-xs"
               placeholder={poolComment || "No comment available"}
               value={displayComment || ""}
@@ -2310,7 +2336,7 @@ export default function MarksEntryPage() {
             size="sm"
             className="h-8 w-full text-xs"
             onClick={() => handleManualSave(assessmentId, studentId)}
-            disabled={entry.isSaving || !entry.isDirty}
+            disabled={published || entry.isSaving || !entry.isDirty}
             data-testid={`button-save-${assessmentId}-${studentId}`}
           >
             {entry.isSaving ? (
@@ -2331,6 +2357,7 @@ export default function MarksEntryPage() {
         <TableCell className="border-l px-1 py-0.5 align-middle sm:py-1 sm:px-2">
           <Select
             value={entry.attStatus || "none"}
+            disabled={published}
             onValueChange={(value) =>
               handleAttStatusChange(assessmentId, studentId, value)
             }
@@ -2397,6 +2424,7 @@ export default function MarksEntryPage() {
         <TableCell className="px-1 py-0.5 align-middle sm:px-2 sm:py-1">
           <Textarea
             rows={1}
+            disabled={published}
             className="h-8 min-h-8 max-h-8 w-[190px] resize-none overflow-hidden px-1.5 py-1 text-[10px] sm:h-9 sm:min-h-9 sm:max-h-9 sm:w-[220px] sm:px-2 sm:text-xs md:w-[250px]"
             placeholder={poolComment || "No comment available"}
             value={displayComment || ""}
@@ -2415,7 +2443,7 @@ export default function MarksEntryPage() {
             size="sm"
             className="h-7 px-2 text-[10px] sm:h-8 sm:px-3 sm:text-xs"
             onClick={() => handleManualSave(assessmentId, studentId)}
-            disabled={entry.isSaving || !entry.isDirty}
+            disabled={published || entry.isSaving || !entry.isDirty}
             data-testid={`button-save-${assessmentId}-${studentId}`}
           >
             {entry.isSaving ? (
@@ -2902,15 +2930,18 @@ export default function MarksEntryPage() {
                     {selectedAssessmentIds.length === 1 ? "" : "s"} in one file
                   </div>
                   <div className="mt-2 flex max-w-full flex-wrap gap-1">
-                    {selectedAssessments.map((assessment) => (
-                      <Badge
-                        key={assessment.id}
-                        variant="outline"
-                        className="max-w-[220px] truncate text-[10px] sm:text-xs"
-                      >
-                        {assessment.name}
-                      </Badge>
-                    ))}
+                    {selectedAssessments.map((assessment) => {
+                      const published = isAssessmentPublished(assessment.id);
+                      return (
+                        <Badge
+                          key={assessment.id}
+                          variant={published ? "default" : "outline"}
+                          className={cn("max-w-[260px] truncate text-[10px] sm:text-xs", published && "bg-blue-600 text-white hover:bg-blue-600")}
+                        >
+                          {assessment.name}{published ? " • Published" : ""}
+                        </Badge>
+                      );
+                    })}
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
@@ -2992,8 +3023,9 @@ export default function MarksEntryPage() {
                                 )}
                                 className="border-l bg-muted/40 px-1 py-1 text-center sm:px-2 sm:py-2"
                               >
-                                <div className="max-w-[210px] truncate text-[10px] font-semibold leading-tight sm:max-w-[280px] sm:text-xs md:max-w-[360px] md:text-sm">
-                                  {data.assessment.name}
+                                <div className="flex max-w-[230px] items-center justify-center gap-1.5 sm:max-w-[310px] md:max-w-[390px]">
+                                  <span className="truncate text-[10px] font-semibold leading-tight sm:text-xs md:text-sm">{data.assessment.name}</span>
+                                  {data.publication?.isPublished && <Badge className="shrink-0 bg-blue-600 px-1.5 py-0 text-[8px] text-white hover:bg-blue-600 sm:text-[9px]">Published</Badge>}
                                 </div>
                               </TableHead>
                             );
@@ -3202,7 +3234,7 @@ export default function MarksEntryPage() {
                 onClick={() =>
                   setSelectedImportAssessmentIds(
                     pendingImport?.assessments
-                      .filter((item) => item.recordCount > 0)
+                      .filter((item) => item.recordCount > 0 && !item.isPublished)
                       .map((item) => item.assessmentId) || [],
                   )
                 }
@@ -3225,7 +3257,7 @@ export default function MarksEntryPage() {
               const checked = selectedImportAssessmentIds.includes(
                 item.assessmentId,
               );
-              const disabled = item.recordCount === 0;
+              const disabled = item.recordCount === 0 || item.isPublished;
               return (
                 <button
                   key={item.assessmentId}
@@ -3256,9 +3288,9 @@ export default function MarksEntryPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{item.name}</span>
                       <Badge variant="outline" className="text-[10px]">
-                        {item.paperCount} paper
-                        {item.paperCount === 1 ? "" : "s"}
+                        {item.paperCount} paper{item.paperCount === 1 ? "" : "s"}
                       </Badge>
+                      {item.isPublished && <Badge className="bg-blue-600 text-[10px] text-white hover:bg-blue-600">Published — locked</Badge>}
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
                       {item.recordCount} valid student record
@@ -3268,14 +3300,12 @@ export default function MarksEntryPage() {
                         : ""}
                     </div>
                     <div className="mt-1 text-xs">
-                      {item.isCurrentlySelected ? (
-                        <span className="text-green-700 dark:text-green-400">
-                          Already displayed
-                        </span>
+                      {item.isPublished ? (
+                        <span className="text-muted-foreground">Published — locked and excluded from import</span>
+                      ) : item.isCurrentlySelected ? (
+                        <span className="text-green-700 dark:text-green-400">Already displayed</span>
                       ) : (
-                        <span className="text-blue-700 dark:text-blue-400">
-                          Will be added to the Marks Entry view
-                        </span>
+                        <span className="text-blue-700 dark:text-blue-400">Will be added to the Marks Entry view</span>
                       )}
                     </div>
                   </div>

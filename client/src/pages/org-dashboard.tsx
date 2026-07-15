@@ -2,6 +2,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import CalendarPage from "@/pages/calendar";
+import InternalTransfersPage from "@/pages/internal-transfers";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useUpload } from "@/hooks/use-upload";
@@ -58,6 +59,7 @@ import {
   Mail,
   Phone,
   Archive,
+  ArrowRightLeft,
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
@@ -186,6 +188,7 @@ export default function OrgDashboard() {
   const [isManageAccountOpen, setIsManageAccountOpen] = useState(false);
   const [isOrgSettingsOpen, setIsOrgSettingsOpen] = useState(false);
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+  const [isInternalTransfersOpen, setIsInternalTransfersOpen] = useState(false);
   const currentYear = new Date().getFullYear();
   const [orgAcademicYear, setOrgAcademicYear] = useState<number>(currentYear);
   const [orgTerm, setOrgTerm] = useState<string>("term1");
@@ -989,6 +992,15 @@ export default function OrgDashboard() {
                 <Calendar className="h-5 w-5" />
               </Button>
             )}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setIsInternalTransfersOpen(true)}
+              data-testid="button-open-hq-internal-transfers"
+              title="Internal Transfers"
+            >
+              <ArrowRightLeft className="h-5 w-5" />
+            </Button>
             <Button 
               variant="ghost" 
               size="icon" 
@@ -1970,6 +1982,23 @@ export default function OrgDashboard() {
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 pb-6 pt-4">
             <CalendarPage />
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isInternalTransfersOpen} onOpenChange={setIsInternalTransfersOpen}>
+        <DialogContent className="w-[98vw] max-w-7xl h-[92vh] overflow-y-auto p-0">
+          <DialogHeader className="px-6 pt-6 pb-2">
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowRightLeft className="h-5 w-5" />
+              Internal Transfers
+            </DialogTitle>
+            <DialogDescription>
+              Transfer students and staff between schools in the organisation.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="px-2 pb-6">
+            <InternalTransfersPage />
           </div>
         </DialogContent>
       </Dialog>

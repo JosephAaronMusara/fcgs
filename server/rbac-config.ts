@@ -8,6 +8,11 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "students.edit", name: "Edit Students", description: "Modify student information", category: "Students" },
   { code: "students.delete", name: "Delete Students", description: "Remove students from the system", category: "Students" },
   
+  // Internal Transfers
+  { code: "internal_transfers.view", name: "View Internal Transfers", description: "View internal school-to-school transfer options and completed transfer history", category: "Internal Transfers" },
+  { code: "internal_transfers.transfer.student", name: "Transfer Students Between Schools", description: "Move student records between schools within the same organisation", category: "Internal Transfers" },
+  { code: "internal_transfers.transfer.staff", name: "Transfer Staff Between Schools", description: "Move staff records between schools within the same organisation", category: "Internal Transfers" },
+
   // Staff
   { code: "staff.view", name: "View Staff", description: "View staff list and profiles", category: "Staff" },
   { code: "staff.create", name: "Create Staff", description: "Add new staff members", category: "Staff" },
@@ -155,6 +160,11 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "reports.view", name: "View Reports", description: "View academic report cards and analytics", category: "Reports" },
   { code: "reports.generate", name: "Generate Reports", description: "Generate and download report cards", category: "Reports" },
   { code: "reports.send", name: "Send Reports", description: "Send report cards to parents via email/SMS", category: "Reports" },
+  { code: "academic_reports.publish.class", name: "Publish Class Results", description: "Publish and lock an exercise or exam for one class", category: "Reports" },
+  { code: "academic_reports.publish.stream", name: "Publish Stream Results", description: "Publish and lock an exercise or exam for every class in a stream", category: "Reports" },
+  { code: "academic_reports.unpublish", name: "Unpublish Results", description: "Unpublish results with a recorded reason so marks can be corrected", category: "Reports" },
+  { code: "academic_reports.send.class", name: "Send Class Reports", description: "Send published report cards for a class", category: "Reports" },
+  { code: "academic_reports.send.stream", name: "Send Stream Reports", description: "Send published report cards for published classes in a stream", category: "Reports" },
   { code: "reports.ecd_entry", name: "Manage ECD Assessment Entry", description: "Create and update ECD assessment ticks in Academic Reports", category: "Reports" },
   { code: "reports.comments_manage", name: "Manage Report Comments", description: "Create and manage report comment banks", category: "Reports" },
 

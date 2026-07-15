@@ -64,6 +64,7 @@ import Student360Page from "@/pages/student-360";
 import Staff360Page from "@/pages/staff-360";
 import KundAiPage from "@/pages/kundai";
 import TransportPage from "@/pages/transport";
+import InternalTransfersPage from "@/pages/internal-transfers";
 import ArrearsPage from "@/pages/arrears";
 import SchoolExpensesPage from "@/pages/school-expenses";
 import SchoolIncomesPage from "@/pages/school-incomes";
@@ -113,6 +114,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/marks$/, permissions: ["marks.view"] },
   { pattern: /^\/record-of-marks$/, permissions: ["record_of_marks.view"] },
   { pattern: /^\/kundai$/, permissions: ["kundai.view"] },
+  { pattern: /^\/internal-transfers$/, permissions: ["internal_transfers.view"] },
   { pattern: /^\/transport$/, permissions: ["transport.view"] },
   { pattern: /^\/arrears$/, permissions: ["arrears.view"] },
   { pattern: /^\/school-finance$/, permissions: SCHOOL_FINANCE_ROUTE_PERMISSIONS },
@@ -856,6 +858,7 @@ function AuthenticatedRoutes() {
         <Route path="/marks"><ProtectedRoute component={MarksPage} /></Route>
         <Route path="/record-of-marks"><ProtectedRoute component={RecordOfMarksPage} /></Route>
         <Route path="/kundai"><ProtectedRoute component={KundAiPage} /></Route>
+        <Route path="/internal-transfers"><ProtectedRoute component={InternalTransfersPage} /></Route>
         <Route path="/transport"><ProtectedRoute component={TransportPage} /></Route>
         <Route path="/school-finance"><ProtectedRoute component={SchoolFinancePage} /></Route>
         <Route path="/arrears"><ProtectedRoute component={ParentsWithArrearsRedirectPage} /></Route>

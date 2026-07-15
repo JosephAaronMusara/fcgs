@@ -68,6 +68,9 @@ import {
   Eye,
   Layers,
   MessageSquare,
+  Lock,
+  Unlock,
+  CheckCircle2,
   X,
 } from "lucide-react";
 import type {
@@ -84,23 +87,52 @@ import { EcdAssessmentTab } from "@/components/academic-reports/ecd-assessment-t
 
 type ViewMode = "hub" | "class-level" | "report-cards";
 
+interface PublicationState {
+  isPublished: boolean;
+  status: "Published" | "Republished" | "Unpublished";
+  publicationVersion?: number;
+  publishedAt?: string | null;
+}
+
 interface StreamStat {
   streamId: number;
   streamName: string;
-  classes: { id: number; name: string }[];
+  classes: { id: number; name: string; isPublished?: boolean }[];
   progressPct: number | null;
+  withMarksPct: number;
+  acknowledgedPct: number;
+  unrecordedPct: number;
   avgPct: number | null;
   classCount: number;
   studentCount: number;
+  expectedEntries: number;
+  withMarksCount: number;
+  acknowledgedCount: number;
+  partialCount: number;
+  unrecordedCount: number;
+  assessmentCreatedCount: number;
+  assessmentMissingCount: number;
+  publishedCount: number;
+  allPublished: boolean;
+  anyPublished: boolean;
+  publicationStatus: "Published" | "Partially published" | "Unpublished";
 }
 
 interface SubjectProgress {
   subjectId: number;
   subjectName: string;
+  assessmentId: number | null;
+  assessmentCreated: boolean;
   teacherName?: string | null;
   totalStudents: number;
   markedCount: number;
-  progressPct: number;
+  acknowledgedCount: number;
+  partialCount: number;
+  unrecordedCount: number;
+  progressPct: number | null;
+  withMarksPct: number;
+  acknowledgedPct: number;
+  unrecordedPct: number;
   avgPct: number | null;
 }
 
@@ -109,14 +141,26 @@ interface ClassProgressData {
   className: string;
   totalStudents: number;
   subjects: SubjectProgress[];
+  totals?: {
+    expectedEntries: number;
+    withMarks: number;
+    acknowledged: number;
+    partial: number;
+    unrecorded: number;
+    offeredSubjects: number;
+    assessmentsCreated: number;
+    assessmentsMissing: number;
+  };
+  publication: PublicationState;
 }
 
 interface MissingMarkSubject {
   subjectId: number;
   subjectName: string;
+  assessmentCreated?: boolean;
   totalStudents: number;
   missingCount: number;
-  missingStudents: { id: number; name: string; admissionNo: string }[];
+  missingStudents: { id: number; name: string; admissionNo: string; reason?: string }[];
 }
 
 interface MeritRow {
@@ -280,6 +324,7 @@ interface ReportCardData {
   exam: Exam;
   subjects: Subject[];
   reportCards: ReportStudent[];
+  publication: PublicationState;
 }
 
 function sanitizeExcelFilePart(value: string | undefined | null) {
@@ -896,6 +941,7 @@ function ReportCardSlip({
   subjectCommentValues,
   subjectCommentSaveStates,
   onSubjectCommentChange,
+  canSendIndividual,
 }: {
   data: ReportCardData;
   studentReport: ReportStudent;
@@ -914,6 +960,7 @@ function ReportCardSlip({
     subject: Pick<ReportSubject, "assessmentId" | "subjectId">,
     value: string,
   ) => void;
+  canSendIndividual: boolean;
 }) {
   const { student, subjects, summary } = studentReport;
   const { school } = data;
@@ -1753,20 +1800,22 @@ function ReportCardSlip({
           )}
           Download
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => onSendIndividual(student.id)}
-          disabled={sendingId === student.id}
-          data-testid={`button-send-${student.id}`}
-        >
-          {sendingId === student.id ? (
-            <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-          ) : (
-            <Send className="w-4 h-4 mr-1" />
-          )}
-          Send Individual Report Card
-        </Button>
+        {canSendIndividual && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onSendIndividual(student.id)}
+            disabled={sendingId === student.id}
+            data-testid={`button-send-${student.id}`}
+          >
+            {sendingId === student.id ? (
+              <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+            ) : (
+              <Send className="w-4 h-4 mr-1" />
+            )}
+            Send Individual Report Card
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -1777,14 +1826,67 @@ function clampDisplayPercent(value: number | null | undefined) {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-function ProgressBadge({ pct }: { pct: number | null }) {
-  const safePct = clampDisplayPercent(pct);
-  if (safePct === null) return <span className="text-muted-foreground">–</span>;
-  const cls = safePct >= 80 ? "qc-pct-circle-ok" : safePct >= 40 ? "qc-pct-circle-mid" : "qc-pct-circle-bad";
+function ProgressBadge({
+  pct,
+  withMarksPct,
+  acknowledgedPct,
+  assessmentCreated = true,
+  title,
+}: {
+  pct: number | null;
+  withMarksPct?: number;
+  acknowledgedPct?: number;
+  assessmentCreated?: boolean;
+  title?: string;
+}) {
+  if (!assessmentCreated) {
+    return (
+      <span
+        className="inline-flex h-16 w-16 items-center justify-center rounded-full border-[3px] border-muted-foreground/35 text-xl font-bold text-muted-foreground"
+        title={title || "Assessment not created"}
+        aria-label="Assessment not created"
+      >
+        ×
+      </span>
+    );
+  }
+
+  const safePct = clampDisplayPercent(pct) ?? 0;
+  const green = Math.max(0, Math.min(100, clampDisplayPercent(withMarksPct) ?? safePct));
+  const yellow = Math.max(0, Math.min(100 - green, clampDisplayPercent(acknowledgedPct) ?? 0));
+  const background = `conic-gradient(#22c55e 0 ${green}%, #eab308 ${green}% ${green + yellow}%, hsl(var(--muted)) ${green + yellow}% 100%)`;
+
   return (
-    <span className={`qc-pct-circle ${cls}`} data-testid="pill-progress">
-      {safePct}%
+    <span
+      className="relative inline-flex h-16 w-16 shrink-0 items-center justify-center rounded-full"
+      style={{ background }}
+      title={title || `${green}% with marks, ${yellow}% acknowledged not written, ${Math.max(0, 100 - green - yellow)}% not recorded`}
+      data-testid="pill-progress"
+    >
+      <span className="absolute inset-[4px] rounded-full bg-background" />
+      <span className="relative z-10 text-sm font-semibold">{safePct}%</span>
     </span>
+  );
+}
+
+function ProgressLegend() {
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-muted-foreground" aria-label="Recording progress key">
+      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-green-500" /> With marks</span>
+      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-yellow-500" /> Acknowledged not written</span>
+      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-muted" /> Not recorded</span>
+      <span className="inline-flex items-center gap-1.5"><span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-muted-foreground/40 font-bold">×</span> Assessment not created</span>
+    </div>
+  );
+}
+
+function PublicationBadge({ status }: { status?: string | null }) {
+  if (!status) return null;
+  const published = status === "Published" || status === "Republished";
+  return (
+    <Badge className={published ? "bg-blue-600 text-white hover:bg-blue-600" : "bg-muted text-muted-foreground hover:bg-muted"}>
+      {status}
+    </Badge>
   );
 }
 
@@ -1814,7 +1916,7 @@ function MissingMarksDialog({
         <DialogHeader>
           <DialogTitle>{classLabel} — Missing Marks</DialogTitle>
           <DialogDescription>
-            Students who have not been marked, grouped by subject
+            Incomplete entries, partial papers, and offered subjects whose assessment has not been created.
           </DialogDescription>
         </DialogHeader>
         {isLoading ? (
@@ -1834,12 +1936,10 @@ function MissingMarksDialog({
               <Card key={sub.subjectId}>
                 <CardContent className="p-4">
                   <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
-                    <span
-                      className="font-semibold"
-                      data-testid={`text-missing-subject-${sub.subjectId}`}
-                    >
-                      {sub.subjectName}
-                    </span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold" data-testid={`text-missing-subject-${sub.subjectId}`}>{sub.subjectName}</span>
+                      {sub.assessmentCreated === false && <Badge variant="secondary">Assessment not created</Badge>}
+                    </div>
                     <span className="text-sm text-red-600 dark:text-red-400 font-medium">
                       {sub.missingCount}/{sub.totalStudents} missing
                     </span>
@@ -1847,12 +1947,8 @@ function MissingMarksDialog({
                   <div className="grid grid-cols-2 gap-2">
                     {sub.missingStudents.map((s) => (
                       <div key={s.id} className="text-sm p-2 border rounded-md">
-                        {s.name}
-                        {s.admissionNo && (
-                          <span className="text-muted-foreground ml-1">
-                            ({s.admissionNo})
-                          </span>
-                        )}
+                        <div>{s.name}{s.admissionNo && <span className="text-muted-foreground ml-1">({s.admissionNo})</span>}</div>
+                        {s.reason && <div className="mt-1 text-xs text-muted-foreground">{s.reason}</div>}
                       </div>
                     ))}
                   </div>
@@ -2441,212 +2537,229 @@ function ExamStreamTable({
     modal: "merit" | "analytics",
   ) => void;
 }) {
+  const { hasPermission } = useAuth();
+  const { toast } = useToast();
+  const canPublishStream = hasPermission("academic_reports.publish.stream");
+  const canUnpublish = hasPermission("academic_reports.unpublish");
+  const canSendStream = hasPermission("academic_reports.send.stream");
+
   const { data: streamStats, isLoading } = useQuery<StreamStat[]>({
     queryKey: ["/api/report-hub/stream-stats", String(exam.id)],
   });
 
+  const publicationMutation = useMutation({
+    mutationFn: async (payload: { streamId: number; publish: boolean; reason?: string }) => {
+      const response = await apiRequest("POST", "/api/report-hub/publication/stream", {
+        examId: exam.id,
+        ...payload,
+      });
+      return response.json();
+    },
+    onSuccess: async (result: any, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/report-hub/stream-stats", String(exam.id)] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/report-hub/publication-status", exam.id] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/report-hub/class-progress"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/marks-entry"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] }),
+      ]);
+      toast({
+        title: variables.publish ? "Results published" : "Results unpublished",
+        description: variables.publish
+          ? `${result.changedClassIds?.length || 0} class${result.changedClassIds?.length === 1 ? "" : "es"} updated.`
+          : "Teachers can edit the affected results again.",
+      });
+    },
+    onError: (error: any) => toast({ title: "Unable to update publication", description: error?.message || "Please try again.", variant: "destructive" }),
+  });
+
+  const sendStreamMutation = useMutation({
+    mutationFn: async (stat: StreamStat) => {
+      const publishedClasses = stat.classes.filter((classInfo) => classInfo.isPublished);
+      const results: any[] = [];
+      for (const classInfo of publishedClasses) {
+        const response = await apiRequest("POST", "/api/report-cards/send-all", {
+          examId: exam.id,
+          classId: classInfo.id,
+          source: "stream",
+          streamId: stat.streamId,
+        });
+        results.push(await response.json());
+      }
+      return { count: publishedClasses.length, results };
+    },
+    onSuccess: (result) => toast({
+      title: "Report cards queued",
+      description: `Reports were queued for ${result.count} published class${result.count === 1 ? "" : "es"}.`,
+    }),
+    onError: (error: any) => toast({ title: "Unable to send reports", description: error?.message || "Please try again.", variant: "destructive" }),
+  });
+
+  const changeStreamPublication = (stat: StreamStat) => {
+    const requiredPermission = stat.allPublished
+      ? "academic_reports.unpublish"
+      : "academic_reports.publish.stream";
+    if (!hasPermission(requiredPermission)) {
+      toast({
+        title: "Permission required",
+        description: `Ask an administrator to grant ${requiredPermission} to your access group. Sign in again after the permission is assigned.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (stat.allPublished) {
+      const reason = window.prompt(`Reason for unpublishing ${exam.examName} for ${stat.streamName}:`);
+      if (!reason?.trim()) return;
+      if (!window.confirm(`Unpublish ${exam.examName} for all ${stat.classCount} classes in ${stat.streamName}? Teachers will be able to modify marks again.`)) return;
+      publicationMutation.mutate({ streamId: stat.streamId, publish: false, reason: reason.trim() });
+      return;
+    }
+
+    const remaining = Math.max(0, stat.classCount - stat.publishedCount);
+    const warning = [
+      `Publish ${exam.examName} for ${stat.streamName}?`,
+      `${remaining} remaining class${remaining === 1 ? "" : "es"} will be published.`,
+      `${stat.assessmentCreatedCount} assessment${stat.assessmentCreatedCount === 1 ? "" : "s"} created; ${stat.assessmentMissingCount} offered subject${stat.assessmentMissingCount === 1 ? "" : "s"} without an assessment.`,
+      `${stat.withMarksCount} entries have marks, ${stat.acknowledgedCount} are acknowledged not written, and ${stat.unrecordedCount} are incomplete or not recorded.`,
+      "Publishing locks marks and assessment structure and makes the results visible in student and parent portals.",
+    ].join("\n\n");
+    if (window.confirm(warning)) publicationMutation.mutate({ streamId: stat.streamId, publish: true });
+  };
+
+  const sendStreamReports = (stat: StreamStat) => {
+    if (!stat.publishedCount) return;
+    if (!canSendStream) {
+      toast({
+        title: "Permission required",
+        description: "Ask an administrator to grant academic_reports.send.stream to your access group. Sign in again after the permission is assigned.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!window.confirm(`Send report cards for the ${stat.publishedCount} published class${stat.publishedCount === 1 ? "" : "es"} in ${stat.streamName}? Unpublished classes will be excluded.`)) return;
+    sendStreamMutation.mutate(stat);
+  };
+
   if (isLoading) {
     return (
       <div className="mb-8">
-        <h3
-          className="text-center font-semibold text-sm uppercase mb-3 text-foreground"
-          data-testid={`text-exam-title-${exam.id}`}
-        >
-          {exam.examName}
-        </h3>
-        <Card>
-          <CardContent className="p-4">
-            <Skeleton className="h-40 w-full" />
-          </CardContent>
-        </Card>
+        <h3 className="text-center font-semibold text-sm uppercase mb-3 text-foreground" data-testid={`text-exam-title-${exam.id}`}>{exam.examName}</h3>
+        <Card><CardContent className="p-4"><Skeleton className="h-40 w-full" /></CardContent></Card>
       </div>
     );
   }
 
-  const activeStats = (streamStats || []).filter((s) => s.classCount > 0);
-
-  if (activeStats.length === 0) return null;
+  const activeStats = (streamStats || []).filter((stat) => stat.classCount > 0);
+  if (!activeStats.length) return null;
 
   return (
     <div className="mb-8" data-testid={`section-exam-${exam.id}`}>
-      <h3
-        className="text-center font-semibold text-sm uppercase mb-3 text-foreground"
-        data-testid={`text-exam-title-${exam.id}`}
-      >
-        {exam.examName}
-      </h3>
-      <div
-        className="overflow-hidden"
-        style={{ border: "1.5px solid rgba(27, 42, 92, 0.25)", borderRadius: "14px" }}
-      >
-          <div className="overflow-visible">
-            <table
-              className="w-full text-sm"
-              style={{ borderCollapse: "separate", borderSpacing: 0 }}
-              data-testid={`table-stream-hub-${exam.id}`}
-            >
-              <thead>
-                <tr className="border-b" style={{ backgroundColor: "rgba(27, 42, 92, 0.1)" }}>
-                  <th className="text-left p-3 font-semibold">Stream</th>
-                  <th className="text-center p-3 font-semibold">Progress</th>
-                  <th className="text-center p-3 font-semibold">Avg Mark</th>
-                  <th className="text-right p-3 font-semibold">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activeStats.map((stat) => {
-                  const hasData =
-                    stat.progressPct !== null && stat.progressPct > 0;
-                  const avgLabel =
-                    stat.avgPct !== null ? `${stat.avgPct}%` : "–";
-
-                  return (
-                    <tr
-                      key={stat.streamId}
-                      className="border-b"
-                      data-testid={`row-stream-${exam.id}-${stat.streamId}`}
-                    >
-                      <td className="p-3">
-                        <div className="font-medium">{stat.streamName}</div>
-                      </td>
-                      <td className="text-center p-3">
-                        <ProgressBadge pct={stat.progressPct} />
-                      </td>
-                      <td className="text-center p-3">
-                        <span className={`font-semibold ${
-                          stat.avgPct === null
-                            ? "text-muted-foreground"
-                            : stat.avgPct >= 80
-                              ? "text-green-600 dark:text-green-400"
-                              : stat.avgPct >= 40
-                                ? "text-amber-600 dark:text-amber-400"
-                                : "text-red-600 dark:text-red-400"
-                        }`}>
-                          {avgLabel}
-                        </span>
-                      </td>
-                      <td className="text-right p-3">
-                        {hasData ? (
-                          <div className="flex items-center justify-end gap-2 flex-wrap">
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  data-testid={`button-options-${exam.id}-${stat.streamId}`}
-                                >
-                                  Options{" "}
-                                  <ChevronDown className="w-3 h-3 ml-1" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent
-                                align="end"
-                                className="min-w-[200px]"
+      <h3 className="text-center font-semibold text-sm uppercase mb-3 text-foreground" data-testid={`text-exam-title-${exam.id}`}>{exam.examName}</h3>
+      <div className="overflow-hidden" style={{ border: "1.5px solid rgba(27, 42, 92, 0.25)", borderRadius: "14px" }}>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm" style={{ borderCollapse: "separate", borderSpacing: 0 }} data-testid={`table-stream-hub-${exam.id}`}>
+            <thead>
+              <tr className="border-b" style={{ backgroundColor: "rgba(27, 42, 92, 0.1)" }}>
+                <th className="text-left p-3 font-semibold">Stream</th>
+                <th className="text-center p-3 font-semibold">Progress</th>
+                <th className="text-center p-3 font-semibold">Avg Mark</th>
+                <th className="text-right p-3 font-semibold">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeStats.map((stat) => {
+                const avgLabel = stat.avgPct !== null ? `${stat.avgPct}%` : "–";
+                const actionIsUnpublish = stat.allPublished;
+                const hasPublicationPermission = actionIsUnpublish ? canUnpublish : canPublishStream;
+                return (
+                  <tr key={stat.streamId} className="border-b" data-testid={`row-stream-${exam.id}-${stat.streamId}`}>
+                    <td className="p-3">
+                      <div className="font-medium">{stat.streamName}</div>
+                      <div className="mt-1 flex items-center gap-2">
+                        <PublicationBadge status={stat.publicationStatus} />
+                        {stat.anyPublished && !stat.allPublished && <span className="text-xs text-muted-foreground">{stat.publishedCount} of {stat.classCount} classes</span>}
+                      </div>
+                    </td>
+                    <td className="text-center p-3">
+                      <ProgressBadge pct={stat.progressPct} withMarksPct={stat.withMarksPct} acknowledgedPct={stat.acknowledgedPct} />
+                    </td>
+                    <td className="text-center p-3">
+                      <span className={`font-semibold ${stat.avgPct === null ? "text-muted-foreground" : stat.avgPct >= 80 ? "text-green-600 dark:text-green-400" : stat.avgPct >= 40 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"}`}>{avgLabel}</span>
+                    </td>
+                    <td className="text-right p-3">
+                      <div className="flex items-center justify-end gap-2 flex-wrap">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" size="sm" data-testid={`button-options-${exam.id}-${stat.streamId}`}>Options <ChevronDown className="w-3 h-3 ml-1" /></Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="min-w-[230px]">
+                            <DropdownMenuItem
+                              onClick={() => changeStreamPublication(stat)}
+                              disabled={publicationMutation.isPending}
+                              title={!hasPublicationPermission ? `Requires ${actionIsUnpublish ? "academic_reports.unpublish" : "academic_reports.publish.stream"}` : undefined}
+                              data-testid={`button-publish-stream-${exam.id}-${stat.streamId}`}
+                            >
+                              {actionIsUnpublish ? <Unlock className="w-4 h-4 mr-2" /> : <Lock className="w-4 h-4 mr-2" />}
+                              {actionIsUnpublish ? "Unpublish" : "Publish"}
+                              {!hasPublicationPermission && <span className="ml-auto text-[10px] text-muted-foreground">Permission required</span>}
+                            </DropdownMenuItem>
+                            {stat.anyPublished && (
+                              <DropdownMenuItem
+                                onClick={() => sendStreamReports(stat)}
+                                disabled={sendStreamMutation.isPending}
+                                title={!canSendStream ? "Requires academic_reports.send.stream" : undefined}
+                                data-testid={`button-send-stream-${exam.id}-${stat.streamId}`}
                               >
-                                <DropdownMenuItem
-                                  onClick={() =>
-                                    onNavigateClassLevel(
-                                      String(exam.id),
-                                      exam.examName,
-                                      stat.streamId,
-                                      stat.streamName,
-                                    )
-                                  }
-                                  data-testid={`button-class-level-${exam.id}-${stat.streamId}`}
-                                >
-                                  <Eye className="w-4 h-4 mr-2" /> View at Class
-                                  Level
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  onClick={() =>
-                                    onOpenStreamModal(
-                                      exam.id,
-                                      stat.streamId,
-                                      stat.streamName,
-                                      "merit",
-                                    )
-                                  }
-                                  data-testid={`button-stream-merit-${exam.id}-${stat.streamId}`}
-                                >
-                                  <Trophy className="w-4 h-4 mr-2" /> Stream
-                                  Merit List
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  onClick={() =>
-                                    onOpenStreamModal(
-                                      exam.id,
-                                      stat.streamId,
-                                      stat.streamName,
-                                      "analytics",
-                                    )
-                                  }
-                                  data-testid={`button-stream-analytics-${exam.id}-${stat.streamId}`}
-                                >
-                                  <BarChart3 className="w-4 h-4 mr-2" /> Stream
-                                  Analytics
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
+                                <Send className="w-4 h-4 mr-2" /> Send Report{stat.anyPublished && !stat.allPublished ? ` — ${stat.publishedCount} published classes` : ""}
+                                {!canSendStream && <span className="ml-auto text-[10px] text-muted-foreground">Permission required</span>}
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem onClick={() => onNavigateClassLevel(String(exam.id), exam.examName, stat.streamId, stat.streamName)} data-testid={`button-class-level-${exam.id}-${stat.streamId}`}>
+                              <Eye className="w-4 h-4 mr-2" /> View at Class Level
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => onOpenStreamModal(exam.id, stat.streamId, stat.streamName, "merit")} data-testid={`button-stream-merit-${exam.id}-${stat.streamId}`}>
+                              <Trophy className="w-4 h-4 mr-2" /> Stream Merit List
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => onOpenStreamModal(exam.id, stat.streamId, stat.streamName, "analytics")} data-testid={`button-stream-analytics-${exam.id}-${stat.streamId}`}>
+                              <BarChart3 className="w-4 h-4 mr-2" /> Stream Analytics
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
 
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="text-white border-[#1b2a5c] no-default-hover-elevate"
-                                  style={{ backgroundColor: "#1b2a5c" }}
-                                  data-testid={`button-reports-${exam.id}-${stat.streamId}`}
-                                >
-                                  <FileText className="w-4 h-4 mr-1" />
-                                  Reports{" "}
-                                  <ChevronDown className="w-3 h-3 ml-1" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent
-                                align="end"
-                                className="min-w-[180px]"
-                              >
-                                {stat.classes.length === 0 ? (
-                                  <DropdownMenuItem disabled>
-                                    No classes found
-                                  </DropdownMenuItem>
-                                ) : (
-                                  stat.classes.map((cls) => (
-                                    <DropdownMenuItem
-                                      key={cls.id}
-                                      onClick={() =>
-                                        onNavigateReports(
-                                          String(exam.id),
-                                          String(cls.id),
-                                          cls.name,
-                                        )
-                                      }
-                                      data-testid={`button-report-class-${exam.id}-${cls.id}`}
-                                    >
-                                      {cls.name}
-                                    </DropdownMenuItem>
-                                  ))
-                                )}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </div>
-                        ) : null}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" size="sm" className="text-white border-[#1b2a5c] no-default-hover-elevate" style={{ backgroundColor: "#1b2a5c" }} data-testid={`button-reports-${exam.id}-${stat.streamId}`}>
+                              <FileText className="w-4 h-4 mr-1" /> Reports <ChevronDown className="w-3 h-3 ml-1" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="min-w-[180px]">
+                            {stat.classes.map((classInfo) => (
+                              <DropdownMenuItem key={classInfo.id} onClick={() => onNavigateReports(String(exam.id), String(classInfo.id), classInfo.name)} data-testid={`button-report-class-${exam.id}-${classInfo.id}`}>
+                                <School className="w-4 h-4 mr-2" /> {classInfo.name}{classInfo.isPublished ? " • Published" : ""}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="border-t px-3 py-2"><ProgressLegend /></div>
       </div>
     </div>
   );
 }
 
 export default function AcademicReportsPage() {
-  const { currentSchoolId, user } = useAuth();
+  const { currentSchoolId, user, hasPermission } = useAuth();
   const schoolScopeId = currentSchoolId || user?.schoolId || null;
   const { toast } = useToast();
+  const canSendClassReports = hasPermission("academic_reports.send.class");
 
   const [viewMode, setViewMode] = useState<ViewMode>("hub");
   const [selectedExamId, setSelectedExamId] = useState<string>("");
@@ -3492,12 +3605,11 @@ export default function AcademicReportsPage() {
                 <ArrowLeft className="w-4 h-4 mr-2" /> Back
               </Button>
               <div>
-                <h2 className="text-lg font-semibold">
-                  {selectedClassName} — Report Cards
-                </h2>
-                <p className="text-sm text-muted-foreground">
-                  {selectedExamName}
-                </p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-lg font-semibold">{selectedClassName} — Report Cards</h2>
+                  {reportCardData?.publication && <PublicationBadge status={reportCardData.publication.status} />}
+                </div>
+                <p className="text-sm text-muted-foreground">{selectedExamName}</p>
               </div>
             </div>
 
@@ -3542,19 +3654,21 @@ export default function AcademicReportsPage() {
                       <Download className="w-4 h-4 mr-2" />
                       Download All
                     </Button>
-                    <Button
-                      variant="outline"
-                      onClick={handleSendAll}
-                      disabled={sendingAll}
-                      data-testid="button-send-all"
-                    >
-                      {sendingAll ? (
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      ) : (
-                        <Send className="w-4 h-4 mr-2" />
-                      )}
-                      Send All Report Cards
-                    </Button>
+                    {canSendClassReports && reportCardData.publication?.isPublished && (
+                      <Button
+                        variant="outline"
+                        onClick={handleSendAll}
+                        disabled={sendingAll}
+                        data-testid="button-send-all"
+                      >
+                        {sendingAll ? (
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        ) : (
+                          <Send className="w-4 h-4 mr-2" />
+                        )}
+                        Send All Report Cards
+                      </Button>
+                    )}
                   </div>
                 </div>
 
@@ -3604,7 +3718,8 @@ export default function AcademicReportsPage() {
                   onDownloadIndividual={handleDownloadIndividual}
                   sendingId={sendingId}
                   downloadingId={downloadingId}
-                  editableComments
+                  editableComments={!reportCardData.publication?.isPublished}
+                  canSendIndividual={canSendClassReports && reportCardData.publication?.isPublished === true}
                   commentValues={reportCardCommentDrafts[rc.student.id]}
                   commentSaveStates={{
                     principal:
@@ -3631,6 +3746,7 @@ export default function AcademicReportsPage() {
                     sendingId={sendingId}
                     downloadingId={downloadingId}
                     editableComments={false}
+                    canSendIndividual={false}
                     commentValues={reportCardCommentDrafts[rc.student.id]}
                     commentSaveStates={{ principal: "idle", class_teacher: "idle" }}
                     subjectCommentValues={reportCardSubjectCommentDrafts}
@@ -3700,48 +3816,149 @@ function ClassLevelBlock({
   onMerit: () => void;
   onAnalytics: () => void;
 }) {
+  const { hasPermission } = useAuth();
+  const { toast } = useToast();
+  const canPublish = hasPermission("academic_reports.publish.class");
+  const canUnpublish = hasPermission("academic_reports.unpublish");
+  const canSend = hasPermission("academic_reports.send.class");
+
   const { data, isLoading } = useQuery<ClassProgressData>({
     queryKey: ["/api/report-hub/class-progress", examId, classId],
     enabled: !!examId && !!classId,
   });
 
+  const publicationMutation = useMutation({
+    mutationFn: async (payload: { publish: boolean; reason?: string }) => {
+      const response = await apiRequest("POST", "/api/report-hub/publication/class", {
+        examId: Number(examId),
+        classId,
+        ...payload,
+      });
+      return response.json();
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/report-hub/class-progress", examId, classId] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/report-hub/stream-stats", examId] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/report-hub/publication-status", Number(examId)] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/marks-entry"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] }),
+      ]);
+      toast({
+        title: variables.publish ? "Results published" : "Results unpublished",
+        description: variables.publish
+          ? `${examName} is now read-only for ${classLabel} and visible in student and parent portals.`
+          : `Teachers can edit ${examName} for ${classLabel} again.`,
+      });
+    },
+    onError: (error: any) => toast({ title: "Unable to update publication", description: error?.message || "Please try again.", variant: "destructive" }),
+  });
+
+  const sendMutation = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("POST", "/api/report-cards/send-all", {
+        examId: Number(examId),
+        classId,
+        source: "class",
+      });
+      return response.json();
+    },
+    onSuccess: (result: any) => toast({ title: result.queued ? "Report cards queued" : "Report cards sent", description: result.message || "The report cards are being delivered." }),
+    onError: (error: any) => toast({ title: "Unable to send reports", description: error?.message || "Please try again.", variant: "destructive" }),
+  });
+
+  const changePublication = () => {
+    if (!data) return;
+    const requiredPermission = data.publication?.isPublished
+      ? "academic_reports.unpublish"
+      : "academic_reports.publish.class";
+    if (!hasPermission(requiredPermission)) {
+      toast({
+        title: "Permission required",
+        description: `Ask an administrator to grant ${requiredPermission} to your access group. Sign in again after the permission is assigned.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (data.publication?.isPublished) {
+      const reason = window.prompt(`Reason for unpublishing ${examName} for ${classLabel}:`);
+      if (!reason?.trim()) return;
+      if (!window.confirm(`Unpublish ${examName} for ${classLabel}? Teachers will be able to modify marks again and the report will no longer be visible in student and parent portals.`)) return;
+      publicationMutation.mutate({ publish: false, reason: reason.trim() });
+      return;
+    }
+
+    const totals = data.totals;
+    const warning = [
+      `Publish ${examName} for ${classLabel}?`,
+      totals ? `${totals.assessmentsCreated} of ${totals.offeredSubjects} offered subjects have assessments. ${totals.assessmentsMissing} assessment${totals.assessmentsMissing === 1 ? " is" : "s are"} not created.` : "",
+      totals ? `${totals.withMarks} entries have marks, ${totals.acknowledged} are acknowledged not written, and ${totals.unrecorded} are incomplete or not recorded.` : "",
+      "Publishing locks marks and assessment structure and makes the report visible in student and parent portals.",
+    ].filter(Boolean).join("\n\n");
+    if (window.confirm(warning)) publicationMutation.mutate({ publish: true });
+  };
+
+  const sendReports = () => {
+    if (!data?.publication?.isPublished) return;
+    if (!canSend) {
+      toast({
+        title: "Permission required",
+        description: "Ask an administrator to grant academic_reports.send.class to your access group. Sign in again after the permission is assigned.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (window.confirm(`Send ${examName} report cards for ${classLabel} through the configured communication channels?`)) sendMutation.mutate();
+  };
+
+  const publicationIsLocked = data?.publication?.isPublished === true;
+  const hasPublicationPermission = publicationIsLocked ? canUnpublish : canPublish;
+
   return (
     <Card data-testid={`card-class-${classId}`}>
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <CardTitle className="text-base">
-            {classLabel} — {examName}
-          </CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <CardTitle className="text-base">{classLabel} — {examName}</CardTitle>
+            {data?.publication && <PublicationBadge status={data.publication.status} />}
+          </div>
           <div className="flex gap-2 flex-wrap">
             <Button
               variant="outline"
               size="sm"
-              onClick={onMissingMarks}
-              data-testid={`button-missing-${classId}`}
+              onClick={changePublication}
+              disabled={publicationMutation.isPending || isLoading}
+              data-testid={`button-publish-class-${classId}`}
+              title={!hasPublicationPermission ? `Requires ${publicationIsLocked ? "academic_reports.unpublish" : "academic_reports.publish.class"}` : undefined}
             >
+              {publicationIsLocked ? <Unlock className="w-4 h-4 mr-1" /> : <Lock className="w-4 h-4 mr-1" />}
+              {publicationIsLocked ? "Unpublish" : "Publish"}
+              {!hasPublicationPermission && <span className="ml-1 text-[10px] text-muted-foreground">(permission required)</span>}
+            </Button>
+            {publicationIsLocked && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={sendReports}
+                disabled={sendMutation.isPending}
+                data-testid={`button-send-class-${classId}`}
+                title={!canSend ? "Requires academic_reports.send.class" : undefined}
+              >
+                {sendMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Send className="w-4 h-4 mr-1" />} Send Report
+                {!canSend && <span className="ml-1 text-[10px] text-muted-foreground">(permission required)</span>}
+              </Button>
+            )}
+            <Button variant="outline" size="sm" onClick={onMissingMarks} data-testid={`button-missing-${classId}`}>
               <AlertTriangle className="w-4 h-4 mr-1" /> Missing Marks
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onMerit}
-              data-testid={`button-merit-${classId}`}
-            >
+            <Button variant="outline" size="sm" onClick={onMerit} data-testid={`button-merit-${classId}`}>
               <Trophy className="w-4 h-4 mr-1" /> Merit List
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onAnalytics}
-              data-testid={`button-analytics-${classId}`}
-            >
+            <Button variant="outline" size="sm" onClick={onAnalytics} data-testid={`button-analytics-${classId}`}>
               <BarChart3 className="w-4 h-4 mr-1" /> Analytics
             </Button>
-            <Button
-              size="sm"
-              onClick={onReports}
-              data-testid={`button-reports-${classId}`}
-            >
+            <Button size="sm" onClick={onReports} data-testid={`button-reports-${classId}`}>
               <FileText className="w-4 h-4 mr-1" /> Reports
             </Button>
           </div>
@@ -3749,57 +3966,48 @@ function ClassLevelBlock({
       </CardHeader>
       <CardContent>
         {isLoading ? (
-          <div className="space-y-2">
-            {[1, 2, 3].map((i) => (
-              <Skeleton key={i} className="h-8 w-full" />
-            ))}
-          </div>
+          <div className="space-y-2">{[1, 2, 3].map((index) => <Skeleton key={index} className="h-8 w-full" />)}</div>
         ) : !data || data.subjects.length === 0 ? (
-          <div className="py-4 text-center text-muted-foreground text-sm">
-            No assessments/subjects found for this class in the selected exam
-            yet.
-          </div>
+          <div className="py-4 text-center text-muted-foreground text-sm">No subjects are currently assigned to this class.</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table
-              className="w-full text-sm"
-              data-testid={`table-class-progress-${classId}`}
-            >
-              <thead>
-                <tr className="border-b bg-muted/30">
-                  <th className="text-left p-2 font-semibold">Subject</th>
-                  <th className="text-left p-2 font-semibold">Teacher</th>
-                  <th className="text-center p-2 font-semibold">Progress</th>
-                  <th className="text-center p-2 font-semibold">Avg Mark</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.subjects.map((sub: any) => (
-                  <tr key={sub.subjectId} className="border-b">
-                    <td className="p-2">
-                      <div>{sub.subjectName}</div>
-                      <div className="text-xs text-muted-foreground">
-                        Students: {sub.totalStudents}
-                      </div>
-                    </td>
-                    <td className="p-2">
-                      {sub.teacherName ? (
-                        <span className="text-sm">{sub.teacherName}</span>
-                      ) : (
-                        <span className="text-sm text-muted-foreground">—</span>
-                      )}
-                    </td>
-                    <td className="text-center p-2">
-                      <ProgressBadge pct={sub.progressPct} />
-                    </td>
-                    <td className="text-center p-2">
-                      {sub.avgPct !== null ? `${sub.avgPct}%` : "–"}
-                    </td>
+          <>
+            <div className="mb-3"><ProgressLegend /></div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm" data-testid={`table-class-progress-${classId}`}>
+                <thead>
+                  <tr className="border-b bg-muted/30">
+                    <th className="text-left p-2 font-semibold">Subject</th>
+                    <th className="text-left p-2 font-semibold">Teacher</th>
+                    <th className="text-center p-2 font-semibold">Progress</th>
+                    <th className="text-center p-2 font-semibold">Avg Mark</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {data.subjects.map((subject) => (
+                    <tr key={subject.subjectId} className="border-b">
+                      <td className="p-2">
+                        <div>{subject.subjectName}</div>
+                        <div className="text-xs text-muted-foreground">Students: {subject.totalStudents}</div>
+                        {!subject.assessmentCreated && <div className="text-xs font-medium text-muted-foreground">Assessment not created</div>}
+                        {subject.partialCount > 0 && <div className="text-xs text-amber-700 dark:text-amber-400">{subject.partialCount} partial paper entr{subject.partialCount === 1 ? "y" : "ies"}</div>}
+                      </td>
+                      <td className="p-2">{subject.teacherName ? <span className="text-sm">{subject.teacherName}</span> : <span className="text-sm text-muted-foreground">—</span>}</td>
+                      <td className="text-center p-2">
+                        <ProgressBadge
+                          pct={subject.progressPct}
+                          withMarksPct={subject.withMarksPct}
+                          acknowledgedPct={subject.acknowledgedPct}
+                          assessmentCreated={subject.assessmentCreated}
+                          title={!subject.assessmentCreated ? "Assessment not created" : undefined}
+                        />
+                      </td>
+                      <td className="text-center p-2">{subject.avgPct !== null ? `${subject.avgPct}%` : "–"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </CardContent>
     </Card>

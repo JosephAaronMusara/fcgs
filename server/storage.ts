@@ -70,10 +70,11 @@ import {
   type Notification, type InsertNotification,
   notifications,
   activityLogs,
+  internalTransfers,
   calendarEvents,
   calendarEventAttendees,
   qcReports,
-  type ActivityLog, type InsertActivityLog,
+  type ActivityLog, type InsertActivityLog, type InternalTransfer, type InsertInternalTransfer,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -98,6 +99,11 @@ export interface IStorage {
   updateStaff(id: number, staffData: Partial<InsertStaff>): Promise<Staff | undefined>;
   deleteStaff(id: number): Promise<boolean>;
   getNextStaffNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string>;
+
+  getInternalTransfers(filters?: { organizationId?: number | null; schoolId?: number | null; personType?: string | null }): Promise<InternalTransfer[]>;
+  createInternalTransfer(data: InsertInternalTransfer): Promise<InternalTransfer>;
+  transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; admissionNo?: string | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }>;
+  transferStaffWithinOrganization(args: { staffId: number; destinationSchoolId: number; destinationRole: string; destinationAccessGroupId?: number | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ staff: Staff; transfer: InternalTransfer }>;
 
   getAllStreams(): Promise<Stream[]>;
   getStreamsBySchoolType(schoolType: string): Promise<Stream[]>;
@@ -786,6 +792,221 @@ export class DatabaseStorage implements IStorage {
   async deleteStaff(id: number): Promise<boolean> {
     const result = await db.delete(staff).where(eq(staff.id, id));
     return true;
+  }
+
+
+  async getInternalTransfers(filters: { organizationId?: number | null; schoolId?: number | null; personType?: string | null } = {}): Promise<InternalTransfer[]> {
+    const conditions: any[] = [];
+    if (filters.organizationId) conditions.push(eq(internalTransfers.organizationId, filters.organizationId));
+    if (filters.schoolId) {
+      conditions.push(or(eq(internalTransfers.sourceSchoolId, filters.schoolId), eq(internalTransfers.destinationSchoolId, filters.schoolId)));
+    }
+    if (filters.personType && filters.personType !== "all") conditions.push(eq(internalTransfers.personType, filters.personType as any));
+    const whereClause = conditions.length ? and(...conditions) : undefined;
+    return db.select().from(internalTransfers).where(whereClause).orderBy(desc(internalTransfers.createdAt));
+  }
+
+  async createInternalTransfer(data: InsertInternalTransfer): Promise<InternalTransfer> {
+    const [created] = await db.insert(internalTransfers).values(data).returning();
+    return created;
+  }
+
+  async transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; admissionNo?: string | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }> {
+    return db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(students).where(eq(students.id, args.studentId));
+      if (!existing || existing.archivedAt) throw new Error("Student not found");
+      if (!existing.schoolId) throw new Error("Student does not belong to a school");
+      if (existing.schoolId === args.destinationSchoolId) throw new Error("Destination school must be different from the current school");
+
+      const [sourceSchool] = await tx.select().from(schools).where(eq(schools.id, existing.schoolId));
+      const [destinationSchool] = await tx.select().from(schools).where(eq(schools.id, args.destinationSchoolId));
+      if (!sourceSchool || !destinationSchool) throw new Error("Source or destination school not found");
+      if (!sourceSchool.organizationId || sourceSchool.organizationId !== destinationSchool.organizationId) throw new Error("Transfers are only allowed within the same organization");
+
+      const [destinationClass] = await tx.select().from(classes).where(and(eq(classes.id, args.destinationClassId), isNull(classes.archivedAt)));
+      if (!destinationClass || destinationClass.schoolId !== args.destinationSchoolId) throw new Error("Destination class does not belong to the destination school");
+
+      const nextAdmissionNo = (args.admissionNo && args.admissionNo.trim())
+        ? args.admissionNo.trim().toUpperCase()
+        : existing.admissionNo;
+      if (nextAdmissionNo !== existing.admissionNo) {
+        const [duplicate] = await tx.select({ id: students.id }).from(students).where(and(eq(students.admissionNo, nextAdmissionNo), ne(students.id, existing.id)));
+        if (duplicate) throw new Error("Admission number already exists");
+      }
+
+      await tx.delete(studentSubjects).where(eq(studentSubjects.studentId, existing.id));
+
+      const [updated] = await tx.update(students).set({
+        schoolId: args.destinationSchoolId,
+        classId: destinationClass.id,
+        streamId: destinationClass.streamId || null,
+        admissionNo: nextAdmissionNo,
+        hostelId: null,
+        isBoarding: false,
+        isDayScholar: true,
+        status: "active",
+      }).where(eq(students.id, existing.id)).returning();
+      if (!updated) throw new Error("Student transfer failed");
+
+      const warnings: string[] = [];
+      if (existing.parentId) {
+        const siblingsInSource = await tx.select({ id: students.id }).from(students).where(and(
+          eq(students.parentId, existing.parentId),
+          eq(students.schoolId, existing.schoolId),
+          ne(students.id, existing.id),
+          isNull(students.archivedAt)
+        ));
+        if (siblingsInSource.length === 0) {
+          const [parent] = await tx.select().from(parents).where(eq(parents.id, existing.parentId));
+          await tx.update(parents).set({ schoolId: args.destinationSchoolId }).where(eq(parents.id, existing.parentId));
+          if (parent?.userId) {
+            await tx.update(users).set({ schoolId: args.destinationSchoolId, organizationId: sourceSchool.organizationId }).where(eq(users.id, parent.userId));
+          }
+        } else {
+          warnings.push("The linked parent still has another child at the source school, so the parent account was left at the source school.");
+        }
+      }
+
+      if (existing.userId) {
+        await tx.update(users).set({ schoolId: args.destinationSchoolId, organizationId: sourceSchool.organizationId, isActive: true }).where(eq(users.id, existing.userId));
+      }
+
+      const [transfer] = await tx.insert(internalTransfers).values({
+        organizationId: sourceSchool.organizationId,
+        personType: "student",
+        personId: existing.id,
+        personName: `${existing.firstName} ${existing.lastName}`.trim(),
+        sourceSchoolId: existing.schoolId,
+        destinationSchoolId: args.destinationSchoolId,
+        sourceClassId: existing.classId || null,
+        destinationClassId: destinationClass.id,
+        sourceStreamId: existing.streamId || null,
+        destinationStreamId: destinationClass.streamId || null,
+        sourceAdmissionNo: existing.admissionNo,
+        destinationAdmissionNo: nextAdmissionNo,
+        effectiveDate: args.effectiveDate,
+        reason: args.reason,
+        status: "completed",
+        requestedByUserId: args.userId || null,
+        completedByUserId: args.userId || null,
+        notes: args.notes || null,
+      }).returning();
+
+      return { student: updated, transfer, warnings };
+    });
+  }
+
+  async transferStaffWithinOrganization(args: { staffId: number; destinationSchoolId: number; destinationRole: string; destinationAccessGroupId?: number | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ staff: Staff; transfer: InternalTransfer }> {
+    return db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(staff).where(eq(staff.id, args.staffId));
+      if (!existing) throw new Error("Staff member not found");
+      if (!existing.schoolId) throw new Error("Staff member does not belong to a school");
+      if (existing.schoolId === args.destinationSchoolId) throw new Error("Destination school must be different from the current school");
+
+      const [sourceSchool] = await tx.select().from(schools).where(eq(schools.id, existing.schoolId));
+      const [destinationSchool] = await tx.select().from(schools).where(eq(schools.id, args.destinationSchoolId));
+      if (!sourceSchool || !destinationSchool) throw new Error("Source or destination school not found");
+      if (!sourceSchool.organizationId || sourceSchool.organizationId !== destinationSchool.organizationId) throw new Error("Transfers are only allowed within the same organization");
+
+      // Staff roles are configurable text values, while users.role is a fixed system identity.
+      // Resolve the linked account identity from existing members of the selected access group
+      // instead of copying a configurable staff-role name into the PostgreSQL enum.
+      const destinationAccessGroupId = args.destinationAccessGroupId || existing.accessGroupId || null;
+      let destinationUserRole: User["role"] | null = null;
+
+      if (destinationAccessGroupId) {
+        const [group] = await tx.select().from(accessGroups).where(eq(accessGroups.id, destinationAccessGroupId));
+        if (!group) throw new Error("Destination access group not found");
+      }
+
+      if (existing.userId) {
+        const [linkedUser] = await tx
+          .select({ role: users.role })
+          .from(users)
+          .where(eq(users.id, existing.userId));
+        if (!linkedUser) throw new Error("The linked staff login account could not be found");
+        if (!destinationAccessGroupId) {
+          throw new Error("A destination access group is required for staff with a linked login account");
+        }
+
+        const peerRoles = await tx
+          .select({
+            role: users.role,
+            memberCount: sql<number>`count(*)::int`,
+          })
+          .from(userAccessGroups)
+          .innerJoin(users, eq(users.id, userAccessGroups.userId))
+          .where(and(
+            eq(userAccessGroups.accessGroupId, destinationAccessGroupId),
+            ne(users.id, existing.userId),
+          ))
+          .groupBy(users.role)
+          .orderBy(desc(sql`count(*)`), asc(users.role));
+
+        const totalPeers = peerRoles.reduce((total, row) => total + Number(row.memberCount || 0), 0);
+        const leadingPeerRole = peerRoles[0];
+        const secondPeerRole = peerRoles[1];
+        const hasClearMajority = Boolean(
+          leadingPeerRole &&
+          Number(leadingPeerRole.memberCount) > totalPeers / 2 &&
+          (!secondPeerRole || Number(leadingPeerRole.memberCount) > Number(secondPeerRole.memberCount)),
+        );
+
+        // Empty or genuinely mixed custom groups retain the account's existing system identity.
+        // Permissions still come from the destination access group.
+        destinationUserRole = hasClearMajority ? leadingPeerRole!.role : linkedUser.role;
+      }
+
+      // All validation and account-role resolution must finish before teaching links are cleared.
+      const now = new Date();
+      await tx.delete(staffSubjects).where(eq(staffSubjects.staffId, existing.id));
+      await tx.update(classes).set({ classTeacherId: null }).where(eq(classes.classTeacherId, existing.id));
+      await tx.update(classTeacherAssignments).set({ effectiveTo: now }).where(and(eq(classTeacherAssignments.teacherId, existing.id), isNull(classTeacherAssignments.effectiveTo)));
+      await tx.update(timetableSlots).set({ teacherId: null }).where(eq(timetableSlots.teacherId, existing.id));
+
+      const [updated] = await tx.update(staff).set({
+        schoolId: args.destinationSchoolId,
+        role: args.destinationRole,
+        accessGroupId: destinationAccessGroupId,
+        status: "active",
+      }).where(eq(staff.id, existing.id)).returning();
+      if (!updated) throw new Error("Staff transfer failed");
+
+      if (existing.userId && destinationUserRole) {
+        await tx.update(users).set({
+          schoolId: args.destinationSchoolId,
+          organizationId: sourceSchool.organizationId,
+          role: destinationUserRole,
+          isActive: true,
+        }).where(eq(users.id, existing.userId));
+        await tx.delete(userAccessGroups).where(eq(userAccessGroups.userId, existing.userId));
+        await tx.insert(userAccessGroups).values({
+          userId: existing.userId,
+          accessGroupId: destinationAccessGroupId!,
+        }).onConflictDoNothing();
+      }
+
+      const [transfer] = await tx.insert(internalTransfers).values({
+        organizationId: sourceSchool.organizationId,
+        personType: "staff",
+        personId: existing.id,
+        personName: `${existing.firstName} ${existing.lastName}`.trim(),
+        sourceSchoolId: existing.schoolId,
+        destinationSchoolId: args.destinationSchoolId,
+        sourceRole: existing.role || null,
+        destinationRole: args.destinationRole,
+        sourceAccessGroupId: existing.accessGroupId || null,
+        destinationAccessGroupId,
+        effectiveDate: args.effectiveDate,
+        reason: args.reason,
+        status: "completed",
+        requestedByUserId: args.userId || null,
+        completedByUserId: args.userId || null,
+        notes: args.notes || null,
+      }).returning();
+
+      return { staff: updated, transfer };
+    });
   }
 
   private getSchoolSequenceCode(schoolId?: number | null): string {
