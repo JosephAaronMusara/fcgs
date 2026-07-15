@@ -2517,6 +2517,7 @@ function ExamStreamTable({
   onNavigateClassLevel,
   onNavigateReports,
   onOpenStreamModal,
+  showTitle = true,
 }: {
   exam: Exam;
   onNavigateClassLevel: (
@@ -2536,6 +2537,7 @@ function ExamStreamTable({
     streamName: string,
     modal: "merit" | "analytics",
   ) => void;
+  showTitle?: boolean;
 }) {
   const { hasPermission } = useAuth();
   const { toast } = useToast();
@@ -2643,8 +2645,10 @@ function ExamStreamTable({
 
   if (isLoading) {
     return (
-      <div className="mb-8">
-        <h3 className="text-center font-semibold text-sm uppercase mb-3 text-foreground" data-testid={`text-exam-title-${exam.id}`}>{exam.examName}</h3>
+      <div className={showTitle ? "mb-8" : "mb-0"}>
+        {showTitle && (
+          <h3 className="text-center font-semibold text-sm uppercase mb-3 text-foreground" data-testid={`text-exam-title-${exam.id}`}>{exam.examName}</h3>
+        )}
         <Card><CardContent className="p-4"><Skeleton className="h-40 w-full" /></CardContent></Card>
       </div>
     );
@@ -2654,8 +2658,10 @@ function ExamStreamTable({
   if (!activeStats.length) return null;
 
   return (
-    <div className="mb-8" data-testid={`section-exam-${exam.id}`}>
-      <h3 className="text-center font-semibold text-sm uppercase mb-3 text-foreground" data-testid={`text-exam-title-${exam.id}`}>{exam.examName}</h3>
+    <div className={showTitle ? "mb-8" : "mb-0"} data-testid={`section-exam-${exam.id}`}>
+      {showTitle && (
+        <h3 className="text-center font-semibold text-sm uppercase mb-3 text-foreground" data-testid={`text-exam-title-${exam.id}`}>{exam.examName}</h3>
+      )}
       <div className="overflow-hidden" style={{ border: "1.5px solid rgba(27, 42, 92, 0.25)", borderRadius: "14px" }}>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-sm" style={{ borderCollapse: "separate", borderSpacing: 0 }} data-testid={`table-stream-hub-${exam.id}`}>
@@ -2751,6 +2757,84 @@ function ExamStreamTable({
         </div>
         <div className="border-t px-3 py-2"><ProgressLegend /></div>
       </div>
+    </div>
+  );
+}
+
+
+type ExamStreamAccordionProps = {
+  exams: Exam[];
+  onNavigateClassLevel: (
+    examId: string,
+    examName: string,
+    streamId: number,
+    streamName: string,
+  ) => void;
+  onNavigateReports: (
+    examId: string,
+    classId: string,
+    className: string,
+  ) => void;
+  onOpenStreamModal: (
+    examId: number,
+    streamId: number,
+    streamName: string,
+    modal: "merit" | "analytics",
+  ) => void;
+};
+
+function ExamStreamAccordion({
+  exams,
+  onNavigateClassLevel,
+  onNavigateReports,
+  onOpenStreamModal,
+}: ExamStreamAccordionProps) {
+  const [openExamId, setOpenExamId] = useState<number | null>(() => exams[0]?.id ?? null);
+
+  useEffect(() => {
+    if (exams.length === 0) {
+      setOpenExamId(null);
+      return;
+    }
+    if (!exams.some((exam) => Number(exam.id) === Number(openExamId))) {
+      setOpenExamId(Number(exams[0].id));
+    }
+  }, [exams, openExamId]);
+
+  return (
+    <div className="space-y-3">
+      {exams.map((exam) => {
+        const isOpen = Number(openExamId) === Number(exam.id);
+        return (
+          <div
+            key={exam.id}
+            className="overflow-hidden rounded-xl border bg-card"
+            data-testid={`accordion-exam-${exam.id}`}
+          >
+            <button
+              type="button"
+              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-muted/40"
+              onClick={() => setOpenExamId(Number(exam.id))}
+              aria-expanded={isOpen}
+              data-testid={`button-toggle-exam-${exam.id}`}
+            >
+              <span className="font-semibold text-sm uppercase text-foreground">{exam.examName}</span>
+              <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+            </button>
+            {isOpen && (
+              <div className="border-t p-3">
+                <ExamStreamTable
+                  exam={exam}
+                  onNavigateClassLevel={onNavigateClassLevel}
+                  onNavigateReports={onNavigateReports}
+                  onOpenStreamModal={onOpenStreamModal}
+                  showTitle={false}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -3468,17 +3552,12 @@ export default function AcademicReportsPage() {
                               </CardContent>
                             </Card>
                           ) : (
-                            <div>
-                              {typeExams.map((exam) => (
-                                <ExamStreamTable
-                                  key={exam.id}
-                                  exam={exam}
-                                  onNavigateClassLevel={navigateToClassLevel}
-                                  onNavigateReports={navigateToReports}
-                                  onOpenStreamModal={openStreamModal}
-                                />
-                              ))}
-                            </div>
+                            <ExamStreamAccordion
+                              exams={typeExams}
+                              onNavigateClassLevel={navigateToClassLevel}
+                              onNavigateReports={navigateToReports}
+                              onOpenStreamModal={openStreamModal}
+                            />
                           )}
                         </TabsContent>
                       );
@@ -3489,17 +3568,12 @@ export default function AcademicReportsPage() {
                         value="unassigned"
                         data-testid="tab-content-at-unassigned"
                       >
-                        <div>
-                          {unassigned.map((exam) => (
-                            <ExamStreamTable
-                              key={exam.id}
-                              exam={exam}
-                              onNavigateClassLevel={navigateToClassLevel}
-                              onNavigateReports={navigateToReports}
-                              onOpenStreamModal={openStreamModal}
-                            />
-                          ))}
-                        </div>
+                        <ExamStreamAccordion
+                          exams={unassigned}
+                          onNavigateClassLevel={navigateToClassLevel}
+                          onNavigateReports={navigateToReports}
+                          onOpenStreamModal={openStreamModal}
+                        />
                       </TabsContent>
                     )}
                   </Tabs>
