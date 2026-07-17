@@ -12,6 +12,7 @@ import { registerObjectStorageRoutes } from "./replit_integrations/object_storag
 import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { generateReportCardPdf, type ReportCardPdfData } from "./pdf-report-card";
+import { parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
@@ -68,7 +69,6 @@ async function resolveGradeProfileContext(args: {
   schoolId: number;
   classId: number;
   subjectId: number;
-  studentId?: number;
 }): Promise<{
   profileKey: GradeProfileKey | null;
   school: any;
@@ -79,11 +79,9 @@ async function resolveGradeProfileContext(args: {
   const school = await storage.getSchool(args.schoolId);
   const classInfo = await storage.getClass(args.classId);
   const subject = await storage.getSubject(args.subjectId);
-  let streamId = classInfo?.streamId ?? null;
-  if (args.studentId) {
-    const student = await storage.getStudent(args.studentId);
-    if (student?.streamId) streamId = student.streamId;
-  }
+  // A class assessment must always use the assessment class stream. Student stream
+  // values can be blank or stale after enrolments/transfers and must not change grading.
+  const streamId = classInfo?.streamId ?? null;
   const stream = streamId ? await storage.getStream(streamId) : undefined;
   const streamName = stream?.name || null;
   const profileKey = resolveGradeProfileKey({
@@ -113,6 +111,54 @@ function isGradeApplicableToClass(grade: any, classId: number): boolean {
 
 function getApplicableGradesForContext(grades: any[], args: { profileKey: string | null | undefined; classId: number }) {
   return getGradesForProfile(grades, args.profileKey).filter((grade) => isGradeApplicableToClass(grade, args.classId));
+}
+
+function getClassSubjectGradeCandidates(args: {
+  allGrades: any[];
+  school: any;
+  classInfo: any;
+  classStreamName?: string | null;
+  subject: any;
+}) {
+  const profileKey = resolveGradeProfileKey({
+    schoolType: args.school?.schoolType,
+    examinationBoard: args.school?.examinationBoard,
+    streamName: args.classStreamName || null,
+    subjectType: args.subject?.subjectType,
+  });
+  return {
+    profileKey,
+    grades: profileKey
+      ? getApplicableGradesForContext(args.allGrades, {
+          profileKey,
+          classId: Number(args.classInfo?.id || 0),
+        })
+      : [],
+  };
+}
+
+function resolveStoredAssessmentGrade(args: {
+  mark: any;
+  percentage: number | null;
+  applicableGrades: any[];
+  allGrades: any[];
+  subjectType?: string | null;
+}) {
+  if (args.percentage === null) return null;
+
+  if (args.mark?.gradeId) {
+    const linkedGrade = args.allGrades.find(
+      (grade) => Number(grade.id) === Number(args.mark.gradeId),
+    );
+    if (linkedGrade) return linkedGrade;
+  }
+
+  const resolution = resolveGradeForPercentage(
+    args.percentage,
+    args.applicableGrades,
+    args.subjectType,
+  );
+  return resolution.ambiguous ? null : resolution.grade;
 }
 
 async function getCurrentStaffMember(req: Request, schoolId: number) {
@@ -11070,7 +11116,9 @@ ${schoolName}`;
         classId: assessment.classId,
         subjectId: assessment.subjectId,
       });
-      const grades = getApplicableGradesForContext(allGrades, { profileKey, classId: assessment.classId });
+      const grades = profileKey
+        ? getApplicableGradesForContext(allGrades, { profileKey, classId: assessment.classId })
+        : [];
 
       const comments = await storage.getAssessmentComments(assessment.schoolId || undefined, assessment.classId, assessment.subjectId);
 
@@ -11094,26 +11142,19 @@ ${schoolName}`;
   });
 
   // Helper function to calculate grade from percentage
-  function calculateGrade(percentage: number, grades: any[], subjectType?: string | null): { gradeId: number | null; gradeName: string } {
-    const orderedGrades = [...grades].sort((a, b) => Number(b.upperLimit) - Number(a.upperLimit));
-    const compatibleTyped = orderedGrades.filter((grade) => grade.gradeType && isSubjectTypeCompatibleWithGradeType(subjectType, grade.gradeType));
-    const genericGrades = orderedGrades.filter((grade) => !grade.gradeType);
-    const candidateSets = compatibleTyped.length > 0
-      ? [compatibleTyped, genericGrades, orderedGrades]
-      : [genericGrades, orderedGrades];
-
-    for (const set of candidateSets) {
-      for (const grade of set) {
-        const lower = Number(grade.lowerLimit);
-        const upper = Number(grade.upperLimit);
-        if (Number.isNaN(lower) || Number.isNaN(upper)) continue;
-        if (percentage >= lower && percentage <= upper) {
-          return { gradeId: grade.id, gradeName: grade.gradeName };
-        }
-      }
-    }
-
-    return { gradeId: null, gradeName: "" };
+  function calculateGrade(percentage: number, grades: any[], subjectType?: string | null): {
+    gradeId: number | null;
+    gradeName: string;
+    ambiguous: boolean;
+    matchingGradeIds: number[];
+  } {
+    const resolution = resolveGradeForPercentage(percentage, grades, subjectType);
+    return {
+      gradeId: resolution.grade ? Number(resolution.grade.id) : null,
+      gradeName: resolution.grade?.gradeName || "",
+      ambiguous: resolution.ambiguous,
+      matchingGradeIds: resolution.matchingGradeIds,
+    };
   }
 
   // Save/update marks for a student
@@ -11215,11 +11256,39 @@ ${schoolName}`;
         schoolId,
         classId,
         subjectId,
-        studentId: Number(studentId),
       });
-      const grades = getApplicableGradesForContext(allGrades, { profileKey, classId });
+      const grades = profileKey
+        ? getApplicableGradesForContext(allGrades, { profileKey, classId })
+        : [];
       const subject = await storage.getSubject(subjectId);
-      const { gradeId, gradeName } = percentage !== null ? calculateGrade(percentage, grades, subject?.subjectType) : { gradeId: null, gradeName: "" };
+      const gradeResolution = percentage !== null
+        ? calculateGrade(percentage, grades, subject?.subjectType)
+        : { gradeId: null, gradeName: "", ambiguous: false, matchingGradeIds: [] as number[] };
+      const { gradeId, gradeName } = gradeResolution;
+
+      if (percentage !== null && (!gradeId || gradeResolution.ambiguous)) {
+        const detail = gradeResolution.ambiguous
+          ? `Overlapping grade ranges matched IDs: ${gradeResolution.matchingGradeIds.join(", ")}`
+          : `No grade range covers ${percentage}%`;
+        console.warn("[MARK_GRADE_RESOLUTION_FAILED]", {
+          assessmentId: assessment.id,
+          studentId: Number(studentId),
+          schoolId,
+          classId,
+          subjectId,
+          percentage,
+          profileKey,
+          detail,
+        });
+        return res.status(422).json({
+          message: gradeResolution.ambiguous
+            ? "This mark matches overlapping grade ranges. Please correct the grading configuration before saving."
+            : `No grade is configured for ${percentage}% in this class and subject. Please correct the grading configuration before saving.`,
+          code: "GRADE_CONFIGURATION_INVALID",
+          percentage,
+          profileKey,
+        });
+      }
       
       // Always look up pool comment for this grade (used for auto snapshot)
       let commentId = null;
@@ -11552,6 +11621,21 @@ ${schoolName}`;
       const subjects = subjectsData.filter(Boolean);
       
       const grades = await storage.getGradesBySchool(schoolId);
+      const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+      const gradeCandidatesBySubject = new Map<number, any[]>();
+      for (const subject of subjects) {
+        if (!subject) continue;
+        gradeCandidatesBySubject.set(
+          Number(subject.id),
+          getClassSubjectGradeCandidates({
+            allGrades: grades,
+            school,
+            classInfo,
+            classStreamName: classStream?.name || null,
+            subject,
+          }).grades,
+        );
+      }
       
       const assessmentIds = allAssessments.map(a => a.id);
       const allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
@@ -11628,18 +11712,22 @@ ${schoolName}`;
           
           if (!mark) continue;
           
-          const pctRaw = mark.percentage !== null && mark.percentage !== undefined ? parseFloat(mark.percentage) : null;
+          const pctRaw = parseFinitePercentage(mark.percentage);
           const statusComment = markStatusLabel(mark.attStatus);
           if (pctRaw === null && !statusComment) continue;
           
           let gradeName = "";
           let gradePoints = 0;
-          if (pctRaw !== null && mark.gradeId) {
-            const grade = grades.find(g => g.id === mark.gradeId);
-            if (grade) {
-              gradeName = grade.gradeName;
-              gradePoints = grade.gradePoints ? parseFloat(grade.gradePoints as string) : 0;
-            }
+          const resolvedGrade = resolveStoredAssessmentGrade({
+            mark,
+            percentage: pctRaw,
+            applicableGrades: gradeCandidatesBySubject.get(Number(subject.id)) || [],
+            allGrades: grades,
+            subjectType: subject.subjectType,
+          });
+          if (resolvedGrade) {
+            gradeName = resolvedGrade.gradeName;
+            gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
           }
           
           const comment = statusComment || mark.customCommentText || mark.autoCommentSnapshot || "";
@@ -11874,8 +11962,7 @@ ${schoolName}`;
 
       for (const rc of reportCards) {
         const avg = rc.summary.averagePercentage;
-        const studentInfo = students.find((student) => student.id === rc.student.id);
-        let streamId = studentInfo?.streamId ?? classInfo?.streamId ?? null;
+        const streamId = classInfo?.streamId ?? null;
         const stream = streamId ? await storage.getStream(streamId) : null;
         const profileKey = resolveGradeProfileKey({
           schoolType: school?.schoolType,
@@ -11982,6 +12069,7 @@ ${schoolName}`;
       
       const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
       const grades = await storage.getGradesBySchool(schoolId);
+      const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
       
       const subjectResults: Array<{
         subjectId: number;
@@ -12008,14 +12096,24 @@ ${schoolName}`;
         let comment = "";
         
         if (mark) {
-          percentage = mark.percentage ? parseFloat(mark.percentage) : null;
-          
-          if (mark.gradeId) {
-            const grade = grades.find(g => g.id === mark.gradeId);
-            if (grade) {
-              gradeName = grade.gradeName;
-              gradePoints = grade.gradePoints ? parseFloat(grade.gradePoints as string) : 0;
-            }
+          percentage = parseFinitePercentage(mark.percentage);
+          const applicableGrades = getClassSubjectGradeCandidates({
+            allGrades: grades,
+            school,
+            classInfo,
+            classStreamName: classStream?.name || null,
+            subject,
+          }).grades;
+          const resolvedGrade = resolveStoredAssessmentGrade({
+            mark,
+            percentage,
+            applicableGrades,
+            allGrades: grades,
+            subjectType: subject.subjectType,
+          });
+          if (resolvedGrade) {
+            gradeName = resolvedGrade.gradeName;
+            gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
           }
           
           comment = mark.customCommentText || mark.autoCommentSnapshot || "";
@@ -12093,6 +12191,21 @@ ${schoolName}`;
     const subjectsList = subjectsData.filter(Boolean);
 
     const grades = await storage.getGradesBySchool(schoolId);
+    const gradeClassStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+    const gradeCandidatesBySubject = new Map<number, any[]>();
+    for (const subject of subjectsList) {
+      if (!subject) continue;
+      gradeCandidatesBySubject.set(
+        Number(subject.id),
+        getClassSubjectGradeCandidates({
+          allGrades: grades,
+          school: schoolInfo,
+          classInfo,
+          classStreamName: gradeClassStream?.name || null,
+          subject,
+        }).grades,
+      );
+    }
     const assessmentIds = allAssessments.map(a => a.id);
     const allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
 
@@ -12155,18 +12268,22 @@ ${schoolName}`;
         const mark = marksMap.get(markKey);
         if (!mark) continue;
 
-        const pctRaw = mark.percentage !== null && mark.percentage !== undefined ? parseFloat(mark.percentage as string) : null;
+        const pctRaw = parseFinitePercentage(mark.percentage);
         const statusComment = markStatusLabel(mark.attStatus);
         if (pctRaw === null && !statusComment) continue;
 
         let gradeName = '';
         let gradePoints = 0;
-        if (pctRaw !== null && mark.gradeId) {
-          const grade = grades.find(g => g.id === mark.gradeId);
-          if (grade) {
-            gradeName = grade.gradeName;
-            gradePoints = grade.gradePoints ? parseFloat(grade.gradePoints as string) : 0;
-          }
+        const resolvedGrade = resolveStoredAssessmentGrade({
+          mark,
+          percentage: pctRaw,
+          applicableGrades: gradeCandidatesBySubject.get(Number(subject.id)) || [],
+          allGrades: grades,
+          subjectType: subject.subjectType,
+        });
+        if (resolvedGrade) {
+          gradeName = resolvedGrade.gradeName;
+          gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
         }
 
         const comment = statusComment || mark.customCommentText || mark.autoCommentSnapshot || '';
@@ -12309,7 +12426,7 @@ ${schoolName}`;
       const profileKey = resolveGradeProfileKey({
         schoolType: schoolInfo?.schoolType,
         examinationBoard: schoolInfo?.examinationBoard,
-        streamName: studentStream?.name || classStream?.name,
+        streamName: classStream?.name || null,
       });
       const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId: classInfo.id });
       const configuredGrade = resolveReportCommentGradeForAverage(applicableGrades, avgPct);
@@ -12381,11 +12498,14 @@ ${schoolName}`;
     const studentForClass = await storage.getStudent(studentId);
     const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => !studentForClass?.classId || Number(assessment.classId) === Number(studentForClass.classId));
     const grades = await storage.getGradesBySchool(schoolId);
-    const exam = await storage.getExam(examId);
+    const [exam, schoolInfo] = await Promise.all([
+      storage.getExam(examId),
+      storage.getSchool(schoolId),
+    ]);
     const termId = exam?.termId;
     const termName = termId ? `Term ${termId}` : '';
 
-    const student = await storage.getStudent(studentId);
+    const student = studentForClass;
     const studentClass = student?.classId ? await storage.getClass(student.classId) : null;
     const studentStream = student?.streamId ? await storage.getStream(student.streamId) : null;
     const classStream = studentClass?.streamId ? await storage.getStream(studentClass.streamId) : null;
@@ -12411,25 +12531,38 @@ ${schoolName}`;
       if (!mark) continue;
 
       const statusComment = markStatusLabel(mark.attStatus);
-      const pctNum = mark.percentage !== null && mark.percentage !== undefined ? parseFloat(mark.percentage as string) : null;
-      if ((pctNum === null || Number.isNaN(pctNum)) && !statusComment) continue;
+      const pctNum = parseFinitePercentage(mark.percentage);
+      if (pctNum === null && !statusComment) continue;
 
-      const pctStr = pctNum !== null && !Number.isNaN(pctNum)
+      const pctStr = pctNum !== null
         ? (pctNum % 1 === 0 ? String(Math.round(pctNum)) : pctNum.toFixed(1))
         : '';
       let gradeName = '';
       let gradePoints = 0;
 
-      if (pctNum !== null && !Number.isNaN(pctNum) && mark.gradeId) {
-        const grade = grades.find(g => g.id === mark.gradeId);
-        if (grade) {
-          gradeName = grade.gradeName;
-          gradePoints = grade.gradePoints ? parseFloat(grade.gradePoints as string) : 0;
-        }
+      const applicableGrades = studentClass
+        ? getClassSubjectGradeCandidates({
+            allGrades: grades,
+            school: schoolInfo,
+            classInfo: studentClass,
+            classStreamName: classStream?.name || null,
+            subject,
+          }).grades
+        : [];
+      const resolvedGrade = resolveStoredAssessmentGrade({
+        mark,
+        percentage: pctNum,
+        applicableGrades,
+        allGrades: grades,
+        subjectType: subject.subjectType,
+      });
+      if (resolvedGrade) {
+        gradeName = resolvedGrade.gradeName;
+        gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
       }
 
       lines.push({ subject: subject.name, pct: pctStr, grade: gradeName, statusComment });
-      if (pctNum !== null && !Number.isNaN(pctNum)) {
+      if (pctNum !== null) {
         totalPct += pctNum;
         totalGradePoints += gradePoints;
         subjectCount++;
@@ -15349,21 +15482,49 @@ ${schoolName}`;
   });
 
   async function getPublishedPortalGradesForStudent(student: any) {
-    if (!student?.classId) return [];
-    const markRows = await db.select().from(assessmentMarksSchema).where(eq(assessmentMarksSchema.studentId, student.id));
+    if (!student?.classId || !student?.schoolId) return [];
+
+    const [markRows, classInfo, school, allGrades] = await Promise.all([
+      db.select().from(assessmentMarksSchema).where(eq(assessmentMarksSchema.studentId, student.id)),
+      storage.getClass(Number(student.classId)),
+      storage.getSchool(Number(student.schoolId)),
+      storage.getGradesBySchool(Number(student.schoolId)),
+    ]);
+    if (!classInfo) return [];
+    const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+
     const results: any[] = [];
     for (const mark of markRows) {
       const assessment = await storage.getAssessment(mark.assessmentId);
       if (!assessment || Number(assessment.classId) !== Number(student.classId) || !assessment.examId) continue;
       const publication = await getClassExamPublication(Number(assessment.examId), Number(student.classId));
       if (!publication?.isPublished) continue;
-      const [subject, grade, exam, assessmentType] = await Promise.all([
+      const [subject, exam, assessmentType] = await Promise.all([
         storage.getSubject(Number(assessment.subjectId)),
-        mark.gradeId ? storage.getGrade(Number(mark.gradeId)) : Promise.resolve(undefined),
         storage.getExam(Number(assessment.examId)),
         assessment.assessmentTypeId ? storage.getAssessmentType(Number(assessment.assessmentTypeId)) : Promise.resolve(undefined),
       ]);
+      const percentage = parseFinitePercentage(mark.percentage);
+      const applicableGrades = subject
+        ? getClassSubjectGradeCandidates({
+            allGrades,
+            school,
+            classInfo,
+            classStreamName: classStream?.name || null,
+            subject,
+          }).grades
+        : [];
+      const grade = subject
+        ? resolveStoredAssessmentGrade({
+            mark,
+            percentage,
+            applicableGrades,
+            allGrades,
+            subjectType: subject.subjectType,
+          })
+        : null;
       const statusComment = markStatusLabel(mark.attStatus);
+      if (percentage === null && !statusComment) continue;
       results.push({
         id: mark.id,
         percentage: mark.percentage,
@@ -15501,7 +15662,7 @@ ${schoolName}`;
             const assessmentIds = classAssessments.map(a => a.id);
             const allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
             const grades = await storage.getGradesBySchool(schoolId);
-            const gradeMap = new Map(grades.map(g => [g.id, g]));
+            const classStreamForGrades = classInfo?.streamId ? streamMap.get(classInfo.streamId) : null;
 
             const studentMarks = allMarks.filter(m => m.studentId === studentId);
 
@@ -15515,8 +15676,23 @@ ${schoolName}`;
               const subject = subjectMap.get(assessment.subjectId);
               if (!mark || !subject) return null;
 
-              const pct = mark.percentage ? parseFloat(mark.percentage as string) : null;
-              const grade = mark.gradeId ? gradeMap.get(mark.gradeId) : null;
+              const pct = parseFinitePercentage(mark.percentage);
+              const applicableGrades = classInfo
+                ? getClassSubjectGradeCandidates({
+                    allGrades: grades,
+                    school,
+                    classInfo,
+                    classStreamName: classStreamForGrades?.name || null,
+                    subject,
+                  }).grades
+                : [];
+              const grade = resolveStoredAssessmentGrade({
+                mark,
+                percentage: pct,
+                applicableGrades,
+                allGrades: grades,
+                subjectType: subject.subjectType,
+              });
               const gradeName = grade?.gradeName || "";
               const gradePoints = grade?.gradePoints ? parseFloat(grade.gradePoints as string) : 0;
 
@@ -15530,8 +15706,9 @@ ${schoolName}`;
               const comment = mark.customCommentText || mark.autoCommentSnapshot || "";
 
               const allSubjectMarks = allMarks
-                .filter(m => m.assessmentId === assessment.id && m.percentage)
-                .map(m => parseFloat(m.percentage as string))
+                .filter(m => m.assessmentId === assessment.id)
+                .map(m => parseFinitePercentage(m.percentage))
+                .filter((value): value is number => value !== null)
                 .sort((a, b) => b - a);
 
               let classPosition: number | null = null;
@@ -15559,8 +15736,9 @@ ${schoolName}`;
               let sc = 0;
               for (const assessment of classAssessments) {
                 const m = allMarks.find(mk => mk.studentId === cs.id && mk.assessmentId === assessment.id);
-                if (m && m.percentage) {
-                  st += parseFloat(m.percentage as string);
+                const markPercentage = parseFinitePercentage(m?.percentage);
+                if (markPercentage !== null) {
+                  st += markPercentage;
                   sc++;
                 }
               }
@@ -15572,7 +15750,7 @@ ${schoolName}`;
 
             let streamPosition: number | null = null;
             let totalInStream: number | null = null;
-            if (streamInfo && classInfo?.streamId) {
+            if (classInfo?.streamId) {
               const streamClasses = allClasses.filter(c => c.streamId === classInfo.streamId);
               const streamStudentTotals: { studentId: number; total: number }[] = [];
               for (const sc of streamClasses) {
@@ -15585,8 +15763,9 @@ ${schoolName}`;
                   let ssc = 0;
                   for (const a of scAssessments) {
                     const m = scMarks.find(mk => mk.studentId === ss.id && mk.assessmentId === a.id);
-                    if (m && m.percentage) {
-                      st += parseFloat(m.percentage as string);
+                    const markPercentage = parseFinitePercentage(m?.percentage);
+                    if (markPercentage !== null) {
+                      st += markPercentage;
                       ssc++;
                     }
                   }
