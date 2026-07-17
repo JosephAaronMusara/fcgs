@@ -170,6 +170,7 @@ export interface IStorage {
   getGrade(id: number): Promise<Grade | undefined>;
   createGrade(grade: InsertGrade): Promise<Grade>;
   updateGrade(id: number, grade: Partial<InsertGrade>): Promise<Grade | undefined>;
+  attachClassToGrades(classId: number, gradeIds: number[]): Promise<number>;
   deleteGrade(id: number): Promise<boolean>;
   getGradeForMark(mark: number): Promise<Grade | undefined>;
 
@@ -1575,6 +1576,26 @@ export class DatabaseStorage implements IStorage {
   async updateGrade(id: number, gradeData: Partial<InsertGrade>): Promise<Grade | undefined> {
     const [updated] = await db.update(grades).set(gradeData).where(eq(grades.id, id)).returning();
     return updated;
+  }
+
+  async attachClassToGrades(classId: number, gradeIds: number[]): Promise<number> {
+    const normalizedGradeIds = Array.from(new Set(gradeIds.map(Number).filter(Number.isFinite)));
+    if (!Number.isFinite(classId) || normalizedGradeIds.length === 0) return 0;
+
+    const updated = await db
+      .update(grades)
+      .set({
+        classIds: sql<number[]>`array_append(COALESCE(${grades.classIds}, ARRAY[]::integer[]), ${classId})`,
+      })
+      .where(and(
+        inArray(grades.id, normalizedGradeIds),
+        sql`COALESCE(${grades.appliesAll}, false) = false`,
+        sql`cardinality(COALESCE(${grades.classIds}, ARRAY[]::integer[])) > 0`,
+        sql`NOT (${classId} = ANY(COALESCE(${grades.classIds}, ARRAY[]::integer[])))`,
+      ))
+      .returning({ id: grades.id });
+
+    return updated.length;
   }
 
   async deleteGrade(id: number): Promise<boolean> {

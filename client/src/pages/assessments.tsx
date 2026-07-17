@@ -706,7 +706,12 @@ function AssessmentDialog({
     setPapers(updated);
   };
   const totalWeight = papers.reduce((sum, p) => sum + parseFloat(p.paperWeightPct || "0"), 0);
-  const weightsValid = Math.abs(totalWeight - 100) < 0.01;
+  const paperValuesValid = papers.every((paper) => {
+    const marks = Number(paper.paperMarks);
+    const weight = Number(paper.paperWeightPct);
+    return paper.paperName.trim().length > 0 && Number.isInteger(marks) && marks > 0 && Number.isFinite(weight) && weight > 0 && weight <= 100;
+  });
+  const weightsValid = Number.isFinite(totalWeight) && Math.abs(totalWeight - 100) < 0.01;
 
   const isTopicValid = topic.trim().length > 0;
   const isSubjectValid = subjectId !== "";
@@ -833,7 +838,7 @@ useEffect(() => {
   const handleSubmit = () => {
     setTouched(true);
     
-    if (!isTopicValid || !isClassValid || !isSubjectValid || !isExamValid || !weightsValid || !hasPapers) {
+    if (!isTopicValid || !isClassValid || !isSubjectValid || !isExamValid || !weightsValid || !paperValuesValid || !hasPapers) {
       return;
     }
     
@@ -994,10 +999,17 @@ useEffect(() => {
               </div>
             )}
             
+            {!paperValuesValid && papers.length > 0 && (
+              <div className="flex items-center gap-2 p-2 bg-destructive/10 text-destructive rounded-md text-sm">
+                <AlertTriangle className="w-4 h-4" />
+                Every paper needs a name, a maximum mark above 0, and a weight above 0%.
+              </div>
+            )}
+
             {!weightsValid && papers.length > 0 && (
               <div className="flex items-center gap-2 p-2 bg-destructive/10 text-destructive rounded-md text-sm">
                 <AlertTriangle className="w-4 h-4" />
-                Paper weights must sum to exactly 100% (currently {totalWeight.toFixed(1)}%)
+                Paper weights must sum to exactly 100% (currently {Number.isFinite(totalWeight) ? totalWeight.toFixed(1) : "invalid"}%)
               </div>
             )}
 
@@ -1017,6 +1029,8 @@ useEffect(() => {
                       value={paper.paperMarks}
                       onChange={(e) => updatePaper(index, "paperMarks", parseInt(e.target.value) || 0)}
                       className="w-20"
+                      min={1}
+                      step={1}
                       data-testid={`input-paper-marks-${index}`}
                     />
                     <span className="text-muted-foreground text-sm">marks</span>
@@ -1027,6 +1041,8 @@ useEffect(() => {
                       value={paper.paperWeightPct}
                       onChange={(e) => updatePaper(index, "paperWeightPct", e.target.value)}
                       className="w-20"
+                      min="0.01"
+                      max="100"
                       step="0.01"
                       data-testid={`input-paper-weight-${index}`}
                     />

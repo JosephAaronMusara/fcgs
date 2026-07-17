@@ -22,6 +22,26 @@ interface ClassWithDetails extends ClassType {
   classTeacher?: Staff;
 }
 
+interface ClassGradingConfiguration {
+  classId: number;
+  ready: boolean;
+  state: "ready" | "needs_configuration";
+  autoAttachedGradeRows: number;
+  message: string;
+  profiles: Array<{
+    profileKey: string | null;
+    profileLabel: string;
+    ready: boolean;
+    state: string;
+    resolutionSource: string;
+    message: string;
+  }>;
+}
+
+interface ClassMutationResponse extends ClassType {
+  gradingConfiguration?: ClassGradingConfiguration;
+}
+
 export default function ClassroomsPage() {
   const { toast } = useToast();
   const { currentSchoolId } = useAuth();
@@ -42,6 +62,16 @@ export default function ClassroomsPage() {
 
   const { data: classList, isLoading } = useQuery<ClassType[]>({
     queryKey: ["/api/classes"],
+  });
+
+  const { data: gradingConfigurations = [] } = useQuery<ClassGradingConfiguration[]>({
+    queryKey: ["/api/classes/grading-configuration", currentSchoolId],
+    queryFn: async () => {
+      const response = await schoolFetch("/api/classes/grading-configuration");
+      if (!response.ok) throw new Error("Failed to load class grading configuration");
+      return response.json();
+    },
+    enabled: !!currentSchoolId,
   });
 
   const { data: streams } = useQuery<Stream[]>({
@@ -70,18 +100,27 @@ export default function ClassroomsPage() {
   const createMutation = useMutation({
     mutationFn: async ({ classData, subjectIds }: { classData: Partial<ClassType>; subjectIds: number[] }) => {
       const res = await apiRequest("POST", "/api/classes", classData);
-      const newClass = await res.json();
+      const newClass = await res.json() as ClassMutationResponse;
+      let gradingConfiguration = newClass.gradingConfiguration;
       if (subjectIds.length > 0) {
-        await apiRequest("PUT", `/api/classes/${newClass.id}/subjects`, { subjectIds });
+        const subjectsResponse = await apiRequest("PUT", `/api/classes/${newClass.id}/subjects`, { subjectIds });
+        const subjectsPayload = await subjectsResponse.json();
+        gradingConfiguration = subjectsPayload.gradingConfiguration || gradingConfiguration;
       }
-      return newClass;
+      return { ...newClass, gradingConfiguration };
     },
-    onSuccess: () => {
+    onSuccess: (createdClass) => {
       queryClient.invalidateQueries({ queryKey: ["/api/classes"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/classes/grading-configuration"] });
       queryClient.invalidateQueries({ queryKey: ["/api/subjects"] });
       queryClient.invalidateQueries({ queryKey: ["/api/class-subjects/all"] });
       setIsAddOpen(false);
-      toast({ title: "Success", description: "Class added successfully" });
+      const grading = createdClass.gradingConfiguration;
+      toast({
+        title: grading?.ready ? "Class added" : "Class added — grading setup required",
+        description: grading?.message || "Class added successfully",
+        variant: grading && !grading.ready ? "destructive" : undefined,
+      });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -93,10 +132,16 @@ export default function ClassroomsPage() {
       const res = await apiRequest("PUT", `/api/classes/${id}`, data);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (updatedClass: ClassMutationResponse) => {
       queryClient.invalidateQueries({ queryKey: ["/api/classes"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/classes/grading-configuration"] });
       setEditingClass(null);
-      toast({ title: "Success", description: "Class updated successfully" });
+      const grading = updatedClass.gradingConfiguration;
+      toast({
+        title: grading?.ready ? "Class updated" : "Class updated — grading setup required",
+        description: grading?.message || "Class updated successfully",
+        variant: grading && !grading.ready ? "destructive" : undefined,
+      });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -109,6 +154,7 @@ export default function ClassroomsPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/classes"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/classes/grading-configuration"] });
       setDeleteClass(null);
       toast({ title: "Success", description: "Class deleted successfully" });
     },
@@ -119,13 +165,20 @@ export default function ClassroomsPage() {
 
   const updateSubjectsMutation = useMutation({
     mutationFn: async ({ classId, subjectIds }: { classId: number; subjectIds: number[] }) => {
-      await apiRequest("PUT", `/api/classes/${classId}/subjects`, { subjectIds });
+      const response = await apiRequest("PUT", `/api/classes/${classId}/subjects`, { subjectIds });
+      return response.json();
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/classes"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/classes/grading-configuration"] });
       queryClient.invalidateQueries({ queryKey: ["/api/subjects"] });
       queryClient.invalidateQueries({ queryKey: ["/api/class-subjects/all"] });
-      toast({ title: "Success", description: "Class subjects updated" });
+      const grading = result?.gradingConfiguration as ClassGradingConfiguration | undefined;
+      toast({
+        title: grading?.ready ? "Class subjects updated" : "Subjects updated — grading setup required",
+        description: grading?.message || "Class subjects updated",
+        variant: grading && !grading.ready ? "destructive" : undefined,
+      });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -316,6 +369,7 @@ export default function ClassroomsPage() {
                     subjectCount={getSubjectCount(classItem.id)}
                     classSubjects={getSubjectsForClass(classItem.id)}
                     classStudents={getStudentsInClass(classItem.id)}
+                    gradingConfiguration={gradingConfigurations.find((item) => item.classId === classItem.id)}
                     onEdit={() => setEditingClass(classItem)}
                     onDelete={() => setDeleteClass(classItem)}
                     onMigrate={() => {
@@ -417,6 +471,7 @@ function ClassCard({
   subjectCount,
   classSubjects,
   classStudents,
+  gradingConfiguration,
   onEdit,
   onDelete,
   onMigrate,
@@ -428,6 +483,7 @@ function ClassCard({
   subjectCount: number;
   classSubjects: Subject[];
   classStudents: Student[];
+  gradingConfiguration?: ClassGradingConfiguration;
   onEdit: () => void;
   onDelete: () => void;
   onMigrate: () => void;
@@ -448,6 +504,16 @@ function ClassCard({
                 ) : null}
               </h3>
               <p className="text-sm text-muted-foreground">{streamName}</p>
+              {gradingConfiguration ? (
+                <Badge
+                  variant={gradingConfiguration.ready ? "secondary" : "destructive"}
+                  className="mt-2"
+                  title={gradingConfiguration.message}
+                  data-testid={`badge-grading-${classItem.id}`}
+                >
+                  {gradingConfiguration.ready ? "Grading ready" : "Grading setup needed"}
+                </Badge>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Badge

@@ -13,6 +13,7 @@ import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { generateReportCardPdf, type ReportCardPdfData } from "./pdf-report-card";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
+import { assessClassSubjectGradeConfiguration, planExactProfileClassAttachment, resolveExpectedGradeProfile, type GradeConfigurationProfileStatus } from "./grading-configuration";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
@@ -125,6 +126,213 @@ function getClassSubjectGradeCandidates(args: {
         })
       : [],
   };
+}
+
+
+type ClassGradingConfigurationSummary = {
+  classId: number;
+  ready: boolean;
+  state: "ready" | "needs_configuration";
+  autoAttachedGradeRows: number;
+  profiles: GradeConfigurationProfileStatus[];
+  message: string;
+};
+
+type AssessmentPaperValidationResult = {
+  valid: boolean;
+  message: string;
+  normalizedPapers: Array<{
+    paperName: string;
+    paperMarks: number;
+    paperWeightPct: string;
+    sortOrder?: number;
+  }>;
+};
+
+function validateAssessmentPapers(papers: unknown): AssessmentPaperValidationResult {
+  if (!Array.isArray(papers) || papers.length < 1) {
+    return { valid: false, message: "At least one paper is required", normalizedPapers: [] };
+  }
+
+  const normalizedPapers: AssessmentPaperValidationResult["normalizedPapers"] = [];
+  const paperNames = new Set<string>();
+  let totalWeight = 0;
+
+  for (let index = 0; index < papers.length; index += 1) {
+    const paper = papers[index] as any;
+    const paperName = String(paper?.paperName || "").trim();
+    const paperMarks = Number(paper?.paperMarks);
+    const paperWeightPct = Number(paper?.paperWeightPct);
+
+    if (!paperName) {
+      return { valid: false, message: `Paper ${index + 1} requires a name`, normalizedPapers: [] };
+    }
+    const normalizedName = paperName.toLowerCase();
+    if (paperNames.has(normalizedName)) {
+      return { valid: false, message: `Paper names must be unique. "${paperName}" is repeated.`, normalizedPapers: [] };
+    }
+    paperNames.add(normalizedName);
+
+    if (!Number.isFinite(paperMarks) || !Number.isInteger(paperMarks) || paperMarks <= 0) {
+      return { valid: false, message: `${paperName} must have a positive whole-number maximum mark`, normalizedPapers: [] };
+    }
+    if (!Number.isFinite(paperWeightPct) || paperWeightPct <= 0 || paperWeightPct > 100) {
+      return { valid: false, message: `${paperName} must have a weight greater than 0% and not more than 100%`, normalizedPapers: [] };
+    }
+
+    totalWeight += paperWeightPct;
+    normalizedPapers.push({
+      paperName,
+      paperMarks,
+      paperWeightPct: paperWeightPct.toFixed(2),
+      ...(paper?.sortOrder !== undefined ? { sortOrder: Number(paper.sortOrder) } : {}),
+    });
+  }
+
+  if (Math.abs(totalWeight - 100) >= 0.01) {
+    return {
+      valid: false,
+      message: `Paper weights must total exactly 100% (currently ${totalWeight.toFixed(2)}%)`,
+      normalizedPapers: [],
+    };
+  }
+
+  return { valid: true, message: "Assessment papers are valid", normalizedPapers };
+}
+
+function mergeGradeConfigurationStatuses(statuses: GradeConfigurationProfileStatus[]): GradeConfigurationProfileStatus[] {
+  const grouped = new Map<string, GradeConfigurationProfileStatus>();
+  for (const status of statuses) {
+    const key = `${status.profileKey || "none"}::${status.subjectType || "generic"}`;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, { ...status, subjectIds: [...status.subjectIds] });
+      continue;
+    }
+    existing.subjectIds = Array.from(new Set([...existing.subjectIds, ...status.subjectIds]));
+  }
+  return Array.from(grouped.values());
+}
+
+async function getClassGradingConfiguration(args: {
+  classId: number;
+  subjectIds?: number[];
+  autoAttach?: boolean;
+  expectedSchoolId?: number;
+}): Promise<ClassGradingConfigurationSummary> {
+  const classInfo = await storage.getClass(args.classId);
+  if (!classInfo || !classInfo.schoolId || (args.expectedSchoolId && classInfo.schoolId !== args.expectedSchoolId)) {
+    return {
+      classId: args.classId,
+      ready: false,
+      state: "needs_configuration",
+      autoAttachedGradeRows: 0,
+      profiles: [],
+      message: "Class or school context was not found.",
+    };
+  }
+
+  const [school, stream, schoolGrades, schoolSubjects] = await Promise.all([
+    storage.getSchool(classInfo.schoolId),
+    classInfo.streamId ? storage.getStream(classInfo.streamId) : Promise.resolve(undefined),
+    storage.getGradesBySchool(classInfo.schoolId),
+    storage.getSubjectsBySchool(classInfo.schoolId),
+  ]);
+
+  const requestedSubjectIds = Array.isArray(args.subjectIds)
+    ? Array.from(new Set(args.subjectIds.map(Number).filter(Number.isFinite)))
+    : (await storage.getClassSubjects(classInfo.id)).map((row) => Number(row.subjectId));
+  const selectedSubjects = schoolSubjects.filter((subject) => requestedSubjectIds.includes(subject.id));
+  const contexts = selectedSubjects.length > 0
+    ? selectedSubjects.map((subject) => ({
+        subjectType: subject.subjectType || null,
+        subjectIds: [subject.id],
+      }))
+    : [{ subjectType: null, subjectIds: [] as number[] }];
+
+  let autoAttachedGradeRows = 0;
+  if (args.autoAttach) {
+    const rowsToAttach = new Set<number>();
+    for (const context of contexts) {
+      const profileKey = resolveExpectedGradeProfile({
+        schoolType: school?.schoolType,
+        examinationBoard: school?.examinationBoard,
+        streamName: stream?.name || null,
+        subjectType: context.subjectType,
+      });
+      const plan = planExactProfileClassAttachment({
+        grades: schoolGrades,
+        profileKey,
+        classId: classInfo.id,
+        subjectType: context.subjectType,
+      });
+      if (plan.safe) {
+        plan.rowsToAttach.forEach((gradeId) => rowsToAttach.add(gradeId));
+      }
+    }
+
+    if (rowsToAttach.size > 0) {
+      autoAttachedGradeRows = await storage.attachClassToGrades(classInfo.id, Array.from(rowsToAttach));
+      console.info("[GRADE_PROFILE_AUTO_ATTACHED]", {
+        classId: classInfo.id,
+        schoolId: classInfo.schoolId,
+        gradeRows: autoAttachedGradeRows,
+        gradeIds: Array.from(rowsToAttach),
+      });
+    }
+  }
+
+  const effectiveGrades = autoAttachedGradeRows > 0
+    ? await storage.getGradesBySchool(classInfo.schoolId)
+    : schoolGrades;
+  const statuses = mergeGradeConfigurationStatuses(contexts.map((context) =>
+    assessClassSubjectGradeConfiguration({
+      grades: effectiveGrades,
+      classId: classInfo.id,
+      schoolType: school?.schoolType,
+      examinationBoard: school?.examinationBoard,
+      streamName: stream?.name || null,
+      subjectType: context.subjectType,
+      subjectIds: context.subjectIds,
+    })
+  ));
+  const ready = statuses.length > 0 && statuses.every((status) => status.ready);
+  const problem = statuses.find((status) => !status.ready);
+
+  return {
+    classId: classInfo.id,
+    ready,
+    state: ready ? "ready" : "needs_configuration",
+    autoAttachedGradeRows,
+    profiles: statuses,
+    message: ready
+      ? autoAttachedGradeRows > 0
+        ? "The class grading profile was attached automatically and is ready."
+        : "The class grading configuration is ready."
+      : problem?.message || "The class grading configuration requires attention.",
+  };
+}
+
+async function requireAssessmentGradingConfiguration(args: {
+  schoolId: number;
+  classId: number;
+  subjectId: number;
+  res: Response;
+}): Promise<ClassGradingConfigurationSummary | null> {
+  const configuration = await getClassGradingConfiguration({
+    classId: args.classId,
+    subjectIds: [args.subjectId],
+    autoAttach: true,
+    expectedSchoolId: args.schoolId,
+  });
+  if (configuration.ready) return configuration;
+
+  args.res.status(422).json({
+    message: `${configuration.message} Configure a complete grading profile before creating or moving this assessment.`,
+    code: "GRADE_CONFIGURATION_INVALID",
+    gradingConfiguration: configuration,
+  });
+  return null;
 }
 
 function resolveStoredAssessmentGrade(args: {
@@ -3266,6 +3474,21 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/classes/grading-configuration", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      const classList = schoolId
+        ? await storage.getClassesBySchool(schoolId)
+        : await storage.getAllClasses();
+      const statuses = await Promise.all(
+        classList.map((classItem) => getClassGradingConfiguration({ classId: classItem.id })),
+      );
+      res.json(statuses);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/classes/:id", requireAuth, async (req, res, next) => {
     try {
       const classData = await storage.getClass(parseInt(req.params.id));
@@ -3282,7 +3505,12 @@ export async function registerRoutes(
     try {
       const data = insertClassSchema.parse(req.body);
       const newClass = await storage.createClass(data);
-      res.status(201).json(newClass);
+      const gradingConfiguration = await getClassGradingConfiguration({
+        classId: newClass.id,
+        subjectIds: [],
+        autoAttach: true,
+      });
+      res.status(201).json({ ...newClass, gradingConfiguration });
     } catch (error) {
       next(error);
     }
@@ -3294,7 +3522,11 @@ export async function registerRoutes(
       if (!updated) {
         return res.status(404).json({ message: "Class not found" });
       }
-      res.json(updated);
+      const gradingConfiguration = await getClassGradingConfiguration({
+        classId: updated.id,
+        autoAttach: true,
+      });
+      res.json({ ...updated, gradingConfiguration });
     } catch (error) {
       next(error);
     }
@@ -3401,7 +3633,15 @@ export async function registerRoutes(
           await tx.insert(classSubjectsSchema).values(inserts);
         }
       });
-      res.status(201).json(await buildClassSubjectManagementPayload(classId));
+      const gradingConfiguration = await getClassGradingConfiguration({
+        classId,
+        subjectIds: Array.from(selected),
+        autoAttach: true,
+      });
+      res.status(201).json({
+        ...(await buildClassSubjectManagementPayload(classId)),
+        gradingConfiguration,
+      });
     } catch (error) {
       next(error);
     }
@@ -3484,7 +3724,16 @@ export async function registerRoutes(
           await tx.insert(classSubjectsSchema).values(inserts);
         }
       });
-      res.json({ message: "Class subjects updated", data: await buildClassSubjectManagementPayload(classId) });
+      const gradingConfiguration = await getClassGradingConfiguration({
+        classId,
+        subjectIds: selected,
+        autoAttach: true,
+      });
+      res.json({
+        message: "Class subjects updated",
+        data: await buildClassSubjectManagementPayload(classId),
+        gradingConfiguration,
+      });
     } catch (error) {
       next(error);
     }
@@ -10955,9 +11204,12 @@ ${schoolName}`;
       if (!schoolId) return;
 
       const { papers, schoolId: _ignoredSchoolId, ...assessmentData } = req.body;
-
-      if (!Array.isArray(papers) || papers.length < 1) {
-        return res.status(400).json({ message: "At least one paper is required" });
+      const paperValidation = validateAssessmentPapers(papers);
+      if (!paperValidation.valid) {
+        return res.status(400).json({
+          message: paperValidation.message,
+          code: "ASSESSMENT_PAPERS_INVALID",
+        });
       }
 
       const validatedRefs = await validateAssessmentPayloadForSchool(schoolId, assessmentData, res);
@@ -10976,6 +11228,14 @@ ${schoolName}`;
       );
       if (!hasTeacherAssignment) return;
 
+      const gradingConfiguration = await requireAssessmentGradingConfiguration({
+        schoolId,
+        classId: Number(assessmentData.classId),
+        subjectId: Number(assessmentData.subjectId),
+        res,
+      });
+      if (!gradingConfiguration) return;
+
       const assessmentWithName = {
         ...assessmentData,
         schoolId,
@@ -10989,10 +11249,10 @@ ${schoolName}`;
 
       const assessment = await storage.createAssessment(assessmentWithName);
 
-      const papersWithAssessmentId = papers.map((p: any, i: number) => ({
-        ...p,
+      const papersWithAssessmentId = paperValidation.normalizedPapers.map((paper, index) => ({
+        ...paper,
         assessmentId: assessment.id,
-        sortOrder: i,
+        sortOrder: index,
       }));
       await storage.setAssessmentPapers(assessment.id, papersWithAssessmentId);
 
@@ -11010,9 +11270,12 @@ ${schoolName}`;
       if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
       const { papers, schoolId: _ignoredSchoolId, ...assessmentData } = req.body;
-
-      if (papers !== undefined && (!Array.isArray(papers) || papers.length < 1)) {
-        return res.status(400).json({ message: "At least one paper is required" });
+      const paperValidation = papers === undefined ? null : validateAssessmentPapers(papers);
+      if (paperValidation && !paperValidation.valid) {
+        return res.status(400).json({
+          message: paperValidation.message,
+          code: "ASSESSMENT_PAPERS_INVALID",
+        });
       }
 
       if (assessmentData.topic && !assessmentData.name) {
@@ -11033,6 +11296,14 @@ ${schoolName}`;
       );
       if (!hasTeacherAssignment) return;
 
+      const gradingConfiguration = await requireAssessmentGradingConfiguration({
+        schoolId: scoped.schoolId,
+        classId: resolvedClassId,
+        subjectId: resolvedSubjectId,
+        res,
+      });
+      if (!gradingConfiguration) return;
+
       const updatePayload = {
         ...assessmentData,
         schoolId: scoped.schoolId,
@@ -11050,11 +11321,11 @@ ${schoolName}`;
       const updated = await storage.updateAssessment(scoped.assessment.id, updatePayload);
       if (!updated) return res.status(404).json({ message: "Assessment not found" });
 
-      if (papers !== undefined) {
-        const papersWithAssessmentId = papers.map((p: any, i: number) => ({
-          ...p,
+      if (paperValidation) {
+        const papersWithAssessmentId = paperValidation.normalizedPapers.map((paper, index) => ({
+          ...paper,
           assessmentId: scoped.assessment.id,
-          sortOrder: i,
+          sortOrder: index,
         }));
         await storage.setAssessmentPapers(scoped.assessment.id, papersWithAssessmentId);
       }
@@ -11179,9 +11450,17 @@ ${schoolName}`;
         return res.status(400).json({ message: "Student does not belong to the assessment class history" });
       }
 
-      // Get assessment papers to calculate weighted percentage
+      // Get assessment papers to calculate weighted percentage. Existing assessments are
+      // revalidated here so invalid legacy paper weights can never produce NaN percentages.
       const papers = await storage.getAssessmentPapers(assessment.id);
-      
+      const paperValidation = validateAssessmentPapers(papers);
+      if (!paperValidation.valid) {
+        return res.status(422).json({
+          message: `${paperValidation.message}. Correct the assessment papers before entering marks.`,
+          code: "ASSESSMENT_PAPERS_INVALID",
+          assessmentId: assessment.id,
+        });
+      }
 
       const normalizedPaperMarks = paperMarks.map((pm: any) => {
         const markValue = pm?.markObtained;
