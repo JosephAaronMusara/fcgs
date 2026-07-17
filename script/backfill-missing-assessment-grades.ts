@@ -1,6 +1,6 @@
 import { and, eq, ilike, isNotNull, isNull } from "drizzle-orm";
 import { db, pool } from "../server/db";
-import { parseFinitePercentage, resolveGradeForPercentage } from "../server/grade-resolution";
+import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "../server/grade-resolution";
 import {
   assessmentMarks,
   assessments,
@@ -11,7 +11,7 @@ import {
   streams,
   subjects,
 } from "../shared/schema";
-import { filterItemsByGradeProfileKey, resolveGradeProfileKey } from "../shared/academic-profiles";
+import { resolveGradeProfileKey } from "../shared/academic-profiles";
 
 type CliOptions = {
   apply: boolean;
@@ -46,12 +46,6 @@ function parseOptions(argv: string[]): CliOptions {
     examName: readStringArg(argv, "exam-name"),
     limit: readNumberArg(argv, "limit"),
   };
-}
-
-function gradeAppliesToClass(grade: any, classId: number): boolean {
-  if (grade?.appliesAll) return true;
-  if (!Array.isArray(grade?.classIds) || grade.classIds.length === 0) return true;
-  return grade.classIds.map((id: unknown) => Number(id)).includes(classId);
 }
 
 async function main() {
@@ -111,6 +105,8 @@ async function main() {
     noMatchingGrade: 0,
     ambiguous: 0,
     inconsistentSchool: 0,
+    exactProfileRepairs: 0,
+    compatibleProfileRepairs: 0,
   };
   const unresolved: Array<Record<string, unknown>> = [];
   const repairs: Array<{ markId: number; gradeId: number }> = [];
@@ -167,8 +163,11 @@ async function main() {
     }
 
     const schoolGrades = gradesBySchool.get(schoolId) || [];
-    const applicableGrades = filterItemsByGradeProfileKey(schoolGrades, profileKey)
-      .filter((grade) => gradeAppliesToClass(grade, Number(row.classId)));
+    const applicableGrades = getProfileAwareGradeCandidates(
+      schoolGrades,
+      profileKey,
+      Number(row.classId),
+    );
     const resolution = resolveGradeForPercentage(percentage, applicableGrades, row.subjectType);
 
     if (!resolution.grade) {
@@ -198,12 +197,18 @@ async function main() {
         percentage,
         profileKey,
         matchingGradeIds: resolution.matchingGradeIds,
+        profileSource: resolution.profileSource,
         reason: "overlapping_grade_ranges",
       });
       continue;
     }
 
     summary.repairable++;
+    if (resolution.profileSource === "compatible") {
+      summary.compatibleProfileRepairs++;
+    } else {
+      summary.exactProfileRepairs++;
+    }
     repairs.push({ markId: Number(row.markId), gradeId: Number(resolution.grade.id) });
   }
 

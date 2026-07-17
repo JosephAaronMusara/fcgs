@@ -10,7 +10,9 @@
     "check": "tsc",
     "db:push": "drizzle-kit push",
     "grades:backfill": "tsx script/backfill-missing-assessment-grades.ts",
-    "grades:backfill:apply": "tsx script/backfill-missing-assessment-grades.ts --apply"
+    "grades:backfill:apply": "tsx script/backfill-missing-assessment-grades.ts --apply",
+    "grades:attach-class": "tsx script/attach-grade-profile-to-class.ts",
+    "grades:attach-class:apply": "tsx script/attach-grade-profile-to-class.ts --apply"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

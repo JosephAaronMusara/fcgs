@@ -12,7 +12,7 @@ import { registerObjectStorageRoutes } from "./replit_integrations/object_storag
 import { registerCalendarRoutes } from "./calendar-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { generateReportCardPdf, type ReportCardPdfData } from "./pdf-report-card";
-import { parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
+import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
@@ -61,10 +61,6 @@ const PASSWORD_RULES = {
   requireSpecial: true,
 };
 
-function getGradesForProfile(grades: any[], profileKey: string | null | undefined) {
-  return filterItemsByGradeProfileKey(grades, profileKey);
-}
-
 async function resolveGradeProfileContext(args: {
   schoolId: number;
   classId: number;
@@ -103,14 +99,8 @@ function isSubjectAvailableForClass(subject: any, classInfo: any): boolean {
   return subjectStreamIds.includes(classStreamId);
 }
 
-function isGradeApplicableToClass(grade: any, classId: number): boolean {
-  if (grade?.appliesAll) return true;
-  if (!Array.isArray(grade?.classIds) || grade.classIds.length === 0) return true;
-  return grade.classIds.map((id: any) => Number(id)).includes(Number(classId));
-}
-
 function getApplicableGradesForContext(grades: any[], args: { profileKey: string | null | undefined; classId: number }) {
-  return getGradesForProfile(grades, args.profileKey).filter((grade) => isGradeApplicableToClass(grade, args.classId));
+  return getProfileAwareGradeCandidates(grades, args.profileKey, args.classId);
 }
 
 function getClassSubjectGradeCandidates(args: {
@@ -10431,9 +10421,8 @@ ${schoolName}`;
 
   function resolveReportCommentGradeForAverage(grades: any[], averagePercentage: number | null) {
     if (averagePercentage === null) return null;
-    const roundedAverage = Math.round(averagePercentage);
-    const orderedGrades = [...grades].sort((a, b) => (Number(b.upperLimit) || 0) - (Number(a.upperLimit) || 0));
-    return orderedGrades.find((grade) => roundedAverage >= Number(grade.lowerLimit) && roundedAverage <= Number(grade.upperLimit)) || null;
+    const resolution = resolveGradeForPercentage(Math.round(averagePercentage), grades);
+    return resolution.ambiguous ? null : resolution.grade;
   }
 
   function findReportCommentForConfiguredGrade(args: {
@@ -13800,24 +13789,14 @@ ${schoolName}`;
 
   function orderAnalyticsGrades(grades: any[]) {
     return [...grades].sort((a, b) => {
+      const priorityDiff = Number(a.resolutionProfilePriority ?? 0) - Number(b.resolutionProfilePriority ?? 0);
+      if (priorityDiff !== 0) return priorityDiff;
       const upperDiff = Number(b.upperLimit ?? -1) - Number(a.upperLimit ?? -1);
       if (upperDiff !== 0) return upperDiff;
       const lowerDiff = Number(b.lowerLimit ?? -1) - Number(a.lowerLimit ?? -1);
       if (lowerDiff !== 0) return lowerDiff;
       return getGradeDisplayName(a).localeCompare(getGradeDisplayName(b));
     });
-  }
-
-  function uniqueAnalyticsGradesByName(grades: any[]) {
-    const seen = new Set<string>();
-    const result: any[] = [];
-    for (const grade of grades) {
-      const name = getGradeDisplayName(grade);
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      result.push(grade);
-    }
-    return result;
   }
 
   function getAnalyticsGradeCandidates(grades: any[], subjectType?: string | null) {
@@ -13829,7 +13808,7 @@ ${schoolName}`;
       : genericGrades.length > 0
         ? genericGrades
         : ordered;
-    return uniqueAnalyticsGradesByName(candidates);
+    return uniqueGradesById(candidates);
   }
 
   function addAnalyticsGradeColumns(columns: string[], grades: any[]) {
@@ -13855,47 +13834,21 @@ ${schoolName}`;
   }
 
   function findGradeForPercentage(pct: number, grades: any[], subjectType?: string | null) {
-    if (!Array.isArray(grades) || grades.length === 0) return null;
-
-    const ordered = orderAnalyticsGrades(grades);
-    const compatibleTyped = ordered.filter((grade) => grade.gradeType && isSubjectTypeCompatibleWithGradeType(subjectType, grade.gradeType));
-    const genericGrades = ordered.filter((grade) => !grade.gradeType);
-    const candidateSets = compatibleTyped.length > 0
-      ? [compatibleTyped, genericGrades, ordered]
-      : genericGrades.length > 0
-        ? [genericGrades, ordered]
-        : [ordered];
-
-    for (const set of candidateSets) {
-      for (const grade of set) {
-        const lower = Number(grade.lowerLimit);
-        const upper = Number(grade.upperLimit);
-        if (Number.isNaN(lower) || Number.isNaN(upper)) continue;
-        if (pct >= lower && pct <= upper) return grade;
-      }
-    }
-
-    return null;
+    const resolution = resolveGradeForPercentage(pct, grades, subjectType);
+    return resolution.ambiguous ? null : resolution.grade;
   }
 
   function resolveAnalyticsGradeForMark(mark: any, pct: number, candidateGrades: any[], subjectType?: string | null, fallbackGrades: any[] = []) {
-    const typedFallbackCandidates = getAnalyticsGradeCandidates(fallbackGrades, subjectType);
-    const gradePool = uniqueGradesById([...candidateGrades, ...typedFallbackCandidates, ...fallbackGrades]);
-
+    // Existing linked grades remain authoritative for historical records. Percentage
+    // fallback must only use profile/class candidates; using every school grade can
+    // silently assign a scale that does not apply to the assessment class.
+    const gradePool = uniqueGradesById([...candidateGrades, ...fallbackGrades]);
     const linkedGrade = mark?.gradeId
       ? gradePool.find((grade) => Number(grade.id) === Number(mark.gradeId))
       : null;
     if (linkedGrade) return linkedGrade;
 
-    // First use the profile/class-specific grade set. If that cannot resolve the
-    // mark, continue to subject-type-aware school grades, then all school grades.
-    // This is important for older marks where grade_id is empty but percentage is set.
-    for (const pool of [candidateGrades, typedFallbackCandidates, fallbackGrades]) {
-      const resolved = findGradeForPercentage(pct, pool, subjectType);
-      if (resolved) return resolved;
-    }
-
-    return null;
+    return findGradeForPercentage(pct, candidateGrades, subjectType);
   }
 
   function isPassingAnalyticsGrade(grade: any, pct: number, fallbackPassMark = 50) {

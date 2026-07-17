@@ -120,13 +120,19 @@ interface AssessmentMark {
   paperMarks: AssessmentMarkPaper[];
 }
 
+type MarksEntryGrade = Grade & {
+  resolutionProfilePriority?: number;
+  resolutionProfileSource?: "exact" | "compatible" | "unscoped";
+};
+
 interface MarksEntryData {
   assessment: Assessment;
   papers: AssessmentPaper[];
   students: Student[];
   marksByStudent: Record<number, AssessmentMark>;
-  grades: Grade[];
+  grades: MarksEntryGrade[];
   comments: AssessmentComment[];
+  gradeProfileKey?: string | null;
   publication?: { isPublished: boolean; status: string };
 }
 
@@ -737,15 +743,29 @@ export default function MarksEntryPage() {
       if (percentage === null)
         return { percentage, gradeName: "", gradeId: null };
 
-      const orderedGrades = [...data.grades].sort(
-        (a, b) => Number(b.upperLimit) - Number(a.upperLimit),
-      );
-      for (const grade of orderedGrades) {
-        const lower = Number(grade.lowerLimit);
-        const upper = Number(grade.upperLimit);
-        if (Number.isNaN(lower) || Number.isNaN(upper)) continue;
-        if (percentage >= lower && percentage <= upper) {
-          return { percentage, gradeName: grade.gradeName, gradeId: grade.id };
+      const orderedGrades = [...data.grades].sort((a, b) => {
+        const priorityDiff = Number(a.resolutionProfilePriority ?? 0) - Number(b.resolutionProfilePriority ?? 0);
+        if (priorityDiff !== 0) return priorityDiff;
+        return Number(b.upperLimit) - Number(a.upperLimit);
+      });
+      const profilePriorities = Array.from(new Set(
+        orderedGrades.map((grade) => Number(grade.resolutionProfilePriority ?? 0)),
+      )).sort((a, b) => a - b);
+
+      // Mirror the server's grading precedence: use an exact-profile range when it
+      // covers the percentage, then fall back to a compatible class profile only
+      // when the exact profile has no matching range.
+      for (const priority of profilePriorities) {
+        const profileGrades = orderedGrades.filter(
+          (grade) => Number(grade.resolutionProfilePriority ?? 0) === priority,
+        );
+        for (const grade of profileGrades) {
+          const lower = Number(grade.lowerLimit);
+          const upper = Number(grade.upperLimit);
+          if (Number.isNaN(lower) || Number.isNaN(upper)) continue;
+          if (percentage >= lower && percentage <= upper) {
+            return { percentage, gradeName: grade.gradeName, gradeId: grade.id };
+          }
         }
       }
       return { percentage, gradeName: "", gradeId: null };
