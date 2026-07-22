@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import * as SelectPrimitive from "@radix-ui/react-select"
-import { Check, ChevronDown, ChevronUp } from "lucide-react"
+import { Check, ChevronDown, ChevronUp, Search, X } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
@@ -191,31 +191,67 @@ const SelectContent = React.forwardRef<
 >(({ className, children, position = "popper", onKeyDownCapture, ...props }, ref) => {
   const [search, setSearch] = React.useState("")
   const contentRef = React.useRef<React.ElementRef<typeof SelectPrimitive.Content> | null>(null)
+  const searchInputRef = React.useRef<HTMLInputElement | null>(null)
   const activeSearch = search.trim().length > 0
   const matchingItemCount = React.useMemo(() => countMatchingItems(children, search), [children, search])
   const viewportScrollHandlers = useNaturalListScroll<HTMLDivElement>()
 
-  React.useEffect(() => {
-    if (!activeSearch) return
-
+  React.useLayoutEffect(() => {
+    searchInputRef.current?.focus({ preventScroll: true })
     const frame = requestAnimationFrame(() => {
-      const firstVisibleItem = contentRef.current?.querySelector<HTMLElement>(
-        "[data-select-searchable-item]:not([data-disabled])",
-      )
-      firstVisibleItem?.focus()
+      searchInputRef.current?.focus({ preventScroll: true })
     })
-
     return () => cancelAnimationFrame(frame)
-  }, [activeSearch, search])
+  }, [])
+
+  const firstVisibleItem = () => contentRef.current?.querySelector<HTMLElement>(
+    "[data-select-searchable-item]:not([data-disabled])",
+  ) ?? null
+
+  const handleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      if (activeSearch) {
+        event.preventDefault()
+        event.stopPropagation()
+        setSearch("")
+      }
+      return
+    }
+
+    if (event.key === "Enter") {
+      const firstItem = firstVisibleItem()
+      if (firstItem) {
+        event.preventDefault()
+        event.stopPropagation()
+        firstItem.click()
+      }
+      return
+    }
+
+    if (event.key === "ArrowDown") {
+      const firstItem = firstVisibleItem()
+      if (firstItem) {
+        event.preventDefault()
+        event.stopPropagation()
+        firstItem.focus()
+      }
+      return
+    }
+
+    // Keep printable keys, Backspace and cursor movement inside the visible
+    // input rather than allowing Radix Select's hidden typeahead to consume them.
+    event.stopPropagation()
+  }
 
   const handleKeyDownCapture = (event: React.KeyboardEvent<HTMLDivElement>) => {
     onKeyDownCapture?.(event)
-    if (event.defaultPrevented) return
+    if (event.defaultPrevented || event.target instanceof HTMLInputElement) return
 
     if (isTypingKey(event)) {
       event.preventDefault()
       event.stopPropagation()
       setSearch((current) => `${current}${event.key}`)
+      searchInputRef.current?.focus({ preventScroll: true })
       return
     }
 
@@ -223,6 +259,7 @@ const SelectContent = React.forwardRef<
       event.preventDefault()
       event.stopPropagation()
       setSearch((current) => current.slice(0, -1))
+      searchInputRef.current?.focus({ preventScroll: true })
       return
     }
 
@@ -230,6 +267,7 @@ const SelectContent = React.forwardRef<
       event.preventDefault()
       event.stopPropagation()
       setSearch("")
+      searchInputRef.current?.focus({ preventScroll: true })
     }
   }
 
@@ -251,6 +289,45 @@ const SelectContent = React.forwardRef<
         {...props}
       >
         <SelectFilterContext.Provider value={{ search }}>
+          <div
+            className="border-b p-2"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <input
+                ref={searchInputRef}
+                autoFocus
+                type="search"
+                inputMode="search"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={handleInputKeyDown}
+                placeholder="Search options…"
+                aria-label="Search options"
+                className="h-10 w-full rounded-md border border-input bg-background pl-9 pr-9 text-base text-foreground outline-none ring-offset-background placeholder:text-muted-foreground focus:ring-2 focus:ring-ring focus:ring-offset-2 sm:h-9 sm:text-sm"
+                data-testid="input-select-search"
+              />
+              {activeSearch && (
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setSearch("")
+                    searchInputRef.current?.focus({ preventScroll: true })
+                  }}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </div>
           <SelectScrollUpButton />
           <SelectPrimitive.Viewport
             className={cn(

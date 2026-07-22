@@ -12,3 +12,8 @@ cookies.txt
 login.json
 event.json
 .local/
+
+# Local repair and upgrade artifacts
+.Local/
+_sql_applied/
+repair-transport-additive.cjs

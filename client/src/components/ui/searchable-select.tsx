@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, ChevronsUpDown, X } from "lucide-react";
+import { Check, ChevronsUpDown, Search, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,6 @@ interface BaseSearchableProps {
 }
 
 const OPTION_ROW_HEIGHT = 36;
-
 
 function isScrollableList(element: HTMLElement | null) {
   if (!element) return false;
@@ -97,31 +96,66 @@ function getFirstEnabledOption(options: SearchableSelectOption[]) {
   return options.find((option) => !option.disabled);
 }
 
-function useTypeahead(open: boolean) {
+function useSearchState(open: boolean) {
   const [search, setSearch] = React.useState("");
 
-  const appendCharacter = React.useCallback((character: string) => {
-    setSearch((current) => `${current}${character}`);
-  }, []);
-
-  const removeCharacter = React.useCallback(() => {
-    setSearch((current) => current.slice(0, -1));
-  }, []);
-
-  const clearSearch = React.useCallback(() => {
-    setSearch("");
-  }, []);
-
   React.useEffect(() => {
-    if (!open) clearSearch();
-  }, [open, clearSearch]);
+    if (!open) setSearch("");
+  }, [open]);
 
-  return {
-    search,
-    appendCharacter,
-    removeCharacter,
-    clearSearch,
-  };
+  return { search, setSearch };
+}
+
+interface SearchFieldProps {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  inputRef: React.RefObject<HTMLInputElement>;
+  onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => void;
+}
+
+function SearchField({ value, onChange, placeholder, inputRef, onKeyDown }: SearchFieldProps) {
+  return (
+    <div
+      className="border-b p-2"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <input
+          ref={inputRef}
+          autoFocus
+          type="search"
+          inputMode="search"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          aria-label={placeholder}
+          className="h-10 w-full rounded-md border border-input bg-background pl-9 pr-9 text-base text-foreground outline-none ring-offset-background placeholder:text-muted-foreground focus:ring-2 focus:ring-ring focus:ring-offset-2 sm:h-9 sm:text-sm"
+          data-testid="input-search-dropdown-options"
+        />
+        {value && (
+          <button
+            type="button"
+            aria-label="Clear search"
+            className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={() => {
+              onChange("");
+              inputRef.current?.focus({ preventScroll: true });
+            }}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 interface TypeaheadListProps {
@@ -155,6 +189,20 @@ function TypeaheadList({ maxVisibleItems, emptyText, children, isEmpty }: Typeah
   );
 }
 
+function focusFirstVisibleOption(content: HTMLDivElement | null) {
+  content?.querySelector<HTMLButtonElement>("[data-searchable-option]:not(:disabled)")?.focus();
+}
+
+function focusAdjacentOption(current: HTMLButtonElement, direction: 1 | -1, input: HTMLInputElement | null) {
+  const container = current.closest<HTMLElement>("[data-searchable-options]");
+  if (!container) return;
+  const options = Array.from(container.querySelectorAll<HTMLButtonElement>("[data-searchable-option]:not(:disabled)"));
+  const index = options.indexOf(current);
+  const next = options[index + direction];
+  if (next) next.focus();
+  else if (direction < 0) input?.focus({ preventScroll: true });
+}
+
 export interface SearchableSelectProps extends BaseSearchableProps {
   value: string;
   onValueChange: (value: string) => void;
@@ -165,6 +213,7 @@ export function SearchableSelect({
   onValueChange,
   options,
   placeholder = "Select option",
+  searchPlaceholder = "Search options…",
   emptyText = "No options found",
   disabled = false,
   className,
@@ -175,7 +224,8 @@ export function SearchableSelect({
 }: SearchableSelectProps) {
   const [open, setOpen] = React.useState(false);
   const contentRef = React.useRef<HTMLDivElement>(null);
-  const { search, appendCharacter, removeCharacter, clearSearch } = useTypeahead(open);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const { search, setSearch } = useSearchState(open);
 
   const selectedOption = React.useMemo(
     () => options.find((option) => option.value === value),
@@ -183,39 +233,58 @@ export function SearchableSelect({
   );
   const filteredOptions = React.useMemo(() => filterOptions(options, search), [options, search]);
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const selectFirstMatch = React.useCallback(() => {
+    const firstEnabled = getFirstEnabledOption(filteredOptions);
+    if (!firstEnabled) return;
+    onValueChange(firstEnabled.value);
+    setSearch("");
+    setOpen(false);
+  }, [filteredOptions, onValueChange, setSearch]);
+
+  const handleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    event.stopPropagation();
 
     if (event.key === "Escape") {
-      if (search) {
-        event.preventDefault();
-        clearSearch();
-      } else {
-        setOpen(false);
-      }
-      return;
-    }
-
-    if (event.key === "Backspace") {
       event.preventDefault();
-      removeCharacter();
+      if (search) setSearch("");
+      else setOpen(false);
       return;
     }
 
     if (event.key === "Enter") {
-      const firstEnabled = getFirstEnabledOption(filteredOptions);
-      if (firstEnabled) {
-        event.preventDefault();
-        onValueChange(firstEnabled.value);
-        clearSearch();
-        setOpen(false);
-      }
+      event.preventDefault();
+      selectFirstMatch();
       return;
     }
 
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusFirstVisibleOption(contentRef.current);
+    }
+  };
+
+  const handleContentKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof HTMLInputElement) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+
     if (event.key.length === 1) {
       event.preventDefault();
-      appendCharacter(event.key);
+      setSearch((current) => `${current}${event.key}`);
+      inputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+
+    if (event.key === "Backspace" && search) {
+      event.preventDefault();
+      setSearch((current) => current.slice(0, -1));
+      inputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+
+    if (event.key === "Escape" && search) {
+      event.preventDefault();
+      setSearch("");
+      inputRef.current?.focus({ preventScroll: true });
     }
   };
 
@@ -239,42 +308,61 @@ export function SearchableSelect({
         ref={contentRef}
         align="start"
         sideOffset={4}
-        tabIndex={-1}
         onOpenAutoFocus={(event) => {
           event.preventDefault();
-          requestAnimationFrame(() => contentRef.current?.focus());
+          inputRef.current?.focus({ preventScroll: true });
         }}
-        onKeyDown={handleKeyDown}
+        onKeyDown={handleContentKeyDown}
         className={cn("w-[--radix-popover-trigger-width] p-0 outline-none", contentClassName)}
       >
-        <TypeaheadList
-          maxVisibleItems={maxVisibleItems}
-          emptyText={emptyText}
-          isEmpty={filteredOptions.length === 0}
-        >
-          {filteredOptions.map((option) => {
-            const isSelected = value === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                disabled={option.disabled}
-                className={cn(
-                  "flex h-9 w-full items-center gap-2 rounded-sm px-2 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50",
-                  isSelected && "bg-accent text-accent-foreground",
-                )}
-                onClick={() => {
-                  onValueChange(option.value);
-                  clearSearch();
-                  setOpen(false);
-                }}
-              >
-                <Check className={cn("h-4 w-4 shrink-0", isSelected ? "opacity-100" : "opacity-0")} />
-                <span className="min-w-0 flex-1 truncate">{option.label}</span>
-              </button>
-            );
-          })}
-        </TypeaheadList>
+        <SearchField
+          value={search}
+          onChange={setSearch}
+          placeholder={searchPlaceholder}
+          inputRef={inputRef}
+          onKeyDown={handleInputKeyDown}
+        />
+        <div data-searchable-options="">
+          <TypeaheadList
+            maxVisibleItems={maxVisibleItems}
+            emptyText={emptyText}
+            isEmpty={filteredOptions.length === 0}
+          >
+            {filteredOptions.map((option) => {
+              const isSelected = value === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  data-searchable-option=""
+                  disabled={option.disabled}
+                  className={cn(
+                    "flex h-9 w-full items-center gap-2 rounded-sm px-2 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50",
+                    isSelected && "bg-accent text-accent-foreground",
+                  )}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      focusAdjacentOption(event.currentTarget, 1, inputRef.current);
+                    }
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      focusAdjacentOption(event.currentTarget, -1, inputRef.current);
+                    }
+                  }}
+                  onClick={() => {
+                    onValueChange(option.value);
+                    setSearch("");
+                    setOpen(false);
+                  }}
+                >
+                  <Check className={cn("h-4 w-4 shrink-0", isSelected ? "opacity-100" : "opacity-0")} />
+                  <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                </button>
+              );
+            })}
+          </TypeaheadList>
+        </div>
       </PopoverContent>
     </Popover>
   );
@@ -291,6 +379,7 @@ export function SearchableMultiSelect({
   onValuesChange,
   options,
   placeholder = "Select options",
+  searchPlaceholder = "Search options…",
   emptyText = "No options found",
   disabled = false,
   className,
@@ -302,7 +391,8 @@ export function SearchableMultiSelect({
 }: SearchableMultiSelectProps) {
   const [open, setOpen] = React.useState(false);
   const contentRef = React.useRef<HTMLDivElement>(null);
-  const { search, appendCharacter, removeCharacter, clearSearch } = useTypeahead(open);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const { search, setSearch } = useSearchState(open);
 
   const selectedSet = React.useMemo(() => new Set(values), [values]);
   const optionMap = React.useMemo(() => new Map(options.map((option) => [option.value, option])), [options]);
@@ -324,38 +414,58 @@ export function SearchableMultiSelect({
     .map((nextValue) => optionMap.get(nextValue)?.label || nextValue)
     .filter(Boolean);
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const selectFirstMatch = React.useCallback(() => {
+    const firstEnabled = getFirstEnabledOption(filteredOptions);
+    if (!firstEnabled) return;
+    toggleValue(firstEnabled.value);
+    setSearch("");
+    requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
+  }, [filteredOptions, setSearch, toggleValue]);
+
+  const handleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    event.stopPropagation();
 
     if (event.key === "Escape") {
-      if (search) {
-        event.preventDefault();
-        clearSearch();
-      } else {
-        setOpen(false);
-      }
-      return;
-    }
-
-    if (event.key === "Backspace") {
       event.preventDefault();
-      removeCharacter();
+      if (search) setSearch("");
+      else setOpen(false);
       return;
     }
 
     if (event.key === "Enter") {
-      const firstEnabled = getFirstEnabledOption(filteredOptions);
-      if (firstEnabled) {
-        event.preventDefault();
-        toggleValue(firstEnabled.value);
-        clearSearch();
-      }
+      event.preventDefault();
+      selectFirstMatch();
       return;
     }
 
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusFirstVisibleOption(contentRef.current);
+    }
+  };
+
+  const handleContentKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof HTMLInputElement) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+
     if (event.key.length === 1) {
       event.preventDefault();
-      appendCharacter(event.key);
+      setSearch((current) => `${current}${event.key}`);
+      inputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+
+    if (event.key === "Backspace" && search) {
+      event.preventDefault();
+      setSearch((current) => current.slice(0, -1));
+      inputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+
+    if (event.key === "Escape" && search) {
+      event.preventDefault();
+      setSearch("");
+      inputRef.current?.focus({ preventScroll: true });
     }
   };
 
@@ -407,41 +517,61 @@ export function SearchableMultiSelect({
         ref={contentRef}
         align="start"
         sideOffset={4}
-        tabIndex={-1}
         onOpenAutoFocus={(event) => {
           event.preventDefault();
-          requestAnimationFrame(() => contentRef.current?.focus());
+          inputRef.current?.focus({ preventScroll: true });
         }}
-        onKeyDown={handleKeyDown}
+        onKeyDown={handleContentKeyDown}
         className={cn("w-[--radix-popover-trigger-width] p-0 outline-none", contentClassName)}
       >
-        <TypeaheadList
-          maxVisibleItems={maxVisibleItems}
-          emptyText={emptyText}
-          isEmpty={filteredOptions.length === 0}
-        >
-          {filteredOptions.map((option) => {
-            const isSelected = selectedSet.has(option.value);
-            return (
-              <button
-                key={option.value}
-                type="button"
-                disabled={option.disabled}
-                className={cn(
-                  "flex h-9 w-full items-center gap-2 rounded-sm px-2 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50",
-                  isSelected && "bg-accent text-accent-foreground",
-                )}
-                onClick={() => {
-                  toggleValue(option.value);
-                  clearSearch();
-                }}
-              >
-                <Check className={cn("h-4 w-4 shrink-0", isSelected ? "opacity-100" : "opacity-0")} />
-                <span className="min-w-0 flex-1 truncate">{option.label}</span>
-              </button>
-            );
-          })}
-        </TypeaheadList>
+        <SearchField
+          value={search}
+          onChange={setSearch}
+          placeholder={searchPlaceholder}
+          inputRef={inputRef}
+          onKeyDown={handleInputKeyDown}
+        />
+        <div data-searchable-options="">
+          <TypeaheadList
+            maxVisibleItems={maxVisibleItems}
+            emptyText={emptyText}
+            isEmpty={filteredOptions.length === 0}
+          >
+            {filteredOptions.map((option) => {
+              const isSelected = selectedSet.has(option.value);
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  data-searchable-option=""
+                  disabled={option.disabled}
+                  className={cn(
+                    "flex h-9 w-full items-center gap-2 rounded-sm px-2 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50",
+                    isSelected && "bg-accent text-accent-foreground",
+                  )}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      focusAdjacentOption(event.currentTarget, 1, inputRef.current);
+                    }
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      focusAdjacentOption(event.currentTarget, -1, inputRef.current);
+                    }
+                  }}
+                  onClick={() => {
+                    toggleValue(option.value);
+                    setSearch("");
+                    requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
+                  }}
+                >
+                  <Check className={cn("h-4 w-4 shrink-0", isSelected ? "opacity-100" : "opacity-0")} />
+                  <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                </button>
+              );
+            })}
+          </TypeaheadList>
+        </div>
       </PopoverContent>
     </Popover>
   );
