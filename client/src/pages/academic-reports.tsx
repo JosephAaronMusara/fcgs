@@ -1,5 +1,5 @@
-import { useState, useMemo, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
+import { useState, useMemo, useEffect, useRef, type ReactNode, type CSSProperties } from "react";
+import QRCode from "qrcode";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import {
@@ -245,7 +245,7 @@ interface StreamAnalyticsData {
   }[];
 }
 
-interface ReportSubject {
+export interface ReportSubject {
   assessmentId?: number;
   subjectId: number;
   subjectName: string;
@@ -260,13 +260,13 @@ interface ReportSubject {
   gradePoints: number;
 }
 
-interface EcdReportSection {
+export interface EcdReportSection {
   code: string;
   name: string;
   items: Array<{ itemText: string; rating: string | null }>;
 }
 
-interface ReportStudent {
+export interface ReportStudent {
   student: {
     id: number;
     admissionNo: string;
@@ -304,7 +304,7 @@ type ReportCardCommentDraftMap = Record<number, { principal: string; class_teach
 type ReportCardSubjectCommentDraftMap = Record<string, string>;
 type ReportCardCommentStatus = "idle" | "saving" | "saved" | "error";
 
-interface ReportCardData {
+export interface ReportCardData {
   school: {
     id: number;
     name: string;
@@ -898,7 +898,7 @@ function EcdChecklistSection({
       className="report-slip-inner report-slip-page report-slip-page--ecd border border-gray-300 dark:border-gray-600 p-3 relative overflow-hidden bg-white dark:bg-gray-900"
       style={{
         fontSize: "12px",
-        minHeight: "calc(297mm - 10mm - 16px)",
+        minHeight: "calc(297mm - 4mm - 16px)",
         pageBreakBefore: "always",
         breakBefore: "page",
       }}
@@ -927,7 +927,61 @@ function EcdChecklistSection({
   );
 }
 
-function ReportCardSlip({
+function ReportAssetImage({
+  src,
+  alt,
+  className,
+  style,
+  fallback,
+  testId,
+}: {
+  src?: string | null;
+  alt: string;
+  className?: string;
+  style?: CSSProperties;
+  fallback: ReactNode;
+  testId?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  const assetTimeoutRef = useRef<number | null>(null);
+
+  const clearAssetTimeout = () => {
+    if (assetTimeoutRef.current !== null) {
+      window.clearTimeout(assetTimeoutRef.current);
+      assetTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    clearAssetTimeout();
+    setFailed(false);
+    if (!src) return;
+    assetTimeoutRef.current = window.setTimeout(() => {
+      assetTimeoutRef.current = null;
+      setFailed(true);
+    }, 10_000);
+    return clearAssetTimeout;
+  }, [src]);
+
+  if (!src || failed) return <>{fallback}</>;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      style={style}
+      data-testid={testId}
+      data-pdf-asset="true"
+      onLoad={clearAssetTimeout}
+      onError={() => {
+        clearAssetTimeout();
+        setFailed(true);
+      }}
+    />
+  );
+}
+
+export function ReportCardSlip({
   data,
   studentReport,
   onSendIndividual,
@@ -942,6 +996,8 @@ function ReportCardSlip({
   subjectCommentSaveStates,
   onSubjectCommentChange,
   canSendIndividual,
+  documentMode = false,
+  downloadStage = "idle",
 }: {
   data: ReportCardData;
   studentReport: ReportStudent;
@@ -961,11 +1017,28 @@ function ReportCardSlip({
     value: string,
   ) => void;
   canSendIndividual: boolean;
+  documentMode?: boolean;
+  downloadStage?: "idle" | "saving" | "generating";
 }) {
   const { student, subjects, summary } = studentReport;
   const { school } = data;
   const name = `${student.firstName} ${student.lastName}`;
-  const { toast } = useToast();
+  const [qrDataUrl, setQrDataUrl] = useState<string>("");
+  const [qrReady, setQrReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void QRCode.toDataURL("https://www.firstchoicegroup.co.zw", {
+      width: 300,
+      margin: 0,
+      errorCorrectionLevel: "M",
+    }).then((value) => {
+      if (!cancelled) { setQrDataUrl(value); setQrReady(true); }
+    }).catch(() => {
+      if (!cancelled) { setQrDataUrl(""); setQrReady(true); }
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const parseGraphNumber = (value: string | number | null | undefined) => {
     if (value === null || value === undefined) return null;
@@ -1008,7 +1081,14 @@ function ReportCardSlip({
     Math.max(principalInfoItems.length - 4, 0) * 4;
 
   const graphPlotHeight = Math.max(70, 92 - layoutPressure);
-  const graphLabelHeight = Math.max(33, 55 - Math.floor(layoutPressure / 2));
+  // Graph labels are protected from adaptive compression so they remain legible.
+  const graphLabelHeight = 55;
+  const headerCompression = Math.min(16, Math.floor(layoutPressure / 3));
+  const headerSideWidth = Math.max(96, 112 - headerCompression);
+  const headerImageSize = Math.max(76, 91 - headerCompression);
+  const headerGap = Math.max(4, 8 - Math.floor(headerCompression / 3));
+  const headerSchoolNameSize = Math.max(12, 14 - Math.floor(headerCompression / 5));
+  const headerInfoSize = Math.max(9, 11 - Math.floor(headerCompression / 6));
   const footerBlockHeight = Math.max(88, 34 + principalInfoItems.length * 18);
   const stampImageMaxHeight = Math.max(64, footerBlockHeight - 16);
   const qrCodeSize = Math.max(78, footerBlockHeight - 18);
@@ -1036,76 +1116,84 @@ function ReportCardSlip({
 
   return (
     <div
-      className="report-slip bg-white dark:bg-gray-900 rounded-lg mb-8 shadow-lg p-2 print:shadow-none print:rounded-none print:mb-0 print:p-0"
-      style={{ pageBreakInside: "avoid", pageBreakAfter: "always" }}
+      className={documentMode ? "w-full" : "w-full max-w-full overflow-x-auto overscroll-x-contain pb-2"}
+      style={documentMode ? undefined : { WebkitOverflowScrolling: "touch", touchAction: "pan-x pan-y" }}
+      data-testid={`scroll-report-card-${student.id}`}
     >
+      <div className={documentMode ? "w-full" : "min-w-[780px]"}>
+        <div
+          className="report-slip bg-white dark:bg-gray-900 rounded-lg mb-8 shadow-lg p-2 print:shadow-none print:rounded-none print:mb-0 print:p-0"
+          style={{ pageBreakInside: "avoid", pageBreakAfter: "always" }}
+          data-report-qr-ready={qrReady ? "true" : "false"}
+        >
       <div
         className="report-slip-inner report-slip-page report-slip-page--main border border-gray-300 dark:border-gray-600 py-2.5 px-1.5 relative overflow-hidden flex flex-col"
-        style={{ fontSize: "12px", minHeight: "calc(287mm - 2px)" }}
+        style={{ fontSize: "12px", minHeight: "calc(293mm - 2px)" }}
       >
         {school.logo && (
-          <img
+          <ReportAssetImage
             src={school.logo}
             alt=""
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] opacity-[0.08] pointer-events-none z-0"
-            aria-hidden="true"
+            fallback={null}
           />
         )}
 
         <div className="relative z-10 h-full flex flex-col">
-          <div className="grid grid-cols-[112px_1fr_112px] items-center gap-2">
+          <div className="grid items-center" style={{ gridTemplateColumns: `${headerSideWidth}px 1fr ${headerSideWidth}px`, gap: `${headerGap}px` }}>
             <div className="text-left">
-              {school.logo ? (
-                <img
-                  src={school.logo}
-                  alt="School logo"
-                  className="w-[91px] h-[91px] object-contain"
-                  data-testid="img-school-logo"
-                />
-              ) : (
-                <div className="w-[91px] h-[91px] border border-gray-400 rounded-lg flex items-center justify-center">
-                  <School className="w-10 h-10 text-gray-400" />
-                </div>
-              )}
+              <ReportAssetImage
+                src={school.logo}
+                alt="School logo"
+                className="object-contain"
+                style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}
+                testId="img-school-logo"
+                fallback={(
+                  <div className="border border-gray-400 rounded-lg flex items-center justify-center" style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}>
+                    <School className="w-10 h-10 text-gray-400" />
+                  </div>
+                )}
+              />
             </div>
 
             <div className="text-center">
               <div
-                className="text-sm font-bold text-gray-900 dark:text-gray-100"
+                className="font-bold text-gray-900 dark:text-gray-100"
+                style={{ fontSize: `${headerSchoolNameSize}px` }}
                 data-testid="text-school-name"
               >
                 {school.name}
               </div>
               {school.phone && (
-                <div className="text-[11px] mt-0.5 text-gray-700 dark:text-gray-300">
+                <div className="mt-0.5 text-gray-700 dark:text-gray-300" style={{ fontSize: `${headerInfoSize}px` }}>
                   <strong>Call Centre:</strong> {school.phone}
                 </div>
               )}
               {school.email && (
-                <div className="text-[11px] mt-0.5 text-gray-700 dark:text-gray-300">
+                <div className="mt-0.5 text-gray-700 dark:text-gray-300" style={{ fontSize: `${headerInfoSize}px` }}>
                   <strong>Email:</strong> {school.email}
                 </div>
               )}
               {school.address && (
-                <div className="text-[11px] mt-0.5 text-gray-700 dark:text-gray-300">
+                <div className="mt-0.5 text-gray-700 dark:text-gray-300" style={{ fontSize: `${headerInfoSize}px` }}>
                   <strong>Address:</strong> {school.address}
                 </div>
               )}
             </div>
 
             <div className="text-right">
-              {student.photo ? (
-                <img
-                  src={student.photo}
-                  alt="Student photo"
-                  className="w-[91px] h-[91px] rounded-lg border border-gray-400 object-cover inline-block"
-                  data-testid={`img-student-photo-${student.id}`}
-                />
-              ) : (
-                <div className="w-[91px] h-[91px] rounded-lg border border-gray-400 inline-flex items-center justify-center text-[10px] text-gray-500">
-                  PHOTO
-                </div>
-              )}
+              <ReportAssetImage
+                src={student.photo}
+                alt="Student photo"
+                className="rounded-lg border border-gray-400 object-cover inline-block"
+                style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}
+                testId={`img-student-photo-${student.id}`}
+                fallback={(
+                  <div className="rounded-lg border border-gray-400 inline-flex items-center justify-center text-[10px] text-gray-500" style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}>
+                    PHOTO
+                  </div>
+                )}
+              />
             </div>
           </div>
 
@@ -1722,27 +1810,19 @@ function ReportCardSlip({
 
             <div className="grid grid-cols-[0.9fr_1.55fr_0.95fr] gap-3 pt-2 text-[11px] items-stretch report-footer-row">
             <div className="flex">
-              {school.stamp ? (
-                <div
-                  className="border border-gray-300 dark:border-gray-600 p-2 h-full w-full flex items-center justify-center report-footer-box"
-                  style={{ minHeight: `${footerBlockHeight}px` }}
-                >
-                  <img
-                    src={school.stamp}
-                    alt="School Stamp & Principal's Signature"
-                    className="max-w-[168px] w-auto h-auto block"
-                    style={{ maxHeight: `${stampImageMaxHeight}px` }}
-                    data-testid="img-stamp"
-                  />
-                </div>
-              ) : (
-                <div
-                  className="border border-gray-300 dark:border-gray-600 p-2 h-full w-full flex items-center justify-center text-[10px] text-gray-500 report-footer-box"
-                  style={{ minHeight: `${footerBlockHeight}px` }}
-                >
-                  Stamp/Signature not set in School Settings.
-                </div>
-              )}
+              <div
+                className="border border-gray-300 dark:border-gray-600 p-2 h-full w-full flex items-center justify-center report-footer-box"
+                style={{ minHeight: `${footerBlockHeight}px` }}
+              >
+                <ReportAssetImage
+                  src={school.stamp}
+                  alt="School Stamp & Principal's Signature"
+                  className="max-w-[168px] w-auto h-auto block"
+                  style={{ maxHeight: `${stampImageMaxHeight}px` }}
+                  testId="img-stamp"
+                  fallback={<div className="text-[10px] text-gray-500 text-center">Stamp/Signature not set in School Settings.</div>}
+                />
+              </div>
             </div>
 
             <div
@@ -1760,12 +1840,13 @@ function ReportCardSlip({
                 className="flex flex-col items-center justify-between h-full report-qr-block"
                 style={{ minHeight: `${footerBlockHeight}px`, width: `${qrCaptionWidth}px` }}
               >
-                <img
+                <ReportAssetImage
                   className="object-contain"
                   style={{ width: `${qrCodeSize}px`, height: `${qrCodeSize}px` }}
                   alt="QR Code"
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent("https://www.firstchoicegroup.co.zw")}`}
-                  data-testid="img-qr-code"
+                  src={qrDataUrl}
+                  testId="img-qr-code"
+                  fallback={<div className="border border-gray-300 text-[9px] text-gray-500 flex items-center justify-center" style={{ width: `${qrCodeSize}px`, height: `${qrCodeSize}px` }}>QR</div>}
                 />
                 <div className="text-[9px] text-gray-600 dark:text-gray-400 text-center leading-none whitespace-nowrap w-full">
                   www.firstchoicegroup.co.zw
@@ -1785,6 +1866,7 @@ function ReportCardSlip({
           examName={data.exam.examName}
         />
       )}
+      {!documentMode && (
       <div className="flex justify-end gap-2 mt-2 print:hidden flex-wrap">
         <Button
           size="sm"
@@ -1798,7 +1880,7 @@ function ReportCardSlip({
           ) : (
             <Download className="w-4 h-4 mr-1" />
           )}
-          Download
+          {downloadingId === student.id ? (downloadStage === "saving" ? "Saving changes…" : "Generating PDF…") : "Download PDF"}
         </Button>
         {canSendIndividual && (
           <Button
@@ -1816,6 +1898,9 @@ function ReportCardSlip({
             Send Individual Report Card
           </Button>
         )}
+      </div>
+      )}
+        </div>
       </div>
     </div>
   );
@@ -2663,14 +2748,24 @@ function ExamStreamTable({
         <h3 className="text-center font-semibold text-sm uppercase mb-3 text-foreground" data-testid={`text-exam-title-${exam.id}`}>{exam.examName}</h3>
       )}
       <div className="overflow-hidden" style={{ border: "1.5px solid rgba(27, 42, 92, 0.25)", borderRadius: "14px" }}>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-sm" style={{ borderCollapse: "separate", borderSpacing: 0 }} data-testid={`table-stream-hub-${exam.id}`}>
+        <div
+          className="max-w-full overflow-x-auto overscroll-x-contain"
+          style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-x pan-y" }}
+          data-testid={`scroll-stream-hub-${exam.id}`}
+        >
+          <table className="w-full min-w-[600px] table-fixed text-sm sm:min-w-[760px]" style={{ borderCollapse: "separate", borderSpacing: 0 }} data-testid={`table-stream-hub-${exam.id}`}>
+            <colgroup>
+              <col className="w-[190px]" />
+              <col className="w-[100px]" />
+              <col className="w-[85px]" />
+              <col className="w-[225px]" />
+            </colgroup>
             <thead>
               <tr className="border-b" style={{ backgroundColor: "rgba(27, 42, 92, 0.1)" }}>
-                <th className="text-left p-3 font-semibold">Stream</th>
-                <th className="text-center p-3 font-semibold">Progress</th>
-                <th className="text-center p-3 font-semibold">Avg Mark</th>
-                <th className="text-right p-3 font-semibold">Actions</th>
+                <th className="px-2 py-2 text-left font-semibold sm:p-3">Stream</th>
+                <th className="px-2 py-2 text-center font-semibold sm:p-3">Progress</th>
+                <th className="px-2 py-2 text-center font-semibold sm:p-3">Avg Mark</th>
+                <th className="px-2 py-2 text-right font-semibold sm:p-3">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -2680,21 +2775,21 @@ function ExamStreamTable({
                 const hasPublicationPermission = actionIsUnpublish ? canUnpublish : canPublishStream;
                 return (
                   <tr key={stat.streamId} className="border-b" data-testid={`row-stream-${exam.id}-${stat.streamId}`}>
-                    <td className="p-3">
+                    <td className="px-2 py-2 align-middle sm:p-3">
                       <div className="font-medium">{stat.streamName}</div>
                       <div className="mt-1 flex items-center gap-2">
                         <PublicationBadge status={stat.publicationStatus} />
                         {stat.anyPublished && !stat.allPublished && <span className="text-xs text-muted-foreground">{stat.publishedCount} of {stat.classCount} classes</span>}
                       </div>
                     </td>
-                    <td className="text-center p-3">
+                    <td className="px-2 py-2 text-center align-middle sm:p-3">
                       <ProgressBadge pct={stat.progressPct} withMarksPct={stat.withMarksPct} acknowledgedPct={stat.acknowledgedPct} />
                     </td>
-                    <td className="text-center p-3">
+                    <td className="px-2 py-2 text-center align-middle sm:p-3">
                       <span className={`font-semibold ${stat.avgPct === null ? "text-muted-foreground" : stat.avgPct >= 80 ? "text-green-600 dark:text-green-400" : stat.avgPct >= 40 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"}`}>{avgLabel}</span>
                     </td>
-                    <td className="text-right p-3">
-                      <div className="flex items-center justify-end gap-2 flex-wrap">
+                    <td className="px-2 py-2 text-right align-middle sm:p-3">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5 sm:gap-2">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button variant="outline" size="sm" data-testid={`button-options-${exam.id}-${stat.streamId}`}>Options <ChevronDown className="w-3 h-3 ml-1" /></Button>
@@ -2789,15 +2884,11 @@ function ExamStreamAccordion({
   onNavigateReports,
   onOpenStreamModal,
 }: ExamStreamAccordionProps) {
-  const [openExamId, setOpenExamId] = useState<number | null>(() => exams[0]?.id ?? null);
+  const [openExamId, setOpenExamId] = useState<number | null>(null);
 
   useEffect(() => {
-    if (exams.length === 0) {
+    if (openExamId !== null && !exams.some((exam) => Number(exam.id) === Number(openExamId))) {
       setOpenExamId(null);
-      return;
-    }
-    if (!exams.some((exam) => Number(exam.id) === Number(openExamId))) {
-      setOpenExamId(Number(exams[0].id));
     }
   }, [exams, openExamId]);
 
@@ -2813,8 +2904,8 @@ function ExamStreamAccordion({
           >
             <button
               type="button"
-              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-muted/40"
-              onClick={() => setOpenExamId(Number(exam.id))}
+              className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left hover:bg-muted/40 sm:px-4"
+              onClick={() => setOpenExamId(isOpen ? null : Number(exam.id))}
               aria-expanded={isOpen}
               data-testid={`button-toggle-exam-${exam.id}`}
             >
@@ -2822,7 +2913,7 @@ function ExamStreamAccordion({
               <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${isOpen ? "rotate-180" : ""}`} />
             </button>
             {isOpen && (
-              <div className="border-t p-3">
+              <div className="border-t p-2 sm:p-3">
                 <ExamStreamTable
                   exam={exam}
                   onNavigateClassLevel={onNavigateClassLevel}
@@ -2856,8 +2947,8 @@ export default function AcademicReportsPage() {
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
   const [sendingAll, setSendingAll] = useState(false);
-  const [printStudentId, setPrintStudentId] = useState<number | null>(null);
-  const originalTitleRef = useRef<string | null>(null);
+  const [downloadingFiltered, setDownloadingFiltered] = useState(false);
+  const [pdfStage, setPdfStage] = useState<"idle" | "saving" | "generating">("idle");
   const [reportCardCommentDrafts, setReportCardCommentDrafts] =
     useState<ReportCardCommentDraftMap>({});
   const [, setReportCardCommentPools] =
@@ -2937,10 +3028,6 @@ export default function AcademicReportsPage() {
     });
   }, [reportCardData, searchTerm]);
 
-  const studentsForPrint = useMemo(() => {
-    if (!printStudentId) return filteredStudents;
-    return filteredStudents.filter((rc) => rc.student.id === printStudentId);
-  }, [filteredStudents, printStudentId]);
 
   useEffect(() => {
     if (!reportCardData) {
@@ -2997,8 +3084,8 @@ export default function AcademicReportsPage() {
     studentId: number,
     commentType: ReportCardCommentType,
     value: string,
-  ) => {
-    if (!selectedExamId) return;
+  ): Promise<boolean> => {
+    if (!selectedExamId) return true;
 
     const statusKey = `${studentId}:${commentType}`;
     setReportCardCommentStatuses((prev) => ({
@@ -3030,6 +3117,7 @@ export default function AcademicReportsPage() {
         ...prev,
         [statusKey]: "saved",
       }));
+      return true;
     } catch (error: any) {
       setReportCardCommentStatuses((prev) => ({
         ...prev,
@@ -3040,6 +3128,7 @@ export default function AcademicReportsPage() {
         description: error?.message || "Failed to save report card comment.",
         variant: "destructive",
       });
+      return false;
     }
   };
 
@@ -3052,7 +3141,7 @@ export default function AcademicReportsPage() {
     studentId: number,
     subject: Pick<ReportSubject, "assessmentId" | "subjectId">,
     value: string,
-  ) => {
+  ): Promise<boolean> => {
     const statusKey = getSubjectDraftKey(studentId, subject);
     setReportCardSubjectCommentStatuses((prev) => ({
       ...prev,
@@ -3085,6 +3174,7 @@ export default function AcademicReportsPage() {
         ...prev,
         [statusKey]: "saved",
       }));
+      return true;
     } catch (error: any) {
       setReportCardSubjectCommentStatuses((prev) => ({
         ...prev,
@@ -3095,6 +3185,7 @@ export default function AcademicReportsPage() {
         description: error?.message || "Failed to save subject comment.",
         variant: "destructive",
       });
+      return false;
     }
   };
 
@@ -3154,18 +3245,76 @@ export default function AcademicReportsPage() {
     }, 700);
   };
 
-  useEffect(() => {
-    const handleAfterPrint = () => {
-      if (originalTitleRef.current !== null) {
-        document.title = originalTitleRef.current;
-        originalTitleRef.current = null;
-      }
-      setPrintStudentId(null);
-    };
 
-    window.addEventListener("afterprint", handleAfterPrint);
-    return () => window.removeEventListener("afterprint", handleAfterPrint);
-  }, []);
+  const flushPendingReportChanges = async (studentIds: number[]) => {
+    if (!reportCardData || reportCardData.publication?.isPublished) return;
+    setPdfStage("saving");
+    const selected = new Set(studentIds);
+
+    for (const [key, timeoutId] of Object.entries(reportCardCommentTimeoutsRef.current)) {
+      const studentId = Number(key.split(":", 1)[0]);
+      if (selected.has(studentId)) {
+        window.clearTimeout(timeoutId);
+        delete reportCardCommentTimeoutsRef.current[key];
+      }
+    }
+    for (const [key, timeoutId] of Object.entries(reportCardSubjectCommentTimeoutsRef.current)) {
+      const studentId = Number(key.split(":", 1)[0]);
+      if (selected.has(studentId)) {
+        window.clearTimeout(timeoutId);
+        delete reportCardSubjectCommentTimeoutsRef.current[key];
+      }
+    }
+
+    const tasks: Array<Promise<boolean>> = [];
+    for (const report of reportCardData.reportCards) {
+      if (!selected.has(report.student.id)) continue;
+      const comments = reportCardCommentDrafts[report.student.id];
+      if (comments) {
+        const principalStatus = reportCardCommentStatuses[`${report.student.id}:principal`];
+        const teacherStatus = reportCardCommentStatuses[`${report.student.id}:class_teacher`];
+        if (principalStatus && principalStatus !== "saved") {
+          tasks.push(saveReportCardCommentOverride(report.student.id, "principal", comments.principal));
+        }
+        if (teacherStatus && teacherStatus !== "saved") {
+          tasks.push(saveReportCardCommentOverride(report.student.id, "class_teacher", comments.class_teacher));
+        }
+      }
+      for (const subject of report.subjects) {
+        const key = getSubjectDraftKey(report.student.id, subject);
+        const status = reportCardSubjectCommentStatuses[key];
+        if (status && status !== "saved") {
+          tasks.push(saveReportCardSubjectComment(report.student.id, subject, reportCardSubjectCommentDrafts[key] ?? subject.comment ?? ""));
+        }
+      }
+    }
+
+    const results = await Promise.all(tasks);
+    if (results.some((ok) => !ok)) {
+      throw new Error("Some report changes could not be saved. Correct the failed comments before generating the PDF.");
+    }
+  };
+
+  const downloadPdfResponse = async (response: Response, fallbackFilename: string) => {
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => null);
+      throw new Error(errorBody?.message || "Failed to generate PDF");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    const plainFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+    const filename = encodedFilename ? decodeURIComponent(encodedFilename) : plainFilename || fallbackFilename;
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+  };
 
   const handleSendAll = async () => {
     if (!reportCardData || filteredStudents.length === 0) return;
@@ -3226,69 +3375,48 @@ export default function AcademicReportsPage() {
   };
 
 
-  const triggerPrintPreview = (title: string, studentId: number | null = null) => {
-    originalTitleRef.current = document.title;
-    document.title = title;
-    setPrintStudentId(studentId);
-
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        window.print();
-      });
-    });
-  };
-
-  const handlePrintAll = () => {
-    const examLabel = selectedExamName?.replace(/\s+/g, "_") || "Exam";
-    const classLabel = selectedClassName?.replace(/\s+/g, "_") || "Class";
-    triggerPrintPreview(`Report_Cards_${classLabel}_${examLabel}`);
-  };
-
   const handleDownloadIndividual = async (studentId: number) => {
     const rc = filteredStudents.find((row) => row.student.id === studentId);
     if (!rc || !selectedExamId || !selectedClassId) return;
 
     setDownloadingId(studentId);
     try {
+      await flushPendingReportChanges([studentId]);
+      setPdfStage("generating");
       const params = new URLSearchParams({ classId: selectedClassId });
-      const response = await schoolFetch(
-        `/api/report-cards/${selectedExamId}/student/${studentId}/download?${params.toString()}`,
-      );
-
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => null);
-        throw new Error(errorBody?.message || "Failed to download report card");
-      }
-
-      const blob = await response.blob();
-      const disposition = response.headers.get("Content-Disposition") || "";
-      const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-      const plainFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+      const response = await schoolFetch(`/api/report-cards/${selectedExamId}/student/${studentId}/download?${params.toString()}`);
       const studentName = `${rc.student.firstName}_${rc.student.lastName}`.replace(/\s+/g, "_");
       const examLabel = selectedExamName?.replace(/\s+/g, "_") || "Exam";
       const classLabel = selectedClassName?.replace(/\s+/g, "_") || "Class";
-      const fallbackFilename = `Report_Card_${studentName}_${classLabel}_${examLabel}.pdf`;
-      const filename = encodedFilename
-        ? decodeURIComponent(encodedFilename)
-        : plainFilename || fallbackFilename;
-
-      const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = filename;
-      link.rel = "noopener";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+      await downloadPdfResponse(response, `Report_Card_${studentName}_${classLabel}_${examLabel}.pdf`);
     } catch (error: any) {
-      toast({
-        title: "Download failed",
-        description: error?.message || "Failed to download this report card.",
-        variant: "destructive",
-      });
+      toast({ title: "Download failed", description: error?.message || "Failed to download this report card.", variant: "destructive" });
     } finally {
       setDownloadingId(null);
+      setPdfStage("idle");
+    }
+  };
+
+  const handleDownloadFiltered = async () => {
+    if (!selectedExamId || !selectedClassId || filteredStudents.length === 0) return;
+    const studentIds = filteredStudents.map((report) => report.student.id);
+    setDownloadingFiltered(true);
+    try {
+      await flushPendingReportChanges(studentIds);
+      setPdfStage("generating");
+      const response = await schoolFetch(`/api/report-cards/${selectedExamId}/pdf`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ classId: Number(selectedClassId), studentIds }),
+      });
+      const examLabel = selectedExamName?.replace(/\s+/g, "_") || "Exam";
+      const classLabel = selectedClassName?.replace(/\s+/g, "_") || "Class";
+      await downloadPdfResponse(response, `${searchTerm.trim() ? "Filtered_" : ""}Report_Cards_${classLabel}_${examLabel}.pdf`);
+    } catch (error: any) {
+      toast({ title: "Download failed", description: error?.message || "Failed to download the filtered report cards.", variant: "destructive" });
+    } finally {
+      setDownloadingFiltered(false);
+      setPdfStage("idle");
     }
   };
 
@@ -3362,38 +3490,7 @@ export default function AcademicReportsPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <style>{`
-        @media print {
-          body > *:not(#report-print-portal) { display: none !important; }
-          #report-print-portal { display: block !important; position: static !important; }
-          .print-hide-for-print { display: none !important; }
-          @page { size: A4; margin: 5mm; }
-          .report-slip { box-shadow: none !important; border-radius: 0 !important; margin-bottom: 0 !important; page-break-after: always; background: white !important; color: black !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip-page--main { min-height: calc(287mm - 2px) !important; height: calc(287mm - 2px) !important; }
-          .report-graphs-row { align-items: stretch !important; }
-          .report-footer-row { align-items: stretch !important; }
-          .report-footer-box, .report-principal-info, .report-qr-block { height: 100% !important; }
-          .report-slip th { background: #6b7280 !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip tbody tr[class*="bg-gray-100"] { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip tbody tr[class*="bg-gray-100"] td { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; }
-          .report-slip-inner { border: 1px solid #ccc !important; }
-          .report-slip [class*="text-green"] { color: #16a34a !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip [class*="text-red"] { color: #dc2626 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip [class*="text-amber"] { color: #d97706 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip [class*="text-blue"] { color: #2563eb !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip [class*="text-gray"] { color: #6b7280 !important; }
-          .report-slip tr[style*="rgba(27, 42, 92"] { background: rgba(27, 42, 92, 0.1) !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip [class*="bg-green-600"] { background: #16a34a !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip svg polyline, .report-slip svg line, .report-slip svg circle { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip [style*="linear-gradient"] { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .report-slip div[style*="background"] { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        }
-        @media screen {
-          .print-only { display: none; }
-          #report-print-portal { position: absolute; left: -9999px; top: 0; width: 210mm; }
-        }
-      `}</style>
-      <div className="print-hide-for-print p-6 max-w-[1100px] mx-auto">
+      <div className="mx-auto max-w-[1100px] px-3 py-4 sm:p-6">
         {viewMode === "hub" && (
           <>
             <div className="flex items-center justify-between gap-4 flex-wrap mb-6">
@@ -3722,11 +3819,12 @@ export default function AcademicReportsPage() {
                   <div className="flex gap-2 flex-wrap">
                     <Button
                       variant="outline"
-                      onClick={handlePrintAll}
-                      data-testid="button-download-all"
+                      onClick={handleDownloadFiltered}
+                      disabled={downloadingFiltered || filteredStudents.length === 0}
+                      data-testid="button-download-reports"
                     >
-                      <Download className="w-4 h-4 mr-2" />
-                      Download All
+                      {downloadingFiltered ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+                      {downloadingFiltered ? (pdfStage === "saving" ? "Saving changes…" : "Generating PDF…") : (searchTerm.trim() ? `Download (${filteredStudents.length})` : "Download All")}
                     </Button>
                     {canSendClassReports && reportCardData.publication?.isPublished && (
                       <Button
@@ -3805,31 +3903,10 @@ export default function AcademicReportsPage() {
                   subjectCommentValues={reportCardSubjectCommentDrafts}
                   subjectCommentSaveStates={reportCardSubjectCommentStatuses}
                   onSubjectCommentChange={handleReportCardSubjectCommentChange}
+                  downloadStage={pdfStage}
                 />
               ))}
             </div>
-            {createPortal(
-              <div id="report-print-portal">
-                {studentsForPrint.map((rc) => (
-                  <ReportCardSlip
-                    key={`print-${rc.student.id}`}
-                    data={reportCardData}
-                    studentReport={rc}
-                    onSendIndividual={handleSendIndividual}
-                    onDownloadIndividual={handleDownloadIndividual}
-                    sendingId={sendingId}
-                    downloadingId={downloadingId}
-                    editableComments={false}
-                    canSendIndividual={false}
-                    commentValues={reportCardCommentDrafts[rc.student.id]}
-                    commentSaveStates={{ principal: "idle", class_teacher: "idle" }}
-                    subjectCommentValues={reportCardSubjectCommentDrafts}
-                    subjectCommentSaveStates={reportCardSubjectCommentStatuses}
-                  />
-                ))}
-              </div>,
-              document.body
-            )}
           </>
         )}
       <MissingMarksDialog
@@ -3991,7 +4068,7 @@ function ClassLevelBlock({
 
   return (
     <Card data-testid={`card-class-${classId}`}>
-      <CardHeader className="pb-2">
+      <CardHeader className="px-3 pb-2 sm:px-6">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2 flex-wrap">
             <CardTitle className="text-base">{classLabel} — {examName}</CardTitle>
@@ -4038,7 +4115,7 @@ function ClassLevelBlock({
           </div>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="px-3 pb-4 sm:px-6 sm:pb-6">
         {isLoading ? (
           <div className="space-y-2">{[1, 2, 3].map((index) => <Skeleton key={index} className="h-8 w-full" />)}</div>
         ) : !data || data.subjects.length === 0 ? (
@@ -4046,27 +4123,37 @@ function ClassLevelBlock({
         ) : (
           <>
             <div className="mb-3"><ProgressLegend /></div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] text-sm" data-testid={`table-class-progress-${classId}`}>
+            <div
+              className="max-w-full overflow-x-auto overscroll-x-contain"
+              style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-x pan-y" }}
+              data-testid={`scroll-class-progress-${classId}`}
+            >
+              <table className="w-full min-w-[560px] table-fixed text-sm sm:min-w-[720px]" data-testid={`table-class-progress-${classId}`}>
+                <colgroup>
+                  <col className="w-[210px]" />
+                  <col className="w-[150px]" />
+                  <col className="w-[110px]" />
+                  <col className="w-[90px]" />
+                </colgroup>
                 <thead>
                   <tr className="border-b bg-muted/30">
-                    <th className="text-left p-2 font-semibold">Subject</th>
-                    <th className="text-left p-2 font-semibold">Teacher</th>
-                    <th className="text-center p-2 font-semibold">Progress</th>
-                    <th className="text-center p-2 font-semibold">Avg Mark</th>
+                    <th className="px-2 py-2 text-left font-semibold">Subject</th>
+                    <th className="px-2 py-2 text-left font-semibold">Teacher</th>
+                    <th className="px-2 py-2 text-center font-semibold">Progress</th>
+                    <th className="px-2 py-2 text-center font-semibold">Avg Mark</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.subjects.map((subject) => (
                     <tr key={subject.subjectId} className="border-b">
-                      <td className="p-2">
+                      <td className="px-2 py-2 align-middle">
                         <div>{subject.subjectName}</div>
                         <div className="text-xs text-muted-foreground">Students: {subject.totalStudents}</div>
                         {!subject.assessmentCreated && <div className="text-xs font-medium text-muted-foreground">Assessment not created</div>}
                         {subject.partialCount > 0 && <div className="text-xs text-amber-700 dark:text-amber-400">{subject.partialCount} partial paper entr{subject.partialCount === 1 ? "y" : "ies"}</div>}
                       </td>
-                      <td className="p-2">{subject.teacherName ? <span className="text-sm">{subject.teacherName}</span> : <span className="text-sm text-muted-foreground">—</span>}</td>
-                      <td className="text-center p-2">
+                      <td className="px-2 py-2 align-middle">{subject.teacherName ? <span className="text-sm">{subject.teacherName}</span> : <span className="text-sm text-muted-foreground">—</span>}</td>
+                      <td className="px-2 py-2 text-center align-middle">
                         <ProgressBadge
                           pct={subject.progressPct}
                           withMarksPct={subject.withMarksPct}
@@ -4075,7 +4162,7 @@ function ClassLevelBlock({
                           title={!subject.assessmentCreated ? "Assessment not created" : undefined}
                         />
                       </td>
-                      <td className="text-center p-2">{subject.avgPct !== null ? `${subject.avgPct}%` : "–"}</td>
+                      <td className="px-2 py-2 text-center align-middle">{subject.avgPct !== null ? `${subject.avgPct}%` : "–"}</td>
                     </tr>
                   ))}
                 </tbody>

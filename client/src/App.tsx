@@ -29,6 +29,7 @@ import GradesPage from "@/pages/grades";
 import AssessmentsPage from "@/pages/assessments";
 import MarksEntryPage from "@/pages/marks-entry";
 import AcademicReportsPage from "@/pages/academic-reports";
+import ReportCardPdfRenderPage from "@/pages/report-card-pdf-render";
 import AttendancePage from "@/pages/attendance";
 import FeesPage from "@/pages/fees";
 import DisciplinePage from "@/pages/discipline";
@@ -911,6 +912,7 @@ function Router() {
 
   return (
     <Switch>
+      <Route path="/pdf-render/report-cards" component={ReportCardPdfRenderPage} />
       <Route path="/apply" component={ApplyPage} />
       <Route path="/reset-password" component={ResetPasswordToken} />
       <Route path="/force-reset-password">

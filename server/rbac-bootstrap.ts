@@ -1,6 +1,6 @@
 import { db } from "./db";
 import { RBAC_PERMISSIONS_DATA } from "./rbac-config";
-import { permissions, userPermissionOverrides, users } from "@shared/schema";
+import { accessGroupPermissions, accessGroups, permissions, userPermissionOverrides, users } from "@shared/schema";
 import { eq, inArray } from "drizzle-orm";
 import { storage } from "./storage";
 
@@ -31,6 +31,55 @@ async function ensurePermissionsCatalog() {
         .where(eq(permissions.id, existing.id));
     }
   }
+}
+
+
+const TRANSPORT_MANAGER_PERMISSIONS = [
+  "transport.view", "transport.dashboard.view",
+  "transport.routes.create", "transport.routes.edit", "transport.stops.manage", "transport.paths.manage",
+  "transport.vehicles.create", "transport.vehicles.edit", "transport.drivers.manage", "transport.owners.manage",
+  "transport.learners.enrol", "transport.learners.edit_service", "transport.learners.transfer",
+  "transport.charges.view", "transport.charges.generate", "transport.payments.view", "transport.receipts.view", "transport.receipts.verify",
+  "transport.payment_plans.manage", "transport.refunds.request", "transport.cashups.prepare",
+  "transport.incidents.manage", "transport.claims.view", "transport.claims.generate", "transport.claims.submit", "transport.claims.verify",
+  "transport.advances.request", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
+];
+
+const ACCOUNTANT_TRANSPORT_PERMISSIONS = [
+  "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.charges.generate", "transport.charges.adjust",
+  "transport.payments.view", "transport.payments.record", "transport.payments.verify", "transport.payments.reverse",
+  "transport.receipts.view", "transport.receipts.verify", "transport.payment_plans.manage",
+  "transport.refunds.request", "transport.refunds.approve", "transport.refunds.pay",
+  "transport.cashups.prepare", "transport.cashups.verify", "transport.claims.view", "transport.claims.verify", "transport.claims.approve",
+  "transport.penalties.manage", "transport.advances.request", "transport.advances.approve", "transport.advances.disburse", "transport.payouts.view", "transport.payouts.generate", "transport.payouts.pay",
+  "transport.periods.lock", "transport.reports.view", "transport.audit.view",
+];
+
+async function ensureAccessGroupPermissions(groupName: string, permissionCodes: string[], createIfMissing = false) {
+  let [group] = await db.select().from(accessGroups).where(eq(accessGroups.name, groupName));
+  if (!group && createIfMissing) {
+    [group] = await db.insert(accessGroups).values({
+      name: groupName,
+      description: "Manages school transport operations, learner services, path setup, claims verification and transport reporting.",
+      isSystemDefault: true,
+    }).returning();
+  }
+  if (!group) return;
+
+  const permissionRows = await db.select({ id: permissions.id }).from(permissions).where(inArray(permissions.code, permissionCodes));
+  if (!permissionRows.length) return;
+  await db.insert(accessGroupPermissions).values(
+    permissionRows.map((permission) => ({ accessGroupId: group.id, permissionId: permission.id })),
+  ).onConflictDoNothing();
+}
+
+async function ensureTransportAccessGroupDefaults() {
+  const allTransportCodes = RBAC_PERMISSIONS_DATA.filter((permission) => permission.code.startsWith("transport.")).map((permission) => permission.code);
+  await ensureAccessGroupPermissions("School Admin", allTransportCodes);
+  await ensureAccessGroupPermissions("Org HQ", allTransportCodes);
+  await ensureAccessGroupPermissions("Accountant", ACCOUNTANT_TRANSPORT_PERMISSIONS);
+  await ensureAccessGroupPermissions("Transport Manager", TRANSPORT_MANAGER_PERMISSIONS, true);
+  await ensureAccessGroupPermissions("Quality Control Officer", ["transport.view", "transport.dashboard.view", "transport.reports.view", "transport.audit.view"]);
 }
 
 async function cleanupLegacyBlanketAdminOverrides() {
@@ -65,6 +114,7 @@ async function cleanupLegacyBlanketAdminOverrides() {
 
 export async function ensureRbacBaseline() {
   await ensurePermissionsCatalog();
+  await ensureTransportAccessGroupDefaults();
   await cleanupLegacyBlanketAdminOverrides();
   await storage.normalizeAllUserBaselineAccessGroups();
 }

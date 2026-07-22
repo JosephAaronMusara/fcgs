@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, json, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -50,6 +50,16 @@ export const scheduledJobStatusEnum = pgEnum("scheduled_job_status", [
   "failed",
   "dead",
 ]);
+
+// Managed by connect-pg-simple. Keeping it in the Drizzle schema prevents
+// `drizzle-kit push` from proposing deletion of the live session store table.
+export const sessionTable = pgTable("session", {
+  sid: varchar("sid").primaryKey().notNull(),
+  sess: json("sess").notNull(),
+  expire: timestamp("expire", { precision: 6 }).notNull(),
+}, (table) => ({
+  expireIndex: index("IDX_session_expire").on(table.expire),
+}));
 
 export const organizations = pgTable("organizations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -420,6 +430,663 @@ export const feesPayments = pgTable("fees_payments", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Transport operations, learner billing, reconciliation and provider settlements.
+// Existing Stage 1 tables are retained and extended additively so production data remains valid.
+export const transportRoutes = pgTable("transport_routes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  name: text("name").notNull(),
+  code: text("code").notNull(),
+  direction: text("direction").notNull().default("both"),
+  defaultFee: decimal("default_fee", { precision: 12, scale: 2 }).notNull().default("0"),
+  billingFrequency: text("billing_frequency").notNull().default("monthly"),
+  departureTime: text("departure_time"),
+  arrivalTime: text("arrival_time"),
+  capacity: integer("capacity"), // Legacy field; operational capacity comes from the assigned vehicle.
+  status: text("status").notNull().default("active"),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  retiredAt: timestamp("retired_at"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ schoolCodeUnique: uniqueIndex("transport_routes_school_code_uidx").on(table.schoolId, table.code) }));
+
+// Legacy route-level pickup points remain available for existing records. New registrations use service points and path nodes.
+export const transportPickupPoints = pgTable("transport_pickup_points", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  routeId: integer("route_id").references(() => transportRoutes.id).notNull(),
+  name: text("name").notNull(),
+  stopOrder: integer("stop_order").notNull().default(1),
+  pickupTime: text("pickup_time"),
+  dropoffTime: text("dropoff_time"),
+  feeOverride: decimal("fee_override", { precision: 12, scale: 2 }),
+  latitude: decimal("latitude", { precision: 10, scale: 7 }),
+  longitude: decimal("longitude", { precision: 10, scale: 7 }),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportOwners = pgTable("transport_owners", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  name: text("name").notNull(),
+  ownerType: text("owner_type").notNull().default("individual"),
+  contactPerson: text("contact_person"),
+  phone: text("phone"),
+  nationalIdOrRegistration: text("national_id_or_registration"),
+  paymentDetails: text("payment_details"),
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: date("effective_from"),
+  effectiveTo: date("effective_to"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const transportDrivers = pgTable("transport_drivers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  firstName: text("first_name").notNull(),
+  lastName: text("last_name").notNull(),
+  phone: text("phone"),
+  nationalId: text("national_id"),
+  licenceNumber: text("licence_number"),
+  licenceExpiry: date("licence_expiry"),
+  engagementType: text("engagement_type").notNull().default("internal"),
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: date("effective_from"),
+  effectiveTo: date("effective_to"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const transportVehicles = pgTable("transport_vehicles", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  registrationNumber: text("registration_number").notNull(),
+  makeModel: text("make_model"),
+  capacity: integer("capacity").notNull().default(1),
+  ownershipType: text("ownership_type").notNull().default("school"),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  driverId: integer("driver_id").references(() => transportDrivers.id),
+  insuranceExpiry: date("insurance_expiry"),
+  fitnessExpiry: date("fitness_expiry"),
+  status: text("status").notNull().default("active"),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ schoolRegistrationUnique: uniqueIndex("transport_vehicles_school_registration_uidx").on(table.schoolId, table.registrationNumber) }));
+
+export const transportSettings = pgTable("transport_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  transportManagerStaffId: integer("transport_manager_staff_id").references(() => staff.id),
+  currencyCode: text("currency_code").notNull().default("USD"),
+  stopGroupingDistanceMeters: integer("stop_grouping_distance_meters").notNull().default(30),
+  inboundOneWayPercent: decimal("inbound_one_way_percent", { precision: 6, scale: 2 }).notNull().default("60"),
+  outboundOneWayPercent: decimal("outbound_one_way_percent", { precision: 6, scale: 2 }).notNull().default("60"),
+  joiningFullChargeThroughDay: integer("joining_full_charge_through_day").notNull().default(5),
+  refundNoCreditRemainingDays: integer("refund_no_credit_remaining_days").notNull().default(5),
+  pendingSeatReservationEnabled: boolean("pending_seat_reservation_enabled").notNull().default(true),
+  pendingSeatReservationDays: integer("pending_seat_reservation_days").notNull().default(7),
+  overdueWarningDays: integer("overdue_warning_days").notNull().default(7),
+  suspensionEligibilityDays: integer("suspension_eligibility_days").notNull().default(30),
+  suspensionNoticeDays: integer("suspension_notice_days").notNull().default(3),
+  minimumSuspensionBalance: decimal("minimum_suspension_balance", { precision: 12, scale: 2 }).notNull().default("0"),
+  paymentPlanMissedInstalmentsToDefault: integer("payment_plan_missed_instalments_to_default").notNull().default(1),
+  receiptPrefix: text("receipt_prefix").notNull().default("TR"),
+  receiptSequenceLength: integer("receipt_sequence_length").notNull().default(6),
+  receiptResetYearly: boolean("receipt_reset_yearly").notNull().default(true),
+  receiptNextSequence: integer("receipt_next_sequence").notNull().default(1),
+  receiptSequenceYear: integer("receipt_sequence_year"),
+  receiptFooter: text("receipt_footer"),
+  printCopiesOnOnePage: boolean("print_copies_on_one_page").notNull().default(true),
+  requireCashupForClaim: boolean("require_cashup_for_claim").notNull().default(true),
+  reportWeekStartsOn: integer("report_week_starts_on").notNull().default(1),
+  fortnightAnchorDate: date("fortnight_anchor_date"),
+  mapProvider: text("map_provider").notNull().default("openstreetmap"),
+  defaultCheckpointRadiusMeters: integer("default_checkpoint_radius_meters").notNull().default(50),
+  approvalWorkflow: jsonb("approval_workflow").notNull().default(sql`'{}'::jsonb`),
+  deductionPriority: jsonb("deduction_priority").notNull().default(sql`'["refund","subscription","penalty","advance","other"]'::jsonb`),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ schoolUnique: uniqueIndex("transport_settings_school_uidx").on(table.schoolId) }));
+
+export const transportServicePoints = pgTable("transport_service_points", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  pointType: text("point_type").notNull().default("both"),
+  name: text("name").notNull(),
+  latitude: decimal("latitude", { precision: 10, scale: 7 }).notNull(),
+  longitude: decimal("longitude", { precision: 10, scale: 7 }).notNull(),
+  address: text("address"),
+  landmark: text("landmark"),
+  instructions: text("instructions"),
+  privacyClass: text("privacy_class").notNull().default("private_household"),
+  isTemporary: boolean("is_temporary").notNull().default(false),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportVehiclePaths = pgTable("transport_vehicle_paths", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  routeId: integer("route_id").references(() => transportRoutes.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  direction: text("direction").notNull(),
+  name: text("name").notNull(),
+  versionNumber: integer("version_number").notNull().default(1),
+  status: text("status").notNull().default("draft"),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  geometry: jsonb("geometry"),
+  estimatedDistanceKm: decimal("estimated_distance_km", { precision: 10, scale: 2 }),
+  estimatedDurationMinutes: integer("estimated_duration_minutes"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  activatedByUserId: integer("activated_by_user_id").references(() => users.id),
+  activatedAt: timestamp("activated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ versionUnique: uniqueIndex("transport_vehicle_path_version_uidx").on(table.schoolId, table.vehicleId, table.routeId, table.direction, table.versionNumber) }));
+
+export const transportPathNodes = pgTable("transport_path_nodes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  pathId: integer("path_id").references(() => transportVehiclePaths.id).notNull(),
+  nodeType: text("node_type").notNull(),
+  name: text("name").notNull(),
+  latitude: decimal("latitude", { precision: 10, scale: 7 }).notNull(),
+  longitude: decimal("longitude", { precision: 10, scale: 7 }).notNull(),
+  stopOrder: integer("stop_order").notNull(),
+  expectedTime: text("expected_time"),
+  checkpointRadiusMeters: integer("checkpoint_radius_meters"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ pathOrderUnique: uniqueIndex("transport_path_node_order_uidx").on(table.pathId, table.stopOrder) }));
+
+export const transportAssignments = pgTable("transport_assignments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  routeId: integer("route_id").references(() => transportRoutes.id).notNull(),
+  pickupPointId: integer("pickup_point_id").references(() => transportPickupPoints.id),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id),
+  driverId: integer("driver_id").references(() => transportDrivers.id),
+  outboundVehicleId: integer("outbound_vehicle_id").references(() => transportVehicles.id),
+  inboundPathId: integer("inbound_path_id").references(() => transportVehiclePaths.id),
+  outboundPathId: integer("outbound_path_id").references(() => transportVehiclePaths.id),
+  pickupServicePointId: integer("pickup_service_point_id").references(() => transportServicePoints.id),
+  dropoffServicePointId: integer("dropoff_service_point_id").references(() => transportServicePoints.id),
+  pickupPathNodeId: integer("pickup_path_node_id").references(() => transportPathNodes.id),
+  dropoffPathNodeId: integer("dropoff_path_node_id").references(() => transportPathNodes.id),
+  serviceType: text("service_type").notNull().default("both"),
+  serviceState: text("service_state").notNull().default("pending_start"),
+  planningStatus: text("planning_status").notNull().default("pending_path_assignment"),
+  financialStatus: text("financial_status").notNull().default("pending_first_payment"),
+  billingFrequency: text("billing_frequency").notNull().default("monthly"),
+  baseMonthlyFee: decimal("base_monthly_fee", { precision: 12, scale: 2 }).notNull().default("0"),
+  agreedFee: decimal("agreed_fee", { precision: 12, scale: 2 }).notNull().default("0"),
+  oneWayPercentSnapshot: decimal("one_way_percent_snapshot", { precision: 6, scale: 2 }),
+  startDate: date("start_date").notNull(),
+  endDate: date("end_date"),
+  seatReservedUntil: date("seat_reserved_until"),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  activeStudentUnique: uniqueIndex("transport_assignments_active_student_uidx").on(table.schoolId, table.studentId).where(sql`${table.isActive} = true`),
+}));
+
+export const transportPathNodeLearners = pgTable("transport_path_node_learners", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  pathNodeId: integer("path_node_id").references(() => transportPathNodes.id).notNull(),
+  assignmentId: integer("assignment_id").references(() => transportAssignments.id).notNull(),
+  servicePointId: integer("service_point_id").references(() => transportServicePoints.id).notNull(),
+  boardsHere: boolean("boards_here").notNull().default(false),
+  alightsHere: boolean("alights_here").notNull().default(false),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ assignmentNodeUnique: uniqueIndex("transport_path_node_learner_uidx").on(table.assignmentId, table.pathNodeId, table.servicePointId) }));
+
+export const transportAssignmentEvents = pgTable("transport_assignment_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  assignmentId: integer("assignment_id").references(() => transportAssignments.id).notNull(),
+  eventType: text("event_type").notNull(),
+  effectiveDate: date("effective_date").notNull(),
+  previousValues: jsonb("previous_values"),
+  newValues: jsonb("new_values"),
+  reason: text("reason").notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportCharges = pgTable("transport_charges", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  assignmentId: integer("assignment_id").references(() => transportAssignments.id).notNull(),
+  routeId: integer("route_id").references(() => transportRoutes.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id),
+  academicYear: integer("academic_year").notNull(),
+  term: text("term").notNull(),
+  month: integer("month").notNull().default(0),
+  servicePeriodStart: date("service_period_start"),
+  servicePeriodEnd: date("service_period_end"),
+  daysInPeriod: integer("days_in_period"),
+  chargeableDays: integer("chargeable_days"),
+  calculationType: text("calculation_type").notNull().default("full"),
+  calculationSnapshot: jsonb("calculation_snapshot"),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  currencyCode: text("currency_code").notNull().default("USD"),
+  status: text("status").notNull().default("open"),
+  dueDate: date("due_date"),
+  description: text("description"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ periodUnique: uniqueIndex("transport_charges_assignment_period_uidx").on(table.assignmentId, table.academicYear, table.term, table.month) }));
+
+export const transportAccountAdjustments = pgTable("transport_account_adjustments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  assignmentId: integer("assignment_id").references(() => transportAssignments.id),
+  chargeId: integer("charge_id").references(() => transportCharges.id),
+  adjustmentType: text("adjustment_type").notNull(),
+  direction: text("direction").notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  currencyCode: text("currency_code").notNull().default("USD"),
+  effectiveDate: date("effective_date").notNull(),
+  reason: text("reason").notNull(),
+  metadata: jsonb("metadata"),
+  status: text("status").notNull().default("requested"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  disbursedByUserId: integer("disbursed_by_user_id").references(() => users.id),
+  disbursedAt: timestamp("disbursed_at"),
+  rejectedByUserId: integer("rejected_by_user_id").references(() => users.id),
+  rejectedAt: timestamp("rejected_at"),
+  rejectionReason: text("rejection_reason"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportProviderAdjustments = pgTable("transport_provider_adjustments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  adjustmentType: text("adjustment_type").notNull(),
+  direction: text("direction").notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  currencyCode: text("currency_code").notNull().default("USD"),
+  serviceYear: integer("service_year").notNull(),
+  serviceMonth: integer("service_month").notNull(),
+  applyYear: integer("apply_year").notNull(),
+  applyMonth: integer("apply_month").notNull(),
+  assignmentId: integer("assignment_id").references(() => transportAssignments.id),
+  refundId: integer("refund_id"),
+  claimId: integer("claim_id"),
+  status: text("status").notNull().default("pending"),
+  reason: text("reason").notNull(),
+  metadata: jsonb("metadata"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportPayments = pgTable("transport_payments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  currencyCode: text("currency_code").notNull().default("USD"),
+  paymentDate: date("payment_date").notNull(),
+  paymentMethod: text("payment_method").notNull().default("cash"),
+  academicYear: integer("academic_year").notNull(),
+  term: text("term").notNull(),
+  month: integer("month").notNull().default(0),
+  receiptNo: text("receipt_no").notNull().unique(),
+  verificationToken: text("verification_token").unique(),
+  receiptSnapshot: jsonb("receipt_snapshot").notNull().default(sql`'{}'::jsonb`),
+  status: text("status").notNull().default("issued"),
+  verificationStatus: text("verification_status").notNull().default("unverified"),
+  externalReference: text("external_reference"),
+  notes: text("notes"),
+  receivedByUserId: integer("received_by_user_id").references(() => users.id).notNull(),
+  verifiedAt: timestamp("verified_at"),
+  verifiedByUserId: integer("verified_by_user_id").references(() => users.id),
+  reconciledAt: timestamp("reconciled_at"),
+  reconciledByUserId: integer("reconciled_by_user_id").references(() => users.id),
+  reversedAt: timestamp("reversed_at"),
+  reversedByUserId: integer("reversed_by_user_id").references(() => users.id),
+  reversalReason: text("reversal_reason"),
+  replacementPaymentId: integer("replacement_payment_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportPaymentAllocations = pgTable("transport_payment_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  paymentId: integer("payment_id").references(() => transportPayments.id).notNull(),
+  chargeId: integer("charge_id").references(() => transportCharges.id).notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  serviceMonth: integer("service_month"),
+  serviceYear: integer("service_year"),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id),
+  claimEligibleAt: timestamp("claim_eligible_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ paymentChargeUnique: uniqueIndex("transport_payment_charge_uidx").on(table.paymentId, table.chargeId) }));
+
+export const transportReceiptEvents = pgTable("transport_receipt_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  paymentId: integer("payment_id").references(() => transportPayments.id).notNull(),
+  eventType: text("event_type").notNull(),
+  copyType: text("copy_type"),
+  reason: text("reason"),
+  metadata: jsonb("metadata"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportPaymentPlans = pgTable("transport_payment_plans", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  assignmentId: integer("assignment_id").references(() => transportAssignments.id).notNull(),
+  planNumber: text("plan_number").notNull().unique(),
+  coveredAmount: decimal("covered_amount", { precision: 12, scale: 2 }).notNull(),
+  instalmentAmount: decimal("instalment_amount", { precision: 12, scale: 2 }).notNull(),
+  frequency: text("frequency").notNull(),
+  startDate: date("start_date").notNull(),
+  finalDueDate: date("final_due_date"),
+  graceDays: integer("grace_days").notNull().default(0),
+  status: text("status").notNull().default("active"),
+  payerAcknowledgement: text("payer_acknowledgement"),
+  notes: text("notes"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id).notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportPaymentPlanInstalments = pgTable("transport_payment_plan_instalments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  planId: integer("plan_id").references(() => transportPaymentPlans.id).notNull(),
+  dueDate: date("due_date").notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  paidAmount: decimal("paid_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  status: text("status").notNull().default("due"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportRefunds = pgTable("transport_refunds", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  assignmentId: integer("assignment_id").references(() => transportAssignments.id),
+  refundNumber: text("refund_number").notNull().unique(),
+  refundType: text("refund_type").notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  effectiveDate: date("effective_date").notNull(),
+  method: text("method").notNull(),
+  status: text("status").notNull().default("requested"),
+  calculationSnapshot: jsonb("calculation_snapshot"),
+  reason: text("reason").notNull(),
+  requestedByUserId: integer("requested_by_user_id").references(() => users.id).notNull(),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  paidByUserId: integer("paid_by_user_id").references(() => users.id),
+  paidAt: timestamp("paid_at"),
+  externalReference: text("external_reference"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportCashups = pgTable("transport_cashups", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  cashupNumber: text("cashup_number").notNull().unique(),
+  cashupDate: date("cashup_date").notNull(),
+  cashierUserId: integer("cashier_user_id").references(() => users.id).notNull(),
+  expectedCash: decimal("expected_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  actualCash: decimal("actual_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  expectedNonCash: decimal("expected_non_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  actualNonCash: decimal("actual_non_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  variance: decimal("variance", { precision: 12, scale: 2 }).notNull().default("0"),
+  depositReference: text("deposit_reference"),
+  status: text("status").notNull().default("draft"),
+  notes: text("notes"),
+  submittedAt: timestamp("submitted_at"),
+  verifiedAt: timestamp("verified_at"),
+  verifiedByUserId: integer("verified_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportCashupPayments = pgTable("transport_cashup_payments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  cashupId: integer("cashup_id").references(() => transportCashups.id).notNull(),
+  paymentId: integer("payment_id").references(() => transportPayments.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ paymentUnique: uniqueIndex("transport_cashup_payment_uidx").on(table.paymentId) }));
+
+export const transportSubscriptionRules = pgTable("transport_subscription_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id),
+  ruleType: text("rule_type").notNull().default("fixed"),
+  value: decimal("value", { precision: 12, scale: 2 }).notNull(),
+  minimumAmount: decimal("minimum_amount", { precision: 12, scale: 2 }),
+  maximumAmount: decimal("maximum_amount", { precision: 12, scale: 2 }),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportPenalties = pgTable("transport_penalties", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  penaltyNumber: text("penalty_number").notNull().unique(),
+  category: text("category").notNull(),
+  incidentDate: date("incident_date").notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  status: text("status").notNull().default("approved"),
+  reason: text("reason").notNull(),
+  disputeNotes: text("dispute_notes"),
+  effectiveYear: integer("effective_year").notNull(),
+  effectiveMonth: integer("effective_month").notNull(),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportAdvances = pgTable("transport_advances", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  advanceNumber: text("advance_number").notNull().unique(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  outstandingAmount: decimal("outstanding_amount", { precision: 12, scale: 2 }).notNull(),
+  purpose: text("purpose").notNull(),
+  requestDate: date("request_date").notNull(),
+  disbursementDate: date("disbursement_date"),
+  disbursementReference: text("disbursement_reference"),
+  recoveryMethod: text("recovery_method").notNull(),
+  recoveryValue: decimal("recovery_value", { precision: 12, scale: 2 }).notNull(),
+  recoveryStartYear: integer("recovery_start_year").notNull(),
+  recoveryStartMonth: integer("recovery_start_month").notNull(),
+  minimumOwnerTakeHome: decimal("minimum_owner_take_home", { precision: 12, scale: 2 }).notNull().default("0"),
+  maximumMonthlyRecovery: decimal("maximum_monthly_recovery", { precision: 12, scale: 2 }),
+  status: text("status").notNull().default("requested"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  disbursedByUserId: integer("disbursed_by_user_id").references(() => users.id),
+  disbursedAt: timestamp("disbursed_at"),
+  rejectedByUserId: integer("rejected_by_user_id").references(() => users.id),
+  rejectedAt: timestamp("rejected_at"),
+  rejectionReason: text("rejection_reason"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportIncidents = pgTable("transport_incidents", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  incidentNumber: text("incident_number").notNull().unique(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  driverId: integer("driver_id").references(() => transportDrivers.id),
+  routeId: integer("route_id").references(() => transportRoutes.id),
+  pathId: integer("path_id").references(() => transportVehiclePaths.id),
+  incidentType: text("incident_type").notNull(),
+  severity: text("severity").notNull().default("medium"),
+  occurredAt: timestamp("occurred_at").notNull(),
+  latitude: decimal("latitude", { precision: 10, scale: 7 }),
+  longitude: decimal("longitude", { precision: 10, scale: 7 }),
+  description: text("description").notNull(),
+  resolution: text("resolution"),
+  status: text("status").notNull().default("reported"),
+  affectedStudentIds: jsonb("affected_student_ids").notNull().default(sql`'[]'::jsonb`),
+  linkedAdvanceId: integer("linked_advance_id").references(() => transportAdvances.id),
+  linkedPenaltyId: integer("linked_penalty_id").references(() => transportPenalties.id),
+  reportedByUserId: integer("reported_by_user_id").references(() => users.id).notNull(),
+  resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+  resolvedAt: timestamp("resolved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportClaims = pgTable("transport_claims", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  driverId: integer("driver_id").references(() => transportDrivers.id),
+  claimNumber: text("claim_number").notNull().unique(),
+  serviceYear: integer("service_year").notNull(),
+  serviceMonth: integer("service_month").notNull(),
+  status: text("status").notNull().default("draft"),
+  currentPeriodAmount: decimal("current_period_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  priorPeriodAmount: decimal("prior_period_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  grossAmount: decimal("gross_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  deductionAmount: decimal("deduction_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  netAmount: decimal("net_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  notes: text("notes"),
+  preparedByUserId: integer("prepared_by_user_id").references(() => users.id).notNull(),
+  submittedAt: timestamp("submitted_at"),
+  verifiedByUserId: integer("verified_by_user_id").references(() => users.id),
+  verifiedAt: timestamp("verified_at"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ vehiclePeriodUnique: uniqueIndex("transport_claim_vehicle_period_uidx").on(table.schoolId, table.vehicleId, table.serviceYear, table.serviceMonth) }));
+
+export const transportClaimAllocations = pgTable("transport_claim_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  claimId: integer("claim_id").references(() => transportClaims.id).notNull(),
+  allocationId: integer("allocation_id").references(() => transportPaymentAllocations.id).notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ allocationUnique: uniqueIndex("transport_claim_allocation_uidx").on(table.allocationId) }));
+
+export const transportClaimDeductions = pgTable("transport_claim_deductions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  claimId: integer("claim_id").references(() => transportClaims.id).notNull(),
+  deductionType: text("deduction_type").notNull(),
+  sourceId: integer("source_id"),
+  description: text("description").notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  priority: integer("priority").notNull().default(100),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportPayouts = pgTable("transport_payouts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  claimId: integer("claim_id").references(() => transportClaims.id).notNull(),
+  payoutNumber: text("payout_number").notNull().unique(),
+  status: text("status").notNull().default("approved"),
+  grossAmount: decimal("gross_amount", { precision: 12, scale: 2 }).notNull(),
+  deductionAmount: decimal("deduction_amount", { precision: 12, scale: 2 }).notNull(),
+  netAmount: decimal("net_amount", { precision: 12, scale: 2 }).notNull(),
+  amountPaid: decimal("amount_paid", { precision: 12, scale: 2 }).notNull().default("0"),
+  paymentDate: date("payment_date"),
+  paymentMethod: text("payment_method"),
+  paymentReference: text("payment_reference"),
+  verificationToken: text("verification_token").notNull().unique(),
+  snapshot: jsonb("snapshot").notNull().default(sql`'{}'::jsonb`),
+  generatedByUserId: integer("generated_by_user_id").references(() => users.id).notNull(),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  paidByUserId: integer("paid_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ claimUnique: uniqueIndex("transport_payout_claim_uidx").on(table.claimId) }));
+
+export const transportPeriodLocks = pgTable("transport_period_locks", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  periodType: text("period_type").notNull(),
+  year: integer("year").notNull(),
+  month: integer("month"),
+  status: text("status").notNull().default("locked"),
+  reason: text("reason"),
+  lockedByUserId: integer("locked_by_user_id").references(() => users.id).notNull(),
+  lockedAt: timestamp("locked_at").defaultNow(),
+  reopenedByUserId: integer("reopened_by_user_id").references(() => users.id),
+  reopenedAt: timestamp("reopened_at"),
+}, (table) => ({ periodUnique: uniqueIndex("transport_period_lock_uidx").on(table.schoolId, table.periodType, table.year, table.month) }));
+
+export const transportVehicleOwnerHistory = pgTable("transport_vehicle_owner_history", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id).notNull(),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  reason: text("reason"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportVehicleDriverHistory = pgTable("transport_vehicle_driver_history", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  driverId: integer("driver_id").references(() => transportDrivers.id).notNull(),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  reason: text("reason"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportAuditEvents = pgTable("transport_audit_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: integer("entity_id"),
+  action: text("action").notNull(),
+  previousValues: jsonb("previous_values"),
+  newValues: jsonb("new_values"),
+  reason: text("reason"),
+  metadata: jsonb("metadata"),
+  userId: integer("user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const libraryResources = pgTable("library_resources", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id),
@@ -742,6 +1409,7 @@ export const accessGroups = pgTable("access_groups", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: text("name").notNull().unique(),
   description: text("description"),
+  accountRole: userRoleEnum("account_role"),
   isSystemDefault: boolean("is_system_default").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -799,6 +1467,42 @@ export const insertAttendanceRecordSchema = createInsertSchema(attendanceRecords
 export const insertDisciplineRecordSchema = createInsertSchema(disciplineRecords).omit({ id: true, createdAt: true });
 export const insertClinicRecordSchema = createInsertSchema(clinicRecords).omit({ id: true, createdAt: true });
 export const insertFeesPaymentSchema = createInsertSchema(feesPayments).omit({ id: true, createdAt: true });
+export const insertTransportRouteSchema = createInsertSchema(transportRoutes).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTransportPickupPointSchema = createInsertSchema(transportPickupPoints).omit({ id: true, createdAt: true });
+export const insertTransportOwnerSchema = createInsertSchema(transportOwners).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTransportDriverSchema = createInsertSchema(transportDrivers).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTransportVehicleSchema = createInsertSchema(transportVehicles).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTransportSettingSchema = createInsertSchema(transportSettings).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTransportServicePointSchema = createInsertSchema(transportServicePoints).omit({ id: true, createdAt: true });
+export const insertTransportVehiclePathSchema = createInsertSchema(transportVehiclePaths).omit({ id: true, createdAt: true, updatedAt: true, activatedAt: true });
+export const insertTransportPathNodeSchema = createInsertSchema(transportPathNodes).omit({ id: true, createdAt: true });
+export const insertTransportAssignmentSchema = createInsertSchema(transportAssignments).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTransportPathNodeLearnerSchema = createInsertSchema(transportPathNodeLearners).omit({ id: true, createdAt: true });
+export const insertTransportAssignmentEventSchema = createInsertSchema(transportAssignmentEvents).omit({ id: true, createdAt: true });
+export const insertTransportChargeSchema = createInsertSchema(transportCharges).omit({ id: true, createdAt: true });
+export const insertTransportAccountAdjustmentSchema = createInsertSchema(transportAccountAdjustments).omit({ id: true, createdAt: true });
+export const insertTransportProviderAdjustmentSchema = createInsertSchema(transportProviderAdjustments).omit({ id: true, createdAt: true });
+export const insertTransportPaymentSchema = createInsertSchema(transportPayments).omit({ id: true, createdAt: true, reversedAt: true, reversedByUserId: true, reversalReason: true, verifiedAt: true, verifiedByUserId: true, reconciledAt: true, reconciledByUserId: true });
+export const insertTransportPaymentAllocationSchema = createInsertSchema(transportPaymentAllocations).omit({ id: true, createdAt: true });
+export const insertTransportReceiptEventSchema = createInsertSchema(transportReceiptEvents).omit({ id: true, createdAt: true });
+export const insertTransportPaymentPlanSchema = createInsertSchema(transportPaymentPlans).omit({ id: true, createdAt: true });
+export const insertTransportPaymentPlanInstalmentSchema = createInsertSchema(transportPaymentPlanInstalments).omit({ id: true, createdAt: true });
+export const insertTransportRefundSchema = createInsertSchema(transportRefunds).omit({ id: true, createdAt: true, approvedAt: true, paidAt: true });
+export const insertTransportCashupSchema = createInsertSchema(transportCashups).omit({ id: true, createdAt: true, submittedAt: true, verifiedAt: true });
+export const insertTransportCashupPaymentSchema = createInsertSchema(transportCashupPayments).omit({ id: true, createdAt: true });
+export const insertTransportSubscriptionRuleSchema = createInsertSchema(transportSubscriptionRules).omit({ id: true, createdAt: true });
+export const insertTransportPenaltySchema = createInsertSchema(transportPenalties).omit({ id: true, createdAt: true });
+export const insertTransportAdvanceSchema = createInsertSchema(transportAdvances).omit({ id: true, createdAt: true });
+export const insertTransportIncidentSchema = createInsertSchema(transportIncidents).omit({ id: true, createdAt: true, resolvedAt: true });
+export const insertTransportClaimSchema = createInsertSchema(transportClaims).omit({ id: true, createdAt: true, submittedAt: true, verifiedAt: true, approvedAt: true });
+export const insertTransportClaimAllocationSchema = createInsertSchema(transportClaimAllocations).omit({ id: true, createdAt: true });
+export const insertTransportClaimDeductionSchema = createInsertSchema(transportClaimDeductions).omit({ id: true, createdAt: true });
+export const insertTransportPayoutSchema = createInsertSchema(transportPayouts).omit({ id: true, createdAt: true });
+export const insertTransportPeriodLockSchema = createInsertSchema(transportPeriodLocks).omit({ id: true, lockedAt: true, reopenedAt: true });
+export const insertTransportVehicleOwnerHistorySchema = createInsertSchema(transportVehicleOwnerHistory).omit({ id: true, createdAt: true });
+export const insertTransportVehicleDriverHistorySchema = createInsertSchema(transportVehicleDriverHistory).omit({ id: true, createdAt: true });
+export const insertTransportAuditEventSchema = createInsertSchema(transportAuditEvents).omit({ id: true, createdAt: true });
+
 export const insertLibraryResourceSchema = createInsertSchema(libraryResources).omit({ id: true, createdAt: true });
 export const insertLibraryCategorySchema = createInsertSchema(libraryCategories).omit({ id: true, createdAt: true });
 export const insertLibraryShelfSchema = createInsertSchema(libraryShelves).omit({ id: true, createdAt: true });
@@ -1452,6 +2156,7 @@ export const staffRoles = pgTable("staff_roles", {
   name: text("name").notNull().unique(),
   label: text("label").notNull(),
   description: text("description"),
+  accessGroupId: integer("access_group_id"),
   isSystemDefault: boolean("is_system_default").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });

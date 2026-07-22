@@ -10,8 +10,9 @@ import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
+import { registerTransportRoutes } from "./transport-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
-import { generateReportCardPdf, type ReportCardPdfData } from "./pdf-report-card";
+import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
 import { assessClassSubjectGradeConfiguration, planExactProfileClassAttachment, resolveExpectedGradeProfile, type GradeConfigurationProfileStatus } from "./grading-configuration";
 import { z } from "zod";
@@ -2279,6 +2280,7 @@ export async function registerRoutes(
   });
   registerObjectStorageRoutes(app);
   registerCalendarRoutes(app);
+  registerTransportRoutes(app);
   await ensureEcdSeedData();
 
   const readOnlyExemptPaths = [
@@ -12444,316 +12446,7 @@ ${schoolName}`;
     }
   });
 
-  async function buildReportCardPdfData(
-    studentId: number,
-    examId: number,
-    schoolId: number,
-    schoolInfo: any,
-    classInfo: any,
-    examInfo: any,
-  ): Promise<ReportCardPdfData | null> {
-    const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
-
-    const subjectIds = [...new Set(allAssessments.map(a => a.subjectId))];
-    const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
-    const subjectsList = subjectsData.filter(Boolean);
-
-    const grades = await storage.getGradesBySchool(schoolId);
-    const gradeClassStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
-    const gradeCandidatesBySubject = new Map<number, any[]>();
-    for (const subject of subjectsList) {
-      if (!subject) continue;
-      gradeCandidatesBySubject.set(
-        Number(subject.id),
-        getClassSubjectGradeCandidates({
-          allGrades: grades,
-          school: schoolInfo,
-          classInfo,
-          classStreamName: gradeClassStream?.name || null,
-          subject,
-        }).grades,
-      );
-    }
-    const assessmentIds = allAssessments.map(a => a.id);
-    const allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
-
-    const marksMap = new Map<string, typeof allMarks[0]>();
-    for (const mark of allMarks) {
-      marksMap.set(`${mark.studentId}-${mark.assessmentId}`, mark);
-    }
-
-    const students = await storage.getStudentsByClass(classInfo.id);
-
-    const bySubject: Record<number, Record<number, number>> = {};
-    const studentSubjectRows: Record<number, Record<number, {
-      percentage: number | null; grade: string; gradePoints: number;
-      comment: string; subjectId: number; subjectName: string;
-    }>> = {};
-
-    const teacherMap = new Map<string, string>();
-    const getTeacherDisplayName = async (staffId: number) => {
-      const staffMember = await storage.getStaff(staffId);
-      if (!staffMember) return `Staff #${staffId}`;
-
-      const normalizedGender = (staffMember.gender || "").toString().toLowerCase();
-      const title = normalizedGender === "male" ? "Mr" : normalizedGender === "female" ? "Ms" : "";
-      const lastName = (staffMember.lastName || "").trim();
-      if (lastName) {
-        return `${title ? `${title} ` : ""}${lastName}`.trim();
-      }
-
-      const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
-      const userLastName = (user?.lastName || "").trim();
-      if (userLastName) {
-        return `${title ? `${title} ` : ""}${userLastName}`.trim();
-      }
-
-      const fallbackName = user
-        ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
-        : `${staffMember.firstName || ""} ${staffMember.lastName || ""}`.trim();
-
-      return fallbackName || `Staff #${staffId}`;
-    };
-    try {
-      const allStaffSubjectsList = await db.select({
-        staffId: staffSubjects.staffId,
-        subjectId: staffSubjects.subjectId,
-        classId: staffSubjects.classId,
-      }).from(staffSubjects).where(eq(staffSubjects.classId, classInfo.id));
-      for (const ss of allStaffSubjectsList) {
-        const tName = await getTeacherDisplayName(ss.staffId);
-        teacherMap.set(`${ss.subjectId}-${ss.classId}`, tName);
-      }
-    } catch (e) {}
-
-    for (const subject of subjectsList) {
-      if (!subject) continue;
-      const assessment = allAssessments.find(a => a.subjectId === subject.id && a.classId === classInfo.id);
-      if (!assessment) continue;
-
-      for (const stu of students) {
-        const markKey = `${stu.id}-${assessment.id}`;
-        const mark = marksMap.get(markKey);
-        if (!mark) continue;
-
-        const pctRaw = parseFinitePercentage(mark.percentage);
-        const statusComment = markStatusLabel(mark.attStatus);
-        if (pctRaw === null && !statusComment) continue;
-
-        let gradeName = '';
-        let gradePoints = 0;
-        const resolvedGrade = resolveStoredAssessmentGrade({
-          mark,
-          percentage: pctRaw,
-          applicableGrades: gradeCandidatesBySubject.get(Number(subject.id)) || [],
-          allGrades: grades,
-          subjectType: subject.subjectType,
-        });
-        if (resolvedGrade) {
-          gradeName = resolvedGrade.gradeName;
-          gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
-        }
-
-        const comment = statusComment || mark.customCommentText || mark.autoCommentSnapshot || '';
-
-        if (pctRaw !== null) {
-          if (!bySubject[subject.id]) bySubject[subject.id] = {};
-          bySubject[subject.id][stu.id] = pctRaw;
-        }
-
-        if (!studentSubjectRows[stu.id]) studentSubjectRows[stu.id] = {};
-        studentSubjectRows[stu.id][subject.id] = {
-          percentage: pctRaw, grade: gradeName, gradePoints,
-          comment, subjectId: subject.id, subjectName: subject.name,
-        };
-      }
-    }
-
-    const rows = studentSubjectRows[studentId] || {};
-    if (Object.keys(rows).length === 0) return null;
-
-    const subjectAvg: Record<number, number> = {};
-    const subjectRank: Record<number, Record<number, string>> = {};
-
-    for (const [subjIdStr, sidToPct] of Object.entries(bySubject)) {
-      const subjId = parseInt(subjIdStr);
-      const vals = Object.values(sidToPct);
-      subjectAvg[subjId] = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
-      const sorted = Object.entries(sidToPct).sort(([, a], [, b]) => b - a);
-      const n = sorted.length;
-      subjectRank[subjId] = {};
-      sorted.forEach(([sid], i) => { subjectRank[subjId][parseInt(sid)] = `${i + 1}/${n}`; });
-    }
-
-    const pdfPrevPctMap: Record<string, number> = {};
-    try {
-      const allSchoolExams = await storage.getExamsBySchool(schoolId);
-      const sortedExams = allSchoolExams
-        .filter(e => e.id !== examId)
-        .sort((a, b) => {
-          const dateA = a.startDate ? new Date(a.startDate).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-          const dateB = b.startDate ? new Date(b.startDate).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-          return dateB - dateA;
-        });
-      const prevExam = sortedExams.length > 0 ? sortedExams[0] : null;
-      if (prevExam) {
-        const prevAssessments = await storage.getAssessmentsByExam(prevExam.id);
-        const prevAssessmentIds = prevAssessments.map(a => a.id);
-        if (prevAssessmentIds.length > 0) {
-          const prevMarks = await storage.getAssessmentMarksByAssessments(prevAssessmentIds);
-          for (const mark of prevMarks) {
-            if (mark.percentage !== null && mark.percentage !== undefined) {
-              pdfPrevPctMap[`${mark.studentId}-${mark.subjectId}`] = parseFloat(mark.percentage);
-            }
-          }
-        }
-      }
-    } catch (e) {}
-
-    const sortedRows = Object.values(rows).sort((a, b) => a.subjectName.localeCompare(b.subjectName));
-    let sumMarks = 0, passed = 0, points = 0, nSubjects = 0;
-    const pdfSubjects: Array<{ subjectName: string; mark: string; dev: string; classAvg: string; grade: string; rank: string; comment: string; teacher: string }> = [];
-
-    for (const row of sortedRows) {
-      const pct = row.percentage;
-      const hasNumericMark = pct !== null && Number.isFinite(pct);
-      if (hasNumericMark) {
-        sumMarks += pct as number;
-        nSubjects++;
-        if ((pct as number) >= 60) passed++;
-        points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
-      }
-
-      const avgVal = subjectAvg[row.subjectId];
-      const classAvgStr = hasNumericMark && avgVal !== undefined ? parseFloat(avgVal.toFixed(1)).toString() : '';
-      const rankStr = hasNumericMark ? (subjectRank[row.subjectId]?.[studentId] || '') : '';
-      const markStr = hasNumericMark ? parseFloat((pct as number).toFixed(1)).toString() : '';
-      const teacher = teacherMap.get(`${row.subjectId}-${classInfo.id}`) || '';
-
-      const prevVal = pdfPrevPctMap[`${studentId}-${row.subjectId}`];
-      let dev = '';
-      if (hasNumericMark) {
-        if (prevVal === undefined) {
-          dev = '+NEW';
-        } else {
-          const diff = Math.round((pct as number) - prevVal);
-          if (diff > 0) dev = `+${diff}`;
-          else if (diff < 0) dev = `${diff}`;
-          else dev = '0';
-        }
-      }
-
-      pdfSubjects.push({
-        subjectName: row.subjectName, mark: markStr, dev,
-        classAvg: classAvgStr, grade: row.grade, rank: rankStr,
-        comment: row.comment, teacher,
-      });
-    }
-
-    const totalMark = nSubjects > 0 ? `${Math.round(sumMarks)}/${100 * nSubjects}` : '';
-    const avgPct = nSubjects > 0 ? parseFloat((sumMarks / nSubjects).toFixed(1)) : null;
-    const avgMarkStr = avgPct !== null ? `${parseFloat(avgPct.toFixed(1))}%` : '';
-    const subjectsPassed = nSubjects > 0 ? `${passed}/${nSubjects}` : '';
-
-    const studentsWithMarks = students.filter(s => {
-      const r = studentSubjectRows[s.id];
-      return r && Object.keys(r).length > 0;
-    });
-    const studentAvgs = studentsWithMarks.map(s => {
-      const r = studentSubjectRows[s.id];
-      const vals = Object.values(r || {}).filter(v => v.percentage !== null);
-      const sum = vals.reduce((a, v) => a + (v.percentage ?? 0), 0);
-      return { id: s.id, avg: vals.length > 0 ? sum / vals.length : 0 };
-    }).sort((a, b) => b.avg - a.avg);
-
-    let position = '';
-    const classSize = studentAvgs.length;
-    let currentPos = 0;
-    let lastAvg: number | null = null;
-    for (let i = 0; i < studentAvgs.length; i++) {
-      if (studentAvgs[i].avg !== lastAvg) { currentPos = i + 1; lastAvg = studentAvgs[i].avg; }
-      if (studentAvgs[i].id === studentId) { position = `${currentPos}/${classSize}`; break; }
-    }
-    const streamPositionMap = await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
-    const overallPosition = streamPositionMap.map.get(studentId) || position;
-
-    const student = students.find(s => s.id === studentId);
-    if (!student) return null;
-    const studentStream = student.streamId ? await storage.getStream(student.streamId) : null;
-    const classStream = classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
-    const ecdSections = await loadEcdSectionsForStudentExam(studentId, examId, [studentStream?.name, classStream?.name]);
-
-    const termId = examInfo?.termId;
-    const termName = termId ? `Term ${termId}` : undefined;
-
-    let principalComment = '';
-    let classTeacherComment = '';
-    if (avgPct !== null) {
-      const allComments = await storage.getReportComments(schoolId);
-      const allGrades = (await storage.getAllGrades()).filter((grade) => grade.schoolId === schoolId);
-      const profileKey = resolveGradeProfileKey({
-        schoolType: schoolInfo?.schoolType,
-        examinationBoard: schoolInfo?.examinationBoard,
-        streamName: classStream?.name || null,
-      });
-      const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId: classInfo.id });
-      const configuredGrade = resolveReportCommentGradeForAverage(applicableGrades, avgPct);
-      principalComment = findReportCommentForConfiguredGrade({
-        comments: allComments,
-        commentType: "principal",
-        grade: configuredGrade,
-        profileKey,
-      });
-      classTeacherComment = findReportCommentForConfiguredGrade({
-        comments: allComments,
-        commentType: "class_teacher",
-        grade: configuredGrade,
-        profileKey,
-        classId: classInfo.id,
-      });
-    }
-
-    const pdfOverrideMap = await getReportCardCommentOverrideMap(schoolId, examId, [studentId]);
-    const pdfOverrides = pdfOverrideMap.get(studentId);
-    if (pdfOverrides?.principal !== undefined) {
-      principalComment = pdfOverrides.principal || '';
-    }
-    if (pdfOverrides?.class_teacher !== undefined) {
-      classTeacherComment = pdfOverrides.class_teacher || '';
-    }
-
-    return {
-      school: {
-        name: schoolInfo?.name || 'School',
-        logo: schoolInfo?.logo,
-        stamp: schoolInfo?.stamp,
-        address: schoolInfo?.address,
-        phone: schoolInfo?.phone,
-        email: schoolInfo?.email,
-        principalName: schoolInfo?.principalName,
-        principalPhone: schoolInfo?.principalPhone,
-      },
-      studentName: `${student.firstName} ${student.lastName}`,
-      admissionNo: student.admissionNo || '',
-      className: classInfo.className || '',
-      examName: examInfo?.examName || '',
-      termName,
-      subjects: pdfSubjects,
-      summary: {
-        totalMark,
-        avgMark: avgMarkStr,
-        subjectsPassed,
-        points: nSubjects > 0 ? points.toString() : '',
-        classPosition: position,
-        overallPosition,
-      },
-      ecdSections,
-      principalComment,
-      classTeacherComment,
-    };
-  }
-
-  async function buildReportCardMessage(
+async function buildReportCardMessage(
     studentId: number,
     examId: number,
     schoolId: number,
@@ -12914,6 +12607,31 @@ ${schoolName}`;
   }
 
 
+  async function generateReportCardChromiumPdf(args: {
+    req: Request;
+    schoolId: number;
+    examId: number;
+    classId: number;
+    studentIds: number[];
+  }): Promise<Buffer> {
+    const params = new URLSearchParams({
+      examId: String(args.examId),
+      classId: String(args.classId),
+      studentIds: args.studentIds.join(","),
+    });
+    return renderAppRoutePdf({
+      req: args.req,
+      schoolId: args.schoolId,
+      route: `/pdf-render/report-cards?${params.toString()}`,
+      pdfOptions: {
+        format: "A4",
+        printBackground: true,
+        preferCSSPageSize: true,
+        margin: { top: "2mm", right: "2mm", bottom: "2mm", left: "2mm" },
+      },
+    });
+  }
+
   app.get("/api/report-cards/:examId/student/:studentId/download", requireAuth, async (req, res, next) => {
     try {
       const examId = parseInt(req.params.examId);
@@ -12939,18 +12657,57 @@ ${schoolName}`;
       if (exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
       if (!currentUser || !(await ensurePublishedPortalAccess({ user: currentUser, examId, classId: activeClassId, studentId, res }))) return;
 
-      const pdfData = await buildReportCardPdfData(studentId, examId, schoolId, school, classInfo, exam);
-      if (!pdfData) return res.status(404).json({ message: "No report card data available for this student" });
-
-      const pdfBuffer = await generateReportCardPdf(pdfData);
+      const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId, classId: activeClassId, studentIds: [studentId] });
       const safeStudentName = `${student.firstName}_${student.lastName}`.replace(/\s+/g, "_");
       const safeClassName = (classInfo.className || 'Class').replace(/\s+/g, "_");
       const safeExamName = (exam.examName || 'Exam').replace(/\s+/g, "_");
 
+      const filename = reportPdfFilename(`Report_Card_${safeStudentName}_${safeClassName}_${safeExamName}`);
       res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="Report_Card_${safeStudentName}_${safeClassName}_${safeExamName}.pdf"`);
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}.pdf"`);
       res.send(pdfBuffer);
     } catch (error) {
+      next(error);
+    }
+  });
+
+  const reportCardPdfSelectionSchema = z.object({
+    classId: z.coerce.number().int().positive(),
+    studentIds: z.array(z.coerce.number().int().positive()).min(1).max(500),
+  });
+
+  app.post("/api/report-cards/:examId/pdf", requireAuth, async (req, res, next) => {
+    try {
+      const examId = Number(req.params.examId);
+      const parsed = reportCardPdfSelectionSchema.parse(req.body);
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId || !currentUser) return res.status(400).json({ message: "School context required" });
+      if (currentUser.role === "student" || currentUser.role === "parent") {
+        return res.status(403).json({ message: "Batch report downloads are not available in this portal" });
+      }
+
+      const [classInfo, exam, classStudents] = await Promise.all([
+        storage.getClass(parsed.classId),
+        storage.getExam(examId),
+        storage.getStudentsByClass(parsed.classId),
+      ]);
+      if (!classInfo || Number(classInfo.schoolId) !== Number(schoolId)) return res.status(404).json({ message: "Class not found" });
+      if (!exam || (exam.schoolId && Number(exam.schoolId) !== Number(schoolId))) return res.status(404).json({ message: "Exam not found" });
+
+      const validIds = new Set(classStudents.map((student: any) => Number(student.id)));
+      const requestedIds = Array.from(new Set(parsed.studentIds));
+      if (requestedIds.some((id) => !validIds.has(id))) {
+        return res.status(400).json({ message: "One or more selected learners do not belong to this class" });
+      }
+
+      const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId, classId: parsed.classId, studentIds: requestedIds });
+      const filename = reportPdfFilename(`Filtered_Report_Cards_${classInfo.className || "Class"}_${exam.examName || "Exam"}`);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}.pdf"`);
+      res.send(pdfBuffer);
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid report selection", errors: error.errors });
       next(error);
     }
   });
@@ -13026,8 +12783,7 @@ ${schoolName}`;
 
             if (parent.email) {
               try {
-                const pdfData = await buildReportCardPdfData(student.id, examId, schoolId, school, classInfo, exam);
-                const pdfBuffer = pdfData ? await generateReportCardPdf(pdfData) : null;
+                const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId: Number(examId), classId: Number(classId), studentIds: [student.id] });
                 const emailResult = await communicationService.sendEmail({
                   to: parent.email,
                   subject: `Report Card - ${name} | ${examName}`,
@@ -13166,8 +12922,7 @@ ${schoolName}`;
       
       if (parent.email) {
         try {
-          const pdfData = await buildReportCardPdfData(student.id, examId, schoolId, school, classInfo, exam);
-          const pdfBuffer = pdfData ? await generateReportCardPdf(pdfData) : null;
+          const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId: Number(examId), classId: Number(classId), studentIds: [student.id] });
           const emailResult = await communicationService.sendEmail({
             to: parent.email,
             subject: `Report Card - ${name} | ${examName}`,
