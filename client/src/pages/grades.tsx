@@ -172,11 +172,15 @@ export default function GradesPage() {
     gradeStatus?: string;
     gradeType?: string;
   }) => {
-    const gradeData = {
+    const allowedGradeTypes = getGradeTypeOptionsForProfile(formData.gradeLevel, schoolType, examinationBoard);
+    const gradeType = formData.gradeType && allowedGradeTypes.includes(formData.gradeType)
+      ? formData.gradeType as NonNullable<Grade["gradeType"]>
+      : undefined;
+    const gradeData: Partial<Grade> = {
       ...formData,
       gradePoints: formData.gradePoints || undefined,
       gradeStatus: formData.gradeStatus || undefined,
-      gradeType: formData.gradeType || undefined,
+      gradeType,
     };
 
     if (editingGrade) {

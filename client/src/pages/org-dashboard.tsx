@@ -3,6 +3,9 @@ import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import CalendarPage from "@/pages/calendar";
 import InternalTransfersPage from "@/pages/internal-transfers";
+import AssetsInventoryPage from "@/pages/assets-inventory";
+import OrgTransportOversightPage from "@/pages/org-transport-oversight";
+import { RecordPhotoActions } from "@/components/record-photo-actions";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useUpload } from "@/hooks/use-upload";
@@ -60,6 +63,10 @@ import {
   Phone,
   Archive,
   ArrowRightLeft,
+  Menu,
+  LayoutDashboard,
+  PackageSearch,
+  BusFront,
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
@@ -187,8 +194,12 @@ export default function OrgDashboard() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isManageAccountOpen, setIsManageAccountOpen] = useState(false);
   const [isOrgSettingsOpen, setIsOrgSettingsOpen] = useState(false);
+  const [orgSettingsTab, setOrgSettingsTab] = useState("hq-info");
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [isInternalTransfersOpen, setIsInternalTransfersOpen] = useState(false);
+  const [isTransportOversightOpen, setIsTransportOversightOpen] = useState(false);
+  const [isAssetsInventoryOpen, setIsAssetsInventoryOpen] = useState(false);
+  const [isHqNavOpen, setIsHqNavOpen] = useState(false);
   const currentYear = new Date().getFullYear();
   const [orgAcademicYear, setOrgAcademicYear] = useState<number>(currentYear);
   const [orgTerm, setOrgTerm] = useState<string>("term1");
@@ -848,6 +859,41 @@ export default function OrgDashboard() {
   const allSchoolsEnabled = schools.length > 0 && selectedSchools.length === schools.length;
   const permissionsModalLoading = !!selectedUser && (userSchoolAccessLoading || userPermissionStatesLoading);
 
+  const scrollToHqSection = (sectionId: string) => {
+    setIsHqNavOpen(false);
+    window.requestAnimationFrame(() => document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
+
+  const hqNavigation = (mobile = false) => (
+    <nav className="space-y-5" aria-label="HQ applications">
+      <div>
+        <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Organisation</p>
+        <div className="space-y-1">
+          <Button variant="ghost" className="w-full justify-start" onClick={() => scrollToHqSection("hq-overview")}><LayoutDashboard className="mr-2 h-4 w-4" />HQ Overview</Button>
+          <Button variant="ghost" className="w-full justify-start" onClick={() => scrollToHqSection("hq-staff")}><Users className="mr-2 h-4 w-4" />HQ Staff</Button>
+          <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsArchivedOpen(true); if (mobile) setIsHqNavOpen(false); }}><Archive className="mr-2 h-4 w-4" />Archived Centres</Button>
+        </div>
+      </div>
+      <div>
+        <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Operations</p>
+        <div className="space-y-1">
+          {hasPermission("calendar.view") && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsCalendarOpen(true); if (mobile) setIsHqNavOpen(false); }}><Calendar className="mr-2 h-4 w-4" />Calendar</Button>}
+          <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsInternalTransfersOpen(true); if (mobile) setIsHqNavOpen(false); }}><ArrowRightLeft className="mr-2 h-4 w-4" />Internal Transfers</Button>
+          {(hasPermission("transport.organization.view") || hasPermission("transport.organization.reports") || hasPermission("transport.organization.manage")) && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsTransportOversightOpen(true); if (mobile) setIsHqNavOpen(false); }}><BusFront className="mr-2 h-4 w-4" />Transport</Button>}
+          {(hasPermission("assets.view") || hasPermission("inventory.view")) && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsAssetsInventoryOpen(true); if (mobile) setIsHqNavOpen(false); }}><PackageSearch className="mr-2 h-4 w-4" />Assets & Inventory</Button>}
+        </div>
+      </div>
+      <div>
+        <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Governance</p>
+        <div className="space-y-1">
+          <Button variant="ghost" className="w-full justify-start" onClick={() => { setOrgSettingsTab("activity-logs"); setIsOrgSettingsOpen(true); if (mobile) setIsHqNavOpen(false); }}><ClipboardList className="mr-2 h-4 w-4" />Activity Logs</Button>
+          <Button variant="ghost" className="w-full justify-start" onClick={() => { setOrgSettingsTab("access-rights"); setIsOrgSettingsOpen(true); if (mobile) setIsHqNavOpen(false); }}><Shield className="mr-2 h-4 w-4" />Access Groups & Permissions</Button>
+          <Button variant="ghost" className="w-full justify-start" onClick={() => { setOrgSettingsTab("hq-info"); setIsOrgSettingsOpen(true); if (mobile) setIsHqNavOpen(false); }}><Settings className="mr-2 h-4 w-4" />Global Settings</Button>
+        </div>
+      </div>
+    </nav>
+  );
+
   if (schoolsLoading || usersLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -858,7 +904,15 @@ export default function OrgDashboard() {
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-background">
-      <header className="border-b">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-72 flex-col border-r bg-card lg:flex">
+        <div className="border-b px-5 py-5">
+          <p className="text-sm font-semibold">HQ Applications</p>
+          <p className="mt-1 text-xs text-muted-foreground">Organisation workspace</p>
+        </div>
+        <ScrollArea className="flex-1 px-3 py-4">{hqNavigation()}</ScrollArea>
+      </aside>
+      <div className="lg:pl-72">
+      <header className="border-b bg-background/95 backdrop-blur">
         <div className="container mx-auto flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
             {orgBranding?.logo ? (
@@ -903,14 +957,13 @@ export default function OrgDashboard() {
             </div>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setIsArchivedOpen(true)}
-              data-testid="button-archived-schools"
-            >
-              <Archive className="h-5 w-5" />
-            </Button>
+            <Button variant="outline" size="icon" className="lg:hidden" onClick={() => setIsHqNavOpen(true)} aria-label="Open HQ applications" data-testid="button-open-hq-navigation"><Menu className="h-5 w-5" /></Button>
+            <Sheet open={isHqNavOpen} onOpenChange={setIsHqNavOpen}>
+              <SheetContent side="left" className="w-[88vw] max-w-sm">
+                <SheetHeader><SheetTitle>HQ Applications</SheetTitle><SheetDescription>Navigate organisation operations and governance.</SheetDescription></SheetHeader>
+                <ScrollArea className="mt-6 h-[calc(100dvh-8rem)] pr-2">{hqNavigation(true)}</ScrollArea>
+              </SheetContent>
+            </Sheet>
             <Sheet open={isArchivedOpen} onOpenChange={setIsArchivedOpen}>
               <SheetContent side="right" className="w-full sm:max-w-md overflow-y-auto">
                 <SheetHeader>
@@ -981,34 +1034,6 @@ export default function OrgDashboard() {
                 </div>
               </SheetContent>
             </Sheet>
-            {hasPermission("calendar.view") && (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setIsCalendarOpen(true)}
-                data-testid="button-open-hq-calendar"
-                title="Open Calendar"
-              >
-                <Calendar className="h-5 w-5" />
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setIsInternalTransfersOpen(true)}
-              data-testid="button-open-hq-internal-transfers"
-              title="Internal Transfers"
-            >
-              <ArrowRightLeft className="h-5 w-5" />
-            </Button>
-            <Button 
-              variant="ghost" 
-              size="icon" 
-              onClick={() => setIsOrgSettingsOpen(true)}
-              data-testid="button-org-settings"
-            >
-              <Settings className="h-5 w-5" />
-            </Button>
             <Popover>
               <PopoverTrigger asChild>
                 <Button variant="ghost" size="icon" className="relative" data-testid="button-notifications">
@@ -1081,7 +1106,212 @@ export default function OrgDashboard() {
         </div>
       </header>
 
-      <main className="container mx-auto space-y-6 px-4 py-6 sm:space-y-8 sm:py-8">
+      <main id="hq-overview" className="container mx-auto scroll-mt-4 space-y-6 px-4 py-6 sm:space-y-8 sm:py-8">
+        <Card id="hq-centres">
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle className="flex items-center gap-2">
+              <Building2 className="h-5 w-5" />
+              Centres / Schools
+            </CardTitle>
+            <Dialog open={isAddSchoolOpen} onOpenChange={setIsAddSchoolOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm" className="w-full sm:w-auto" data-testid="button-add-school">
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add a School
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Add New School</DialogTitle>
+                  <DialogDescription>Add a new school to your organization</DialogDescription>
+                </DialogHeader>
+                <form onSubmit={handleAddSchool} className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="name">School Name</Label>
+                    <Input id="name" name="name" required data-testid="input-school-name" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="shortCode">Short Code</Label>
+                    <Input id="shortCode" name="shortCode" required placeholder="e.g., FCGS-HF" data-testid="input-school-code" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="address">Address</Label>
+                    <Input id="address" name="address" data-testid="input-school-address" />
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="latitude">Latitude</Label>
+                      <Input id="latitude" name="latitude" placeholder="e.g., -17.8292" data-testid="input-school-latitude" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="longitude">Longitude</Label>
+                      <Input id="longitude" name="longitude" placeholder="e.g., 31.0522" data-testid="input-school-longitude" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="phone">Phone</Label>
+                      <Input id="phone" name="phone" data-testid="input-school-phone" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="email">Email</Label>
+                      <Input id="email" name="email" type="email" data-testid="input-school-email" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label>School Type</Label>
+                      <Select value={newSchoolType} onValueChange={setNewSchoolType}>
+                        <SelectTrigger data-testid="select-school-type">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="primary">Primary</SelectItem>
+                          <SelectItem value="secondary">Secondary</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Examination Board</Label>
+                      <Select value={newExamBoard} onValueChange={setNewExamBoard}>
+                        <SelectTrigger data-testid="select-exam-board">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="ZIMSEC">ZIMSEC</SelectItem>
+                          <SelectItem value="Cambridge">Cambridge</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Boarding / Day</Label>
+                      <Select value={newBoardingType} onValueChange={setNewBoardingType}>
+                        <SelectTrigger data-testid="select-boarding-type">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="day">Day School</SelectItem>
+                          <SelectItem value="boarding">Boarding School</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <Button type="submit" className="w-full" disabled={createSchool.isPending}>
+                    Add School
+                  </Button>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </CardHeader>
+          <CardContent>
+            {schools.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <SchoolIcon className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p>No schools yet. Add your first school to get started.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {schools.map((school) => {
+                  const isPending = school.terminationStatus === "pending";
+                  const initiator = isPending && school.terminationByUserId
+                    ? orgUsers.find(u => u.id === school.terminationByUserId)
+                    : null;
+                  const initiatorName = initiator
+                    ? `${initiator.firstName || ""} ${initiator.lastName || ""}`.trim() || initiator.username
+                    : "Unknown";
+
+                  return (
+                    <div
+                      key={school.id}
+                      className={`p-4 border rounded-lg ${isPending ? "border-destructive/50 bg-destructive/5" : "hover-elevate"}`}
+                      data-testid={`school-card-${school.id}`}
+                    >
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="flex min-w-0 items-start gap-3">
+                          <div className={`h-10 w-10 rounded-full flex items-center justify-center ${isPending ? "bg-destructive/10" : "bg-primary/10"}`}>
+                            {isPending ? (
+                              <AlertTriangle className="h-5 w-5 text-destructive" />
+                            ) : (
+                              <Building2 className="h-5 w-5 text-primary" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <h3 className="font-medium break-words">{school.name}</h3>
+                            <p className="flex flex-wrap items-start gap-1 text-sm text-muted-foreground">
+                              <MapPin className="h-3 w-3" />
+                              {school.address || "No address"}
+                              {school.latitude && school.longitude && (
+                                <span className="text-[10px] opacity-60 ml-1">({school.latitude}, {school.longitude})</span>
+                              )}
+                            </p>
+                            <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate" data-testid={`badge-type-${school.id}`}>
+                                {school.schoolType === "primary" ? "Primary" : "Secondary"}
+                              </Badge>
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate" data-testid={`badge-board-${school.id}`}>
+                                {school.examinationBoard || "ZIMSEC"}
+                              </Badge>
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate" data-testid={`badge-boarding-${school.id}`}>
+                                {school.enableHostel ? "Boarding" : "Day School"}
+                              </Badge>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+                          {!isPending && (
+                            <>
+                              <button
+                                className="text-emerald-600 hover:text-emerald-700 hover:underline text-sm font-medium"
+                                onClick={() => handleEnterSchool(school.id)}
+                                data-testid={`button-enter-school-${school.id}`}
+                              >
+                                Enter School
+                              </button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => setSchoolToDelete(school)}
+                                data-testid={`button-delete-school-${school.id}`}
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </>
+                          )}
+                          {isPending && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => restoreSchool.mutate(school.id)}
+                              disabled={restoreSchool.isPending}
+                              data-testid={`button-restore-school-${school.id}`}
+                            >
+                              <RotateCcw className="h-4 w-4 mr-1" />
+                              Restore
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {isPending && (
+                        <div className="mt-3 pt-3 border-t border-destructive/20">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-sm text-destructive font-medium" data-testid={`text-countdown-${school.id}`}>
+                              <Clock className="h-4 w-4" />
+                              <span>Archival in: {getCountdown(school.terminationAt)}</span>
+                            </div>
+                            <span className="text-xs text-muted-foreground" data-testid={`text-initiated-by-${school.id}`}>
+                              Initiated by {initiatorName}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Global Search */}
         <Card>
           <CardHeader className="pb-3">
@@ -1301,216 +1531,11 @@ export default function OrgDashboard() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <CardTitle className="flex items-center gap-2">
-              <Building2 className="h-5 w-5" />
-              Our Schools
-            </CardTitle>
-            <Dialog open={isAddSchoolOpen} onOpenChange={setIsAddSchoolOpen}>
-              <DialogTrigger asChild>
-                <Button variant="outline" size="sm" className="w-full sm:w-auto" data-testid="button-add-school">
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add a School
-                </Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Add New School</DialogTitle>
-                  <DialogDescription>Add a new school to your organization</DialogDescription>
-                </DialogHeader>
-                <form onSubmit={handleAddSchool} className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="name">School Name</Label>
-                    <Input id="name" name="name" required data-testid="input-school-name" />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="shortCode">Short Code</Label>
-                    <Input id="shortCode" name="shortCode" required placeholder="e.g., FCGS-HF" data-testid="input-school-code" />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="address">Address</Label>
-                    <Input id="address" name="address" data-testid="input-school-address" />
-                  </div>
-                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="latitude">Latitude</Label>
-                      <Input id="latitude" name="latitude" placeholder="e.g., -17.8292" data-testid="input-school-latitude" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="longitude">Longitude</Label>
-                      <Input id="longitude" name="longitude" placeholder="e.g., 31.0522" data-testid="input-school-longitude" />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="phone">Phone</Label>
-                      <Input id="phone" name="phone" data-testid="input-school-phone" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="email">Email</Label>
-                      <Input id="email" name="email" type="email" data-testid="input-school-email" />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                    <div className="space-y-2">
-                      <Label>School Type</Label>
-                      <Select value={newSchoolType} onValueChange={setNewSchoolType}>
-                        <SelectTrigger data-testid="select-school-type">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="primary">Primary</SelectItem>
-                          <SelectItem value="secondary">Secondary</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Examination Board</Label>
-                      <Select value={newExamBoard} onValueChange={setNewExamBoard}>
-                        <SelectTrigger data-testid="select-exam-board">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="ZIMSEC">ZIMSEC</SelectItem>
-                          <SelectItem value="Cambridge">Cambridge</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Boarding / Day</Label>
-                      <Select value={newBoardingType} onValueChange={setNewBoardingType}>
-                        <SelectTrigger data-testid="select-boarding-type">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="day">Day School</SelectItem>
-                          <SelectItem value="boarding">Boarding School</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <Button type="submit" className="w-full" disabled={createSchool.isPending}>
-                    Add School
-                  </Button>
-                </form>
-              </DialogContent>
-            </Dialog>
-          </CardHeader>
-          <CardContent>
-            {schools.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                <SchoolIcon className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p>No schools yet. Add your first school to get started.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {schools.map((school) => {
-                  const isPending = school.terminationStatus === "pending";
-                  const initiator = isPending && school.terminationByUserId
-                    ? orgUsers.find(u => u.id === school.terminationByUserId)
-                    : null;
-                  const initiatorName = initiator
-                    ? `${initiator.firstName || ""} ${initiator.lastName || ""}`.trim() || initiator.username
-                    : "Unknown";
-
-                  return (
-                    <div
-                      key={school.id}
-                      className={`p-4 border rounded-lg ${isPending ? "border-destructive/50 bg-destructive/5" : "hover-elevate"}`}
-                      data-testid={`school-card-${school.id}`}
-                    >
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div className="flex min-w-0 items-start gap-3">
-                          <div className={`h-10 w-10 rounded-full flex items-center justify-center ${isPending ? "bg-destructive/10" : "bg-primary/10"}`}>
-                            {isPending ? (
-                              <AlertTriangle className="h-5 w-5 text-destructive" />
-                            ) : (
-                              <Building2 className="h-5 w-5 text-primary" />
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <h3 className="font-medium break-words">{school.name}</h3>
-                            <p className="flex flex-wrap items-start gap-1 text-sm text-muted-foreground">
-                              <MapPin className="h-3 w-3" />
-                              {school.address || "No address"}
-                              {school.latitude && school.longitude && (
-                                <span className="text-[10px] opacity-60 ml-1">({school.latitude}, {school.longitude})</span>
-                              )}
-                            </p>
-                            <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate" data-testid={`badge-type-${school.id}`}>
-                                {school.schoolType === "primary" ? "Primary" : "Secondary"}
-                              </Badge>
-                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate" data-testid={`badge-board-${school.id}`}>
-                                {school.examinationBoard || "ZIMSEC"}
-                              </Badge>
-                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 no-default-hover-elevate no-default-active-elevate" data-testid={`badge-boarding-${school.id}`}>
-                                {school.enableHostel ? "Boarding" : "Day School"}
-                              </Badge>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-                          {!isPending && (
-                            <>
-                              <button
-                                className="text-emerald-600 hover:text-emerald-700 hover:underline text-sm font-medium"
-                                onClick={() => handleEnterSchool(school.id)}
-                                data-testid={`button-enter-school-${school.id}`}
-                              >
-                                Enter School
-                              </button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => setSchoolToDelete(school)}
-                                data-testid={`button-delete-school-${school.id}`}
-                              >
-                                <Trash2 className="h-4 w-4 text-destructive" />
-                              </Button>
-                            </>
-                          )}
-                          {isPending && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => restoreSchool.mutate(school.id)}
-                              disabled={restoreSchool.isPending}
-                              data-testid={`button-restore-school-${school.id}`}
-                            >
-                              <RotateCcw className="h-4 w-4 mr-1" />
-                              Restore
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                      {isPending && (
-                        <div className="mt-3 pt-3 border-t border-destructive/20">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2 text-sm text-destructive font-medium" data-testid={`text-countdown-${school.id}`}>
-                              <Clock className="h-4 w-4" />
-                              <span>Archival in: {getCountdown(school.terminationAt)}</span>
-                            </div>
-                            <span className="text-xs text-muted-foreground" data-testid={`text-initiated-by-${school.id}`}>
-                              Initiated by {initiatorName}
-                            </span>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
+        <Card id="hq-staff" className="scroll-mt-6">
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="flex items-center gap-2">
               <Users className="h-5 w-5" />
-              Org HQ
+              HQ Staff
             </CardTitle>
             <Dialog open={isAddUserOpen} onOpenChange={setIsAddUserOpen}>
               <DialogTrigger asChild>
@@ -1521,8 +1546,8 @@ export default function OrgDashboard() {
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Add Org HQ User</DialogTitle>
-                  <DialogDescription>Add a new organization-level user</DialogDescription>
+                  <DialogTitle>Add HQ Staff Member</DialogTitle>
+                  <DialogDescription>Add a new HQ staff member</DialogDescription>
                 </DialogHeader>
                 <form onSubmit={handleAddUser} className="space-y-4">
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -1554,7 +1579,7 @@ export default function OrgDashboard() {
             {orgUsers.filter(u => u.role === "org_admin").length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
                 <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p>No Org HQ users yet.</p>
+                <p>No HQ staff members yet.</p>
               </div>
             ) : (
               orgUsers.filter(u => u.role === "org_admin").map((orgUser) => (
@@ -1564,11 +1589,18 @@ export default function OrgDashboard() {
                   data-testid={`user-row-${orgUser.id}`}
                 >
                   <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
-                    <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center">
-                      <span className="text-sm font-medium">
-                        {(orgUser.firstName?.[0] || orgUser.username[0]).toUpperCase()}
-                      </span>
-                    </div>
+                    <RecordPhotoActions
+                      entity="users"
+                      recordId={orgUser.id}
+                      firstName={orgUser.firstName}
+                      lastName={orgUser.lastName}
+                      recordNumber={`HQ-${orgUser.id}`}
+                      photo={orgUser.photo}
+                      initials={`${orgUser.firstName?.[0] || orgUser.username[0] || "H"}${orgUser.lastName?.[0] || ""}`.toUpperCase()}
+                      canManage={hasPermission("users.edit") || hasPermission("users.manage_photo")}
+                      onPhotoUpdated={(photo) => queryClient.setQueryData<OrgUser[]>(["/api/users?role=org_admin"], (rows = []) => rows.map((row) => row.id === orgUser.id ? { ...row, photo } : row))}
+                      className="h-10 w-10"
+                    />
                     <div className="min-w-0">
                       <p className="font-medium">
                         {orgUser.firstName && orgUser.lastName 
@@ -1626,6 +1658,7 @@ export default function OrgDashboard() {
           </CardContent>
         </Card>
       </main>
+      </div>
 
       <Dialog open={isEditUserOpen} onOpenChange={setIsEditUserOpen}>
         <DialogContent>
@@ -2003,6 +2036,26 @@ export default function OrgDashboard() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={isTransportOversightOpen} onOpenChange={setIsTransportOversightOpen}>
+        <DialogContent className="flex h-[94dvh] w-[98vw] max-w-[98vw] flex-col p-0">
+          <DialogHeader className="border-b px-6 pb-4 pt-6">
+            <DialogTitle className="flex items-center gap-2"><BusFront className="h-5 w-5" />Transport Oversight</DialogTitle>
+            <DialogDescription>Read-only organisation monitoring of outsourced school transport services.</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto px-4 pb-6 pt-4 sm:px-6"><OrgTransportOversightPage /></div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isAssetsInventoryOpen} onOpenChange={setIsAssetsInventoryOpen}>
+        <DialogContent className="flex h-[96dvh] w-[99vw] max-w-[99vw] flex-col p-0">
+          <DialogHeader className="border-b px-6 pb-4 pt-6">
+            <DialogTitle className="flex items-center gap-2"><PackageSearch className="h-5 w-5" />Assets & Inventory</DialogTitle>
+            <DialogDescription>Operate HQ stores and assets or switch to organisation-wide and centre views.</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto"><AssetsInventoryPage /></div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isOrgSettingsOpen} onOpenChange={(open) => {
         setIsOrgSettingsOpen(open);
         if (!open) {
@@ -2015,13 +2068,13 @@ export default function OrgDashboard() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
-              Global Settings
+              {orgSettingsTab === "activity-logs" ? "Activity Logs" : orgSettingsTab === "access-rights" ? "Access Groups & Permissions" : "Global Settings"}
             </DialogTitle>
             <DialogDescription>
-              Configure global settings for your organization. These apply to all schools.
+              {orgSettingsTab === "activity-logs" ? "Review organisation activity and audit history." : orgSettingsTab === "access-rights" ? "Manage HQ and school access groups, roles and permission assignments." : "Configure global settings for your organization. These apply to all schools."}
             </DialogDescription>
           </DialogHeader>
-          <Tabs defaultValue="hq-info" className="flex-1 overflow-hidden flex flex-col">
+          <Tabs value={orgSettingsTab} onValueChange={setOrgSettingsTab} className="flex-1 overflow-hidden flex flex-col">
             <TabsList data-testid="tabs-org-settings">
               <TabsTrigger value="hq-info" data-testid="tab-org-hq-info">
                 <Building2 className="h-4 w-4 mr-1" />

@@ -190,11 +190,6 @@ const LEGACY_ROUTE_PERMISSION_RULES: Array<{
   { method: "POST", pattern: /^\/api\/newsletters$/, requirement: "newsletters.create" },
   { method: "PUT", pattern: /^\/api\/newsletters\/\d+$/, requirement: "newsletters.edit" },
   { method: "DELETE", pattern: /^\/api\/newsletters\/\d+$/, requirement: "newsletters.delete" },
-
-  { method: "POST", pattern: /^\/api\/schemes$/, requirement: "schemes.create" },
-  { method: "PUT", pattern: /^\/api\/schemes\/\d+$/, requirement: "schemes.edit" },
-  { method: "DELETE", pattern: /^\/api\/schemes\/\d+$/, requirement: "schemes.delete" },
-
   { method: "POST", pattern: /^\/api\/hostels$/, requirement: "hostels.create" },
   { method: "PUT", pattern: /^\/api\/hostels\/\d+$/, requirement: "hostels.edit" },
   { method: "DELETE", pattern: /^\/api\/hostels\/\d+$/, requirement: "hostels.delete" },

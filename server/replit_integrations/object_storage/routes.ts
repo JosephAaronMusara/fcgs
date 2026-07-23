@@ -26,6 +26,10 @@ function safeFileName(fileName: string): string {
   return fileName;
 }
 
+function routeParam(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
+}
+
 export function registerObjectStorageRoutes(app: Express): void {
   // Ensure the uploads directory exists
   fsp.mkdir(UPLOAD_DIR, { recursive: true }).catch(() => {});
@@ -66,7 +70,7 @@ export function registerObjectStorageRoutes(app: Express): void {
   // Step 2: PUT the bytes to the uploadURL
   app.put("/api/uploads/put/:fileName", requireAuth, async (req, res) => {
     try {
-      const fileName = safeFileName(req.params.fileName);
+      const fileName = safeFileName(routeParam(req.params.fileName));
 
       await fsp.mkdir(UPLOAD_DIR, { recursive: true });
       const dest = path.join(UPLOAD_DIR, fileName);

@@ -30,7 +30,7 @@ import {
   User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ApplicationFormModal } from "@/pages/apply";
+import { ApplicationFormModal } from "@/components/application-form-modal";
 
 type LoginRole = "staff" | "student" | "parent" | "org_member";
 

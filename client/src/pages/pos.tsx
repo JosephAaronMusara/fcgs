@@ -75,21 +75,23 @@ export default function POSPage() {
   });
 
   const createSale = useMutation({
-    mutationFn: async (data: { items: { itemId: number; quantity: number; unitPrice: string; subtotal: string }[]; totalAmount: string }) => {
-      return apiRequest("POST", "/api/pos/sales", {
-        schoolId: 1,
-        totalAmount: data.totalAmount,
+    mutationFn: async (data: { items: { itemId: number; quantity: number }[] }) => {
+      const response = await apiRequest("POST", "/api/pos/sales", {
         paymentMethod: "cash",
         items: data.items,
       });
+      return response.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/pos/sales"] });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/pos/items"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/pos/sales"] }),
+      ]);
       setCart([]);
       toast({ title: "Sale completed!" });
     },
-    onError: () => {
-      toast({ title: "Failed to complete sale", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to complete sale", description: error.message, variant: "destructive" });
     },
   });
 
@@ -101,15 +103,24 @@ export default function POSPage() {
       description: formData.get("description") as string,
       price: formData.get("price") as string,
       category: formData.get("category") as string,
-      stockQuantity: parseInt(formData.get("stockQuantity") as string) || 0,
-      schoolId: 1,
+      stockQty: Number.parseInt(String(formData.get("stockQty") || "0"), 10) || 0,
     });
   };
 
   const addToCart = (item: PosItem) => {
+    const available = item.stockQty ?? 0;
+    if (available <= 0) {
+      toast({ title: "Out of stock", description: `${item.name} is not currently available.`, variant: "destructive" });
+      return;
+    }
+
     setCart((prev) => {
       const existing = prev.find((c) => c.item.id === item.id);
       if (existing) {
+        if (existing.quantity >= available) {
+          toast({ title: "Stock limit reached", description: `Only ${available} unit${available === 1 ? "" : "s"} available.` });
+          return prev;
+        }
         return prev.map((c) =>
           c.item.id === item.id ? { ...c, quantity: c.quantity + 1 } : c
         );
@@ -121,9 +132,11 @@ export default function POSPage() {
   const updateQuantity = (itemId: number, delta: number) => {
     setCart((prev) =>
       prev
-        .map((c) =>
-          c.item.id === itemId ? { ...c, quantity: Math.max(0, c.quantity + delta) } : c
-        )
+        .map((c) => {
+          if (c.item.id !== itemId) return c;
+          const available = c.item.stockQty ?? 0;
+          return { ...c, quantity: Math.min(available, Math.max(0, c.quantity + delta)) };
+        })
         .filter((c) => c.quantity > 0)
     );
   };
@@ -139,10 +152,7 @@ export default function POSPage() {
       items: cart.map((c) => ({
         itemId: c.item.id,
         quantity: c.quantity,
-        unitPrice: c.item.price,
-        subtotal: (parseFloat(c.item.price) * c.quantity).toFixed(2),
       })),
-      totalAmount: cartTotal.toFixed(2),
     });
   };
 
@@ -150,7 +160,7 @@ export default function POSPage() {
     const csvContent = [
       ["Date", "Description", "Debit", "Credit", "Account Code"],
       ...sales.map((sale) => [
-        sale.saleDate,
+        sale.saleDate ? new Date(sale.saleDate).toISOString() : "",
         `POS Sale #${sale.id}`,
         sale.totalAmount,
         "",
@@ -220,8 +230,8 @@ export default function POSPage() {
                     <Input id="price" name="price" type="number" step="0.01" required data-testid="input-item-price" />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="stockQuantity">Stock Quantity</Label>
-                    <Input id="stockQuantity" name="stockQuantity" type="number" data-testid="input-stock" />
+                    <Label htmlFor="stockQty">Stock Quantity</Label>
+                    <Input id="stockQty" name="stockQty" type="number" data-testid="input-stock" />
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -262,7 +272,7 @@ export default function POSPage() {
                       {items.map((item) => (
                         <Card
                           key={item.id}
-                          className="cursor-pointer hover-elevate"
+                          className={(item.stockQty ?? 0) > 0 ? "cursor-pointer hover-elevate" : "cursor-not-allowed opacity-60"}
                           onClick={() => addToCart(item)}
                           data-testid={`card-item-${item.id}`}
                         >
@@ -271,7 +281,7 @@ export default function POSPage() {
                             <p className="text-sm text-muted-foreground truncate">{item.category || "Uncategorized"}</p>
                             <div className="flex items-center justify-between mt-2">
                               <span className="font-bold text-primary">${item.price}</span>
-                              <Badge variant="outline">{item.stockQuantity || 0} in stock</Badge>
+                              <Badge variant="outline">{item.stockQty ?? 0} in stock</Badge>
                             </div>
                           </CardContent>
                         </Card>
@@ -316,6 +326,7 @@ export default function POSPage() {
                               variant="ghost"
                               size="icon"
                               onClick={() => updateQuantity(c.item.id, 1)}
+                              disabled={c.quantity >= (c.item.stockQty ?? 0)}
                             >
                               <PlusCircle className="h-4 w-4" />
                             </Button>
@@ -358,7 +369,7 @@ export default function POSPage() {
                     <SortableTableHead sortKey="name" sortConfig={itemsSortConfig} onSort={requestItemsSort}>Item</SortableTableHead>
                     <SortableTableHead sortKey="category" sortConfig={itemsSortConfig} onSort={requestItemsSort}>Category</SortableTableHead>
                     <SortableTableHead sortKey="price" sortConfig={itemsSortConfig} onSort={requestItemsSort}>Price</SortableTableHead>
-                    <SortableTableHead sortKey="stockQuantity" sortConfig={itemsSortConfig} onSort={requestItemsSort}>Stock</SortableTableHead>
+                    <SortableTableHead sortKey="stockQty" sortConfig={itemsSortConfig} onSort={requestItemsSort}>Stock</SortableTableHead>
                     <TableHead>Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -369,8 +380,8 @@ export default function POSPage() {
                       <TableCell>{item.category || "-"}</TableCell>
                       <TableCell>${item.price}</TableCell>
                       <TableCell>
-                        <Badge variant={item.stockQuantity && item.stockQuantity > 10 ? "default" : "destructive"}>
-                          {item.stockQuantity || 0}
+                        <Badge variant={(item.stockQty ?? 0) > 10 ? "default" : "destructive"}>
+                          {item.stockQty ?? 0}
                         </Badge>
                       </TableCell>
                       <TableCell>
@@ -411,7 +422,7 @@ export default function POSPage() {
                   {(sortedSales ?? []).map((sale) => (
                     <TableRow key={sale.id} data-testid={`row-sale-${sale.id}`}>
                       <TableCell className="font-medium">#{sale.id}</TableCell>
-                      <TableCell>{new Date(sale.saleDate).toLocaleDateString()}</TableCell>
+                      <TableCell>{sale.saleDate ? new Date(sale.saleDate).toLocaleDateString() : "-"}</TableCell>
                       <TableCell className="font-bold">${sale.totalAmount}</TableCell>
                       <TableCell>
                         <Badge variant="secondary">{sale.paymentMethod}</Badge>

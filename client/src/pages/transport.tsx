@@ -121,7 +121,13 @@ export default function TransportPage() {
   const [reportFrom, setReportFrom] = useState(() => `${new Date().getFullYear()}-${String(currentMonth()).padStart(2, "0")}-01`);
   const [reportTo, setReportTo] = useState(today());
 
-  const can = (...permissions: string[]) => hasAnyPermission(...permissions);
+  const isHqOversight = user?.role === "org_admin" && new URLSearchParams(window.location.search).get("mode") === "hq-oversight";
+  const canManageFromHq = hasAnyPermission("transport.organization.manage");
+  const can = (...permissions: string[]) => {
+    const operationalRequest = permissions.some((permission) => permission !== "transport.view" && !permission.endsWith(".view"));
+    if (isHqOversight && operationalRequest && !canManageFromHq) return false;
+    return hasAnyPermission(...permissions);
+  };
   const canManageLegacy = can("transport.create", "transport.edit", "transport.delete");
   const effectiveSchoolId = currentSchoolId ?? user?.schoolId ?? null;
 
@@ -262,6 +268,13 @@ export default function TransportPage() {
 
   return (
     <div className="space-y-5 p-4 md:p-6">
+      {isHqOversight && (
+        <Alert>
+          <ShieldCheck className="h-4 w-4" />
+          <AlertTitle>HQ Oversight Mode</AlertTitle>
+          <AlertDescription>You are viewing {data.school?.name || "this school"} transport records with organisation oversight permissions. Operational actions remain hidden unless an exceptional management permission has been granted.</AlertDescription>
+        </Alert>
+      )}
       <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold"><Bus className="h-7 w-7"/>Transport</h1>

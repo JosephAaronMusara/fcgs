@@ -179,11 +179,15 @@ export default function SubjectsPage() {
   });
 
   const handleSubmit = (formData: { name: string; shortCode: string; syllabusCode?: string; subjectType?: string; description?: string; streamIds?: number[] }) => {
-    const subjectData = {
+    const allowedSubjectTypes = getSubjectTypeOptionsForSchool(schoolType, examinationBoard);
+    const subjectType = formData.subjectType && allowedSubjectTypes.includes(formData.subjectType)
+      ? formData.subjectType as NonNullable<Subject["subjectType"]>
+      : undefined;
+    const subjectData: Partial<Subject> = {
       name: formData.name,
       shortCode: formData.shortCode,
       syllabusCode: formData.syllabusCode || null,
-      subjectType: formData.subjectType || undefined,
+      subjectType,
       description: formData.description || undefined,
       streamIds: formData.streamIds && formData.streamIds.length > 0 ? formData.streamIds : null,
       streamId: formData.streamIds && formData.streamIds.length === 1 ? formData.streamIds[0] : null,

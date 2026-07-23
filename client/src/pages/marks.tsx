@@ -12,7 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { Save, FileText } from "lucide-react";
-import type { Assessment, Student, Mark, Class, Subject } from "@shared/schema";
+import type { Assessment, AssessmentType, Student, Mark, Class, Subject } from "@shared/schema";
 
 export default function MarksPage() {
   const { toast } = useToast();
@@ -29,6 +29,10 @@ export default function MarksPage() {
 
   const { data: subjects } = useQuery<Subject[]>({
     queryKey: ["/api/subjects"],
+  });
+
+  const { data: assessmentTypes = [] } = useQuery<AssessmentType[]>({
+    queryKey: ["/api/assessment-types"],
   });
 
   const selectedAssessmentData = assessments?.find((a) => a.id.toString() === selectedAssessment);
@@ -97,6 +101,11 @@ export default function MarksPage() {
     return subjects?.find((s) => s.id === subjectId)?.name || "";
   };
 
+  const getAssessmentTypeName = (assessmentTypeId: number | null) => {
+    if (!assessmentTypeId) return "N/A";
+    return assessmentTypes.find((type) => type.id === assessmentTypeId)?.name || "N/A";
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -149,9 +158,9 @@ export default function MarksPage() {
               <div>
                 <CardTitle>{selectedAssessmentData.name}</CardTitle>
                 <CardDescription>
-                  Total Marks: {selectedAssessmentData.totalMarks} | 
-                  Type: {selectedAssessmentData.assessmentType} | 
-                  Term: {selectedAssessmentData.term || "N/A"}
+                  Total Marks: {selectedAssessmentData.totalMarks ?? 100} | 
+                  Type: {getAssessmentTypeName(selectedAssessmentData.assessmentTypeId)} | 
+                  Term: {selectedAssessmentData.termId ? `Term ${selectedAssessmentData.termId}` : "N/A"}
                 </CardDescription>
               </div>
             </div>
@@ -203,8 +212,9 @@ function MarksTable({
       <TableBody>
         {(sortedData ?? []).map((student) => {
           const mark = getCurrentMark(student.id);
-          const percentage = mark && selectedAssessmentData.totalMarks
-            ? ((parseFloat(mark) / selectedAssessmentData.totalMarks) * 100).toFixed(1)
+          const totalMarks = selectedAssessmentData.totalMarks ?? 100;
+          const percentage = mark
+            ? ((parseFloat(mark) / totalMarks) * 100).toFixed(1)
             : "-";
           return (
             <TableRow key={student.id} data-testid={`marks-row-${student.id}`}>
@@ -216,7 +226,7 @@ function MarksTable({
                 <Input
                   type="number"
                   min="0"
-                  max={selectedAssessmentData.totalMarks}
+                  max={totalMarks}
                   value={mark}
                   onChange={(e) => handleMarkChange(student.id, e.target.value)}
                   className="w-24"

@@ -82,7 +82,7 @@ import type {
   ReportComment,
   AssessmentType,
 } from "@shared/schema";
-import { getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName } from "@shared/academic-profiles";
+import { getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, type GradeProfileKey } from "@shared/academic-profiles";
 import { EcdAssessmentTab } from "@/components/academic-reports/ecd-assessment-tab";
 
 type ViewMode = "hub" | "class-level" | "report-cards";
@@ -756,12 +756,12 @@ type ReportCommentGradeOption = {
   lowerLimit: number;
   upperLimit: number;
   gradePoints: number;
-  gradeStatus: string;
-  gradeType: string;
+  gradeStatus: string | null;
+  gradeType: string | null;
 };
 
 function formatReportCommentGradeLabel(grade: Pick<ReportCommentGradeOption, "gradeName" | "gradeStatus" | "lowerLimit" | "upperLimit">) {
-  return `${grade.gradeName} (${grade.gradeStatus}) • ${grade.lowerLimit}% - ${grade.upperLimit}%`;
+  return `${grade.gradeName} (${grade.gradeStatus || "Unspecified"}) • ${grade.lowerLimit}% - ${grade.upperLimit}%`;
 }
 function normalizeReportCommentProfileToken(value?: string | null) {
   return (value || "").trim().toLowerCase();
@@ -4278,7 +4278,7 @@ function ReportCommentsModal({
   const [commentText, setCommentText] = useState("");
   const [selectedGradeId, setSelectedGradeId] = useState("");
   const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
-  const [activeTab, setActiveTab] = useState("");
+  const [activeTab, setActiveTab] = useState<GradeProfileKey | "">("");
   const [dupModalOpen, setDupModalOpen] = useState(false);
   const [duplicates, setDuplicates] = useState<any[]>([]);
   const [missingTargets, setMissingTargets] = useState<any[]>([]);
@@ -4359,7 +4359,7 @@ function ReportCommentsModal({
   }, [resolvedSchoolType, resolvedExaminationBoard]);
 
   const profileKeysWithGrades = useMemo(() => {
-    const keys = new Set<string>();
+    const keys = new Set<GradeProfileKey>();
     profileTabs.forEach((profile) => {
       if (gradesData.some((grade) => reportCommentGradeMatchesTab(grade.gradeLevel, profile.key))) {
         keys.add(profile.key);
@@ -4384,12 +4384,12 @@ function ReportCommentsModal({
       return;
     }
 
-    const validTabs = new Set(profileTabs.map((profile) => profile.key));
+    const validTabs = new Set<GradeProfileKey>(profileTabs.map((profile) => profile.key));
     const firstProfileWithGrades =
       profileTabs.find((profile) => profileKeysWithGrades.has(profile.key))?.key || profileTabs[0].key;
 
     setActiveTab((previous) => {
-      if (!validTabs.has(previous)) return firstProfileWithGrades;
+      if (!previous || !validTabs.has(previous)) return firstProfileWithGrades;
       if (profileKeysWithGrades.size > 0 && !profileKeysWithGrades.has(previous)) {
         return firstProfileWithGrades;
       }
@@ -4767,7 +4767,14 @@ function ReportCommentsModal({
             </DialogDescription>
           </DialogHeader>
 
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 min-h-0 flex flex-col">
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => {
+              const profile = profileTabs.find((candidate) => candidate.key === value);
+              if (profile) setActiveTab(profile.key);
+            }}
+            className="flex-1 min-h-0 flex flex-col"
+          >
             <TabsList className="flex flex-wrap h-auto justify-start">
               {profileTabs.map((profile) => (
                 <TabsTrigger key={profile.key} value={profile.key} data-testid={`tab-report-comments-${profile.key}`}>

@@ -1,7 +1,26 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, json, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, json, jsonb, index, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+
+// drizzle-zod 0.7.x has a known TypeScript-only regression where calling
+// `.omit({ field: true })` on a generated insert schema resolves the mask keys
+// to `never`. Runtime validation is correct, but the broken inferred type then
+// cascades through routes and storage. Keep the runtime schema unchanged while
+// restoring the standard Zod object shape at the type level.
+type OmittedInsertObject<
+  TSchema extends z.AnyZodObject,
+  TMask extends Record<string, true>,
+> = TSchema extends z.ZodObject<infer TShape, infer TUnknownKeys, infer TCatchall>
+  ? z.ZodObject<Omit<TShape, Extract<keyof TShape, keyof TMask>>, TUnknownKeys, TCatchall>
+  : never;
+
+function omitInsertFields<
+  TSchema extends z.AnyZodObject,
+  const TMask extends Record<string, true>,
+>(schema: TSchema, mask: TMask): OmittedInsertObject<TSchema, TMask> {
+  return schema.omit(mask as any) as unknown as OmittedInsertObject<TSchema, TMask>;
+}
 
 export const userRoleEnum = pgEnum("user_role", ["org_admin", "school_admin", "teacher", "quality_control_officer", "assistant_teacher", "librarian", "student", "parent"]);
 
@@ -132,7 +151,7 @@ export const schools = pgTable("schools", {
   terminationStatus: text("termination_status"),
   terminationRequestedAt: timestamp("termination_requested_at"),
   terminationAt: timestamp("termination_at"),
-  terminationByUserId: integer("termination_by_user_id").references(() => users.id),
+  terminationByUserId: integer("termination_by_user_id").references((): AnyPgColumn => users.id),
   archivedAt: timestamp("archived_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -146,7 +165,8 @@ export const users = pgTable("users", {
   firstName: text("first_name"),
   lastName: text("last_name"),
   phone: text("phone"),
-  schoolId: integer("school_id").references(() => schools.id),
+  photo: text("photo"),
+  schoolId: integer("school_id").references((): AnyPgColumn => schools.id),
   organizationId: integer("organization_id").references(() => organizations.id),
   isActive: boolean("is_active").default(true),
   passwordResetToken: text("password_reset_token"),
@@ -228,6 +248,7 @@ export const parents = pgTable("parents", {
   residentialArea: text("residential_area"),
   occupation: text("occupation"),
   relationship: text("relationship").default("parent"),
+  photo: text("photo"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -1446,89 +1467,88 @@ export const userSchoolAccess = pgTable("user_school_access", {
   schoolId: integer("school_id").references(() => schools.id).notNull(),
 });
 
-export const insertOrganizationSchema = createInsertSchema(organizations).omit({ id: true, createdAt: true });
-export const insertSchoolSchema = createInsertSchema(schools).omit({ id: true, createdAt: true });
-export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
-export const insertStaffSchema = createInsertSchema(staff).omit({ id: true, createdAt: true });
-export const insertStreamSchema = createInsertSchema(streams).omit({ id: true });
-export const insertClassSchema = createInsertSchema(classes).omit({ id: true, archivedAt: true, createdAt: true });
-export const insertClassTeacherAssignmentSchema = createInsertSchema(classTeacherAssignments).omit({ id: true, createdAt: true });
-export const insertParentSchema = createInsertSchema(parents).omit({ id: true, createdAt: true });
-export const insertStudentSchema = createInsertSchema(students).omit({ id: true, archivedAt: true, createdAt: true });
-export const insertSubjectSchema = createInsertSchema(subjects).omit({ id: true });
-export const insertStaffSubjectSchema = createInsertSchema(staffSubjects).omit({ id: true });
-export const insertStudentSubjectSchema = createInsertSchema(studentSubjects).omit({ id: true });
-export const insertInternalTransferSchema = createInsertSchema(internalTransfers).omit({ id: true, createdAt: true, completedAt: true });
-export const insertClassSubjectSchema = createInsertSchema(classSubjects).omit({ id: true });
-export const insertGradeSchema = createInsertSchema(grades).omit({ id: true });
-export const insertAssessmentSchema = createInsertSchema(assessments).omit({ id: true, createdAt: true });
-export const insertMarkSchema = createInsertSchema(marks).omit({ id: true, markedAt: true });
-export const insertAttendanceRecordSchema = createInsertSchema(attendanceRecords).omit({ id: true, createdAt: true });
-export const insertDisciplineRecordSchema = createInsertSchema(disciplineRecords).omit({ id: true, createdAt: true });
-export const insertClinicRecordSchema = createInsertSchema(clinicRecords).omit({ id: true, createdAt: true });
-export const insertFeesPaymentSchema = createInsertSchema(feesPayments).omit({ id: true, createdAt: true });
-export const insertTransportRouteSchema = createInsertSchema(transportRoutes).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertTransportPickupPointSchema = createInsertSchema(transportPickupPoints).omit({ id: true, createdAt: true });
-export const insertTransportOwnerSchema = createInsertSchema(transportOwners).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertTransportDriverSchema = createInsertSchema(transportDrivers).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertTransportVehicleSchema = createInsertSchema(transportVehicles).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertTransportSettingSchema = createInsertSchema(transportSettings).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertTransportServicePointSchema = createInsertSchema(transportServicePoints).omit({ id: true, createdAt: true });
-export const insertTransportVehiclePathSchema = createInsertSchema(transportVehiclePaths).omit({ id: true, createdAt: true, updatedAt: true, activatedAt: true });
-export const insertTransportPathNodeSchema = createInsertSchema(transportPathNodes).omit({ id: true, createdAt: true });
-export const insertTransportAssignmentSchema = createInsertSchema(transportAssignments).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertTransportPathNodeLearnerSchema = createInsertSchema(transportPathNodeLearners).omit({ id: true, createdAt: true });
-export const insertTransportAssignmentEventSchema = createInsertSchema(transportAssignmentEvents).omit({ id: true, createdAt: true });
-export const insertTransportChargeSchema = createInsertSchema(transportCharges).omit({ id: true, createdAt: true });
-export const insertTransportAccountAdjustmentSchema = createInsertSchema(transportAccountAdjustments).omit({ id: true, createdAt: true });
-export const insertTransportProviderAdjustmentSchema = createInsertSchema(transportProviderAdjustments).omit({ id: true, createdAt: true });
-export const insertTransportPaymentSchema = createInsertSchema(transportPayments).omit({ id: true, createdAt: true, reversedAt: true, reversedByUserId: true, reversalReason: true, verifiedAt: true, verifiedByUserId: true, reconciledAt: true, reconciledByUserId: true });
-export const insertTransportPaymentAllocationSchema = createInsertSchema(transportPaymentAllocations).omit({ id: true, createdAt: true });
-export const insertTransportReceiptEventSchema = createInsertSchema(transportReceiptEvents).omit({ id: true, createdAt: true });
-export const insertTransportPaymentPlanSchema = createInsertSchema(transportPaymentPlans).omit({ id: true, createdAt: true });
-export const insertTransportPaymentPlanInstalmentSchema = createInsertSchema(transportPaymentPlanInstalments).omit({ id: true, createdAt: true });
-export const insertTransportRefundSchema = createInsertSchema(transportRefunds).omit({ id: true, createdAt: true, approvedAt: true, paidAt: true });
-export const insertTransportCashupSchema = createInsertSchema(transportCashups).omit({ id: true, createdAt: true, submittedAt: true, verifiedAt: true });
-export const insertTransportCashupPaymentSchema = createInsertSchema(transportCashupPayments).omit({ id: true, createdAt: true });
-export const insertTransportSubscriptionRuleSchema = createInsertSchema(transportSubscriptionRules).omit({ id: true, createdAt: true });
-export const insertTransportPenaltySchema = createInsertSchema(transportPenalties).omit({ id: true, createdAt: true });
-export const insertTransportAdvanceSchema = createInsertSchema(transportAdvances).omit({ id: true, createdAt: true });
-export const insertTransportIncidentSchema = createInsertSchema(transportIncidents).omit({ id: true, createdAt: true, resolvedAt: true });
-export const insertTransportClaimSchema = createInsertSchema(transportClaims).omit({ id: true, createdAt: true, submittedAt: true, verifiedAt: true, approvedAt: true });
-export const insertTransportClaimAllocationSchema = createInsertSchema(transportClaimAllocations).omit({ id: true, createdAt: true });
-export const insertTransportClaimDeductionSchema = createInsertSchema(transportClaimDeductions).omit({ id: true, createdAt: true });
-export const insertTransportPayoutSchema = createInsertSchema(transportPayouts).omit({ id: true, createdAt: true });
-export const insertTransportPeriodLockSchema = createInsertSchema(transportPeriodLocks).omit({ id: true, lockedAt: true, reopenedAt: true });
-export const insertTransportVehicleOwnerHistorySchema = createInsertSchema(transportVehicleOwnerHistory).omit({ id: true, createdAt: true });
-export const insertTransportVehicleDriverHistorySchema = createInsertSchema(transportVehicleDriverHistory).omit({ id: true, createdAt: true });
-export const insertTransportAuditEventSchema = createInsertSchema(transportAuditEvents).omit({ id: true, createdAt: true });
+export const insertOrganizationSchema = omitInsertFields(createInsertSchema(organizations), { id: true, createdAt: true });
+export const insertSchoolSchema = omitInsertFields(createInsertSchema(schools), { id: true, createdAt: true });
+export const insertUserSchema = omitInsertFields(createInsertSchema(users), { id: true, createdAt: true });
+export const insertStaffSchema = omitInsertFields(createInsertSchema(staff), { id: true, createdAt: true });
+export const insertStreamSchema = omitInsertFields(createInsertSchema(streams), { id: true });
+export const insertClassSchema = omitInsertFields(createInsertSchema(classes), { id: true, archivedAt: true, createdAt: true });
+export const insertClassTeacherAssignmentSchema = omitInsertFields(createInsertSchema(classTeacherAssignments), { id: true, createdAt: true });
+export const insertParentSchema = omitInsertFields(createInsertSchema(parents), { id: true, createdAt: true });
+export const insertStudentSchema = omitInsertFields(createInsertSchema(students), { id: true, archivedAt: true, createdAt: true });
+export const insertSubjectSchema = omitInsertFields(createInsertSchema(subjects), { id: true });
+export const insertStaffSubjectSchema = omitInsertFields(createInsertSchema(staffSubjects), { id: true });
+export const insertStudentSubjectSchema = omitInsertFields(createInsertSchema(studentSubjects), { id: true });
+export const insertInternalTransferSchema = omitInsertFields(createInsertSchema(internalTransfers), { id: true, createdAt: true, completedAt: true });
+export const insertClassSubjectSchema = omitInsertFields(createInsertSchema(classSubjects), { id: true });
+export const insertGradeSchema = omitInsertFields(createInsertSchema(grades), { id: true });
+export const insertAssessmentSchema = omitInsertFields(createInsertSchema(assessments), { id: true, createdAt: true });
+export const insertMarkSchema = omitInsertFields(createInsertSchema(marks), { id: true, markedAt: true });
+export const insertAttendanceRecordSchema = omitInsertFields(createInsertSchema(attendanceRecords), { id: true, createdAt: true });
+export const insertDisciplineRecordSchema = omitInsertFields(createInsertSchema(disciplineRecords), { id: true, createdAt: true });
+export const insertClinicRecordSchema = omitInsertFields(createInsertSchema(clinicRecords), { id: true, createdAt: true });
+export const insertFeesPaymentSchema = omitInsertFields(createInsertSchema(feesPayments), { id: true, createdAt: true });
+export const insertTransportRouteSchema = omitInsertFields(createInsertSchema(transportRoutes), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportPickupPointSchema = omitInsertFields(createInsertSchema(transportPickupPoints), { id: true, createdAt: true });
+export const insertTransportOwnerSchema = omitInsertFields(createInsertSchema(transportOwners), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportDriverSchema = omitInsertFields(createInsertSchema(transportDrivers), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportVehicleSchema = omitInsertFields(createInsertSchema(transportVehicles), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportSettingSchema = omitInsertFields(createInsertSchema(transportSettings), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportServicePointSchema = omitInsertFields(createInsertSchema(transportServicePoints), { id: true, createdAt: true });
+export const insertTransportVehiclePathSchema = omitInsertFields(createInsertSchema(transportVehiclePaths), { id: true, createdAt: true, updatedAt: true, activatedAt: true });
+export const insertTransportPathNodeSchema = omitInsertFields(createInsertSchema(transportPathNodes), { id: true, createdAt: true });
+export const insertTransportAssignmentSchema = omitInsertFields(createInsertSchema(transportAssignments), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportPathNodeLearnerSchema = omitInsertFields(createInsertSchema(transportPathNodeLearners), { id: true, createdAt: true });
+export const insertTransportAssignmentEventSchema = omitInsertFields(createInsertSchema(transportAssignmentEvents), { id: true, createdAt: true });
+export const insertTransportChargeSchema = omitInsertFields(createInsertSchema(transportCharges), { id: true, createdAt: true });
+export const insertTransportAccountAdjustmentSchema = omitInsertFields(createInsertSchema(transportAccountAdjustments), { id: true, createdAt: true });
+export const insertTransportProviderAdjustmentSchema = omitInsertFields(createInsertSchema(transportProviderAdjustments), { id: true, createdAt: true });
+export const insertTransportPaymentSchema = omitInsertFields(createInsertSchema(transportPayments), { id: true, createdAt: true, reversedAt: true, reversedByUserId: true, reversalReason: true, verifiedAt: true, verifiedByUserId: true, reconciledAt: true, reconciledByUserId: true });
+export const insertTransportPaymentAllocationSchema = omitInsertFields(createInsertSchema(transportPaymentAllocations), { id: true, createdAt: true });
+export const insertTransportReceiptEventSchema = omitInsertFields(createInsertSchema(transportReceiptEvents), { id: true, createdAt: true });
+export const insertTransportPaymentPlanSchema = omitInsertFields(createInsertSchema(transportPaymentPlans), { id: true, createdAt: true });
+export const insertTransportPaymentPlanInstalmentSchema = omitInsertFields(createInsertSchema(transportPaymentPlanInstalments), { id: true, createdAt: true });
+export const insertTransportRefundSchema = omitInsertFields(createInsertSchema(transportRefunds), { id: true, createdAt: true, approvedAt: true, paidAt: true });
+export const insertTransportCashupSchema = omitInsertFields(createInsertSchema(transportCashups), { id: true, createdAt: true, submittedAt: true, verifiedAt: true });
+export const insertTransportCashupPaymentSchema = omitInsertFields(createInsertSchema(transportCashupPayments), { id: true, createdAt: true });
+export const insertTransportSubscriptionRuleSchema = omitInsertFields(createInsertSchema(transportSubscriptionRules), { id: true, createdAt: true });
+export const insertTransportPenaltySchema = omitInsertFields(createInsertSchema(transportPenalties), { id: true, createdAt: true });
+export const insertTransportAdvanceSchema = omitInsertFields(createInsertSchema(transportAdvances), { id: true, createdAt: true });
+export const insertTransportIncidentSchema = omitInsertFields(createInsertSchema(transportIncidents), { id: true, createdAt: true, resolvedAt: true });
+export const insertTransportClaimSchema = omitInsertFields(createInsertSchema(transportClaims), { id: true, createdAt: true, submittedAt: true, verifiedAt: true, approvedAt: true });
+export const insertTransportClaimAllocationSchema = omitInsertFields(createInsertSchema(transportClaimAllocations), { id: true, createdAt: true });
+export const insertTransportClaimDeductionSchema = omitInsertFields(createInsertSchema(transportClaimDeductions), { id: true, createdAt: true });
+export const insertTransportPayoutSchema = omitInsertFields(createInsertSchema(transportPayouts), { id: true, createdAt: true });
+export const insertTransportPeriodLockSchema = omitInsertFields(createInsertSchema(transportPeriodLocks), { id: true, lockedAt: true, reopenedAt: true });
+export const insertTransportVehicleOwnerHistorySchema = omitInsertFields(createInsertSchema(transportVehicleOwnerHistory), { id: true, createdAt: true });
+export const insertTransportVehicleDriverHistorySchema = omitInsertFields(createInsertSchema(transportVehicleDriverHistory), { id: true, createdAt: true });
+export const insertTransportAuditEventSchema = omitInsertFields(createInsertSchema(transportAuditEvents), { id: true, createdAt: true });
 
-export const insertLibraryResourceSchema = createInsertSchema(libraryResources).omit({ id: true, createdAt: true });
-export const insertLibraryCategorySchema = createInsertSchema(libraryCategories).omit({ id: true, createdAt: true });
-export const insertLibraryShelfSchema = createInsertSchema(libraryShelves).omit({ id: true, createdAt: true });
-export const insertLibraryBookSchema = createInsertSchema(libraryBooks).omit({ id: true, createdAt: true });
-export const insertLibraryBookCopySchema = createInsertSchema(libraryBookCopies).omit({ id: true, addedAt: true });
-export const insertLibraryLoanSchema = createInsertSchema(libraryLoans).omit({ id: true, createdAt: true, issuedAt: true, returnedAt: true, markedLostAt: true, markedRecoveredAt: true });
-export const insertLibraryFineSchema = createInsertSchema(libraryFines).omit({ id: true, createdAt: true, paidAt: true });
-export const insertLibraryReservationSchema = createInsertSchema(libraryReservations).omit({ id: true, createdAt: true, reservedAt: true, notifiedAt: true });
-export const insertLibraryPolicySchema = createInsertSchema(libraryPolicies).omit({ id: true, updatedAt: true });
-export const insertTimetableSlotSchema = createInsertSchema(timetableSlots).omit({ id: true });
-export const insertLogbookEntrySchema = createInsertSchema(logbookEntries).omit({ id: true, createdAt: true });
-export const insertStaffAttendanceLogSchema = createInsertSchema(staffAttendanceLogs).omit({ id: true, createdAt: true });
-export const insertPosItemSchema = createInsertSchema(posItems).omit({ id: true, createdAt: true });
-export const insertPosSaleSchema = createInsertSchema(posSales).omit({ id: true, saleDate: true });
-export const insertPosSaleItemSchema = createInsertSchema(posSaleItems).omit({ id: true });
-export const insertNewsletterSchema = createInsertSchema(newsletters).omit({ id: true, createdAt: true });
-export const insertSchemeSchema = createInsertSchema(schemes).omit({ id: true, createdAt: true });
-export const insertHostelSchema = createInsertSchema(hostels).omit({ id: true, createdAt: true });
-export const insertHostelRollCallSchema = createInsertSchema(hostelRollCall).omit({ id: true, createdAt: true });
-export const insertStudentApplicationSchema = createInsertSchema(studentApplications).omit({ id: true, createdAt: true });
-export const insertPermissionSchema = createInsertSchema(permissions).omit({ id: true, createdAt: true });
-export const insertAccessGroupSchema = createInsertSchema(accessGroups).omit({ id: true, createdAt: true });
-export const insertAccessGroupPermissionSchema = createInsertSchema(accessGroupPermissions).omit({ id: true });
-export const insertUserAccessGroupSchema = createInsertSchema(userAccessGroups).omit({ id: true });
-export const insertUserPermissionOverrideSchema = createInsertSchema(userPermissionOverrides).omit({ id: true, createdAt: true });
-export const insertUserSchoolAccessSchema = createInsertSchema(userSchoolAccess).omit({ id: true });
+export const insertLibraryResourceSchema = omitInsertFields(createInsertSchema(libraryResources), { id: true, createdAt: true });
+export const insertLibraryCategorySchema = omitInsertFields(createInsertSchema(libraryCategories), { id: true, createdAt: true });
+export const insertLibraryShelfSchema = omitInsertFields(createInsertSchema(libraryShelves), { id: true, createdAt: true });
+export const insertLibraryBookSchema = omitInsertFields(createInsertSchema(libraryBooks), { id: true, createdAt: true });
+export const insertLibraryBookCopySchema = omitInsertFields(createInsertSchema(libraryBookCopies), { id: true, addedAt: true });
+export const insertLibraryLoanSchema = omitInsertFields(createInsertSchema(libraryLoans), { id: true, createdAt: true, issuedAt: true, returnedAt: true, markedLostAt: true, markedRecoveredAt: true });
+export const insertLibraryFineSchema = omitInsertFields(createInsertSchema(libraryFines), { id: true, createdAt: true, paidAt: true });
+export const insertLibraryReservationSchema = omitInsertFields(createInsertSchema(libraryReservations), { id: true, createdAt: true, reservedAt: true, notifiedAt: true });
+export const insertLibraryPolicySchema = omitInsertFields(createInsertSchema(libraryPolicies), { id: true, updatedAt: true });
+export const insertTimetableSlotSchema = omitInsertFields(createInsertSchema(timetableSlots), { id: true });
+export const insertLogbookEntrySchema = omitInsertFields(createInsertSchema(logbookEntries), { id: true, createdAt: true });
+export const insertStaffAttendanceLogSchema = omitInsertFields(createInsertSchema(staffAttendanceLogs), { id: true, createdAt: true });
+export const insertPosItemSchema = omitInsertFields(createInsertSchema(posItems), { id: true, createdAt: true });
+export const insertPosSaleSchema = omitInsertFields(createInsertSchema(posSales), { id: true, saleDate: true });
+export const insertPosSaleItemSchema = omitInsertFields(createInsertSchema(posSaleItems), { id: true });
+export const insertNewsletterSchema = omitInsertFields(createInsertSchema(newsletters), { id: true, createdAt: true });
+export const insertHostelSchema = omitInsertFields(createInsertSchema(hostels), { id: true, createdAt: true });
+export const insertHostelRollCallSchema = omitInsertFields(createInsertSchema(hostelRollCall), { id: true, createdAt: true });
+export const insertStudentApplicationSchema = omitInsertFields(createInsertSchema(studentApplications), { id: true, createdAt: true });
+export const insertPermissionSchema = omitInsertFields(createInsertSchema(permissions), { id: true, createdAt: true });
+export const insertAccessGroupSchema = omitInsertFields(createInsertSchema(accessGroups), { id: true, createdAt: true });
+export const insertAccessGroupPermissionSchema = omitInsertFields(createInsertSchema(accessGroupPermissions), { id: true });
+export const insertUserAccessGroupSchema = omitInsertFields(createInsertSchema(userAccessGroups), { id: true });
+export const insertUserPermissionOverrideSchema = omitInsertFields(createInsertSchema(userPermissionOverrides), { id: true, createdAt: true });
+export const insertUserSchoolAccessSchema = omitInsertFields(createInsertSchema(userSchoolAccess), { id: true });
 
 export type InsertOrganization = z.infer<typeof insertOrganizationSchema>;
 export type Organization = typeof organizations.$inferSelect;
@@ -1604,8 +1624,6 @@ export type InsertPosSaleItem = z.infer<typeof insertPosSaleItemSchema>;
 export type PosSaleItem = typeof posSaleItems.$inferSelect;
 export type InsertNewsletter = z.infer<typeof insertNewsletterSchema>;
 export type Newsletter = typeof newsletters.$inferSelect;
-export type InsertScheme = z.infer<typeof insertSchemeSchema>;
-export type Scheme = typeof schemes.$inferSelect;
 export type InsertHostel = z.infer<typeof insertHostelSchema>;
 export type Hostel = typeof hostels.$inferSelect;
 export type InsertHostelRollCall = z.infer<typeof insertHostelRollCallSchema>;
@@ -1648,7 +1666,7 @@ export const communicationLogs = pgTable("communication_logs", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const insertCommunicationLogSchema = createInsertSchema(communicationLogs).omit({ id: true, createdAt: true });
+export const insertCommunicationLogSchema = omitInsertFields(createInsertSchema(communicationLogs), { id: true, createdAt: true });
 export type InsertCommunicationLog = z.infer<typeof insertCommunicationLogSchema>;
 export type CommunicationLog = typeof communicationLogs.$inferSelect;
 
@@ -1674,7 +1692,7 @@ export const communicationJobs = pgTable("communication_jobs", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
-export const insertCommunicationJobSchema = createInsertSchema(communicationJobs).omit({ id: true, createdAt: true, updatedAt: true, startedAt: true, completedAt: true });
+export const insertCommunicationJobSchema = omitInsertFields(createInsertSchema(communicationJobs), { id: true, createdAt: true, updatedAt: true, startedAt: true, completedAt: true });
 export type InsertCommunicationJob = z.infer<typeof insertCommunicationJobSchema>;
 export type CommunicationJob = typeof communicationJobs.$inferSelect;
 
@@ -1919,7 +1937,7 @@ export const scheduledJobs = pgTable("scheduled_jobs", {
 });
 
 // Insert schemas + types
-export const insertCalendarEventSchema = createInsertSchema(calendarEvents).omit({
+export const insertCalendarEventSchema = omitInsertFields(createInsertSchema(calendarEvents), {
   id: true,
   createdAt: true,
   updatedAt: true,
@@ -1927,27 +1945,31 @@ export const insertCalendarEventSchema = createInsertSchema(calendarEvents).omit
 export type InsertCalendarEvent = z.infer<typeof insertCalendarEventSchema>;
 export type CalendarEvent = typeof calendarEvents.$inferSelect;
 
-export const insertCalendarEventReminderSchema =
-  createInsertSchema(calendarEventReminders).omit({
+export const insertCalendarEventReminderSchema = omitInsertFields(
+  createInsertSchema(calendarEventReminders),
+  {
     id: true,
     createdAt: true,
-  });
+  },
+);
 export type InsertCalendarEventReminder = z.infer<
   typeof insertCalendarEventReminderSchema
 >;
 export type CalendarEventReminder = typeof calendarEventReminders.$inferSelect;
 
-export const insertCalendarEventAttendeeSchema =
-  createInsertSchema(calendarEventAttendees).omit({
+export const insertCalendarEventAttendeeSchema = omitInsertFields(
+  createInsertSchema(calendarEventAttendees),
+  {
     id: true,
     createdAt: true,
-  });
+  },
+);
 export type InsertCalendarEventAttendee = z.infer<
   typeof insertCalendarEventAttendeeSchema
 >;
 export type CalendarEventAttendee = typeof calendarEventAttendees.$inferSelect;
 
-export const insertScheduledJobSchema = createInsertSchema(scheduledJobs).omit({
+export const insertScheduledJobSchema = omitInsertFields(createInsertSchema(scheduledJobs), {
   id: true,
   createdAt: true,
   updatedAt: true,
@@ -1972,7 +1994,7 @@ export const notifications = pgTable("notifications", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const insertNotificationSchema = createInsertSchema(notifications).omit({ id: true, createdAt: true, readAt: true });
+export const insertNotificationSchema = omitInsertFields(createInsertSchema(notifications), { id: true, createdAt: true, readAt: true });
 export type InsertNotification = z.infer<typeof insertNotificationSchema>;
 export type Notification = typeof notifications.$inferSelect;
 
@@ -1994,7 +2016,7 @@ export const activityLogs = pgTable("activity_logs", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const insertActivityLogSchema = createInsertSchema(activityLogs).omit({ id: true, createdAt: true });
+export const insertActivityLogSchema = omitInsertFields(createInsertSchema(activityLogs), { id: true, createdAt: true });
 export type InsertActivityLog = z.infer<typeof insertActivityLogSchema>;
 export type ActivityLog = typeof activityLogs.$inferSelect;
 
@@ -2020,7 +2042,7 @@ export const qcReports = pgTable("qc_reports", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const insertQcReportSchema = createInsertSchema(qcReports).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertQcReportSchema = omitInsertFields(createInsertSchema(qcReports), { id: true, createdAt: true, updatedAt: true });
 export type InsertQcReport = z.infer<typeof insertQcReportSchema>;
 export type QcReport = typeof qcReports.$inferSelect;
 
@@ -2041,7 +2063,7 @@ export const qcRecords = pgTable("qc_records", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const insertQcRecordSchema = createInsertSchema(qcRecords).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertQcRecordSchema = omitInsertFields(createInsertSchema(qcRecords), { id: true, createdAt: true, updatedAt: true });
 export type InsertQcRecord = z.infer<typeof insertQcRecordSchema>;
 export type QcRecord = typeof qcRecords.$inferSelect;
 
@@ -2105,14 +2127,14 @@ export const reportComments = pgTable("report_comments", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const insertReportCommentSchema = createInsertSchema(reportComments).omit({ id: true, createdAt: true });
+export const insertReportCommentSchema = omitInsertFields(createInsertSchema(reportComments), { id: true, createdAt: true });
 export type InsertReportComment = z.infer<typeof insertReportCommentSchema>;
 export type ReportComment = typeof reportComments.$inferSelect;
 
-export const insertEcdAssessmentDomainSchema = createInsertSchema(ecdAssessmentDomains).omit({ id: true });
-export const insertEcdAssessmentItemSchema = createInsertSchema(ecdAssessmentItems).omit({ id: true });
-export const insertEcdAssessmentRecordSchema = createInsertSchema(ecdAssessmentRecords).omit({ id: true, createdAt: true, updatedAt: true, publishedAt: true });
-export const insertEcdAssessmentResponseSchema = createInsertSchema(ecdAssessmentResponses).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertEcdAssessmentDomainSchema = omitInsertFields(createInsertSchema(ecdAssessmentDomains), { id: true });
+export const insertEcdAssessmentItemSchema = omitInsertFields(createInsertSchema(ecdAssessmentItems), { id: true });
+export const insertEcdAssessmentRecordSchema = omitInsertFields(createInsertSchema(ecdAssessmentRecords), { id: true, createdAt: true, updatedAt: true, publishedAt: true });
+export const insertEcdAssessmentResponseSchema = omitInsertFields(createInsertSchema(ecdAssessmentResponses), { id: true, createdAt: true, updatedAt: true });
 export type InsertEcdAssessmentDomain = z.infer<typeof insertEcdAssessmentDomainSchema>;
 export type EcdAssessmentDomain = typeof ecdAssessmentDomains.$inferSelect;
 export type InsertEcdAssessmentItem = z.infer<typeof insertEcdAssessmentItemSchema>;
@@ -2122,15 +2144,15 @@ export type EcdAssessmentRecord = typeof ecdAssessmentRecords.$inferSelect;
 export type InsertEcdAssessmentResponse = z.infer<typeof insertEcdAssessmentResponseSchema>;
 export type EcdAssessmentResponse = typeof ecdAssessmentResponses.$inferSelect;
 
-export const insertAssessmentTypeSchema = createInsertSchema(assessmentTypes).omit({ id: true, createdAt: true });
-export const insertExamTypeSchema = createInsertSchema(examTypes).omit({ id: true, createdAt: true });
-export const insertExamSchema = createInsertSchema(exams).omit({ id: true, createdAt: true });
-export const insertAssessmentPublicationSchema = createInsertSchema(assessmentPublications).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertAssessmentPublicationEventSchema = createInsertSchema(assessmentPublicationEvents).omit({ id: true, createdAt: true });
-export const insertAssessmentPaperSchema = createInsertSchema(assessmentPapers).omit({ id: true });
-export const insertAssessmentCommentSchema = createInsertSchema(assessmentComments).omit({ id: true, createdAt: true });
-export const insertAssessmentMarkSchema = createInsertSchema(assessmentMarks).omit({ id: true, markedAt: true });
-export const insertAssessmentMarkPaperSchema = createInsertSchema(assessmentMarkPapers).omit({ id: true });
+export const insertAssessmentTypeSchema = omitInsertFields(createInsertSchema(assessmentTypes), { id: true, createdAt: true });
+export const insertExamTypeSchema = omitInsertFields(createInsertSchema(examTypes), { id: true, createdAt: true });
+export const insertExamSchema = omitInsertFields(createInsertSchema(exams), { id: true, createdAt: true });
+export const insertAssessmentPublicationSchema = omitInsertFields(createInsertSchema(assessmentPublications), { id: true, createdAt: true, updatedAt: true });
+export const insertAssessmentPublicationEventSchema = omitInsertFields(createInsertSchema(assessmentPublicationEvents), { id: true, createdAt: true });
+export const insertAssessmentPaperSchema = omitInsertFields(createInsertSchema(assessmentPapers), { id: true });
+export const insertAssessmentCommentSchema = omitInsertFields(createInsertSchema(assessmentComments), { id: true, createdAt: true });
+export const insertAssessmentMarkSchema = omitInsertFields(createInsertSchema(assessmentMarks), { id: true, markedAt: true });
+export const insertAssessmentMarkPaperSchema = omitInsertFields(createInsertSchema(assessmentMarkPapers), { id: true });
 
 export type InsertAssessmentType = z.infer<typeof insertAssessmentTypeSchema>;
 export type AssessmentType = typeof assessmentTypes.$inferSelect;
@@ -2161,6 +2183,569 @@ export const staffRoles = pgTable("staff_roles", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const insertStaffRoleSchema = createInsertSchema(staffRoles).omit({ id: true, createdAt: true });
+export const insertStaffRoleSchema = omitInsertFields(createInsertSchema(staffRoles), { id: true, createdAt: true });
 export type InsertStaffRole = z.infer<typeof insertStaffRoleSchema>;
 export type StaffRole = typeof staffRoles.$inferSelect;
+
+// Assets & Inventory
+export const assetCentres = pgTable("asset_centres", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreType: text("centre_type").notNull().default("school"), // hq | school | warehouse | workshop | other
+  name: text("name").notNull(),
+  code: text("code").notNull(),
+  address: text("address"),
+  phone: text("phone"),
+  email: text("email"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  orgCodeUnique: uniqueIndex("asset_centres_org_code_uq").on(table.organizationId, table.code),
+  schoolUnique: uniqueIndex("asset_centres_school_uq").on(table.schoolId),
+  orgIdx: index("asset_centres_org_idx").on(table.organizationId, table.isActive),
+}));
+
+export const assetInventorySettings = pgTable("asset_inventory_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  currency: text("currency").notNull().default("USD"),
+  purchaseRequestApprovalThreshold: decimal("purchase_request_approval_threshold", { precision: 14, scale: 2 }).notNull().default("100"),
+  purchaseOrderHqThreshold: decimal("purchase_order_hq_threshold", { precision: 14, scale: 2 }).notNull().default("1000"),
+  lowStockNotificationsEnabled: boolean("low_stock_notifications_enabled").notNull().default(true),
+  defaultSupplierLeadTimeDays: integer("default_supplier_lead_time_days").notNull().default(7),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationUnique: uniqueIndex("asset_inventory_settings_org_uq").on(table.organizationId),
+}));
+
+export const assetInventoryCategories = pgTable("asset_inventory_categories", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  kind: text("kind").notNull(), // asset | inventory
+  name: text("name").notNull(),
+  code: text("code"),
+  description: text("description"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  scopeNameUnique: uniqueIndex("asset_inventory_categories_scope_name_uq").on(table.organizationId, table.schoolId, table.kind, table.name),
+  centreNameIdx: index("asset_inventory_categories_centre_idx").on(table.centreId, table.kind, table.name),
+}));
+
+export const assetInventoryLocations = pgTable("asset_inventory_locations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  name: text("name").notNull(),
+  code: text("code"),
+  locationType: text("location_type").notNull().default("general"),
+  description: text("description"),
+  isStore: boolean("is_store").notNull().default(false),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolNameUnique: uniqueIndex("asset_inventory_locations_school_name_uq").on(table.schoolId, table.name),
+  centreNameIdx: index("asset_inventory_locations_centre_idx").on(table.centreId, table.name),
+}));
+
+export const inventorySuppliers = pgTable("inventory_suppliers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  name: text("name").notNull(),
+  contactPerson: text("contact_person"),
+  phone: text("phone"),
+  email: text("email"),
+  address: text("address"),
+  registrationNumber: text("registration_number"),
+  taxNumber: text("tax_number"),
+  goodsServices: text("goods_services"),
+  paymentTerms: text("payment_terms"),
+  notes: text("notes"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  orgNameUnique: uniqueIndex("inventory_suppliers_org_name_uq").on(table.organizationId, table.name),
+}));
+
+export const assetRegister = pgTable("asset_register", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  owningCentreId: integer("owning_centre_id").references(() => assetCentres.id),
+  currentCentreId: integer("current_centre_id").references(() => assetCentres.id),
+  assetNumber: text("asset_number").notNull(),
+  assetClass: text("asset_class").notNull().default("general"), // vehicle is reserved for future Fleet integration
+  name: text("name").notNull(),
+  categoryId: integer("category_id").references(() => assetInventoryCategories.id),
+  locationId: integer("location_id").references(() => assetInventoryLocations.id),
+  supplierId: integer("supplier_id").references(() => inventorySuppliers.id),
+  serialNumber: text("serial_number"),
+  description: text("description"),
+  acquisitionDate: date("acquisition_date"),
+  acquisitionCost: decimal("acquisition_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  currentValue: decimal("current_value", { precision: 14, scale: 2 }).notNull().default("0"),
+  condition: text("condition").notNull().default("good"),
+  status: text("status").notNull().default("available"),
+  warrantyExpiry: date("warranty_expiry"),
+  supplier: text("supplier"),
+  procurementReference: text("procurement_reference"),
+  notes: text("notes"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolAssetNumberUnique: uniqueIndex("asset_register_school_number_uq").on(table.schoolId, table.assetNumber),
+  centreAssetNumberUnique: uniqueIndex("asset_register_centre_number_uq").on(table.currentCentreId, table.assetNumber),
+  schoolIdx: index("asset_register_school_idx").on(table.schoolId),
+  centreIdx: index("asset_register_centre_idx").on(table.currentCentreId, table.status),
+}));
+
+export const assetVehicleDetails = pgTable("asset_vehicle_details", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  assetId: integer("asset_id").notNull().references(() => assetRegister.id),
+  registrationNumber: text("registration_number"),
+  vin: text("vin"),
+  engineNumber: text("engine_number"),
+  make: text("make"),
+  model: text("model"),
+  manufactureYear: integer("manufacture_year"),
+  colour: text("colour"),
+  fuelType: text("fuel_type"),
+  vehicleClass: text("vehicle_class"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  assetUnique: uniqueIndex("asset_vehicle_details_asset_uq").on(table.assetId),
+  registrationIdx: index("asset_vehicle_details_registration_idx").on(table.registrationNumber),
+}));
+
+export const inventoryItems = pgTable("inventory_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  sku: text("sku").notNull(),
+  name: text("name").notNull(),
+  itemType: text("item_type").notNull().default("consumable"), // consumable | returnable | spare_part | resale
+  categoryId: integer("category_id").references(() => assetInventoryCategories.id),
+  defaultLocationId: integer("default_location_id").references(() => assetInventoryLocations.id),
+  preferredSupplierId: integer("preferred_supplier_id").references(() => inventorySuppliers.id),
+  unitOfMeasure: text("unit_of_measure").notNull().default("unit"),
+  purchaseUnit: text("purchase_unit"),
+  issueUnit: text("issue_unit"),
+  unitConversionFactor: decimal("unit_conversion_factor", { precision: 14, scale: 4 }).notNull().default("1"),
+  quantityOnHand: decimal("quantity_on_hand", { precision: 14, scale: 3 }).notNull().default("0"),
+  reorderEnabled: boolean("reorder_enabled").notNull().default(true),
+  reorderLevel: decimal("reorder_level", { precision: 14, scale: 3 }).notNull().default("0"),
+  criticalStockLevel: decimal("critical_stock_level", { precision: 14, scale: 3 }).notNull().default("0"),
+  targetStockLevel: decimal("target_stock_level", { precision: 14, scale: 3 }).notNull().default("0"),
+  preferredReorderQuantity: decimal("preferred_reorder_quantity", { precision: 14, scale: 3 }).notNull().default("0"),
+  supplierLeadTimeDays: integer("supplier_lead_time_days").notNull().default(0),
+  unitCost: decimal("unit_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  batchTrackingEnabled: boolean("batch_tracking_enabled").notNull().default(false),
+  expiryTrackingEnabled: boolean("expiry_tracking_enabled").notNull().default(false),
+  description: text("description"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolSkuUnique: uniqueIndex("inventory_items_school_sku_uq").on(table.schoolId, table.sku),
+  centreSkuUnique: uniqueIndex("inventory_items_centre_sku_uq").on(table.centreId, table.sku),
+  schoolIdx: index("inventory_items_school_idx").on(table.schoolId),
+  centreIdx: index("inventory_items_centre_idx").on(table.centreId, table.isActive),
+}));
+
+export const inventoryBatches = pgTable("inventory_batches", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  itemId: integer("item_id").notNull().references(() => inventoryItems.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  locationId: integer("location_id").references(() => assetInventoryLocations.id),
+  batchNumber: text("batch_number").notNull(),
+  manufactureDate: date("manufacture_date"),
+  expiryDate: date("expiry_date"),
+  quantityOnHand: decimal("quantity_on_hand", { precision: 14, scale: 3 }).notNull().default("0"),
+  supplierId: integer("supplier_id").references(() => inventorySuppliers.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  itemBatchUnique: uniqueIndex("inventory_batches_item_batch_uq").on(table.itemId, table.batchNumber, table.locationId),
+  expiryIdx: index("inventory_batches_expiry_idx").on(table.expiryDate),
+}));
+
+export const inventoryMovements = pgTable("inventory_movements", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  itemId: integer("item_id").notNull().references(() => inventoryItems.id),
+  batchId: integer("batch_id").references(() => inventoryBatches.id),
+  movementType: text("movement_type").notNull(),
+  quantity: decimal("quantity", { precision: 14, scale: 3 }).notNull(),
+  quantityBefore: decimal("quantity_before", { precision: 14, scale: 3 }).notNull(),
+  quantityAfter: decimal("quantity_after", { precision: 14, scale: 3 }).notNull(),
+  unitCost: decimal("unit_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  fromLocationId: integer("from_location_id").references(() => assetInventoryLocations.id),
+  toLocationId: integer("to_location_id").references(() => assetInventoryLocations.id),
+  recipientType: text("recipient_type"),
+  recipientId: integer("recipient_id"),
+  sourceDocumentType: text("source_document_type"),
+  sourceDocumentId: integer("source_document_id"),
+  reason: text("reason"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  schoolReferenceUnique: uniqueIndex("inventory_movements_school_reference_uq").on(table.schoolId, table.referenceNumber),
+  centreReferenceUnique: uniqueIndex("inventory_movements_centre_reference_uq").on(table.centreId, table.referenceNumber),
+  itemIdx: index("inventory_movements_item_idx").on(table.itemId, table.createdAt),
+}));
+
+export const inventoryReturnableIssues = pgTable("inventory_returnable_issues", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").notNull().references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  itemId: integer("item_id").notNull().references(() => inventoryItems.id),
+  quantityIssued: decimal("quantity_issued", { precision: 14, scale: 3 }).notNull(),
+  quantityReturned: decimal("quantity_returned", { precision: 14, scale: 3 }).notNull().default("0"),
+  recipientType: text("recipient_type").notNull(),
+  recipientId: integer("recipient_id"),
+  recipientName: text("recipient_name").notNull(),
+  issuedAt: timestamp("issued_at").notNull().defaultNow(),
+  expectedReturnDate: date("expected_return_date"),
+  lastReturnedAt: timestamp("last_returned_at"),
+  status: text("status").notNull().default("issued"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  centreReferenceUnique: uniqueIndex("inventory_returnable_issues_centre_reference_uq").on(table.centreId, table.referenceNumber),
+  itemStatusIdx: index("inventory_returnable_issues_item_status_idx").on(table.itemId, table.status),
+  dueDateIdx: index("inventory_returnable_issues_due_idx").on(table.expectedReturnDate, table.status),
+}));
+
+export const assetAssignments = pgTable("asset_assignments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  assetId: integer("asset_id").notNull().references(() => assetRegister.id),
+  assigneeType: text("assignee_type").notNull(),
+  assigneeId: integer("assignee_id"),
+  assigneeName: text("assignee_name").notNull(),
+  assignedAt: timestamp("assigned_at").notNull().defaultNow(),
+  expectedReturnDate: date("expected_return_date"),
+  returnedAt: timestamp("returned_at"),
+  conditionOut: text("condition_out").notNull().default("good"),
+  conditionIn: text("condition_in"),
+  status: text("status").notNull().default("active"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  returnedByUserId: integer("returned_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolReferenceUnique: uniqueIndex("asset_assignments_school_reference_uq").on(table.schoolId, table.referenceNumber),
+  centreReferenceUnique: uniqueIndex("asset_assignments_centre_reference_uq").on(table.centreId, table.referenceNumber),
+  assetStatusIdx: index("asset_assignments_asset_status_idx").on(table.assetId, table.status),
+}));
+
+export const assetMaintenanceRecords = pgTable("asset_maintenance_records", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  assetId: integer("asset_id").notNull().references(() => assetRegister.id),
+  issueDescription: text("issue_description").notNull(),
+  serviceProvider: text("service_provider"),
+  status: text("status").notNull().default("reported"),
+  dateReported: date("date_reported").notNull(),
+  dateSent: date("date_sent"),
+  dateReturned: date("date_returned"),
+  estimatedCost: decimal("estimated_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  actualCost: decimal("actual_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  workCompleted: text("work_completed"),
+  nextServiceDate: date("next_service_date"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const assetDamageCases = pgTable("asset_damage_cases", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  assetId: integer("asset_id").references(() => assetRegister.id),
+  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id),
+  incidentDate: date("incident_date").notNull(),
+  incidentType: text("incident_type").notNull().default("breakage"),
+  locationId: integer("location_id").references(() => assetInventoryLocations.id),
+  description: text("description").notNull(),
+  classification: text("classification").notNull().default("unconfirmed"),
+  responsiblePartyType: text("responsible_party_type"),
+  responsiblePartyId: integer("responsible_party_id"),
+  responsiblePartyName: text("responsible_party_name"),
+  findings: text("findings"),
+  status: text("status").notNull().default("reported"),
+  proposedCharge: decimal("proposed_charge", { precision: 14, scale: 2 }).notNull().default("0"),
+  approvedCharge: decimal("approved_charge", { precision: 14, scale: 2 }).notNull().default("0"),
+  amountRecovered: decimal("amount_recovered", { precision: 14, scale: 2 }).notNull().default("0"),
+  approvalNotes: text("approval_notes"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolReferenceUnique: uniqueIndex("asset_damage_cases_school_reference_uq").on(table.schoolId, table.referenceNumber),
+  centreReferenceUnique: uniqueIndex("asset_damage_cases_centre_reference_uq").on(table.centreId, table.referenceNumber),
+}));
+
+export const assetDamageRecoveries = pgTable("asset_damage_recoveries", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  damageCaseId: integer("damage_case_id").notNull().references(() => assetDamageCases.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  amount: decimal("amount", { precision: 14, scale: 2 }).notNull(),
+  paymentMethod: text("payment_method").notNull().default("cash"),
+  receiptNumber: text("receipt_number"),
+  notes: text("notes"),
+  receivedByUserId: integer("received_by_user_id").references(() => users.id),
+  receivedAt: timestamp("received_at").defaultNow(),
+});
+
+export const inventoryStocktakes = pgTable("inventory_stocktakes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  locationId: integer("location_id").references(() => assetInventoryLocations.id),
+  status: text("status").notNull().default("draft"),
+  countDate: date("count_date").notNull(),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const inventoryStocktakeLines = pgTable("inventory_stocktake_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  stocktakeId: integer("stocktake_id").notNull().references(() => inventoryStocktakes.id),
+  itemId: integer("item_id").notNull().references(() => inventoryItems.id),
+  expectedQuantity: decimal("expected_quantity", { precision: 14, scale: 3 }).notNull(),
+  countedQuantity: decimal("counted_quantity", { precision: 14, scale: 3 }),
+  varianceQuantity: decimal("variance_quantity", { precision: 14, scale: 3 }),
+  notes: text("notes"),
+}, (table) => ({
+  stocktakeItemUnique: uniqueIndex("inventory_stocktake_lines_item_uq").on(table.stocktakeId, table.itemId),
+}));
+
+export const inventoryLowStockAlerts = pgTable("inventory_low_stock_alerts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").references(() => assetCentres.id),
+  itemId: integer("item_id").notNull().references(() => inventoryItems.id),
+  status: text("status").notNull().default("open"),
+  severity: text("severity").notNull().default("low"),
+  quantityAtTrigger: decimal("quantity_at_trigger", { precision: 14, scale: 3 }).notNull(),
+  reorderLevel: decimal("reorder_level", { precision: 14, scale: 3 }).notNull(),
+  suggestedQuantity: decimal("suggested_quantity", { precision: 14, scale: 3 }).notNull().default("0"),
+  acknowledgedByUserId: integer("acknowledged_by_user_id").references(() => users.id),
+  acknowledgedAt: timestamp("acknowledged_at"),
+  resolvedAt: timestamp("resolved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  itemStatusUnique: uniqueIndex("inventory_low_stock_alert_item_status_uq").on(table.itemId, table.status),
+  centreStatusIdx: index("inventory_low_stock_alert_centre_idx").on(table.centreId, table.status, table.severity),
+}));
+
+export const inventoryPurchaseRequests = pgTable("inventory_purchase_requests", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").notNull().references(() => assetCentres.id),
+  referenceNumber: text("reference_number").notNull(),
+  department: text("department"),
+  requiredDate: date("required_date"),
+  justification: text("justification").notNull(),
+  urgency: text("urgency").notNull().default("normal"),
+  status: text("status").notNull().default("draft"),
+  estimatedTotal: decimal("estimated_total", { precision: 14, scale: 2 }).notNull().default("0"),
+  requestedByUserId: integer("requested_by_user_id").references(() => users.id),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  approvalNotes: text("approval_notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  centreReferenceUnique: uniqueIndex("inventory_purchase_requests_centre_ref_uq").on(table.centreId, table.referenceNumber),
+}));
+
+export const inventoryPurchaseRequestLines = pgTable("inventory_purchase_request_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  requestId: integer("request_id").notNull().references(() => inventoryPurchaseRequests.id),
+  itemId: integer("item_id").references(() => inventoryItems.id),
+  itemName: text("item_name").notNull(),
+  itemType: text("item_type").notNull().default("consumable"),
+  quantity: decimal("quantity", { precision: 14, scale: 3 }).notNull(),
+  unitOfMeasure: text("unit_of_measure").notNull().default("unit"),
+  estimatedUnitCost: decimal("estimated_unit_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  preferredSupplierId: integer("preferred_supplier_id").references(() => inventorySuppliers.id),
+  notes: text("notes"),
+});
+
+export const inventoryPurchaseOrders = pgTable("inventory_purchase_orders", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").notNull().references(() => assetCentres.id),
+  purchaseRequestId: integer("purchase_request_id").references(() => inventoryPurchaseRequests.id),
+  supplierId: integer("supplier_id").notNull().references(() => inventorySuppliers.id),
+  referenceNumber: text("reference_number").notNull(),
+  status: text("status").notNull().default("draft"),
+  expectedDeliveryDate: date("expected_delivery_date"),
+  subtotal: decimal("subtotal", { precision: 14, scale: 2 }).notNull().default("0"),
+  taxAmount: decimal("tax_amount", { precision: 14, scale: 2 }).notNull().default("0"),
+  discountAmount: decimal("discount_amount", { precision: 14, scale: 2 }).notNull().default("0"),
+  totalAmount: decimal("total_amount", { precision: 14, scale: 2 }).notNull().default("0"),
+  terms: text("terms"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  centreReferenceUnique: uniqueIndex("inventory_purchase_orders_centre_ref_uq").on(table.centreId, table.referenceNumber),
+}));
+
+export const inventoryPurchaseOrderLines = pgTable("inventory_purchase_order_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => inventoryPurchaseOrders.id),
+  requestLineId: integer("request_line_id").references(() => inventoryPurchaseRequestLines.id),
+  itemId: integer("item_id").references(() => inventoryItems.id),
+  itemName: text("item_name").notNull(),
+  itemType: text("item_type").notNull().default("consumable"),
+  orderedQuantity: decimal("ordered_quantity", { precision: 14, scale: 3 }).notNull(),
+  receivedQuantity: decimal("received_quantity", { precision: 14, scale: 3 }).notNull().default("0"),
+  unitOfMeasure: text("unit_of_measure").notNull().default("unit"),
+  unitCost: decimal("unit_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  notes: text("notes"),
+});
+
+export const inventoryGoodsReceipts = pgTable("inventory_goods_receipts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  centreId: integer("centre_id").notNull().references(() => assetCentres.id),
+  purchaseOrderId: integer("purchase_order_id").references(() => inventoryPurchaseOrders.id),
+  supplierId: integer("supplier_id").references(() => inventorySuppliers.id),
+  referenceNumber: text("reference_number").notNull(),
+  deliveryNoteNumber: text("delivery_note_number"),
+  receivedDate: date("received_date").notNull(),
+  status: text("status").notNull().default("posted"),
+  inspectionNotes: text("inspection_notes"),
+  receivedByUserId: integer("received_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  centreReferenceUnique: uniqueIndex("inventory_goods_receipts_centre_ref_uq").on(table.centreId, table.referenceNumber),
+}));
+
+export const inventoryGoodsReceiptLines = pgTable("inventory_goods_receipt_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  goodsReceiptId: integer("goods_receipt_id").notNull().references(() => inventoryGoodsReceipts.id),
+  purchaseOrderLineId: integer("purchase_order_line_id").references(() => inventoryPurchaseOrderLines.id),
+  itemId: integer("item_id").references(() => inventoryItems.id),
+  itemName: text("item_name").notNull(),
+  itemType: text("item_type").notNull().default("consumable"),
+  quantityDelivered: decimal("quantity_delivered", { precision: 14, scale: 3 }).notNull(),
+  quantityAccepted: decimal("quantity_accepted", { precision: 14, scale: 3 }).notNull(),
+  quantityRejected: decimal("quantity_rejected", { precision: 14, scale: 3 }).notNull().default("0"),
+  unitCost: decimal("unit_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  batchNumber: text("batch_number"),
+  expiryDate: date("expiry_date"),
+  rejectionReason: text("rejection_reason"),
+});
+
+export const assetCentreTransfers = pgTable("asset_centre_transfers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  referenceNumber: text("reference_number").notNull(),
+  sourceCentreId: integer("source_centre_id").notNull().references(() => assetCentres.id),
+  destinationCentreId: integer("destination_centre_id").notNull().references(() => assetCentres.id),
+  sourceLocationId: integer("source_location_id").references(() => assetInventoryLocations.id),
+  destinationLocationId: integer("destination_location_id").references(() => assetInventoryLocations.id),
+  status: text("status").notNull().default("draft"),
+  requestedByUserId: integer("requested_by_user_id").references(() => users.id),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  dispatchedByUserId: integer("dispatched_by_user_id").references(() => users.id),
+  receivedByUserId: integer("received_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  dispatchedAt: timestamp("dispatched_at"),
+  receivedAt: timestamp("received_at"),
+  transportDetails: text("transport_details"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  orgReferenceUnique: uniqueIndex("asset_centre_transfers_org_ref_uq").on(table.organizationId, table.referenceNumber),
+  statusIdx: index("asset_centre_transfers_status_idx").on(table.organizationId, table.status),
+}));
+
+export const assetCentreTransferLines = pgTable("asset_centre_transfer_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  transferId: integer("transfer_id").notNull().references(() => assetCentreTransfers.id),
+  lineType: text("line_type").notNull(), // asset | inventory
+  assetId: integer("asset_id").references(() => assetRegister.id),
+  itemId: integer("item_id").references(() => inventoryItems.id),
+  destinationItemId: integer("destination_item_id").references(() => inventoryItems.id),
+  quantity: decimal("quantity", { precision: 14, scale: 3 }).notNull().default("1"),
+  conditionDispatched: text("condition_dispatched"),
+  conditionReceived: text("condition_received"),
+  quantityReceived: decimal("quantity_received", { precision: 14, scale: 3 }),
+  varianceNotes: text("variance_notes"),
+  status: text("status").notNull().default("pending"),
+});
+
+export const insertAssetInventorySettingsSchema = omitInsertFields(createInsertSchema(assetInventorySettings), { id: true, createdAt: true, updatedAt: true });
+export const insertInventoryReturnableIssueSchema = omitInsertFields(createInsertSchema(inventoryReturnableIssues), { id: true, updatedAt: true });
+export const insertAssetCentreSchema = omitInsertFields(createInsertSchema(assetCentres), { id: true, createdAt: true, updatedAt: true });
+export const insertAssetInventoryCategorySchema = omitInsertFields(createInsertSchema(assetInventoryCategories), { id: true, createdAt: true, updatedAt: true });
+export const insertAssetInventoryLocationSchema = omitInsertFields(createInsertSchema(assetInventoryLocations), { id: true, createdAt: true, updatedAt: true });
+export const insertAssetRegisterSchema = omitInsertFields(createInsertSchema(assetRegister), { id: true, createdAt: true, updatedAt: true });
+export const insertInventoryItemSchema = omitInsertFields(createInsertSchema(inventoryItems), { id: true, createdAt: true, updatedAt: true });
+export type AssetCentre = typeof assetCentres.$inferSelect;
+export type AssetInventoryCategory = typeof assetInventoryCategories.$inferSelect;
+export type AssetInventoryLocation = typeof assetInventoryLocations.$inferSelect;
+export type AssetRegisterItem = typeof assetRegister.$inferSelect;
+export type InventoryItem = typeof inventoryItems.$inferSelect;
+export type InventorySupplier = typeof inventorySuppliers.$inferSelect;

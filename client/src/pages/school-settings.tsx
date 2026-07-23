@@ -70,7 +70,6 @@ export default function SchoolSettingsPage() {
     enableELibrary: false,
     enablePOS: false,
     enableELogbook: false,
-    enableESchemes: false,
     enableHostel: false,
     enableTransport: false,
   });
@@ -118,7 +117,6 @@ export default function SchoolSettingsPage() {
         enableELibrary: school.enableELibrary || false,
         enablePOS: school.enablePOS || false,
         enableELogbook: school.enableELogbook || false,
-        enableESchemes: school.enableESchemes || false,
         enableHostel: school.enableHostel || false,
         enableTransport: school.enableTransport || false,
       });
@@ -159,7 +157,6 @@ export default function SchoolSettingsPage() {
       enableELibrary: featureValues.enableELibrary,
       enablePOS: featureValues.enablePOS,
       enableELogbook: featureValues.enableELogbook,
-      enableESchemes: featureValues.enableESchemes,
       enableHostel: featureValues.enableHostel,
       enableTransport: featureValues.enableTransport,
     });
@@ -173,7 +170,6 @@ export default function SchoolSettingsPage() {
         enableELibrary: school.enableELibrary || false,
         enablePOS: school.enablePOS || false,
         enableELogbook: school.enableELogbook || false,
-        enableESchemes: school.enableESchemes || false,
         enableHostel: school.enableHostel || false,
         enableTransport: school.enableTransport || false,
       });
@@ -677,20 +673,6 @@ export default function SchoolSettingsPage() {
                   data-testid="switch-elogbook"
                 />
               </div>
-
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label>E-Schemes</Label>
-                  <p className="text-sm text-muted-foreground">Teaching schemes of work</p>
-                </div>
-                <Switch
-                  checked={featureValues.enableESchemes}
-                  onCheckedChange={(checked) => handleToggle("enableESchemes", checked)}
-                  disabled={!isEditingFeatures}
-                  data-testid="switch-eschemes"
-                />
-              </div>
-
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
                   <Label>Boarding School</Label>

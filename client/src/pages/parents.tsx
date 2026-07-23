@@ -21,6 +21,7 @@ import { ResidentialAreaInput } from "@/components/residential-area-input";
 import type { Parent, Student, User } from "@shared/schema";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
+import { RecordPhotoActions } from "@/components/record-photo-actions";
 
 type PaginatedResponse<T> = {
   items: T[];
@@ -34,7 +35,7 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 export default function ParentsPage() {
   const { toast } = useToast();
-  const { currentSchoolId } = useAuth();
+  const { currentSchoolId, hasPermission } = useAuth();
   
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -447,9 +448,21 @@ export default function ParentsPage() {
                         />
                       </TableCell>
                       <TableCell>
-                        <div>
-                          <p className="font-medium">{p.firstName} {p.lastName}</p>
-                          <p className="text-xs text-muted-foreground capitalize">{p.relationship || "Parent"}</p>
+                        <div className="flex items-center gap-3">
+                          <RecordPhotoActions
+                            entity="parents"
+                            recordId={p.id}
+                            firstName={p.firstName}
+                            lastName={p.lastName}
+                            recordNumber={`PARENT-${p.id}`}
+                            photo={p.photo}
+                            initials={getParentInitials(p)}
+                            canManage={hasPermission("parents.edit") || hasPermission("parents.manage_photo")}
+                          />
+                          <div>
+                            <p className="font-medium">{p.firstName} {p.lastName}</p>
+                            <p className="text-xs text-muted-foreground capitalize">{p.relationship || "Parent"}</p>
+                          </div>
                         </div>
                       </TableCell>
                       <TableCell>{p.phone || "—"}</TableCell>
@@ -576,9 +589,17 @@ export default function ParentsPage() {
 
                       <div className="mobile-record-media-row pl-6">
                         <div className="flex shrink-0 flex-col items-stretch gap-1">
-                          <div className="mobile-record-avatar">
-                            <span>{getParentInitials(p)}</span>
-                          </div>
+                          <RecordPhotoActions
+                            entity="parents"
+                            recordId={p.id}
+                            firstName={p.firstName}
+                            lastName={p.lastName}
+                            recordNumber={`PARENT-${p.id}`}
+                            photo={p.photo}
+                            initials={getParentInitials(p)}
+                            canManage={hasPermission("parents.edit") || hasPermission("parents.manage_photo")}
+                            className="mobile-record-avatar"
+                          />
                         </div>
 
                         <div className="mobile-record-details">

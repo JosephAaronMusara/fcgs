@@ -1,7 +1,7 @@
 import { db } from "./db";
 import { RBAC_PERMISSIONS_DATA } from "./rbac-config";
 import { accessGroupPermissions, accessGroups, permissions, userPermissionOverrides, users } from "@shared/schema";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { storage } from "./storage";
 
 async function ensurePermissionsCatalog() {
@@ -33,6 +33,28 @@ async function ensurePermissionsCatalog() {
   }
 }
 
+const RETIRED_PERMISSION_CODES = [
+  "discussion_forum.view",
+  "schemes.view",
+  "schemes.create",
+  "schemes.edit",
+  "schemes.delete",
+] as const;
+
+async function removeRetiredPermissions() {
+  const retired = await db
+    .select({ id: permissions.id })
+    .from(permissions)
+    .where(inArray(permissions.code, [...RETIRED_PERMISSION_CODES]));
+
+  const retiredIds = retired.map((permission) => permission.id);
+  if (!retiredIds.length) return;
+
+  await db.delete(accessGroupPermissions).where(inArray(accessGroupPermissions.permissionId, retiredIds));
+  await db.delete(userPermissionOverrides).where(inArray(userPermissionOverrides.permissionId, retiredIds));
+  await db.delete(permissions).where(inArray(permissions.id, retiredIds));
+}
+
 
 const TRANSPORT_MANAGER_PERMISSIONS = [
   "transport.view", "transport.dashboard.view",
@@ -55,12 +77,12 @@ const ACCOUNTANT_TRANSPORT_PERMISSIONS = [
   "transport.periods.lock", "transport.reports.view", "transport.audit.view",
 ];
 
-async function ensureAccessGroupPermissions(groupName: string, permissionCodes: string[], createIfMissing = false) {
+async function ensureAccessGroupPermissions(groupName: string, permissionCodes: string[], createIfMissing = false, description?: string) {
   let [group] = await db.select().from(accessGroups).where(eq(accessGroups.name, groupName));
   if (!group && createIfMissing) {
     [group] = await db.insert(accessGroups).values({
       name: groupName,
-      description: "Manages school transport operations, learner services, path setup, claims verification and transport reporting.",
+      description: description || "System access group managed by the FCGS permission bootstrap.",
       isSystemDefault: true,
     }).returning();
   }
@@ -73,13 +95,63 @@ async function ensureAccessGroupPermissions(groupName: string, permissionCodes: 
   ).onConflictDoNothing();
 }
 
+const ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS = [
+  "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.payments.view",
+  "transport.receipts.view", "transport.claims.view", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
+  "transport.organization.view", "transport.organization.reports", "transport.organization.export",
+];
+
+async function replaceAccessGroupPermissionSubset(groupName: string, prefix: string, allowedCodes: string[]) {
+  const [group] = await db.select().from(accessGroups).where(eq(accessGroups.name, groupName));
+  if (!group) return;
+  const allRows = await db.select({ id: permissions.id, code: permissions.code }).from(permissions);
+  const matchingIds = allRows.filter((row) => row.code.startsWith(prefix)).map((row) => row.id);
+  if (matchingIds.length) {
+    await db.delete(accessGroupPermissions).where(and(
+      eq(accessGroupPermissions.accessGroupId, group.id),
+      inArray(accessGroupPermissions.permissionId, matchingIds),
+    ));
+  }
+  await ensureAccessGroupPermissions(groupName, allowedCodes);
+}
+
 async function ensureTransportAccessGroupDefaults() {
   const allTransportCodes = RBAC_PERMISSIONS_DATA.filter((permission) => permission.code.startsWith("transport.")).map((permission) => permission.code);
   await ensureAccessGroupPermissions("School Admin", allTransportCodes);
-  await ensureAccessGroupPermissions("Org HQ", allTransportCodes);
+  await replaceAccessGroupPermissionSubset("Org HQ", "transport.", ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS);
   await ensureAccessGroupPermissions("Accountant", ACCOUNTANT_TRANSPORT_PERMISSIONS);
-  await ensureAccessGroupPermissions("Transport Manager", TRANSPORT_MANAGER_PERMISSIONS, true);
+  await ensureAccessGroupPermissions(
+    "Transport Manager",
+    TRANSPORT_MANAGER_PERMISSIONS,
+    true,
+    "Manages school transport operations, learner services, path setup, claims verification and transport reporting.",
+  );
   await ensureAccessGroupPermissions("Quality Control Officer", ["transport.view", "transport.dashboard.view", "transport.reports.view", "transport.audit.view"]);
+}
+
+const ASSET_INVENTORY_OFFICER_PERMISSIONS = [
+  "assets.view", "assets.create", "assets.edit", "assets.assign", "assets.transfer", "assets.maintenance", "assets.reports", "assets.setup.manage",
+  "inventory.view", "inventory.items.manage", "inventory.receive", "inventory.issue", "inventory.adjust", "inventory.stocktake", "inventory.reports", "inventory.low_stock.view",
+  "inventory.restock.request", "inventory.procurement.view", "inventory.procurement.request", "inventory.procurement.order", "inventory.procurement.receive",
+  "inventory.transfer.request", "inventory.transfer.dispatch", "inventory.transfer.receive",
+  "damage.view", "damage.report", "damage.investigate", "damage.reports",
+];
+
+async function ensureAssetsInventoryAccessGroupDefaults() {
+  const allCodes = RBAC_PERMISSIONS_DATA.filter((permission) => ["assets.", "inventory.", "damage."].some((prefix) => permission.code.startsWith(prefix))).map((permission) => permission.code);
+  await ensureAccessGroupPermissions("School Admin", allCodes);
+  await ensureAccessGroupPermissions("Org HQ", allCodes);
+  await ensureAccessGroupPermissions("Assets & Inventory Officer", ASSET_INVENTORY_OFFICER_PERMISSIONS, true, "Manages asset registers, stores, stock movements, procurement receipts, centre transfers, maintenance and damage reporting.");
+  await ensureAccessGroupPermissions("Accountant", ["assets.view", "assets.reports", "inventory.view", "inventory.reports", "inventory.low_stock.view", "inventory.procurement.view", "inventory.procurement.approve", "inventory.procurement.order", "damage.view", "damage.approve_charge", "damage.record_recovery", "damage.reports"]);
+  await ensureAccessGroupPermissions("Teacher", ["assets.view", "damage.view", "damage.report"]);
+}
+
+async function ensurePhotoAccessGroupDefaults() {
+  const adminPhotoPermissions = ["students.manage_photo", "staff.manage_photo", "parents.manage_photo", "users.manage_photo"];
+  await ensureAccessGroupPermissions("School Admin", adminPhotoPermissions);
+  await ensureAccessGroupPermissions("Org HQ", adminPhotoPermissions);
+  await ensureAccessGroupPermissions("Teacher", ["students.manage_photo"]);
+  await ensureAccessGroupPermissions("Assistant Teacher", ["students.manage_photo"]);
 }
 
 async function cleanupLegacyBlanketAdminOverrides() {
@@ -114,7 +186,10 @@ async function cleanupLegacyBlanketAdminOverrides() {
 
 export async function ensureRbacBaseline() {
   await ensurePermissionsCatalog();
+  await removeRetiredPermissions();
   await ensureTransportAccessGroupDefaults();
+  await ensureAssetsInventoryAccessGroupDefaults();
+  await ensurePhotoAccessGroupDefaults();
   await cleanupLegacyBlanketAdminOverrides();
   await storage.normalizeAllUserBaselineAccessGroups();
 }

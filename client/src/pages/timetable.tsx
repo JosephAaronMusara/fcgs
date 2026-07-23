@@ -25,7 +25,13 @@ import {
 import { Calendar, Plus, Clock, Trash2 } from "lucide-react";
 import type { TimetableSlot, Class, Subject, Staff } from "@shared/schema";
 
-const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+const DAYS = [
+  { value: 1, label: "Monday" },
+  { value: 2, label: "Tuesday" },
+  { value: 3, label: "Wednesday" },
+  { value: 4, label: "Thursday" },
+  { value: 5, label: "Friday" },
+] as const;
 const TIME_SLOTS = [
   "07:30", "08:15", "09:00", "09:45", "10:30", "11:15", "12:00", "12:45", "13:30", "14:15", "15:00"
 ];
@@ -53,7 +59,15 @@ export default function TimetablePage() {
   });
 
   const createSlot = useMutation({
-    mutationFn: async (data: Partial<TimetableSlot>) => {
+    mutationFn: async (data: {
+      classId: number;
+      subjectId: number;
+      teacherId: number | null;
+      dayOfWeek: number;
+      startTime: string;
+      endTime: string;
+      room: string | null;
+    }) => {
       return apiRequest("POST", "/api/timetable", data);
     },
     onSuccess: () => {
@@ -61,8 +75,8 @@ export default function TimetablePage() {
       setIsAddOpen(false);
       toast({ title: "Lesson added to timetable" });
     },
-    onError: () => {
-      toast({ title: "Failed to add lesson", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to add lesson", description: error.message, variant: "destructive" });
     },
   });
 
@@ -79,15 +93,15 @@ export default function TimetablePage() {
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
+    const teacherValue = String(formData.get("teacherId") || "");
     createSlot.mutate({
-      classId: parseInt(formData.get("classId") as string),
-      subjectId: parseInt(formData.get("subjectId") as string),
-      teacherId: parseInt(formData.get("teacherId") as string),
-      dayOfWeek: formData.get("dayOfWeek") as string,
-      startTime: formData.get("startTime") as string,
-      endTime: formData.get("endTime") as string,
-      room: formData.get("room") as string,
-      schoolId: 1,
+      classId: Number(formData.get("classId")),
+      subjectId: Number(formData.get("subjectId")),
+      teacherId: teacherValue && teacherValue !== "unassigned" ? Number(teacherValue) : null,
+      dayOfWeek: Number(formData.get("dayOfWeek")),
+      startTime: String(formData.get("startTime") || ""),
+      endTime: String(formData.get("endTime") || ""),
+      room: String(formData.get("room") || "").trim() || null,
     });
   };
 
@@ -95,17 +109,18 @@ export default function TimetablePage() {
     ? slots 
     : slots.filter(slot => slot.classId.toString() === selectedClass);
 
-  const getSlotForCell = (day: string, time: string) => {
+  const getSlotForCell = (dayOfWeek: number, time: string) => {
     return filteredSlots.find(slot => 
-      slot.dayOfWeek === day && slot.startTime === time
+      slot.dayOfWeek === dayOfWeek && slot.startTime === time
     );
   };
 
   const getSubjectName = (id: number) => subjects.find(s => s.id === id)?.name || "Unknown";
   const getClassName = (id: number) => classes.find(c => c.id === id)?.className || "Unknown";
-  const getTeacherName = (id: number) => {
+  const getTeacherName = (id: number | null) => {
+    if (!id) return "Unassigned";
     const teacher = teachers.find(t => t.id === id);
-    return teacher ? `${teacher.firstName} ${teacher.lastName}` : "Unknown";
+    return teacher ? `${teacher.firstName} ${teacher.lastName}` : "Unassigned";
   };
 
   if (isLoading) {
@@ -173,11 +188,12 @@ export default function TimetablePage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="teacherId">Teacher</Label>
-                <Select name="teacherId" required>
+                <Select name="teacherId" defaultValue="unassigned">
                   <SelectTrigger data-testid="select-teacher">
                     <SelectValue placeholder="Select teacher" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="unassigned">Unassigned</SelectItem>
                     {teachers.map((teacher) => (
                       <SelectItem key={teacher.id} value={teacher.id.toString()}>
                         {teacher.firstName} {teacher.lastName}
@@ -195,7 +211,7 @@ export default function TimetablePage() {
                     </SelectTrigger>
                     <SelectContent>
                       {DAYS.map((day) => (
-                        <SelectItem key={day} value={day}>{day}</SelectItem>
+                        <SelectItem key={day.value} value={String(day.value)}>{day.label}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -272,7 +288,7 @@ export default function TimetablePage() {
                 <tr>
                   <th className="border p-2 bg-muted">Time</th>
                   {DAYS.map((day) => (
-                    <th key={day} className="border p-2 bg-muted">{day}</th>
+                    <th key={day.value} className="border p-2 bg-muted">{day.label}</th>
                   ))}
                 </tr>
               </thead>
@@ -281,9 +297,9 @@ export default function TimetablePage() {
                   <tr key={time}>
                     <td className="border p-2 font-medium text-center bg-muted/50">{time}</td>
                     {DAYS.map((day) => {
-                      const slot = getSlotForCell(day, time);
+                      const slot = getSlotForCell(day.value, time);
                       return (
-                        <td key={`${day}-${time}`} className="border p-2 min-w-[150px]">
+                        <td key={`${day.value}-${time}`} className="border p-2 min-w-[150px]">
                           {slot ? (
                             <div className="bg-primary/10 rounded p-2 text-xs space-y-1">
                               <div className="font-semibold">{getSubjectName(slot.subjectId)}</div>

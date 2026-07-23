@@ -34,7 +34,6 @@ import {
   Library,
   ShoppingCart,
   Building,
-  MessageSquare,
   Bot,
   BookMarked,
   Receipt,
@@ -79,10 +78,7 @@ const SCHOOL_FINANCE_MENU_PERMISSIONS = [
   "school_incomes.view",
   "financial_statements.view",
 ];
-const ASSETS_INVENTORY_MENU_PERMISSIONS = [
-  ...POS_MENU_PERMISSIONS,
-  ...SCHOOL_FINANCE_MENU_PERMISSIONS,
-];
+const ASSETS_INVENTORY_MENU_PERMISSIONS = ["assets.view", "inventory.view", "damage.view"];
 
 const staffMenuGroups: MenuGroup[] = [
   {
@@ -92,14 +88,14 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Calendar", url: "/calendar", icon: Calendar, requiredPermissions: ["calendar.view"] },
       { title: "Applications", url: "/applications", icon: FileText, requiredPermissions: ["applications.view"] },
       { title: "Internal Transfers", url: "/internal-transfers", icon: ArrowRightLeft, requiredPermissions: ["internal_transfers.view"] },
-      { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport", badge: "In Production" },
+      { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport" },
     ],
   },
   {
     label: "Human Resources",
     items: [
       { title: "School Staff", url: "/staff", icon: Users, requiredPermissions: ["staff.view"] },
-      { title: "Timetable", url: "/timetable", icon: Calendar, requiredPermissions: ["timetable.view"], comingSoon: true },
+      { title: "Timetable", url: "/timetable", icon: Calendar, requiredPermissions: ["timetable.view"] },
       { title: "Staff Attendance", url: "/logbook", icon: Clock, requiredPermissions: ["staff_attendance.view_own", "staff_attendance.view_all", "staff_attendance.view_logs", "staff_attendance.view_overview", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"], featureKey: "enableELogbook" },
     ],
   },
@@ -140,7 +136,7 @@ const staffMenuGroups: MenuGroup[] = [
     items: [
       { title: "Point of Sale", url: "/pos", icon: ShoppingCart, requiredPermissions: POS_MENU_PERMISSIONS, featureKey: "enableFinance", badge: "In Production" },
       { title: "School Finance", url: "/school-finance", icon: DollarSign, requiredPermissions: SCHOOL_FINANCE_MENU_PERMISSIONS, featureKey: "enableFinance" },
-      { title: "Assets & Inventory", url: "/assets-inventory", icon: Package, requiredPermissions: ASSETS_INVENTORY_MENU_PERMISSIONS, featureKey: "enableFinance", badge: "In Production" },
+      { title: "Assets & Inventory", url: "/assets-inventory", icon: Package, requiredPermissions: ASSETS_INVENTORY_MENU_PERMISSIONS },
     ],
   },
   {
@@ -165,7 +161,7 @@ const studentMenuGroups: MenuGroup[] = [
     label: "Learning",
     items: [
       { title: "My Classes", url: "/my-classes", icon: School },
-      { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
+      { title: "Timetable", url: "#", icon: Calendar },
       { title: "Learning Materials", url: "#", icon: BookMarked, comingSoon: true },
       { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
       { title: "AI Study Helper", url: "#", icon: Bot, comingSoon: true },
@@ -196,7 +192,6 @@ const studentMenuGroups: MenuGroup[] = [
     label: "Community",
     items: [
       { title: "Newsletters", url: "/my-newsletters", icon: Megaphone },
-      { title: "Discussion Forum", url: "#", icon: MessageSquare, comingSoon: true },
     ],
   },
   {
@@ -222,7 +217,7 @@ const parentMenuGroups: MenuGroup[] = [
       { title: "Attendance", url: "/children-attendance", icon: ClipboardCheck },
       { title: "Results & Reports", url: "/children-reports", icon: BarChart3 },
       { title: "Discipline", url: "#", icon: Shield, comingSoon: true },
-      { title: "Timetable", url: "#", icon: Calendar, comingSoon: true },
+      { title: "Timetable", url: "#", icon: Calendar },
       { title: "Homework", url: "#", icon: ClipboardList, comingSoon: true },
     ],
   },

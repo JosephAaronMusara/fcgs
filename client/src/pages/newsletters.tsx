@@ -63,8 +63,8 @@ export default function NewslettersPage() {
   });
 
   const updateNewsletter = useMutation({
-    mutationFn: async ({ id, status }: { id: number; status: string }) => {
-      return apiRequest("PUT", `/api/newsletters/${id}`, { status });
+    mutationFn: async ({ id, isPublished }: { id: number; isPublished: boolean }) => {
+      return apiRequest("PUT", `/api/newsletters/${id}`, { isPublished });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/newsletters"] });
@@ -102,11 +102,12 @@ export default function NewslettersPage() {
       content: formData.get("content") as string,
       targetAudience: selectedAudience,
       channels: selectedChannels,
-      status: "draft",
+      isPublished: false,
+      publishDate: null,
     });
   };
 
-  const formatDate = (date: string | null) => {
+  const formatDate = (date: Date | string | null) => {
     if (!date) return "Not published";
     return new Date(date).toLocaleDateString("en-GB", {
       day: "numeric",
@@ -115,16 +116,8 @@ export default function NewslettersPage() {
     });
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "published":
-        return "default";
-      case "sent":
-        return "secondary";
-      default:
-        return "outline";
-    }
-  };
+  const getStatusLabel = (newsletter: Newsletter) => newsletter.isPublished ? "Published" : "Draft";
+  const getStatusColor = (newsletter: Newsletter): "default" | "outline" => newsletter.isPublished ? "default" : "outline";
 
   if (isLoading) {
     return (
@@ -295,7 +288,7 @@ export default function NewslettersPage() {
             <Card key={newsletter.id} className="hover-elevate" data-testid={`card-newsletter-${newsletter.id}`}>
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-2">
-                  <Badge variant={getStatusColor(newsletter.status)}>{newsletter.status}</Badge>
+                  <Badge variant={getStatusColor(newsletter)}>{getStatusLabel(newsletter)}</Badge>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -331,10 +324,10 @@ export default function NewslettersPage() {
                     <Eye className="h-4 w-4 mr-1" />
                     View
                   </Button>
-                  {newsletter.status === "draft" && (
+                  {!newsletter.isPublished && (
                     <Button
                       size="sm"
-                      onClick={() => updateNewsletter.mutate({ id: newsletter.id, status: "published" })}
+                      onClick={() => updateNewsletter.mutate({ id: newsletter.id, isPublished: true })}
                       data-testid={`button-publish-${newsletter.id}`}
                     >
                       <Send className="h-4 w-4 mr-1" />
@@ -353,7 +346,7 @@ export default function NewslettersPage() {
           <DialogHeader>
             <DialogTitle>{viewNewsletter?.title}</DialogTitle>
             <DialogDescription>
-              Published: {formatDate(viewNewsletter?.publishDate || null)}
+              Published: {formatDate(viewNewsletter?.publishDate ?? null)}
             </DialogDescription>
           </DialogHeader>
           <div className="prose prose-sm max-w-none">

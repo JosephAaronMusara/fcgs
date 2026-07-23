@@ -1,0 +1,95 @@
+{
+  "name": "FCGS HQ, People Photos, Assets & Inventory and Transport Oversight Update",
+  "files": [
+    {
+      "path": "client/src/components/app-sidebar.tsx",
+      "sourceSha256": "ef0de9de7738047396c4294ae0118e54e8686cd5ea8699c400876d3ec2ec3038",
+      "targetSha256": "ff91007999f9cfb36fe73862f4bea9e02ad8772c83be1b699a405c36818dac8d"
+    },
+    {
+      "path": "client/src/components/record-photo-actions.tsx",
+      "sourceSha256": null,
+      "targetSha256": "e04b2f64cdaa5f7a3a0acaf0ccbd25d27a6a940954c105c3c98a1687e64b2b57"
+    },
+    {
+      "path": "client/src/pages/assets-inventory.tsx",
+      "sourceSha256": "18dd33ab2f7c89ab5c594a89f748b4fb644c0f4ffdeb10897b36dcc3fc7c1527",
+      "targetSha256": "7632b99a0e3251691096ad6898745911df0d69c465f71f3f857b25ad259ec235"
+    },
+    {
+      "path": "client/src/pages/org-dashboard.tsx",
+      "sourceSha256": "7d63c4fb877a90149ae5537bcca726555ceff7a9a7e5ef3fb7f145190a712223",
+      "targetSha256": "286ea7c48cb81348a22c8adce5421c697c20aade11c32e18b7b49b5163700d32"
+    },
+    {
+      "path": "client/src/pages/org-transport-oversight.tsx",
+      "sourceSha256": null,
+      "targetSha256": "e885f2277690f79904d1197d0b0db932b01a79f6fe56812dc8d96375cf97c256"
+    },
+    {
+      "path": "client/src/pages/parents.tsx",
+      "sourceSha256": "210c1210faf61bbc59ca07893360056954ba612bba2439d7eed37922e103576a",
+      "targetSha256": "4cec92fa6f7ba18b05cdc78f7309409ca2ef3adfec8cda1454a0ad9d6480947d"
+    },
+    {
+      "path": "client/src/pages/staff.tsx",
+      "sourceSha256": "e187e53443a367055b8c3bdb25eb105bb2db5e24d6e6a41ca50c54522f548669",
+      "targetSha256": "61bf0a311f1f4eb4283f054d69c973360b884c4050226b25c85be5e1105bb05a"
+    },
+    {
+      "path": "client/src/pages/students.tsx",
+      "sourceSha256": "fc6265775512a556f387ba457d381560e0506ba76290103ce3c7e73edc970a13",
+      "targetSha256": "2a6dd6edcd23399bb6c4c540c4bcec6b91a020676cf2ff08feefbd34fd02ae51"
+    },
+    {
+      "path": "client/src/pages/transport.tsx",
+      "sourceSha256": "20495c4a11487905c618c3b926d70b5ea907bd00a620ceaae8a2a1cc305d5d98",
+      "targetSha256": "5146a28a1d921a18b4d1d4069f6664dd5e648dc37df3060ff832bb1a762e886c"
+    },
+    {
+      "path": "script/preflight-assets-inventory-upgrade.ts",
+      "sourceSha256": "77f380989db4a21a8c998fd1168c77e35a6147319e999d5d77cf67e17c6831d6",
+      "targetSha256": "7b4241c0e00954d2ec8110117b99e80e9d62f5909a0d09f71e2c61afa5b1beb8"
+    },
+    {
+      "path": "server/assets-inventory-routes.ts",
+      "sourceSha256": "9c73b2de5cf14ed7cc0ced09d1c983f1d5e6a870327ec0bc9e8055f585d570da",
+      "targetSha256": "e7794f8375111eae39896b40c61a4a465a5abd9eef99e606177607f1c96cc701"
+    },
+    {
+      "path": "server/hq-operations-routes.ts",
+      "sourceSha256": null,
+      "targetSha256": "ede1b19ece93dc1128829dddece9ac94e100fece670568a754c53a6026c8d5e5"
+    },
+    {
+      "path": "server/rbac-bootstrap.ts",
+      "sourceSha256": "d4dbe6c335b90eac18a763f27c71adc97ee911d65ace76f5965f3bfc9341c742",
+      "targetSha256": "49d789d209aed112b46e0423d029f8891a8ab15a9acb9739d9bb938bedcc9d41"
+    },
+    {
+      "path": "server/rbac-config.ts",
+      "sourceSha256": "94241bc27b3e7bf2e0aab8a24859736c9c060c59c5d88cbb63ad3b855e3e313a",
+      "targetSha256": "e26288985363ca1ff04c55c50767ae81ec4bcd189a1a2983f00494967f5df37f"
+    },
+    {
+      "path": "server/routes.ts",
+      "sourceSha256": "fd0a059d6e9d7356a49c5fdcdbb151552d324e65d12f21377895e1cdb7c11fd8",
+      "targetSha256": "b8a57e86e1356662905e42409344434b061cf087e6b3ce0a0d9961d8b8c36576"
+    },
+    {
+      "path": "server/seed.ts",
+      "sourceSha256": "49ad7e4cbf9e563c9079c8645a5138340e38d478621402ed773221164aac0f47",
+      "targetSha256": "e25255fa15857a220489180340da4d92a6fbe8f32e38d44ba30c097d94e1b411"
+    },
+    {
+      "path": "server/transport-routes.ts",
+      "sourceSha256": "a5592a164cced21c4569e45a93d3e01b948b8221dd7709f0ce3efb5d5e294231",
+      "targetSha256": "ef96c3e16d9d2f9ca40923bee082075f8bfc4e4258b1d28dedd02c08890623cb"
+    },
+    {
+      "path": "shared/schema.ts",
+      "sourceSha256": "b89a65d1e54855849da458cca158cf41d1a11d09a1d5bd00b24a70600218a7fc",
+      "targetSha256": "2ce60c5b384d659d9a6ae65584b5706b5d7e5387812e4b893d6895cc3381da0b"
+    }
+  ]
+}

@@ -89,7 +89,9 @@ function notify() {
 export function subscribeOfflineQueue(listener: (snapshot: OfflineQueueSnapshot) => void) {
   listeners.add(listener);
   listener(snapshot());
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 export function getOfflineQueueSnapshot() {

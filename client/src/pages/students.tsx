@@ -23,6 +23,7 @@ import * as XLSX from "xlsx";
 import { ResidentialAreaInput } from "@/components/residential-area-input";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
+import { RecordPhotoActions } from "@/components/record-photo-actions";
 
 type PaginatedResponse<T> = {
   items: T[];
@@ -44,7 +45,7 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 export default function StudentsPage() {
   const { toast } = useToast();
-  const { currentSchoolId } = useAuth();
+  const { currentSchoolId, hasPermission } = useAuth();
   const [search, setSearch] = useState("");
   const [classFilter, setClassFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -758,13 +759,16 @@ export default function StudentsPage() {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center text-sm font-medium overflow-hidden">
-                            {s.photo ? (
-                              <img src={s.photo} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <span>{s.firstName?.[0]}{s.lastName?.[0]}</span>
-                            )}
-                          </div>
+                          <RecordPhotoActions
+                            entity="students"
+                            recordId={s.id}
+                            firstName={s.firstName}
+                            lastName={s.lastName}
+                            recordNumber={s.admissionNo}
+                            photo={s.photo}
+                            initials={`${s.firstName?.[0] || ""}${s.lastName?.[0] || ""}`}
+                            canManage={hasPermission("students.edit") || hasPermission("students.manage_photo")}
+                          />
                           <div>
                             <p className="font-medium">{s.firstName} {s.lastName}</p>
                             <p className="text-xs text-muted-foreground capitalize">{s.gender || ""}</p>
@@ -1018,13 +1022,17 @@ export default function StudentsPage() {
                           </Badge>
                         </div>
 
-                        <div className="mobile-record-avatar h-[70px] w-[70px]">
-                          {s.photo ? (
-                            <img src={s.photo} alt={`${s.firstName} ${s.lastName}`} className="h-full w-full object-cover" />
-                          ) : (
-                            <span>{getStudentInitials(s)}</span>
-                          )}
-                        </div>
+                        <RecordPhotoActions
+                          entity="students"
+                          recordId={s.id}
+                          firstName={s.firstName}
+                          lastName={s.lastName}
+                          recordNumber={s.admissionNo}
+                          photo={s.photo}
+                          initials={getStudentInitials(s)}
+                          canManage={hasPermission("students.edit") || hasPermission("students.manage_photo")}
+                          className="h-[70px] w-[70px]"
+                        />
 
                         <div className="mobile-record-details">
                           <div className="mobile-record-details-grid mobile-record-two-col">
@@ -1677,7 +1685,7 @@ function StudentForm({
           <Input
             id="nationalIdNumber"
             name="nationalIdNumber"
-            defaultValue={defaultValues?.nationalIdNumber}
+            defaultValue={defaultValues?.nationalIdNumber ?? ""}
             placeholder="e.g. 00-000000A00"
             data-testid="input-national-id-number"
           />
@@ -1687,7 +1695,7 @@ function StudentForm({
           <Input
             id="passportNumber"
             name="passportNumber"
-            defaultValue={defaultValues?.passportNumber}
+            defaultValue={defaultValues?.passportNumber ?? ""}
             data-testid="input-passport-number"
           />
         </div>

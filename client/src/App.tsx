@@ -14,67 +14,62 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { AlertTriangle, Archive, ArrowLeft, Bell, Clock, Eye, Mail, MapPin, MessageSquare, Newspaper, RotateCcw } from "lucide-react";
-import { useState, useEffect, useCallback } from "react";
+import { lazy, Suspense, useState, useEffect, useCallback } from "react";
 import Login from "@/pages/login";
 import ForceResetPassword from "@/pages/force-reset-password";
 import ResetPasswordToken from "@/pages/reset-password-token";
-import Dashboard from "@/pages/dashboard";
-import OrgDashboard from "@/pages/org-dashboard";
-import StaffPage from "@/pages/staff";
-import StudentsPage from "@/pages/students";
-import ParentsPage from "@/pages/parents";
-import ClassesPage from "@/pages/classes";
-import SubjectsPage from "@/pages/subjects";
-import GradesPage from "@/pages/grades";
-import AssessmentsPage from "@/pages/assessments";
-import MarksEntryPage from "@/pages/marks-entry";
-import AcademicReportsPage from "@/pages/academic-reports";
-import ReportCardPdfRenderPage from "@/pages/report-card-pdf-render";
-import AttendancePage from "@/pages/attendance";
-import FeesPage from "@/pages/fees";
-import DisciplinePage from "@/pages/discipline";
-import ClinicPage from "@/pages/clinic";
-import MarksPage from "@/pages/marks";
-import MyChildrenPage from "@/pages/my-children";
-import SchoolSettingsPage from "@/pages/school-settings";
-import LibraryPage from "@/pages/library";
-import TimetablePage from "@/pages/timetable";
-import CalendarPage from "@/pages/calendar";
-import LogbookPage from "@/pages/logbook";
-import POSPage from "@/pages/pos";
-import SchoolFinancePage from "@/pages/school-finance";
-import AssetsInventoryPage from "@/pages/assets-inventory";
-import NewslettersPage from "@/pages/newsletters";
-import SchemesPage from "@/pages/schemes";
-import HostelPage from "@/pages/hostel";
-import HostelsPage from "@/pages/hostels";
-import ApplicationsPage from "@/pages/applications";
-import MessagesPage from "@/pages/messages";
-import ApplyPage from "@/pages/apply";
-import QCReportsPage from "@/pages/qc-reports";
-import QCReportsClassPage from "@/pages/qc-reports-class";
-import QCReportsStudentPage from "@/pages/qc-reports-student";
-import RecordOfMarksPage from "@/pages/record-of-marks";
-import MyClassesPage from "@/pages/my-classes";
-import MyAttendancePage from "@/pages/my-attendance";
-import MyGradesPage from "@/pages/my-grades";
-import MyProfilePage from "@/pages/my-profile";
-import MyNotificationsPage from "@/pages/my-notifications";
-import MyNewslettersPage from "@/pages/my-newsletters";
-import ChildrenAttendancePage from "@/pages/children-attendance";
-import ChildrenReportsPage from "@/pages/children-reports";
-import Student360Page from "@/pages/student-360";
-import Staff360Page from "@/pages/staff-360";
-import KundAiPage from "@/pages/kundai";
-import TransportPage from "@/pages/transport";
-import InternalTransfersPage from "@/pages/internal-transfers";
-import ArrearsPage from "@/pages/arrears";
-import SchoolExpensesPage from "@/pages/school-expenses";
-import SchoolIncomesPage from "@/pages/school-incomes";
-import ProductsPage from "@/pages/products";
-import FinancialStatementsPage from "@/pages/financial-statements";
-import LearningMaterialsPage from "@/pages/learning-materials";
 import NotFound from "@/pages/not-found";
+
+const ApplyPage = lazy(() => import("@/pages/apply"));
+const ReportCardPdfRenderPage = lazy(() => import("@/pages/report-card-pdf-render"));
+const Dashboard = lazy(() => import("@/pages/dashboard"));
+const OrgDashboard = lazy(() => import("@/pages/org-dashboard"));
+const StaffPage = lazy(() => import("@/pages/staff"));
+const StudentsPage = lazy(() => import("@/pages/students"));
+const ParentsPage = lazy(() => import("@/pages/parents"));
+const ClassesPage = lazy(() => import("@/pages/classes"));
+const SubjectsPage = lazy(() => import("@/pages/subjects"));
+const GradesPage = lazy(() => import("@/pages/grades"));
+const AssessmentsPage = lazy(() => import("@/pages/assessments"));
+const MarksEntryPage = lazy(() => import("@/pages/marks-entry"));
+const AcademicReportsPage = lazy(() => import("@/pages/academic-reports"));
+const AttendancePage = lazy(() => import("@/pages/attendance"));
+const FeesPage = lazy(() => import("@/pages/fees"));
+const DisciplinePage = lazy(() => import("@/pages/discipline"));
+const ClinicPage = lazy(() => import("@/pages/clinic"));
+const MarksPage = lazy(() => import("@/pages/marks"));
+const MyChildrenPage = lazy(() => import("@/pages/my-children"));
+const SchoolSettingsPage = lazy(() => import("@/pages/school-settings"));
+const LibraryPage = lazy(() => import("@/pages/library"));
+const TimetablePage = lazy(() => import("@/pages/timetable"));
+const CalendarPage = lazy(() => import("@/pages/calendar"));
+const LogbookPage = lazy(() => import("@/pages/logbook"));
+const POSPage = lazy(() => import("@/pages/pos"));
+const SchoolFinancePage = lazy(() => import("@/pages/school-finance"));
+const AssetsInventoryPage = lazy(() => import("@/pages/assets-inventory"));
+const NewslettersPage = lazy(() => import("@/pages/newsletters"));
+const HostelPage = lazy(() => import("@/pages/hostel"));
+const HostelsPage = lazy(() => import("@/pages/hostels"));
+const ApplicationsPage = lazy(() => import("@/pages/applications"));
+const MessagesPage = lazy(() => import("@/pages/messages"));
+const QCReportsPage = lazy(() => import("@/pages/qc-reports"));
+const QCReportsClassPage = lazy(() => import("@/pages/qc-reports-class"));
+const QCReportsStudentPage = lazy(() => import("@/pages/qc-reports-student"));
+const RecordOfMarksPage = lazy(() => import("@/pages/record-of-marks"));
+const MyClassesPage = lazy(() => import("@/pages/my-classes"));
+const MyAttendancePage = lazy(() => import("@/pages/my-attendance"));
+const MyGradesPage = lazy(() => import("@/pages/my-grades"));
+const MyProfilePage = lazy(() => import("@/pages/my-profile"));
+const MyNotificationsPage = lazy(() => import("@/pages/my-notifications"));
+const MyNewslettersPage = lazy(() => import("@/pages/my-newsletters"));
+const ChildrenAttendancePage = lazy(() => import("@/pages/children-attendance"));
+const ChildrenReportsPage = lazy(() => import("@/pages/children-reports"));
+const Student360Page = lazy(() => import("@/pages/student-360"));
+const Staff360Page = lazy(() => import("@/pages/staff-360"));
+const KundAiPage = lazy(() => import("@/pages/kundai"));
+const TransportPage = lazy(() => import("@/pages/transport"));
+const InternalTransfersPage = lazy(() => import("@/pages/internal-transfers"));
+const LearningMaterialsPage = lazy(() => import("@/pages/learning-materials"));
 
 
 type RoutePermissionRule = {
@@ -91,10 +86,7 @@ const SCHOOL_FINANCE_ROUTE_PERMISSIONS = [
   "school_incomes.view",
   "financial_statements.view",
 ];
-const ASSETS_INVENTORY_ROUTE_PERMISSIONS = [
-  ...POS_ROUTE_PERMISSIONS,
-  ...SCHOOL_FINANCE_ROUTE_PERMISSIONS,
-];
+const ASSETS_INVENTORY_ROUTE_PERMISSIONS = ["assets.view", "inventory.view", "damage.view"];
 
 const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/dashboard$/, permissions: ["dashboard.view"] },
@@ -126,7 +118,6 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/school-incomes$/, permissions: ["school_incomes.view"] },
   { pattern: /^\/products$/, permissions: POS_ROUTE_PERMISSIONS },
   { pattern: /^\/financial-statements$/, permissions: ["financial_statements.view"] },
-  { pattern: /^\/discussion-forum$/, permissions: ["discussion_forum.view"] },
   { pattern: /^\/learning-materials$/, permissions: ["learning_materials.view"] },
   { pattern: /^\/settings$/, permissions: ["settings.view"] },
   { pattern: /^\/library$/, permissions: ["library.view"] },
@@ -135,7 +126,6 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/logbook$/, permissions: ["staff_attendance.view_own", "staff_attendance.view_all", "staff_attendance.view_logs", "staff_attendance.view_overview", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"] },
   { pattern: /^\/pos$/, permissions: POS_ROUTE_PERMISSIONS },
   { pattern: /^\/newsletters$/, permissions: ["newsletters.view"] },
-  { pattern: /^\/schemes$/, permissions: ["schemes.view"] },
   { pattern: /^\/hostel$/, permissions: ["hostel.view"] },
   { pattern: /^\/hostels$/, permissions: ["hostels.view"] },
   { pattern: /^\/applications$/, permissions: ["applications.view"] },
@@ -870,7 +860,6 @@ function AuthenticatedRoutes() {
         <Route path="/products"><ProtectedRoute component={ProductsRedirectPage} /></Route>
         <Route path="/assets-inventory"><ProtectedRoute component={AssetsInventoryPage} /></Route>
         <Route path="/financial-statements"><ProtectedRoute component={FinancialStatementsRedirectPage} /></Route>
-        <Route path="/discussion-forum" component={() => <ProtectedRoute component={DiscussionForumPage} />} />
         <Route path="/learning-materials"><ProtectedRoute component={LearningMaterialsPage} /></Route>
         <Route path="/children"><ProtectedRoute component={MyChildrenPage} /></Route>
         <Route path="/settings"><ProtectedRoute component={SchoolSettingsPage} /></Route>
@@ -880,7 +869,6 @@ function AuthenticatedRoutes() {
         <Route path="/logbook"><ProtectedRoute component={LogbookPage} /></Route>
         <Route path="/pos"><ProtectedRoute component={POSPage} /></Route>
         <Route path="/newsletters"><ProtectedRoute component={NewslettersPage} /></Route>
-        <Route path="/schemes"><ProtectedRoute component={SchemesPage} /></Route>
         <Route path="/hostel"><ProtectedRoute component={HostelPage} /></Route>
         <Route path="/hostels"><ProtectedRoute component={HostelsPage} /></Route>
         <Route path="/applications"><ProtectedRoute component={ApplicationsPage} /></Route>
@@ -971,7 +959,15 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <AuthProvider>
-          <Router />
+          <Suspense
+            fallback={(
+              <div className="min-h-screen flex items-center justify-center" role="status" aria-label="Loading page">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+              </div>
+            )}
+          >
+            <Router />
+          </Suspense>
           <Toaster />
         </AuthProvider>
       </TooltipProvider>

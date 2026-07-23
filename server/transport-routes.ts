@@ -1036,6 +1036,18 @@ async function getTransportPeriodSummary(schoolId: number, from: string, to: str
 }
 
 export function registerTransportRoutes(app: Express) {
+  app.use("/api/transport", async (req, res, next) => {
+    try {
+      const current = userOf(req);
+      if (!current || current.role !== "org_admin" || ["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+      const effectivePermissions = await storage.getUserEffectivePermissions(current.id);
+      const canManageOrganisationTransport = effectivePermissions.some((entry) => entry.permission.code === "transport.organization.manage" && entry.granted);
+      if (!canManageOrganisationTransport) return res.status(403).json({ message: "HQ Transport access is oversight-only" });
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
   app.get("/api/transport/bootstrap", requireAuth, requirePermission("transport.view"), async (req, res) => {
     try {
       const school = await schoolContext(req);
@@ -2415,7 +2427,13 @@ export function registerTransportRoutes(app: Express) {
         WHERE c.school_id=${school.id} AND c.service_year=${year} AND c.service_month=${month}
         ORDER BY v.registration_number, c.claim_number
       `);
-      const totals = rows.rows.reduce((result: any, row: any) => ({
+      type SettlementTotals = {
+        gross: number;
+        deductions: number;
+        net: number;
+        paid: number;
+      };
+      const totals = rows.rows.reduce<SettlementTotals>((result, row: any) => ({
         gross: rounded(result.gross + amount(row.grossAmount)),
         deductions: rounded(result.deductions + amount(row.deductionAmount)),
         net: rounded(result.net + amount(row.netAmount)),

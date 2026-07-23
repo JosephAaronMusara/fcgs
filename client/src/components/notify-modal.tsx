@@ -169,7 +169,7 @@ export function NotifyModal({
   const staffOptions: SearchableSelectOption[] = useMemo(() => staffDirectory.map((staff) => ({
     value: String(staff.id),
     label: fullName(staff),
-    searchText: `${staff.staffId || ""} ${staff.phone || ""} ${staff.email || ""} ${staff.position || ""}`,
+    searchText: `${staff.staffNo || ""} ${staff.role || ""} ${staff.phone || ""} ${staff.email || ""}`,
   })), [staffDirectory]);
 
   const selectedIndividualIds = recipientType === "staff" ? selectedIndividualStaffIds : selectedIndividualStudentIds;
@@ -278,7 +278,7 @@ export function NotifyModal({
             </div>
             {targetAudience === "streams" && supportsStudentAudience && <div className="space-y-2"><Label>Select Streams</Label><SearchableMultiSelect values={selectedStreamIds} onValuesChange={setSelectedStreamIds} options={streamOptions} placeholder="Search and select streams" emptyText="No streams found for this school" data-testid="multiselect-notify-streams" /></div>}
             {targetAudience === "classes" && supportsStudentAudience && <div className="space-y-2"><Label>Select Classes</Label><SearchableMultiSelect values={selectedClassIds} onValuesChange={setSelectedClassIds} options={classOptions} placeholder="Search and select classes" emptyText="No classes found for this school" data-testid="multiselect-notify-classes" /></div>}
-            {targetAudience === "individuals" && recipientType === "staff" && <div className="space-y-2"><Label>Select Staff Members</Label><SearchableMultiSelect values={selectedIndividualStaffIds} onValuesChange={setSelectedIndividualStaffIds} options={staffOptions} placeholder="Search by staff name, ID, phone, or email" emptyText="No staff found for this school" data-testid="multiselect-notify-staff-individuals" /></div>}
+            {targetAudience === "individuals" && recipientType === "staff" && <div className="space-y-2"><Label>Select Staff Members</Label><SearchableMultiSelect values={selectedIndividualStaffIds} onValuesChange={setSelectedIndividualStaffIds} options={staffOptions} placeholder="Search by staff name, staff number, role, phone, or email" emptyText="No staff found for this school" data-testid="multiselect-notify-staff-individuals" /></div>}
             {targetAudience === "individuals" && supportsStudentAudience && <div className="space-y-2"><Label>{recipientType === "parent" ? "Search Students Linked to Parents" : "Select Students"}</Label><SearchableMultiSelect values={selectedIndividualStudentIds} onValuesChange={setSelectedIndividualStudentIds} options={studentOptions} placeholder="Search by student name or admission number" emptyText="No students found for this school" data-testid="multiselect-notify-individuals" />{recipientType === "parent" && <p className="text-xs text-muted-foreground">Parents linked to the selected students will receive the message.</p>}</div>}
           </div>
           <div className="space-y-3">

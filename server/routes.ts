@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { setupAuth, requireAuth, requirePermission, requireRole } from "./auth";
-import { storage } from "./storage";
+import { setupAuth, requireAuth, requirePermission, requireAnyPermission, requireRole } from "./auth";
+import { storage, PosSaleProcessingError } from "./storage";
 import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
 import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
@@ -11,6 +11,8 @@ import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "dr
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
 import { registerTransportRoutes } from "./transport-routes";
+import { registerAssetsInventoryRoutes } from "./assets-inventory-routes";
+import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
@@ -29,13 +31,22 @@ import {
   libraryBooks as libraryBooksTable, libraryBookCopies as libraryBookCopiesTable, libraryFines as libraryFinesTable, libraryReservations as libraryReservationsTable,
   insertTimetableSlotSchema, insertLogbookEntrySchema, insertStaffAttendanceLogSchema, insertPosItemSchema,
   schools as schoolsTable, staff, parents as parentsTable,
-  insertPosSaleSchema, insertNewsletterSchema, insertSchemeSchema,
+  insertNewsletterSchema,
   insertHostelSchema, insertHostelRollCallSchema, insertStudentApplicationSchema,
   hostels as hostelsTable,
   insertPermissionSchema, insertAccessGroupSchema,
-  type User, type AccessGroup, type Staff, type InsertStudent, type InsertActivityLog
+  type User, type AccessGroup, type Staff, type InsertStudent, type InsertActivityLog, type InsertStaffAttendanceLog
 } from "@shared/schema";
 import { ECD_DOMAIN_SEEDS, filterItemsByGradeProfileKey, getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, getSubjectTypeOptionsForSchool, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, type GradeProfileKey } from "@shared/academic-profiles";
+
+function requestText(value: unknown): string {
+  if (Array.isArray(value)) return requestText(value[0]);
+  return typeof value === "string" ? value : "";
+}
+
+function requestId(value: unknown): number {
+  return Number.parseInt(requestText(value), 10);
+}
 
 function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -54,6 +65,16 @@ const updateUserSchema = z.object({
 const updateUserPermissionsSchema = z.object({
   schoolIds: z.array(z.number()).optional().default([]),
   permissionIds: z.array(z.number()).optional().default([]),
+});
+
+const posSaleRequestSchema = z.object({
+  paymentMethod: z.string().trim().min(1).max(50).default("cash"),
+  customerName: z.string().trim().max(200).nullable().optional(),
+  studentId: z.coerce.number().int().positive().nullable().optional(),
+  items: z.array(z.object({
+    itemId: z.coerce.number().int().positive(),
+    quantity: z.coerce.number().int().positive().max(100000),
+  })).min(1),
 });
 
 const PASSWORD_RULES = {
@@ -980,7 +1001,7 @@ function installActivityAudit(app: Express) {
         category,
         description: buildAuditDescription(req, action, category),
         targetType: category,
-        targetId: req.params?.id ? Number.parseInt(String(req.params.id), 10) || null : null,
+        targetId: requestId((req.params as Record<string, unknown>).id) || null,
         targetName: req.body?.name || req.body?.title || req.body?.fileName || uploadedFileNames?.[0] || null,
         metadata: {
           method: req.method,
@@ -1610,6 +1631,29 @@ async function requireSchoolScope(req: Request, res: Response): Promise<number |
     res.status(400).json({ message: "No school context" });
     return null;
   }
+
+  const currentUser = req.user as User;
+  if (currentUser.role === "org_admin") {
+    const school = await storage.getSchool(schoolId);
+    if (!school) {
+      res.status(404).json({ message: "School not found" });
+      return null;
+    }
+
+    if (currentUser.organizationId !== null && currentUser.organizationId !== undefined) {
+      if (school.organizationId !== currentUser.organizationId) {
+        res.status(403).json({ message: "School not in organization context" });
+        return null;
+      }
+    } else {
+      const allowedSchoolIds = await storage.getUserSchoolAccess(currentUser.id);
+      if (!allowedSchoolIds.includes(schoolId)) {
+        res.status(403).json({ message: "School not assigned to this account" });
+        return null;
+      }
+    }
+  }
+
   return schoolId;
 }
 
@@ -1629,6 +1673,15 @@ async function ensureSubjectInSchool(subjectId: number, schoolId: number, res: R
     return null;
   }
   return subjectInfo;
+}
+
+async function ensureStaffInSchool(staffId: number, schoolId: number, res: Response) {
+  const staffMember = await storage.getStaff(staffId);
+  if (!staffMember || staffMember.schoolId !== schoolId) {
+    res.status(403).json({ message: "Staff member not in school context" });
+    return null;
+  }
+  return staffMember;
 }
 
 async function ensureGradeInSchool(gradeId: number, schoolId: number, res: Response) {
@@ -2236,6 +2289,14 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  function routeParam(value: unknown): string {
+    return requestText(value);
+  }
+
+  function parseIdParam(value: unknown): number {
+    return requestId(value);
+  }
+
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString(), uptime: process.uptime() });
   });
@@ -2281,6 +2342,8 @@ export async function registerRoutes(
   registerObjectStorageRoutes(app);
   registerCalendarRoutes(app);
   registerTransportRoutes(app);
+  registerAssetsInventoryRoutes(app);
+  registerHqOperationsRoutes(app);
   await ensureEcdSeedData();
 
   const readOnlyExemptPaths = [
@@ -2410,7 +2473,7 @@ export async function registerRoutes(
 
   app.put("/api/users/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const userId = parseInt(req.params.id);
+      const userId = parseIdParam(req.params.id);
       const parsed = updateUserSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ message: "Invalid request body", errors: parsed.error.errors });
@@ -2428,7 +2491,7 @@ export async function registerRoutes(
 
   app.delete("/api/users/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const userId = parseInt(req.params.id);
+      const userId = parseIdParam(req.params.id);
       const currentUser = req.user as Express.User;
       if (userId === currentUser.id) {
         return res.status(400).json({ message: "Cannot delete your own account" });
@@ -2443,7 +2506,7 @@ export async function registerRoutes(
   app.get("/api/users/:id/schools", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
-      const userId = parseInt(req.params.id);
+      const userId = parseIdParam(req.params.id);
       const access = await checkTenantAccess(currentUser, userId, { repairLegacyOrgAdmin: true });
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
@@ -2460,7 +2523,7 @@ export async function registerRoutes(
   app.put("/api/users/:id/permissions", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
-      const userId = parseInt(req.params.id);
+      const userId = parseIdParam(req.params.id);
       const parsed = updateUserPermissionsSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ message: "Invalid request body", errors: parsed.error.errors });
@@ -2502,7 +2565,7 @@ export async function registerRoutes(
 
   app.put("/api/users/:id/password", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const userId = parseInt(req.params.id);
+      const userId = parseIdParam(req.params.id);
       const { password } = req.body;
       if (!password || password.length < 6) {
         return res.status(400).json({ message: "Password must be at least 6 characters" });
@@ -2521,7 +2584,7 @@ export async function registerRoutes(
 
   app.put("/api/users/:id/status", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const userId = parseInt(req.params.id);
+      const userId = parseIdParam(req.params.id);
       const currentUser = req.user as User;
       if (userId === currentUser.id) {
         return res.status(400).json({ message: "Cannot change your own account status" });
@@ -2880,7 +2943,7 @@ export async function registerRoutes(
         allStaff = await storage.getStaffBySchool(schoolId);
       } else if (currentUser?.organizationId) {
         const orgSchools = await storage.getSchoolsByOrganization(currentUser.organizationId);
-        schoolMap = new Map(orgSchools.map(s => [s.id, s.schoolName]));
+        schoolMap = new Map(orgSchools.map(s => [s.id, s.name]));
         const staffArrays = await Promise.all(orgSchools.map(s => storage.getStaffBySchool(s.id)));
         allStaff = staffArrays.flat();
       } else {
@@ -2914,7 +2977,7 @@ export async function registerRoutes(
 
   app.get("/api/staff/:id", requireAuth, async (req, res, next) => {
     try {
-      const staffMember = await storage.getStaff(parseInt(req.params.id));
+      const staffMember = await storage.getStaff(parseIdParam(req.params.id));
       if (!staffMember) {
         return res.status(404).json({ message: "Staff not found" });
       }
@@ -2968,7 +3031,7 @@ export async function registerRoutes(
       if ("nationalIdNumber" in payload && !payload.nationalIdNumber) {
         return res.status(400).json({ message: "National ID Number is required" });
       }
-      const updated = await storage.updateStaff(parseInt(req.params.id), payload);
+      const updated = await storage.updateStaff(parseIdParam(req.params.id), payload);
       if (!updated) {
         return res.status(404).json({ message: "Staff not found" });
       }
@@ -2981,7 +3044,7 @@ export async function registerRoutes(
 
   app.delete("/api/staff/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      await storage.deleteStaff(parseInt(req.params.id));
+      await storage.deleteStaff(parseIdParam(req.params.id));
       res.json({ message: "Staff deleted successfully" });
     } catch (error) {
       next(error);
@@ -3028,7 +3091,7 @@ export async function registerRoutes(
 
   app.post("/api/staff/:id/reset-mobile-id", requireAuth, requirePermission("staff_attendance.reset_device_id"), async (req, res, next) => {
     try {
-      const targetStaffId = parseInt(req.params.id);
+      const targetStaffId = parseIdParam(req.params.id);
       const existingStaff = await storage.getStaff(targetStaffId);
       const updated = await storage.updateStaff(targetStaffId, { mobileId: null });
       if (!updated) {
@@ -3055,7 +3118,7 @@ export async function registerRoutes(
 
   app.get("/api/staff/:id/subjects", requireAuth, async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const subjects = await storage.getStaffSubjects(staffId);
       res.json(subjects);
     } catch (error) {
@@ -3065,7 +3128,7 @@ export async function registerRoutes(
 
   app.put("/api/staff/:id/subjects", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const { subjectIds } = req.body;
       if (!Array.isArray(subjectIds)) {
         return res.status(400).json({ message: "Invalid subject IDs" });
@@ -3079,7 +3142,7 @@ export async function registerRoutes(
 
   app.get("/api/staff/:id/subject-assignments", requireAuth, requirePermission("staff.assign_subjects"), async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id, 10);
+      const staffId = parseIdParam(req.params.id);
       if (Number.isNaN(staffId)) return res.status(400).json({ message: "Invalid staff ID" });
 
       const rows = await storage.getStaffSubjects(staffId);
@@ -3151,7 +3214,7 @@ export async function registerRoutes(
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
 
-      const staffId = parseInt(req.params.id, 10);
+      const staffId = parseIdParam(req.params.id);
       if (Number.isNaN(staffId)) return res.status(400).json({ message: "Invalid staff ID" });
 
       const staffMember = await storage.getStaff(staffId);
@@ -3165,12 +3228,13 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Assignments payload is required" });
       }
 
-      const normalizedAssignments = bodyAssignments.map((row: any) => ({
+      type StaffSubjectAssignmentInput = { classId: number; subjectId: number };
+      const normalizedAssignments: StaffSubjectAssignmentInput[] = (bodyAssignments as unknown[]).map((row: any) => ({
         classId: Number(row?.classId),
         subjectId: Number(row?.subjectId),
       }));
-      const normalizedReassignments = new Set(
-        bodyReassignments.map((row: any) => `${Number(row?.classId)}-${Number(row?.subjectId)}`)
+      const normalizedReassignments = new Set<string>(
+        (bodyReassignments as unknown[]).map((row: any) => `${Number(row?.classId)}-${Number(row?.subjectId)}`)
       );
 
       if (normalizedAssignments.some((row) => Number.isNaN(row.classId) || Number.isNaN(row.subjectId))) {
@@ -3261,7 +3325,7 @@ export async function registerRoutes(
 
   app.get("/api/staff/:id/classes", requireAuth, async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const classes = await storage.getStaffClasses(staffId);
       res.json(classes);
     } catch (error) {
@@ -3271,7 +3335,7 @@ export async function registerRoutes(
 
   app.put("/api/staff/:id/classes", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const { classIds } = req.body;
       if (!Array.isArray(classIds)) {
         return res.status(400).json({ message: "Invalid class IDs" });
@@ -3286,7 +3350,7 @@ export async function registerRoutes(
   // Staff User Account Management
   app.get("/api/staff/:id/user", requireAuth, async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const staffMember = await storage.getStaff(staffId);
       if (!staffMember) {
         return res.status(404).json({ message: "Staff member not found" });
@@ -3308,7 +3372,7 @@ export async function registerRoutes(
 
   app.post("/api/staff/:id/user", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const { username, password, sendResetToken } = req.body;
       if (!username) {
         return res.status(400).json({ message: "Username is required" });
@@ -3406,7 +3470,7 @@ export async function registerRoutes(
 
   app.put("/api/staff/:id/user/password", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const { password } = req.body;
       if (!password) {
         return res.status(400).json({ message: "Password is required" });
@@ -3425,7 +3489,7 @@ export async function registerRoutes(
 
   app.put("/api/staff/:id/user/status", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.id);
+      const staffId = parseIdParam(req.params.id);
       const { isActive } = req.body;
       if (typeof isActive !== "boolean") {
         return res.status(400).json({ message: "isActive must be a boolean" });
@@ -3493,7 +3557,7 @@ export async function registerRoutes(
 
   app.get("/api/classes/:id", requireAuth, async (req, res, next) => {
     try {
-      const classData = await storage.getClass(parseInt(req.params.id));
+      const classData = await storage.getClass(parseIdParam(req.params.id));
       if (!classData) {
         return res.status(404).json({ message: "Class not found" });
       }
@@ -3520,7 +3584,7 @@ export async function registerRoutes(
 
   app.put("/api/classes/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateClass(parseInt(req.params.id), req.body);
+      const updated = await storage.updateClass(parseIdParam(req.params.id), req.body);
       if (!updated) {
         return res.status(404).json({ message: "Class not found" });
       }
@@ -3537,14 +3601,14 @@ export async function registerRoutes(
   app.delete("/api/classes/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const classData = await storage.getClass(parseInt(req.params.id));
+      const classData = await storage.getClass(parseIdParam(req.params.id));
       if (!classData) {
         return res.status(404).json({ message: "Class not found" });
       }
       if (schoolId && classData.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      await storage.deleteClass(parseInt(req.params.id));
+      await storage.deleteClass(parseIdParam(req.params.id));
       res.json({ message: "Class deleted successfully" });
     } catch (error) {
       next(error);
@@ -3553,7 +3617,7 @@ export async function registerRoutes(
 
   app.get("/api/classes/:id/student-count", requireAuth, async (req, res, next) => {
     try {
-      const count = await storage.getStudentCountByClass(parseInt(req.params.id));
+      const count = await storage.getStudentCountByClass(parseIdParam(req.params.id));
       res.json({ count });
     } catch (error) {
       next(error);
@@ -3583,7 +3647,7 @@ export async function registerRoutes(
 
   app.get("/api/classes/:id/subjects", requireAuth, async (req, res, next) => {
     try {
-      const classId = parseInt(req.params.id);
+      const classId = parseIdParam(req.params.id);
       const classData = await storage.getClass(classId);
       if (!classData) {
         return res.status(404).json({ message: "Class not found" });
@@ -3602,7 +3666,7 @@ export async function registerRoutes(
   app.post("/api/classes/:id/subjects", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const classId = parseInt(req.params.id);
+      const classId = parseIdParam(req.params.id);
       const classData = await storage.getClass(classId);
       if (!classData) {
         return res.status(404).json({ message: "Class not found" });
@@ -3652,7 +3716,7 @@ export async function registerRoutes(
   app.delete("/api/classes/:id/subjects/:subjectId", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const classId = parseInt(req.params.id);
+      const classId = parseIdParam(req.params.id);
       const classData = await storage.getClass(classId);
       if (!classData) {
         return res.status(404).json({ message: "Class not found" });
@@ -3660,7 +3724,7 @@ export async function registerRoutes(
       if (schoolId && classData.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const subjectId = parseInt(req.params.subjectId);
+      const subjectId = parseIdParam(req.params.subjectId);
       const payload = await buildClassSubjectManagementPayload(classId);
       const inherited = new Set((payload?.inheritedSelected ?? []).map(Number));
       const directSelected = new Set((payload?.directSelected ?? []).map(Number));
@@ -3690,7 +3754,7 @@ export async function registerRoutes(
   app.put("/api/classes/:id/subjects", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const classId = parseInt(req.params.id);
+      const classId = parseIdParam(req.params.id);
       const classData = await storage.getClass(classId);
       if (!classData) {
         return res.status(404).json({ message: "Class not found" });
@@ -3744,7 +3808,7 @@ export async function registerRoutes(
   app.post("/api/classes/:id/migrate", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const fromClassId = parseInt(req.params.id);
+      const fromClassId = parseIdParam(req.params.id);
       const { toClassId, studentIds } = req.body;
       
       if (!toClassId) {
@@ -3813,7 +3877,7 @@ export async function registerRoutes(
   app.get("/api/parents/:id", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parent = await storage.getParent(parseInt(req.params.id));
+      const parent = await storage.getParent(parseIdParam(req.params.id));
       if (!parent) {
         return res.status(404).json({ message: "Parent not found" });
       }
@@ -3853,7 +3917,7 @@ export async function registerRoutes(
   app.put("/api/parents/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parentId = parseInt(req.params.id);
+      const parentId = parseIdParam(req.params.id);
       const parent = await storage.getParent(parentId);
       if (!parent) {
         return res.status(404).json({ message: "Parent not found" });
@@ -3874,7 +3938,7 @@ export async function registerRoutes(
   app.delete("/api/parents/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parentId = parseInt(req.params.id);
+      const parentId = parseIdParam(req.params.id);
       const parent = await storage.getParent(parentId);
       if (!parent) {
         return res.status(404).json({ message: "Parent not found" });
@@ -3970,7 +4034,7 @@ export async function registerRoutes(
   app.get("/api/parents/:id/user", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parentId = parseInt(req.params.id);
+      const parentId = parseIdParam(req.params.id);
       const parent = await storage.getParent(parentId);
       if (!parent) {
         return res.status(404).json({ message: "Parent not found" });
@@ -3999,7 +4063,7 @@ export async function registerRoutes(
   app.post("/api/parents/:id/user", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parentId = parseInt(req.params.id);
+      const parentId = parseIdParam(req.params.id);
       const { username, password, sendResetToken } = req.body;
       
       if (!username) {
@@ -4101,7 +4165,7 @@ export async function registerRoutes(
   app.put("/api/parents/:id/user/password", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parentId = parseInt(req.params.id);
+      const parentId = parseIdParam(req.params.id);
       const { password } = req.body;
       
       if (!password || password.length < 6) {
@@ -4130,7 +4194,7 @@ export async function registerRoutes(
   app.put("/api/parents/:id/user/status", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const parentId = parseInt(req.params.id);
+      const parentId = parseIdParam(req.params.id);
       const { isActive } = req.body;
       
       const parent = await storage.getParent(parentId);
@@ -4251,7 +4315,7 @@ export async function registerRoutes(
         classMap = new Map(allClasses.map(c => [c.id, c]));
       } else if (currentUser?.organizationId) {
         const orgSchools = await storage.getSchoolsByOrganization(currentUser.organizationId);
-        schoolMap = new Map(orgSchools.map(s => [s.id, s.schoolName]));
+        schoolMap = new Map(orgSchools.map(s => [s.id, s.name]));
         const dataArrays = await Promise.all(orgSchools.map(async s => {
           const studs = await storage.getStudentsBySchool(s.id);
           const cls = await storage.getClassesBySchool(s.id);
@@ -4303,7 +4367,7 @@ export async function registerRoutes(
 
   app.get("/api/students/by-class/:classId", requireAuth, async (req, res, next) => {
     try {
-      const studentList = await storage.getStudentsByClass(parseInt(req.params.classId));
+      const studentList = await storage.getStudentsByClass(parseIdParam(req.params.classId));
       res.json(studentList);
     } catch (error) {
       next(error);
@@ -4312,7 +4376,7 @@ export async function registerRoutes(
 
   app.get("/api/students/by-parent/:parentId", requireAuth, async (req, res, next) => {
     try {
-      const requestedParentId = parseInt(req.params.parentId);
+      const requestedParentId = parseIdParam(req.params.parentId);
       const user = req.user as User;
       
       if (user.role === "parent") {
@@ -4337,7 +4401,7 @@ export async function registerRoutes(
 
   app.get("/api/students/:id", requireAuth, async (req, res, next) => {
     try {
-      const student = await storage.getStudent(parseInt(req.params.id));
+      const student = await storage.getStudent(parseIdParam(req.params.id));
       if (!student) {
         return res.status(404).json({ message: "Student not found" });
       }
@@ -4407,7 +4471,7 @@ export async function registerRoutes(
 
   app.put("/api/students/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
       const existing = await storage.getStudent(studentId);
       if (!existing) {
         return res.status(404).json({ message: "Student not found" });
@@ -4456,7 +4520,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
 
       const student = await storage.getStudent(studentId);
       if (!student || student.archivedAt) {
@@ -4490,7 +4554,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const student = await storage.getStudent(id);
       if (!student || student.archivedAt) {
         return res.status(404).json({ message: "Student not found" });
@@ -4512,7 +4576,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
       const student = await storage.getStudent(studentId);
       if (!student) {
         return res.status(404).json({ message: "Student not found" });
@@ -4527,7 +4591,26 @@ export async function registerRoutes(
     }
   });
 
-  const photoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+  const photoUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 20 * 1024 * 1024 },
+    fileFilter: (_req, file, callback) => {
+      if (!file.mimetype?.startsWith("image/")) return callback(new Error("Only image files are allowed"));
+      callback(null, true);
+    },
+  });
+
+  type PhotoRecord = {
+    id: number;
+    schoolId: number | null;
+    firstName: string;
+    lastName: string;
+    photo?: string | null;
+    admissionNo?: string | null;
+    staffNo?: string | null;
+    organizationId?: number | null;
+    username?: string | null;
+  };
 
   async function getPhotoLimitBytes(schoolId: number): Promise<number> {
     const school = await storage.getSchool(schoolId);
@@ -4538,79 +4621,164 @@ export async function registerRoutes(
     return 5 * 1024 * 1024;
   }
 
-  app.post("/api/students/:id/photo", requireAuth, requireRole("school_admin", "org_admin", "teacher"), photoUpload.single("photo"), async (req, res, next) => {
+  async function assertPhotoRecordAccess(req: Request, record: PhotoRecord): Promise<number> {
+    if (!record.schoolId) throw new Error("Record has no school context");
+    const currentUser = req.user as User;
+    const requestedSchoolId = getSchoolContext(req);
+    if (requestedSchoolId && requestedSchoolId !== record.schoolId) throw new Error("Access denied");
+    if (currentUser.role !== "org_admin" && currentUser.schoolId !== record.schoolId) throw new Error("Access denied");
+    if (currentUser.role === "org_admin" && currentUser.organizationId) {
+      const school = await storage.getSchool(record.schoolId);
+      if (!school || school.organizationId !== currentUser.organizationId) throw new Error("Access denied");
+    }
+    return record.schoolId;
+  }
+
+  function photoExtension(file: Express.Multer.File): string {
+    const mimeMap: Record<string, string> = {
+      "image/jpeg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+      "image/gif": "gif",
+      "image/heic": "heic",
+      "image/heif": "heif",
+    };
+    if (mimeMap[file.mimetype]) return mimeMap[file.mimetype];
+    const rawExt = path.extname(file.originalname || "").toLowerCase().replace(".", "");
+    return /^[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : "jpg";
+  }
+
+  function safeProfileFileName(record: PhotoRecord, entity: "student" | "staff" | "parent" | "user", extension: string): string {
+    const reference = entity === "student" ? record.admissionNo : entity === "staff" ? record.staffNo : entity === "user" ? `HQ-${record.id}` : `PARENT-${record.id}`;
+    const base = `${record.firstName}_${record.lastName}_${reference || record.id}`
+      .normalize("NFKD")
+      .replace(/[^a-zA-Z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return `${base || `${entity}_${record.id}`}.${extension}`;
+  }
+
+  async function saveProfilePhoto(args: {
+    req: Request;
+    record: PhotoRecord;
+    entity: "student" | "staff" | "parent";
+    folder: string;
+    update: (photo: string) => Promise<unknown>;
+  }): Promise<string> {
+    if (!args.req.file) throw new Error("No image file uploaded");
+    const schoolId = await assertPhotoRecordAccess(args.req, args.record);
+    const limitBytes = await getPhotoLimitBytes(schoolId);
+    if (args.req.file.size > limitBytes) throw new Error(`Photo exceeds the ${Math.round(limitBytes / (1024 * 1024))}MB upload limit`);
+    const extension = photoExtension(args.req.file);
+    const objectRoot = path.resolve(process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage");
+    const objectName = `uploads/${args.folder}/${args.record.id}-${Date.now()}.${extension}`;
+    const absolutePath = path.resolve(objectRoot, objectName);
+    if (!absolutePath.startsWith(`${objectRoot}${path.sep}`)) throw new Error("Invalid photo path");
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, args.req.file.buffer);
+    const photoPath = `/objects/${objectName}`;
+    await args.update(photoPath);
+    return photoPath;
+  }
+
+  async function downloadProfilePhoto(res: Response, record: PhotoRecord, entity: "student" | "staff" | "parent" | "user") {
+    if (!record.photo || !record.photo.startsWith("/objects/")) return res.status(404).json({ message: "No profile photo is available" });
+    const objectRoot = path.resolve(process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage");
+    const relativePath = record.photo.replace(/^\/objects\//, "");
+    const absolutePath = path.resolve(objectRoot, relativePath);
+    if (!absolutePath.startsWith(`${objectRoot}${path.sep}`)) return res.status(400).json({ message: "Invalid photo path" });
     try {
-      if (!req.file) return res.status(400).json({ message: "No image file uploaded" });
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
-      const studentId = parseInt(req.params.id);
-      const student = await storage.getStudent(studentId);
-      if (!student) return res.status(404).json({ message: "Student not found" });
-      if (student.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
-      const limitBytes = await getPhotoLimitBytes(schoolId);
-      if (req.file.size > limitBytes) return res.status(400).json({ message: `Photo exceeds the ${Math.round(limitBytes / (1024 * 1024))}MB upload limit` });
+      await fs.access(absolutePath);
+    } catch {
+      return res.status(404).json({ message: "Profile photo file was not found" });
+    }
+    const extension = path.extname(absolutePath).replace(".", "") || "jpg";
+    return res.download(absolutePath, safeProfileFileName(record, entity, extension));
+  }
 
-      const objectRoot = process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage";
-
-
-      const rawExt = path.extname(req.file.originalname || "").toLowerCase().replace(".", "");
-
-
-      const ext = /^[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : "jpg";
-
-
-      const objectName = `uploads/student-photos/${studentId}-${Date.now()}.${ext}`;
-
-
-      const absPath = path.join(objectRoot, objectName);
-
-
-      await fs.mkdir(path.dirname(absPath), { recursive: true });
-
-
-      await fs.writeFile(absPath, req.file.buffer);
-
-      const photoPath = `/objects/${objectName}`;
-      await storage.updateStudent(studentId, { photo: photoPath });
-      res.json({ photo: photoPath });
+  app.post("/api/students/:id/photo", requireAuth, requireAnyPermission("students.edit", "students.manage_photo"), photoUpload.single("photo"), async (req, res, next) => {
+    try {
+      const record = await storage.getStudent(parseIdParam(req.params.id));
+      if (!record) return res.status(404).json({ message: "Student not found" });
+      const photo = await saveProfilePhoto({ req, record, entity: "student", folder: "student-photos", update: (value) => storage.updateStudent(record.id, { photo: value }) });
+      res.json({ photo });
     } catch (error) { next(error); }
   });
 
-  app.post("/api/staff/:id/photo", requireAuth, requireRole("school_admin", "org_admin"), photoUpload.single("photo"), async (req, res, next) => {
+  app.get("/api/students/:id/photo/download", requireAuth, requireAnyPermission("students.view", "students.edit", "students.manage_photo"), async (req, res, next) => {
     try {
+      const record = await storage.getStudent(parseIdParam(req.params.id));
+      if (!record) return res.status(404).json({ message: "Student not found" });
+      await assertPhotoRecordAccess(req, record);
+      return downloadProfilePhoto(res, record, "student");
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/staff/:id/photo", requireAuth, requireAnyPermission("staff.edit", "staff.manage_photo"), photoUpload.single("photo"), async (req, res, next) => {
+    try {
+      const record = await storage.getStaff(parseIdParam(req.params.id));
+      if (!record) return res.status(404).json({ message: "Staff member not found" });
+      const photo = await saveProfilePhoto({ req, record, entity: "staff", folder: "staff-photos", update: (value) => storage.updateStaff(record.id, { photo: value }) });
+      res.json({ photo });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/staff/:id/photo/download", requireAuth, requireAnyPermission("staff.view", "staff.edit", "staff.manage_photo"), async (req, res, next) => {
+    try {
+      const record = await storage.getStaff(parseIdParam(req.params.id));
+      if (!record) return res.status(404).json({ message: "Staff member not found" });
+      await assertPhotoRecordAccess(req, record);
+      return downloadProfilePhoto(res, record, "staff");
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/parents/:id/photo", requireAuth, requireAnyPermission("parents.edit", "parents.manage_photo"), photoUpload.single("photo"), async (req, res, next) => {
+    try {
+      const record = await storage.getParent(parseIdParam(req.params.id));
+      if (!record) return res.status(404).json({ message: "Parent not found" });
+      const photo = await saveProfilePhoto({ req, record, entity: "parent", folder: "parent-photos", update: (value) => storage.updateParent(record.id, { photo: value }) });
+      res.json({ photo });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/parents/:id/photo/download", requireAuth, requireAnyPermission("parents.view", "parents.edit", "parents.manage_photo"), async (req, res, next) => {
+    try {
+      const record = await storage.getParent(parseIdParam(req.params.id));
+      if (!record) return res.status(404).json({ message: "Parent not found" });
+      await assertPhotoRecordAccess(req, record);
+      return downloadProfilePhoto(res, record, "parent");
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/users/:id/photo", requireAuth, requireAnyPermission("users.edit", "users.manage_photo"), photoUpload.single("photo"), async (req, res, next) => {
+    try {
+      const record = await storage.getUser(parseIdParam(req.params.id));
+      if (!record || record.role !== "org_admin") return res.status(404).json({ message: "HQ staff member not found" });
+      const current = req.user as User;
+      if (current.role !== "org_admin" || !current.organizationId || record.organizationId !== current.organizationId) return res.status(403).json({ message: "Access denied" });
       if (!req.file) return res.status(400).json({ message: "No image file uploaded" });
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
-      const staffId = parseInt(req.params.id);
-      const staffMember = await storage.getStaff(staffId);
-      if (!staffMember) return res.status(404).json({ message: "Staff member not found" });
-      if (staffMember.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
-      const limitBytes = await getPhotoLimitBytes(schoolId);
+      const org = await storage.getOrganization(current.organizationId);
+      const limitBytes = (org?.photoUploadLimitMB || 5) * 1024 * 1024;
       if (req.file.size > limitBytes) return res.status(400).json({ message: `Photo exceeds the ${Math.round(limitBytes / (1024 * 1024))}MB upload limit` });
+      const extension = photoExtension(req.file);
+      const objectRoot = path.resolve(process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage");
+      const objectName = `uploads/hq-staff-photos/${record.id}-${Date.now()}.${extension}`;
+      const absolutePath = path.resolve(objectRoot, objectName);
+      if (!absolutePath.startsWith(`${objectRoot}${path.sep}`)) return res.status(400).json({ message: "Invalid photo path" });
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await fs.writeFile(absolutePath, req.file.buffer);
+      const photo = `/objects/${objectName}`;
+      await storage.updateUser(record.id, { photo });
+      res.json({ photo });
+    } catch (error) { next(error); }
+  });
 
-      const objectRoot = process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage";
-
-
-      const rawExt = path.extname(req.file.originalname || "").toLowerCase().replace(".", "");
-
-
-      const ext = /^[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : "jpg";
-
-
-      const objectName = `uploads/staff-photos/${staffId}-${Date.now()}.${ext}`;
-
-
-      const absPath = path.join(objectRoot, objectName);
-
-
-      await fs.mkdir(path.dirname(absPath), { recursive: true });
-
-
-      await fs.writeFile(absPath, req.file.buffer);
-
-      const photoPath = `/objects/${objectName}`;
-      await storage.updateStaff(staffId, { photo: photoPath });
-      res.json({ photo: photoPath });
+  app.get("/api/users/:id/photo/download", requireAuth, requireAnyPermission("users.view", "users.edit", "users.manage_photo"), async (req, res, next) => {
+    try {
+      const record = await storage.getUser(parseIdParam(req.params.id));
+      if (!record || record.role !== "org_admin") return res.status(404).json({ message: "HQ staff member not found" });
+      const current = req.user as User;
+      if (current.role !== "org_admin" || !current.organizationId || record.organizationId !== current.organizationId) return res.status(403).json({ message: "Access denied" });
+      return downloadProfilePhoto(res, { ...record, schoolId: null, firstName: record.firstName || record.username, lastName: record.lastName || "", organizationId: record.organizationId }, "user");
     } catch (error) { next(error); }
   });
 
@@ -4618,7 +4786,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
       const student = await storage.getStudent(studentId);
       if (!student) {
         return res.status(404).json({ message: "Student not found" });
@@ -4771,7 +4939,7 @@ export async function registerRoutes(
               const newParent = await storage.createParent({
                 firstName,
                 lastName,
-                phone: student.parentPhone?.trim(),
+                phone: student.parentPhone?.trim() || "",
                 email: student.parentEmail?.trim() || undefined,
                 relationship: student.parentRelationship?.trim() || undefined,
                 schoolId: effectiveSchoolId,
@@ -4841,7 +5009,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
       const student = await storage.getStudent(studentId);
       if (!student) {
         return res.status(404).json({ message: "Student not found" });
@@ -4863,7 +5031,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
       const student = await storage.getStudent(studentId);
       if (!student) {
         return res.status(404).json({ message: "Student not found" });
@@ -4957,7 +5125,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
       const student = await storage.getStudent(studentId);
       if (!student || !student.userId) {
         return res.status(404).json({ message: "Student or user account not found" });
@@ -4981,7 +5149,7 @@ export async function registerRoutes(
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
-      const studentId = parseInt(req.params.id);
+      const studentId = parseIdParam(req.params.id);
       const student = await storage.getStudent(studentId);
       if (!student || !student.userId) {
         return res.status(404).json({ message: "Student or user account not found" });
@@ -5053,7 +5221,7 @@ export async function registerRoutes(
   app.get("/api/subjects/:id", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const subject = await storage.getSubject(parseInt(req.params.id));
+      const subject = await storage.getSubject(parseIdParam(req.params.id));
       if (!subject) {
         return res.status(404).json({ message: "Subject not found" });
       }
@@ -5085,7 +5253,7 @@ export async function registerRoutes(
   app.put("/api/subjects/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const subject = await storage.getSubject(parseInt(req.params.id));
+      const subject = await storage.getSubject(parseIdParam(req.params.id));
       if (!subject) {
         return res.status(404).json({ message: "Subject not found" });
       }
@@ -5095,7 +5263,7 @@ export async function registerRoutes(
       const validated = await validateSubjectPayloadForSchool(subject.schoolId, req.body, res, subject);
       if (!validated) return;
       const { name, shortCode, syllabusCode, subjectType, description, streamId, streamIds } = req.body;
-      const updateData: Partial<{ name: string; shortCode: string; syllabusCode: string | null; subjectType: string; description: string; streamId: number | null; streamIds: number[] | null }> = {};
+      const updateData: Partial<z.infer<typeof insertSubjectSchema>> = {};
       if (name !== undefined) updateData.name = name;
       if (shortCode !== undefined) updateData.shortCode = shortCode;
       if (syllabusCode !== undefined) updateData.syllabusCode = syllabusCode;
@@ -5104,7 +5272,7 @@ export async function registerRoutes(
       if (streamId !== undefined) updateData.streamId = streamId;
       if (streamIds !== undefined) updateData.streamIds = streamIds;
       
-      const updated = await storage.updateSubject(parseInt(req.params.id), updateData);
+      const updated = await storage.updateSubject(parseIdParam(req.params.id), updateData);
       res.json(updated);
     } catch (error) {
       next(error);
@@ -5114,14 +5282,14 @@ export async function registerRoutes(
   app.delete("/api/subjects/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const subject = await storage.getSubject(parseInt(req.params.id));
+      const subject = await storage.getSubject(parseIdParam(req.params.id));
       if (!subject) {
         return res.status(404).json({ message: "Subject not found" });
       }
       if (schoolId && subject.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      await storage.deleteSubject(parseInt(req.params.id));
+      await storage.deleteSubject(parseIdParam(req.params.id));
       res.json({ message: "Subject deleted successfully" });
     } catch (error) {
       next(error);
@@ -5187,7 +5355,7 @@ export async function registerRoutes(
   app.put("/api/grades/:id", requireAuth, requireRole("school_admin", "org_admin", "teacher", "quality_control_officer"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const grade = await storage.getGrade(parseInt(req.params.id));
+      const grade = await storage.getGrade(parseIdParam(req.params.id));
       if (!grade) {
         return res.status(404).json({ message: "Grade not found" });
       }
@@ -5206,7 +5374,7 @@ export async function registerRoutes(
       if (gradeStatus !== undefined) updateData.gradeStatus = gradeStatus;
       if (gradeType !== undefined) updateData.gradeType = gradeType;
       
-      const updated = await storage.updateGrade(parseInt(req.params.id), updateData);
+      const updated = await storage.updateGrade(parseIdParam(req.params.id), updateData);
       res.json(updated);
     } catch (error) {
       next(error);
@@ -5216,14 +5384,14 @@ export async function registerRoutes(
   app.delete("/api/grades/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const grade = await storage.getGrade(parseInt(req.params.id));
+      const grade = await storage.getGrade(parseIdParam(req.params.id));
       if (!grade) {
         return res.status(404).json({ message: "Grade not found" });
       }
       if (schoolId && grade.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      await storage.deleteGrade(parseInt(req.params.id));
+      await storage.deleteGrade(parseIdParam(req.params.id));
       res.json({ message: "Grade deleted successfully" });
     } catch (error) {
       next(error);
@@ -5235,7 +5403,7 @@ export async function registerRoutes(
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
 
-      const classId = parseInt(req.params.classId);
+      const classId = parseIdParam(req.params.classId);
       const classInfo = await ensureClassInSchool(classId, schoolId, res);
       if (!classInfo) return;
 
@@ -5257,7 +5425,7 @@ export async function registerRoutes(
 
   app.delete("/api/assessments/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.id));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseIdParam(req.params.id));
       if (!scoped) return;
       if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
@@ -5270,7 +5438,7 @@ export async function registerRoutes(
 
   app.get("/api/marks/by-assessment/:assessmentId", requireAuth, async (req, res, next) => {
     try {
-      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseIdParam(req.params.assessmentId));
       if (!scoped) return;
 
       const markList = await storage.getMarksByAssessment(scoped.assessment.id);
@@ -5285,7 +5453,7 @@ export async function registerRoutes(
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
 
-      const studentId = parseInt(req.params.studentId);
+      const studentId = parseIdParam(req.params.studentId);
       const student = await ensureStudentInSchool(studentId, schoolId, res);
       if (!student) return;
 
@@ -5348,8 +5516,8 @@ export async function registerRoutes(
 
   app.get("/api/attendance/by-class/:classId/:date", requireAuth, async (req, res, next) => {
     try {
-      const date = req.params.date || new Date().toISOString().split('T')[0];
-      const records = await storage.getAttendanceByClass(parseInt(req.params.classId), date);
+      const date = routeParam(req.params.date) || new Date().toISOString().split('T')[0];
+      const records = await storage.getAttendanceByClass(parseIdParam(req.params.classId), date);
       res.json(records);
     } catch (error) {
       next(error);
@@ -5358,7 +5526,7 @@ export async function registerRoutes(
 
   app.get("/api/attendance/by-student/:studentId", requireAuth, async (req, res, next) => {
     try {
-      const records = await storage.getAttendanceByStudent(parseInt(req.params.studentId));
+      const records = await storage.getAttendanceByStudent(parseIdParam(req.params.studentId));
       res.json(records);
     } catch (error) {
       next(error);
@@ -5392,7 +5560,7 @@ export async function registerRoutes(
           return res.status(403).json({ message: "Only the currently assigned class teacher can mark this class register" });
         }
 
-        const classIdsToMark = Array.from(new Set(parsed.map((rec: any) => Number(rec.classId)).filter(Number.isFinite)));
+        const classIdsToMark = Array.from(new Set<number>(parsed.map((rec: any) => Number(rec.classId)).filter((classId: number) => Number.isFinite(classId))));
         for (const classId of classIdsToMark) {
           const classInfo = await storage.getClass(classId);
           if (!classInfo) {
@@ -5595,12 +5763,12 @@ export async function registerRoutes(
 
   app.get("/api/attendance/grid/:classId/:from/:to", requireAuth, async (req, res, next) => {
     try {
-      const classParam = req.params.classId;
+      const classParam = routeParam(req.params.classId);
       const showAllClasses = classParam === "all";
-      const classId = showAllClasses ? null : parseInt(classParam);
+      const classId = showAllClasses ? null : Number.parseInt(classParam, 10);
       const isValidDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime());
-      let from = req.params.from || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-      let to = req.params.to || new Date().toISOString().split('T')[0];
+      let from = routeParam(req.params.from) || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+      let to = routeParam(req.params.to) || new Date().toISOString().split('T')[0];
       if (!isValidDate(from)) from = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       if (!isValidDate(to)) to = new Date().toISOString().split('T')[0];
 
@@ -5677,10 +5845,10 @@ export async function registerRoutes(
 
   app.get("/api/attendance/export/:classId/:from/:to", requireAuth, async (req, res, next) => {
     try {
-      const classId = parseInt(req.params.classId);
+      const classId = parseIdParam(req.params.classId);
       const isValidDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime());
-      let from = req.params.from || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-      let to = req.params.to || new Date().toISOString().split('T')[0];
+      let from = routeParam(req.params.from) || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+      let to = routeParam(req.params.to) || new Date().toISOString().split('T')[0];
       if (!isValidDate(from)) from = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       if (!isValidDate(to)) to = new Date().toISOString().split('T')[0];
       const records = await storage.getAttendanceByClassRange(classId, from, to);
@@ -5722,7 +5890,7 @@ export async function registerRoutes(
 
   app.put("/api/attendance/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
     try {
-      const updated = await storage.updateAttendance(parseInt(req.params.id), req.body);
+      const updated = await storage.updateAttendance(parseIdParam(req.params.id), req.body);
       if (!updated) {
         return res.status(404).json({ message: "Attendance record not found" });
       }
@@ -5774,7 +5942,7 @@ export async function registerRoutes(
 
   app.put("/api/clinic/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const updated = await storage.updateClinicRecord(id, req.body);
       if (!updated) return res.status(404).json({ message: "Record not found" });
       res.json(updated);
@@ -5785,7 +5953,7 @@ export async function registerRoutes(
 
   app.delete("/api/clinic/:id", requireAuth, requireRole("school_admin"), async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       await storage.deleteClinicRecord(id);
       res.json({ success: true });
     } catch (error) {
@@ -6219,7 +6387,7 @@ ${schoolName}`;
 
   app.get("/api/organizations/:id", requireAuth, async (req, res, next) => {
     try {
-      const org = await storage.getOrganization(parseInt(req.params.id));
+      const org = await storage.getOrganization(parseIdParam(req.params.id));
       if (!org) return res.status(404).json({ message: "Organization not found" });
       res.json(org);
     } catch (error) {
@@ -6246,7 +6414,7 @@ ${schoolName}`;
           return res.status(400).json({ message: `Photo upload limit must be one of: ${allowed.join(", ")} MB` });
         }
       }
-      const updated = await storage.updateOrganization(parseInt(req.params.id), data);
+      const updated = await storage.updateOrganization(parseIdParam(req.params.id), data);
       if (!updated) return res.status(404).json({ message: "Organization not found" });
       res.json(updated);
     } catch (error) {
@@ -6315,7 +6483,7 @@ ${schoolName}`;
 
   app.get("/api/schools/:id", requireAuth, async (req, res, next) => {
     try {
-      const school = await storage.getSchool(parseInt(req.params.id));
+      const school = await storage.getSchool(parseIdParam(req.params.id));
       if (!school) return res.status(404).json({ message: "School not found" });
       res.json(school);
     } catch (error) {
@@ -6357,7 +6525,7 @@ ${schoolName}`;
 
   app.put("/api/schools/:id", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateSchool(parseInt(req.params.id), req.body);
+      const updated = await storage.updateSchool(parseIdParam(req.params.id), req.body);
       if (!updated) return res.status(404).json({ message: "School not found" });
       logActivity(req, { action: "update", category: "schools", description: `Updated school settings: ${updated.name}`, targetType: "school", targetId: updated.id, targetName: updated.name });
       res.json(updated);
@@ -6368,7 +6536,7 @@ ${schoolName}`;
 
   app.delete("/api/schools/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const schoolId = parseInt(req.params.id);
+      const schoolId = parseIdParam(req.params.id);
       const currentUser = req.user as User;
       const school = await storage.getSchool(schoolId);
       if (!school) return res.status(404).json({ message: "School not found" });
@@ -6435,7 +6603,7 @@ ${schoolName}`;
 
   app.post("/api/schools/:id/restore", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const schoolId = parseInt(req.params.id);
+      const schoolId = parseIdParam(req.params.id);
       const currentUser = req.user as User;
       const school = await storage.getSchool(schoolId);
       if (!school) return res.status(404).json({ message: "School not found" });
@@ -6489,7 +6657,7 @@ ${schoolName}`;
 
   app.post("/api/schools/:id/unarchive", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const schoolId = parseInt(req.params.id);
+      const schoolId = parseIdParam(req.params.id);
       const school = await storage.getSchool(schoolId);
       if (!school) return res.status(404).json({ message: "School not found" });
       if (school.terminationStatus !== "archived") {
@@ -6505,7 +6673,7 @@ ${schoolName}`;
 
   app.get("/api/schools/:id/termination-status", requireAuth, async (req, res, next) => {
     try {
-      const schoolId = parseInt(req.params.id);
+      const schoolId = parseIdParam(req.params.id);
       const school = await storage.getSchool(schoolId);
       if (!school) return res.status(404).json({ message: "School not found" });
       res.json({
@@ -6542,7 +6710,7 @@ ${schoolName}`;
 
   app.post("/api/notifications/:id/read", requireAuth, async (req, res, next) => {
     try {
-      const updated = await storage.markNotificationRead(parseInt(req.params.id));
+      const updated = await storage.markNotificationRead(parseIdParam(req.params.id));
       res.json(updated);
     } catch (error) {
       next(error);
@@ -6666,10 +6834,6 @@ ${schoolName}`;
     notifiedAt: z.union([z.string(), z.date()]).optional().nullable(),
     expiresAt: z.union([z.string(), z.date()]).optional().nullable(),
   });
-
-  function parseIdParam(value: string): number {
-    return parseInt(value, 10);
-  }
 
   function getRequiredLibrarySchoolId(req: Request, res: Response): number | null {
     const schoolId = getSchoolContext(req);
@@ -7128,7 +7292,7 @@ ${schoolName}`;
     try {
       const schoolId = getRequiredLibrarySchoolId(req, res);
       if (!schoolId) return;
-      const copy = await storage.getLibraryBookCopyByQr(req.params.qrCode);
+      const copy = await storage.getLibraryBookCopyByQr(routeParam(req.params.qrCode));
       if (!copy || copy.schoolId !== schoolId) return res.status(404).json({ message: "No book copy found with this QR code" });
       const book = await getScopedLibraryBook(copy.bookId, schoolId);
       let activeLoan = null;
@@ -7256,8 +7420,11 @@ ${schoolName}`;
       await fs.writeFile(absPath, req.file.buffer);
       const attachmentUrl = `/objects/${objectName}`;
 
+      const existingAttachmentUrls = Array.isArray(copy.attachmentUrls)
+        ? copy.attachmentUrls.filter((url): url is string => typeof url === "string")
+        : [];
       const updated = await storage.updateLibraryBookCopy(copyId, {
-        attachmentUrls: [...(copy.attachmentUrls ?? []), attachmentUrl],
+        attachmentUrls: [...existingAttachmentUrls, attachmentUrl],
       });
 
       res.json({ attachmentUrl, copy: updated });
@@ -7275,11 +7442,14 @@ ${schoolName}`;
 
       const attachmentUrl = String(req.body?.attachmentUrl ?? "").trim();
       if (!attachmentUrl) return res.status(400).json({ message: "Attachment URL is required" });
-      if (!(copy.attachmentUrls ?? []).includes(attachmentUrl)) {
+      const existingAttachmentUrls = Array.isArray(copy.attachmentUrls)
+        ? copy.attachmentUrls.filter((url): url is string => typeof url === "string")
+        : [];
+      if (!existingAttachmentUrls.includes(attachmentUrl)) {
         return res.status(404).json({ message: "Attachment not found on this copy" });
       }
 
-      const updatedUrls = (copy.attachmentUrls ?? []).filter((url) => url !== attachmentUrl);
+      const updatedUrls = existingAttachmentUrls.filter((url) => url !== attachmentUrl);
       const updated = await storage.updateLibraryBookCopy(copyId, { attachmentUrls: updatedUrls });
       if (!updated) return res.status(404).json({ message: "Copy not found" });
       res.json(updated);
@@ -7816,8 +7986,16 @@ ${schoolName}`;
   // Timetable routes
   app.get("/api/timetable", requireAuth, async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req) || (req.query.schoolId ? parseInt(req.query.schoolId as string) : undefined);
-      const classId = req.query.classId ? parseInt(req.query.classId as string) : undefined;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const classIdText = requestText(req.query.classId);
+      const classId = classIdText ? Number.parseInt(classIdText, 10) : undefined;
+      if (classIdText && (!classId || Number.isNaN(classId))) {
+        return res.status(400).json({ message: "Invalid class ID" });
+      }
+      if (classId && !(await ensureClassInSchool(classId, schoolId, res))) return;
+
       const slots = await storage.getTimetableSlots(schoolId, classId);
       res.json(slots);
     } catch (error) {
@@ -7825,9 +8003,36 @@ ${schoolName}`;
     }
   });
 
-  app.post("/api/timetable", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/timetable", requireAuth, requireRole("school_admin", "org_admin", "teacher"), async (req, res, next) => {
     try {
-      const data = insertTimetableSlotSchema.parse(req.body);
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const data = insertTimetableSlotSchema.parse({
+        ...body,
+        schoolId,
+        classId: Number(body.classId),
+        subjectId: Number(body.subjectId),
+        teacherId: body.teacherId === null || body.teacherId === undefined || body.teacherId === ""
+          ? null
+          : Number(body.teacherId),
+        dayOfWeek: Number(body.dayOfWeek),
+        startTime: requestText(body.startTime),
+        endTime: requestText(body.endTime),
+        room: requestText(body.room).trim() || null,
+      });
+
+      if (data.dayOfWeek < 1 || data.dayOfWeek > 5) {
+        return res.status(400).json({ message: "Day of week must be between Monday and Friday" });
+      }
+      if (data.startTime >= data.endTime) {
+        return res.status(400).json({ message: "End time must be later than start time" });
+      }
+      if (!(await ensureClassInSchool(data.classId, schoolId, res))) return;
+      if (!(await ensureSubjectInSchool(data.subjectId, schoolId, res))) return;
+      if (data.teacherId && !(await ensureStaffInSchool(data.teacherId, schoolId, res))) return;
+
       const newSlot = await storage.createTimetableSlot(data);
       res.status(201).json(newSlot);
     } catch (error) {
@@ -7835,10 +8040,43 @@ ${schoolName}`;
     }
   });
 
-  app.put("/api/timetable/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.put("/api/timetable/:id", requireAuth, requireRole("school_admin", "org_admin", "teacher"), async (req, res, next) => {
     try {
-      const updated = await storage.updateTimetableSlot(parseInt(req.params.id), req.body);
-      if (!updated) return res.status(404).json({ message: "Slot not found" });
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const slotId = parseIdParam(req.params.id);
+      const existing = await storage.getTimetableSlot(slotId);
+      if (!existing) return res.status(404).json({ message: "Slot not found" });
+      if (existing.schoolId !== schoolId) return res.status(403).json({ message: "Slot not in school context" });
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const data = insertTimetableSlotSchema.parse({
+        schoolId,
+        classId: body.classId === undefined ? existing.classId : Number(body.classId),
+        subjectId: body.subjectId === undefined ? existing.subjectId : Number(body.subjectId),
+        teacherId: body.teacherId === undefined
+          ? existing.teacherId
+          : body.teacherId === null || body.teacherId === "" ? null : Number(body.teacherId),
+        dayOfWeek: body.dayOfWeek === undefined ? existing.dayOfWeek : Number(body.dayOfWeek),
+        startTime: body.startTime === undefined ? existing.startTime : requestText(body.startTime),
+        endTime: body.endTime === undefined ? existing.endTime : requestText(body.endTime),
+        room: body.room === undefined ? existing.room : requestText(body.room).trim() || null,
+        term: body.term === undefined ? existing.term : requestText(body.term).trim() || null,
+        year: body.year === undefined || body.year === null || body.year === "" ? existing.year : Number(body.year),
+      });
+
+      if (data.dayOfWeek < 1 || data.dayOfWeek > 5) {
+        return res.status(400).json({ message: "Day of week must be between Monday and Friday" });
+      }
+      if (data.startTime >= data.endTime) {
+        return res.status(400).json({ message: "End time must be later than start time" });
+      }
+      if (!(await ensureClassInSchool(data.classId, schoolId, res))) return;
+      if (!(await ensureSubjectInSchool(data.subjectId, schoolId, res))) return;
+      if (data.teacherId && !(await ensureStaffInSchool(data.teacherId, schoolId, res))) return;
+
+      const updated = await storage.updateTimetableSlot(slotId, data);
       res.json(updated);
     } catch (error) {
       next(error);
@@ -7847,7 +8085,15 @@ ${schoolName}`;
 
   app.delete("/api/timetable/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      await storage.deleteTimetableSlot(parseInt(req.params.id));
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+
+      const slotId = parseIdParam(req.params.id);
+      const existing = await storage.getTimetableSlot(slotId);
+      if (!existing) return res.status(404).json({ message: "Slot not found" });
+      if (existing.schoolId !== schoolId) return res.status(403).json({ message: "Slot not in school context" });
+
+      await storage.deleteTimetableSlot(slotId);
       res.json({ message: "Slot deleted successfully" });
     } catch (error) {
       next(error);
@@ -7878,7 +8124,7 @@ ${schoolName}`;
 
   app.put("/api/logbook/:id", requireAuth, requireRole("teacher", "school_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateLogbookEntry(parseInt(req.params.id), req.body);
+      const updated = await storage.updateLogbookEntry(parseIdParam(req.params.id), req.body);
       if (!updated) return res.status(404).json({ message: "Entry not found" });
       res.json(updated);
     } catch (error) {
@@ -7888,7 +8134,7 @@ ${schoolName}`;
 
   app.delete("/api/logbook/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      await storage.deleteLogbookEntry(parseInt(req.params.id));
+      await storage.deleteLogbookEntry(parseIdParam(req.params.id));
       res.json({ message: "Entry deleted successfully" });
     } catch (error) {
       next(error);
@@ -8070,7 +8316,7 @@ ${schoolName}`;
     try {
       await storage.autoClockOutOverdueStaffAttendanceLogs();
       const user = req.user as User;
-      const attendanceId = parseInt(req.params.id, 10);
+      const attendanceId = parseIdParam(req.params.id);
       if (Number.isNaN(attendanceId)) return res.status(400).json({ message: "Invalid attendance record" });
 
       const existing = await storage.getStaffAttendanceLogById(attendanceId);
@@ -8484,7 +8730,8 @@ ${schoolName}`;
   // POS routes
   app.get("/api/pos/items", requireAuth, async (req, res, next) => {
     try {
-      const schoolId = req.query.schoolId ? parseInt(req.query.schoolId as string) : undefined;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
       const items = await storage.getPosItems(schoolId);
       res.json(items);
     } catch (error) {
@@ -8494,8 +8741,11 @@ ${schoolName}`;
 
   app.get("/api/pos/items/:id", requireAuth, async (req, res, next) => {
     try {
-      const item = await storage.getPosItem(parseInt(req.params.id));
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const item = await storage.getPosItem(parseIdParam(req.params.id));
       if (!item) return res.status(404).json({ message: "Item not found" });
+      if (item.schoolId !== schoolId) return res.status(403).json({ message: "Item not in school context" });
       res.json(item);
     } catch (error) {
       next(error);
@@ -8504,7 +8754,19 @@ ${schoolName}`;
 
   app.post("/api/pos/items", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const data = insertPosItemSchema.parse(req.body);
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const data = insertPosItemSchema.parse({
+        ...body,
+        schoolId,
+        stockQty: body.stockQty === undefined ? 0 : Number(body.stockQty),
+      });
+      if ((data.stockQty ?? 0) < 0) return res.status(400).json({ message: "Stock quantity cannot be negative" });
+      const price = Number(data.price);
+      if (!Number.isFinite(price) || price < 0) {
+        return res.status(400).json({ message: "Price must be a valid non-negative amount" });
+      }
       const newItem = await storage.createPosItem(data);
       res.status(201).json(newItem);
     } catch (error) {
@@ -8514,8 +8776,29 @@ ${schoolName}`;
 
   app.put("/api/pos/items/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updatePosItem(parseInt(req.params.id), req.body);
-      if (!updated) return res.status(404).json({ message: "Item not found" });
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const itemId = parseIdParam(req.params.id);
+      const existing = await storage.getPosItem(itemId);
+      if (!existing) return res.status(404).json({ message: "Item not found" });
+      if (existing.schoolId !== schoolId) return res.status(403).json({ message: "Item not in school context" });
+
+      const { schoolId: _ignoredSchoolId, ...body } = (req.body || {}) as Record<string, unknown>;
+      const normalized = {
+        ...body,
+        ...(body.stockQty === undefined ? {} : { stockQty: Number(body.stockQty) }),
+      };
+      const data = insertPosItemSchema.partial().parse(normalized);
+      if (data.stockQty !== undefined && data.stockQty !== null && data.stockQty < 0) {
+        return res.status(400).json({ message: "Stock quantity cannot be negative" });
+      }
+      if (data.price !== undefined) {
+        const price = Number(data.price);
+        if (!Number.isFinite(price) || price < 0) {
+          return res.status(400).json({ message: "Price must be a valid non-negative amount" });
+        }
+      }
+      const updated = await storage.updatePosItem(itemId, data);
       res.json(updated);
     } catch (error) {
       next(error);
@@ -8524,7 +8807,13 @@ ${schoolName}`;
 
   app.delete("/api/pos/items/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      await storage.deletePosItem(parseInt(req.params.id));
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const itemId = parseIdParam(req.params.id);
+      const existing = await storage.getPosItem(itemId);
+      if (!existing) return res.status(404).json({ message: "Item not found" });
+      if (existing.schoolId !== schoolId) return res.status(403).json({ message: "Item not in school context" });
+      await storage.deletePosItem(itemId);
       res.json({ message: "Item deleted successfully" });
     } catch (error) {
       next(error);
@@ -8533,7 +8822,8 @@ ${schoolName}`;
 
   app.get("/api/pos/sales", requireAuth, async (req, res, next) => {
     try {
-      const schoolId = req.query.schoolId ? parseInt(req.query.schoolId as string) : undefined;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
       const sales = await storage.getPosSales(schoolId);
       res.json(sales);
     } catch (error) {
@@ -8541,23 +8831,49 @@ ${schoolName}`;
     }
   });
 
-  app.post("/api/pos/sales", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
+  app.post("/api/pos/sales", requireAuth, requireRole("school_admin", "org_admin", "teacher"), async (req, res, next) => {
     try {
-      const { items, ...saleData } = req.body;
-      const sale = await storage.createPosSale(saleData);
-      if (items && items.length > 0) {
-        const saleItems = items.map((item: any) => ({ ...item, saleId: sale.id }));
-        await storage.createPosSaleItems(saleItems);
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const parsed = posSaleRequestSchema.parse(req.body);
+      if (parsed.studentId && !(await ensureStudentInSchool(parsed.studentId, schoolId, res))) return;
+
+      const currentUser = req.user as User;
+      const [seller] = await db.select({ id: staffTable.id, schoolId: staffTable.schoolId })
+        .from(staffTable)
+        .where(eq(staffTable.userId, currentUser.id))
+        .limit(1);
+      if (seller && seller.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Seller not in school context" });
       }
-      res.status(201).json(sale);
+
+      const result = await storage.createPosSaleWithItems({
+        schoolId,
+        paymentMethod: parsed.paymentMethod,
+        customerName: parsed.customerName,
+        studentId: parsed.studentId,
+        soldBy: seller?.id || null,
+        items: parsed.items,
+      });
+      res.status(201).json({ ...result.sale, items: result.items });
     } catch (error) {
+      if (error instanceof PosSaleProcessingError) {
+        const status = error.code === "INSUFFICIENT_STOCK" ? 409 : 400;
+        return res.status(status).json({ message: error.message, code: error.code });
+      }
       next(error);
     }
   });
 
   app.get("/api/pos/sales/:id/items", requireAuth, async (req, res, next) => {
     try {
-      const items = await storage.getPosSaleItems(parseInt(req.params.id));
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const saleId = parseIdParam(req.params.id);
+      const sale = await storage.getPosSale(saleId);
+      if (!sale) return res.status(404).json({ message: "Sale not found" });
+      if (sale.schoolId !== schoolId) return res.status(403).json({ message: "Sale not in school context" });
+      const items = await storage.getPosSaleItems(saleId);
       res.json(items);
     } catch (error) {
       next(error);
@@ -8567,7 +8883,8 @@ ${schoolName}`;
   // Newsletter routes
   app.get("/api/newsletters", requireAuth, async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req) || (req.query.schoolId ? parseInt(req.query.schoolId as string) : undefined);
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
       const newsletters = await storage.getNewsletters(schoolId);
       res.json(newsletters);
     } catch (error) {
@@ -8577,7 +8894,8 @@ ${schoolName}`;
 
   app.get("/api/newsletters/recipient-counts", requireAuth, async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req) || (req.query.schoolId ? parseInt(req.query.schoolId as string) : undefined);
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
       const audience = (req.query.audience as string) || "all";
       let emailCount = 0;
       let smsCount = 0;
@@ -8610,9 +8928,10 @@ ${schoolName}`;
 
   app.post("/api/newsletters", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req) || (req.user as User).schoolId;
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
-      const data = insertNewsletterSchema.parse({ ...req.body, schoolId });
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const { schoolId: _ignoredSchoolId, status: _ignoredStatus, ...body } = (req.body || {}) as Record<string, unknown>;
+      const data = insertNewsletterSchema.parse({ ...body, schoolId, isPublished: false, publishDate: null });
       const newNewsletter = await storage.createNewsletter(data);
       res.status(201).json(newNewsletter);
     } catch (error) {
@@ -8623,23 +8942,42 @@ ${schoolName}`;
   app.put("/api/newsletters/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
-      const newsletterId = parseInt(req.params.id);
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const newsletterId = parseIdParam(req.params.id);
       const existing = await storage.getNewsletterById(newsletterId);
-      const updated = await storage.updateNewsletter(newsletterId, req.body);
+      if (!existing) return res.status(404).json({ message: "Newsletter not found" });
+      if (existing.schoolId !== schoolId) return res.status(403).json({ message: "Newsletter not in school context" });
+
+      const { schoolId: _ignoredSchoolId, createdBy: _ignoredCreatedBy, status, ...body } = (req.body || {}) as Record<string, unknown>;
+      const legacyStatus = requestText(status).toLowerCase();
+      const publishRequested = body.isPublished === true || legacyStatus === "published";
+      const unpublishRequested = body.isPublished === false || legacyStatus === "draft";
+      const normalizedBody: Record<string, unknown> = { ...body };
+      if (publishRequested) {
+        normalizedBody.isPublished = true;
+        normalizedBody.publishDate = existing.publishDate || new Date();
+      } else if (unpublishRequested) {
+        normalizedBody.isPublished = false;
+        normalizedBody.publishDate = null;
+      } else if (body.publishDate) {
+        normalizedBody.publishDate = new Date(requestText(body.publishDate));
+      }
+      const updateData = insertNewsletterSchema.partial().parse(normalizedBody);
+      const updated = await storage.updateNewsletter(newsletterId, updateData);
       if (!updated) return res.status(404).json({ message: "Newsletter not found" });
 
-      const isNewlyPublished = (req.body.isPublished === true || req.body.status === "published")
-        && existing && !existing.isPublished && updated.schoolId;
+      const isNewlyPublished = publishRequested && !existing.isPublished && updated.schoolId;
       let communicationJobId: number | null = null;
 
       if (isNewlyPublished) {
         const channels: string[] = updated.channels || [];
-        const schoolId = updated.schoolId!;
+        const publishSchoolId = updated.schoolId!;
         const audience = updated.targetAudience || "all";
         const plainText = updated.content.replace(/<[^>]*>/g, '');
 
         const job = await queueCommunicationBackgroundJob({
-          schoolId,
+          schoolId: publishSchoolId,
           requestedBy: currentUser.id,
           jobType: "newsletter_publish",
           title: `Publish newsletter - ${updated.title}`,
@@ -8655,7 +8993,7 @@ ${schoolName}`;
           if (shouldSendInApp) {
             try {
               await createBroadcastNotifications({
-                schoolId,
+                schoolId: publishSchoolId,
                 targetAudience: audience,
                 title: updated.title,
                 message: updated.content,
@@ -8676,20 +9014,20 @@ ${schoolName}`;
             try {
               let allRecipients: Array<{ email: string; id: number; name: string }> = [];
               if (audience === "all" || audience === "parents") {
-                const parents = await storage.getParentsBySchool(schoolId);
+                const parents = await storage.getParentsBySchool(publishSchoolId);
                 allRecipients.push(...parents.filter(p => p.email).map(p => ({ email: p.email!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
               }
               if (audience === "all" || audience === "staff") {
-                const staffMembers = await storage.getStaffBySchool(schoolId);
+                const staffMembers = await storage.getStaffBySchool(publishSchoolId);
                 allRecipients.push(...staffMembers.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
               }
               if (audience === "all" || audience === "students") {
-                const studentsList = await storage.getStudentsBySchool(schoolId);
+                const studentsList = await storage.getStudentsBySchool(publishSchoolId);
                 allRecipients.push(...studentsList.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
               }
               if (allRecipients.length > 0) {
                 const result = await communicationService.sendBulkEmail(allRecipients, updated.title, updated.content, {
-                  schoolId,
+                  schoolId: publishSchoolId,
                   recipientType: "staff",
                   sentBy: currentUser.id,
                   category: "newsletter",
@@ -8710,20 +9048,20 @@ ${schoolName}`;
             try {
               let allRecipients: Array<{ phone: string; id: number; name: string }> = [];
               if (audience === "all" || audience === "parents") {
-                const parents = await storage.getParentsBySchool(schoolId);
+                const parents = await storage.getParentsBySchool(publishSchoolId);
                 allRecipients.push(...parents.filter(p => p.phone).map(p => ({ phone: p.phone!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
               }
               if (audience === "all" || audience === "staff") {
-                const staffMembers = await storage.getStaffBySchool(schoolId);
+                const staffMembers = await storage.getStaffBySchool(publishSchoolId);
                 allRecipients.push(...staffMembers.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
               }
               if (audience === "all" || audience === "students") {
-                const studentsList = await storage.getStudentsBySchool(schoolId);
+                const studentsList = await storage.getStudentsBySchool(publishSchoolId);
                 allRecipients.push(...studentsList.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
               }
               if (allRecipients.length > 0) {
                 const result = await communicationService.sendBulkSms(allRecipients, plainText.length > 160 ? plainText.substring(0, 157) + "..." : plainText, {
-                  schoolId,
+                  schoolId: publishSchoolId,
                   recipientType: "staff",
                   sentBy: currentUser.id,
                   category: "newsletter",
@@ -8756,7 +9094,7 @@ ${schoolName}`;
           description: `Queued published newsletter: ${updated.title}`,
           targetType: "communication_job",
           targetId: job.id,
-          schoolId,
+          schoolId: publishSchoolId,
           metadata: { jobType: "newsletter_publish", newsletterId: updated.id, channels, audience },
         });
       }
@@ -8770,49 +9108,14 @@ ${schoolName}`;
 
   app.delete("/api/newsletters/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      await storage.deleteNewsletter(parseInt(req.params.id));
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const newsletterId = parseIdParam(req.params.id);
+      const existing = await storage.getNewsletterById(newsletterId);
+      if (!existing) return res.status(404).json({ message: "Newsletter not found" });
+      if (existing.schoolId !== schoolId) return res.status(403).json({ message: "Newsletter not in school context" });
+      await storage.deleteNewsletter(newsletterId);
       res.json({ message: "Newsletter deleted successfully" });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  // Schemes routes
-  app.get("/api/schemes", requireAuth, async (req, res, next) => {
-    try {
-      const schoolId = getSchoolContext(req) || (req.query.schoolId ? parseInt(req.query.schoolId as string) : undefined);
-      const subjectId = req.query.subjectId ? parseInt(req.query.subjectId as string) : undefined;
-      const schemesList = await storage.getSchemes(schoolId, subjectId);
-      res.json(schemesList);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.post("/api/schemes", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
-    try {
-      const data = insertSchemeSchema.parse(req.body);
-      const newScheme = await storage.createScheme(data);
-      res.status(201).json(newScheme);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.put("/api/schemes/:id", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
-    try {
-      const updated = await storage.updateScheme(parseInt(req.params.id), req.body);
-      if (!updated) return res.status(404).json({ message: "Scheme not found" });
-      res.json(updated);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.delete("/api/schemes/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
-    try {
-      await storage.deleteScheme(parseInt(req.params.id));
-      res.json({ message: "Scheme deleted successfully" });
     } catch (error) {
       next(error);
     }
@@ -8842,7 +9145,7 @@ ${schoolName}`;
   app.put("/api/hostels/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const existing = await storage.getHostel(id);
       if (!existing) return res.status(404).json({ message: "Hostel not found" });
       if (schoolId && existing.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
@@ -8855,7 +9158,7 @@ ${schoolName}`;
   app.post("/api/hostels/:id/manage-students", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const hostelId = parseInt(req.params.id);
+      const hostelId = parseIdParam(req.params.id);
       const { studentIds = [], mode = "assign" } = req.body as { studentIds?: number[]; mode?: "assign" | "remove" };
       const hostel = await storage.getHostel(hostelId);
       if (!hostel) return res.status(404).json({ message: "Hostel not found" });
@@ -8901,7 +9204,7 @@ ${schoolName}`;
   app.delete("/api/hostels/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const hostel = await storage.getHostel(id);
       if (!hostel) return res.status(404).json({ message: "Hostel not found" });
       if (schoolId && hostel.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
@@ -8917,8 +9220,9 @@ ${schoolName}`;
 
   app.get("/api/hostel/rollcall", requireAuth, async (req, res, next) => {
     try {
-      const schoolId = req.query.schoolId ? parseInt(req.query.schoolId as string) : getSchoolContext(req) || undefined;
-      const date = req.query.date as string | undefined;
+      const schoolIdParam = routeParam(req.query.schoolId);
+      const schoolId = schoolIdParam ? Number.parseInt(schoolIdParam, 10) : getSchoolContext(req) || undefined;
+      const date = routeParam(req.query.date) || undefined;
       const records = await storage.getHostelRollCall(schoolId, date);
       res.json(records);
     } catch (error) {
@@ -8928,9 +9232,9 @@ ${schoolName}`;
 
   app.get("/api/hostel/rollcall/by-hostel/:hostelId/:date/:timeSlot", requireAuth, async (req, res, next) => {
     try {
-      const hostelId = parseInt(req.params.hostelId);
-      const date = req.params.date;
-      const timeSlot = req.params.timeSlot;
+      const hostelId = parseIdParam(req.params.hostelId);
+      const date = routeParam(req.params.date);
+      const timeSlot = routeParam(req.params.timeSlot);
       const records = await storage.getHostelRollCallByHostel(hostelId, date, timeSlot);
       res.json(records);
     } catch (error) {
@@ -8940,11 +9244,11 @@ ${schoolName}`;
 
   app.get("/api/hostel/rollcall/grid/:hostelId/:from/:to/:timeSlot", requireAuth, async (req, res, next) => {
     try {
-      const hostelId = parseInt(req.params.hostelId);
+      const hostelId = parseIdParam(req.params.hostelId);
       const isValidDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime());
-      let from = req.params.from;
-      let to = req.params.to;
-      const timeSlot = req.params.timeSlot;
+      let from = routeParam(req.params.from);
+      let to = routeParam(req.params.to);
+      const timeSlot = routeParam(req.params.timeSlot);
       if (!isValidDate(from)) from = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       if (!isValidDate(to)) to = new Date().toISOString().split('T')[0];
 
@@ -8995,11 +9299,11 @@ ${schoolName}`;
 
   app.get("/api/hostel/rollcall/export/:hostelId/:from/:to/:timeSlot", requireAuth, async (req, res, next) => {
     try {
-      const hostelId = parseInt(req.params.hostelId);
+      const hostelId = parseIdParam(req.params.hostelId);
       const isValidDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime());
-      let from = req.params.from;
-      let to = req.params.to;
-      const timeSlot = req.params.timeSlot;
+      let from = routeParam(req.params.from);
+      let to = routeParam(req.params.to);
+      const timeSlot = routeParam(req.params.timeSlot);
       if (!isValidDate(from)) from = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       if (!isValidDate(to)) to = new Date().toISOString().split('T')[0];
 
@@ -9090,8 +9394,7 @@ ${schoolName}`;
               type: "attendance",
               title: "Hostel Attendance Alert",
               message,
-              data: { studentId: student.id, hostelId: hostel?.id || null, status: rec.status, date: rec.date, timeSlot: rec.timeSlot },
-              actionUrl: "/hostel",
+              link: "/hostel",
             });
             if (admin.phone) {
               communicationService.sendSms({
@@ -9197,7 +9500,7 @@ ${schoolName}`;
 
   app.put("/api/applications/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateStudentApplication(parseInt(req.params.id), req.body);
+      const updated = await storage.updateStudentApplication(parseIdParam(req.params.id), req.body);
       if (!updated) return res.status(404).json({ message: "Application not found" });
 
       if (req.body.status === "approved" && updated.schoolId) {
@@ -9272,7 +9575,7 @@ ${schoolName}`;
 
   app.put("/api/permissions/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updatePermission(parseInt(req.params.id), req.body);
+      const updated = await storage.updatePermission(parseIdParam(req.params.id), req.body);
       if (!updated) return res.status(404).json({ message: "Permission not found" });
       res.json(updated);
     } catch (error) {
@@ -9282,7 +9585,7 @@ ${schoolName}`;
 
   app.delete("/api/permissions/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      await storage.deletePermission(parseInt(req.params.id));
+      await storage.deletePermission(parseIdParam(req.params.id));
       res.json({ success: true });
     } catch (error) {
       next(error);
@@ -9310,7 +9613,7 @@ ${schoolName}`;
         return res.status(403).json({ message: "Access denied" });
       }
       const visibleGroups = await getVisibleAccessGroupsForUser(currentUser);
-      const group = visibleGroups.find(g => g.id === parseInt(req.params.id));
+      const group = visibleGroups.find(g => g.id === parseIdParam(req.params.id));
       if (!group) return res.status(404).json({ message: "Access group not found" });
       res.json(group);
     } catch (error) {
@@ -9325,7 +9628,7 @@ ${schoolName}`;
         return res.status(403).json({ message: "Access denied" });
       }
       const visibleGroups = await getVisibleAccessGroupsForUser(currentUser);
-      const group = visibleGroups.find(g => g.id === parseInt(req.params.id));
+      const group = visibleGroups.find(g => g.id === parseIdParam(req.params.id));
       if (!group) return res.status(404).json({ message: "Access group not found" });
       const perms = await storage.getAccessGroupPermissions(group.id);
       res.json(perms);
@@ -9346,7 +9649,7 @@ ${schoolName}`;
 
   app.put("/api/access-groups/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateAccessGroup(parseInt(req.params.id), req.body);
+      const updated = await storage.updateAccessGroup(parseIdParam(req.params.id), req.body);
       if (!updated) return res.status(404).json({ message: "Access group not found" });
       res.json(updated);
     } catch (error) {
@@ -9357,7 +9660,7 @@ ${schoolName}`;
   app.put("/api/access-groups/:id/permissions", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
       const { permissionIds } = req.body as { permissionIds: number[] };
-      await storage.setAccessGroupPermissions(parseInt(req.params.id), permissionIds || []);
+      await storage.setAccessGroupPermissions(parseIdParam(req.params.id), permissionIds || []);
       res.json({ success: true });
     } catch (error) {
       next(error);
@@ -9366,7 +9669,7 @@ ${schoolName}`;
 
   app.delete("/api/access-groups/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const groupId = parseInt(req.params.id);
+      const groupId = parseIdParam(req.params.id);
       const group = await storage.getAccessGroup(groupId);
       if (!group) {
         return res.status(404).json({ message: "Access group not found" });
@@ -9411,7 +9714,7 @@ ${schoolName}`;
 
   app.put("/api/staff-roles/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const { label, description } = req.body;
       const [existing] = await db.select().from(staffRoles).where(eq(staffRoles.id, id));
       if (!existing) {
@@ -9429,7 +9732,7 @@ ${schoolName}`;
 
   app.delete("/api/staff-roles/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const [existing] = await db.select().from(staffRoles).where(eq(staffRoles.id, id));
       if (!existing) {
         return res.status(404).json({ message: "Role not found" });
@@ -9534,7 +9837,7 @@ ${schoolName}`;
       if (!(await canViewAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId, { repairLegacyOrgAdmin: true });
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
@@ -9555,7 +9858,7 @@ ${schoolName}`;
       if (!(await canManageAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
@@ -9594,12 +9897,12 @@ ${schoolName}`;
       if (!(await canManageAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      const groupId = parseInt(req.params.groupId);
+      const groupId = parseIdParam(req.params.groupId);
       const allowedGroup = await getAssignableAccessGroupForUser(currentUser, groupId);
       if (!allowedGroup.allowed) {
         return res.status(403).json({ message: allowedGroup.error });
@@ -9622,7 +9925,7 @@ ${schoolName}`;
       if (!(await canViewAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId, { repairLegacyOrgAdmin: true });
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
@@ -9641,7 +9944,7 @@ ${schoolName}`;
       if (!(await canViewAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId, { repairLegacyOrgAdmin: true });
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
@@ -9660,7 +9963,7 @@ ${schoolName}`;
       if (!(await canManageAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
@@ -9683,12 +9986,12 @@ ${schoolName}`;
       if (!(await canManageAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      await storage.removeUserPermissionOverride(targetUserId, parseInt(req.params.permissionId));
+      await storage.removeUserPermissionOverride(targetUserId, parseIdParam(req.params.permissionId));
       res.json({ success: true });
     } catch (error) {
       next(error);
@@ -9701,7 +10004,7 @@ ${schoolName}`;
       if (!(await canManageAccessRights(currentUser))) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const targetUserId = parseInt(req.params.userId);
+      const targetUserId = parseIdParam(req.params.userId);
       const access = await checkTenantAccess(currentUser, targetUserId);
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
@@ -9723,7 +10026,7 @@ ${schoolName}`;
   // Check if user has permission (only self or admin with tenant scope)
   app.get("/api/users/:userId/has-permission/:code", requireAuth, async (req, res, next) => {
     try {
-      const requestedUserId = parseInt(req.params.userId);
+      const requestedUserId = parseIdParam(req.params.userId);
       const currentUser = req.user as User;
       
       // Allow checking own permissions
@@ -9744,7 +10047,7 @@ ${schoolName}`;
         }
       }
       
-      const hasPermission = await storage.userHasPermission(requestedUserId, req.params.code);
+      const hasPermission = await storage.userHasPermission(requestedUserId, routeParam(req.params.code));
       res.json({ hasPermission });
     } catch (error) {
       next(error);
@@ -9766,7 +10069,7 @@ ${schoolName}`;
   app.get("/api/communication/jobs/:id", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
-      const jobId = parseInt(req.params.id);
+      const jobId = parseIdParam(req.params.id);
       if (!Number.isFinite(jobId)) return res.status(400).json({ message: "Invalid job id" });
 
       const [job] = await db.select().from(communicationJobs).where(eq(communicationJobs.id, jobId)).limit(1);
@@ -9826,7 +10129,7 @@ ${schoolName}`;
         const selectedStaffIds = new Set((data.staffIds || []).map(Number));
         selectedStaff = staffList.filter(s => selectedStaffIds.has(s.id));
       } else {
-        selectedStaff = staffList.filter(s => matchesSearch([s.firstName, s.lastName, s.staffId, s.position, s.phone, s.email], data.search));
+        selectedStaff = staffList.filter(s => matchesSearch([s.firstName, s.lastName, s.staffNo, s.role, s.phone, s.email], data.search));
       }
       recipients = selectedStaff.map(s => ({ id: s.id, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
     } else if (data.recipientType === "student") {
@@ -10091,7 +10394,7 @@ ${schoolName}`;
 
   app.put("/api/assessment-types/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const updated = await storage.updateAssessmentType(id, req.body);
       if (!updated) return res.status(404).json({ message: "Assessment type not found" });
       res.json(updated);
@@ -10102,7 +10405,7 @@ ${schoolName}`;
 
   app.delete("/api/assessment-types/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       await storage.deleteAssessmentType(id);
       res.status(204).send();
     } catch (error) {
@@ -10131,7 +10434,7 @@ ${schoolName}`;
 
   app.put("/api/exam-types/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const updated = await storage.updateExamType(id, req.body);
       if (!updated) return res.status(404).json({ message: "Exam type not found" });
       res.json(updated);
@@ -10142,7 +10445,7 @@ ${schoolName}`;
 
   app.delete("/api/exam-types/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       await storage.deleteExamType(id);
       res.status(204).send();
     } catch (error) {
@@ -10166,7 +10469,7 @@ ${schoolName}`;
 
   app.get("/api/exams/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const exam = await storage.getExam(id);
       if (!exam) return res.status(404).json({ message: "Exam not found" });
       res.json(exam);
@@ -10213,7 +10516,7 @@ ${schoolName}`;
 
   app.put("/api/exams/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       const updated = await storage.updateExam(id, req.body);
       if (!updated) return res.status(404).json({ message: "Exam not found" });
       res.json(updated);
@@ -10224,7 +10527,7 @@ ${schoolName}`;
 
   app.delete("/api/exams/:id", requireAuth, async (req, res, next) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       await storage.deleteExam(id);
       res.status(204).send();
     } catch (error) {
@@ -10375,7 +10678,7 @@ ${schoolName}`;
   // Assessment Papers
   app.get("/api/assessments/:assessmentId/papers", requireAuth, async (req, res, next) => {
     try {
-      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseIdParam(req.params.assessmentId));
       if (!scoped) return;
 
       const papers = await storage.getAssessmentPapers(scoped.assessment.id);
@@ -10387,7 +10690,7 @@ ${schoolName}`;
 
   app.put("/api/assessments/:assessmentId/papers", requireAuth, async (req, res, next) => {
     try {
-      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseIdParam(req.params.assessmentId));
       if (!scoped) return;
       if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
@@ -10620,7 +10923,7 @@ ${schoolName}`;
   // Update a single comment's text
   app.put("/api/assessment-comments/:id", requireAuth, async (req, res, next) => {
     try {
-      const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, parseInt(req.params.id));
+      const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, parseIdParam(req.params.id));
       if (!scopedComment) return;
 
       const { commentText } = req.body;
@@ -10635,7 +10938,7 @@ ${schoolName}`;
 
   app.delete("/api/assessment-comments/:id", requireAuth, async (req, res, next) => {
     try {
-      const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, parseInt(req.params.id));
+      const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, parseIdParam(req.params.id));
       if (!scopedComment) return;
 
       await storage.deleteAssessmentComment(scopedComment.comment.id);
@@ -10945,7 +11248,7 @@ ${schoolName}`;
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });
-      const id = parseInt(req.params.id);
+      const id = parseIdParam(req.params.id);
       await storage.deleteReportComment(id, schoolId);
       res.status(204).send();
     } catch (error) {
@@ -11267,7 +11570,7 @@ ${schoolName}`;
 
   app.put("/api/assessments/:id", requireAuth, async (req, res, next) => {
     try {
-      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.id));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseIdParam(req.params.id));
       if (!scoped) return;
       if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
@@ -11344,7 +11647,7 @@ ${schoolName}`;
   // Get marks entry data for an assessment (students with their marks)
   app.get("/api/marks-entry/:assessmentId", requireAuth, async (req, res, next) => {
     try {
-      const scoped = await getScopedAssessmentOrRespond(req, res, parseInt(req.params.assessmentId));
+      const scoped = await getScopedAssessmentOrRespond(req, res, parseIdParam(req.params.assessmentId));
       if (!scoped) return;
 
       const assessmentId = scoped.assessment.id;
@@ -11655,7 +11958,7 @@ ${schoolName}`;
   // Delete a mark
   app.delete("/api/marks-entry/:markId", requireAuth, async (req, res, next) => {
     try {
-      const scopedMark = await getScopedAssessmentMarkOrRespond(req, res, parseInt(req.params.markId));
+      const scopedMark = await getScopedAssessmentMarkOrRespond(req, res, parseIdParam(req.params.markId));
       if (!scopedMark) return;
       if (await rejectIfAssessmentPublished(scopedMark.assessment, res)) return;
 
@@ -11856,8 +12159,8 @@ ${schoolName}`;
   // Get report card data for a class and exam
   app.get("/api/report-cards/:examId/class/:classId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const classId = parseInt(req.params.classId);
+      const examId = parseIdParam(req.params.examId);
+      const classId = parseIdParam(req.params.classId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       
@@ -12319,8 +12622,8 @@ ${schoolName}`;
   // Get individual student report card
   app.get("/api/report-cards/:examId/student/:studentId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const studentId = parseInt(req.params.studentId);
+      const examId = parseIdParam(req.params.examId);
+      const studentId = parseIdParam(req.params.studentId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       
@@ -12634,8 +12937,8 @@ async function buildReportCardMessage(
 
   app.get("/api/report-cards/:examId/student/:studentId/download", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const studentId = parseInt(req.params.studentId);
+      const examId = parseIdParam(req.params.examId);
+      const studentId = parseIdParam(req.params.studentId);
       const classId = req.query.classId ? parseInt(req.query.classId as string) : null;
 
       const currentUser = await storage.getUser((req.user as any).id);
@@ -13249,7 +13552,7 @@ async function buildReportCardMessage(
   // Get stream-level stats for an exam (all offered subjects and expected learner-subject entries)
   app.get("/api/report-hub/stream-stats/:examId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
+      const examId = parseIdParam(req.params.examId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -13328,8 +13631,8 @@ async function buildReportCardMessage(
   // not by the assessments that happen to have been created.
   app.get("/api/report-hub/class-progress/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const classId = parseInt(req.params.classId);
+      const examId = parseIdParam(req.params.examId);
+      const classId = parseIdParam(req.params.classId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -13403,8 +13706,8 @@ async function buildReportCardMessage(
   // Missing marks for a class (grouped by every subject offered by the class)
   app.get("/api/report-hub/missing-marks/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const classId = parseInt(req.params.classId);
+      const examId = parseIdParam(req.params.examId);
+      const classId = parseIdParam(req.params.classId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -13511,8 +13814,8 @@ async function buildReportCardMessage(
   // Class merit list
   app.get("/api/report-hub/class-merit/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const classId = parseInt(req.params.classId);
+      const examId = parseIdParam(req.params.examId);
+      const classId = parseIdParam(req.params.classId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -13895,8 +14198,8 @@ async function buildReportCardMessage(
   // Class analytics
   app.get("/api/report-hub/class-analytics/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const classId = parseInt(req.params.classId);
+      const examId = parseIdParam(req.params.examId);
+      const classId = parseIdParam(req.params.classId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -14069,8 +14372,8 @@ async function buildReportCardMessage(
   // Stream merit list
   app.get("/api/report-hub/stream-merit/:examId/:streamId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const streamId = parseInt(req.params.streamId);
+      const examId = parseIdParam(req.params.examId);
+      const streamId = parseIdParam(req.params.streamId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -14244,8 +14547,8 @@ async function buildReportCardMessage(
   // Stream analytics
   app.get("/api/report-hub/stream-analytics/:examId/:streamId", requireAuth, async (req, res, next) => {
     try {
-      const examId = parseInt(req.params.examId);
-      const streamId = parseInt(req.params.streamId);
+      const examId = parseIdParam(req.params.examId);
+      const streamId = parseIdParam(req.params.streamId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -14413,7 +14716,7 @@ async function buildReportCardMessage(
   // Classes for a stream (for the Reports dropdown)
   app.get("/api/report-hub/stream-classes/:streamId", requireAuth, async (req, res, next) => {
     try {
-      const streamId = parseInt(req.params.streamId);
+      const streamId = parseIdParam(req.params.streamId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -14785,7 +15088,7 @@ async function buildReportCardMessage(
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const classId = parseInt(req.params.classId);
+      const classId = parseIdParam(req.params.classId);
       const termNumber = req.query.term ? parseInt(req.query.term as string) : null;
       const year = req.query.year as string || null;
 
@@ -14868,7 +15171,7 @@ async function buildReportCardMessage(
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const classId = parseInt(req.params.classId);
+      const classId = parseIdParam(req.params.classId);
       const termNumber = req.query.term ? parseInt(req.query.term as string) : null;
       const year = req.query.year as string || null;
 
@@ -14929,7 +15232,7 @@ async function buildReportCardMessage(
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const studentId = parseInt(req.params.studentId);
+      const studentId = parseIdParam(req.params.studentId);
       const classId = req.query.classId ? parseInt(req.query.classId as string) : null;
       const termNumber = req.query.term ? parseInt(req.query.term as string) : null;
       const year = req.query.year as string || null;
@@ -15092,7 +15395,8 @@ async function buildReportCardMessage(
         }
 
         const grade = avgPct !== null ? getGrade(avgPct) : "-";
-        const comment = subjMarks.length > 0 && subjMarks[subjMarks.length - 1].comment ? subjMarks[subjMarks.length - 1].comment || "" : "";
+        const latestMark = subjMarks.at(-1);
+        const comment = latestMark?.customCommentText || latestMark?.autoCommentSnapshot || "";
 
         performance.push({ subject: subj.name, subjectId: subj.id, avg: avgPct, grade, comment });
 
@@ -15244,7 +15548,7 @@ async function buildReportCardMessage(
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const reportId = parseInt(req.params.reportId);
+      const reportId = parseIdParam(req.params.reportId);
       const { attendanceComment, behaviourComment, behaviourRating, studyHabitsComment, subjectComments, notes, qcStatus } = req.body;
 
       const existing = await db.select().from(qcReports).where(
@@ -15282,7 +15586,7 @@ async function buildReportCardMessage(
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const studentId = parseInt(req.params.studentId);
+      const studentId = parseIdParam(req.params.studentId);
       const classId = req.query.classId ? parseInt(req.query.classId as string) : null;
       const termNumber = req.query.term ? parseInt(req.query.term as string) : null;
       const year = req.query.year as string || null;
@@ -15412,7 +15716,7 @@ async function buildReportCardMessage(
       if (!student) return res.status(404).json({ message: "Student record not found" });
       const classInfo = student.classId ? await storage.getClass(student.classId) : null;
       const parentInfo = student.parentId ? await storage.getParent(student.parentId) : null;
-      res.json({ ...student, className: classInfo?.name, parentName: parentInfo ? `${parentInfo.firstName} ${parentInfo.lastName}` : null });
+      res.json({ ...student, className: classInfo?.className, parentName: parentInfo ? `${parentInfo.firstName} ${parentInfo.lastName}` : null });
     } catch (error) { next(error); }
   });
 
@@ -15598,7 +15902,7 @@ async function buildReportCardMessage(
 
   app.get("/api/student-profile/:studentId", requireAuth, async (req, res, next) => {
     try {
-      const studentId = parseInt(req.params.studentId);
+      const studentId = parseIdParam(req.params.studentId);
       const currentUser = await storage.getUser((req.user as any).id);
       let schoolId = getSchoolContext(req) || currentUser?.schoolId;
 
@@ -15933,7 +16237,7 @@ async function buildReportCardMessage(
         sick: attendance.filter(a => a.status === "sick").length,
         excused: attendance.filter(a => a.status === "excused").length,
         late: attendance.filter(a => a.status === "late").length,
-        fees: attendance.filter(a => a.status === "fees" || a.status === "sent_home_fees").length,
+        fees: attendance.filter(a => a.status === "fees").length,
         suspended: attendance.filter(a => a.status === "suspended").length,
         absconding: attendance.filter(a => a.status === "absconding").length,
         total: attendance.length,
@@ -16015,7 +16319,7 @@ async function buildReportCardMessage(
 
   app.get("/api/staff-profile/:staffId", requireAuth, async (req, res, next) => {
     try {
-      const staffId = parseInt(req.params.staffId);
+      const staffId = parseIdParam(req.params.staffId);
       const currentUser = await storage.getUser((req.user as any).id);
       let schoolId = getSchoolContext(req) || currentUser?.schoolId;
 

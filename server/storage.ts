@@ -6,7 +6,7 @@ import {
   staffSubjects, studentSubjects, classSubjects, grades, assessments, marks, attendanceRecords,
   disciplineRecords, clinicRecords, feesPayments, organizations, schools, libraryResources, libraryCategories, libraryShelves, libraryBooks, libraryBookCopies, libraryLoans, libraryFines, libraryReservations, libraryPolicies,
   timetableSlots, logbookEntries, posItems, posSales, posSaleItems,
-  newsletters, schemes, hostels, hostelRollCall, studentApplications, staffAttendanceLogs,
+  newsletters, hostels, hostelRollCall, studentApplications, staffAttendanceLogs,
   permissions, accessGroups, accessGroupPermissions, userAccessGroups, userPermissionOverrides, userSchoolAccess, staffRoles,
   communicationLogs, assessmentTypes, examTypes, exams, assessmentPapers, assessmentComments,
   assessmentMarks, assessmentMarkPapers, reportComments,
@@ -35,6 +35,7 @@ import {
   type LibraryCategory, type InsertLibraryCategory,
   type LibraryShelf, type InsertLibraryShelf,
   type LibraryBook, type InsertLibraryBook,
+  type LibraryBookCopy, type InsertLibraryBookCopy,
   type LibraryLoan, type InsertLibraryLoan,
   type LibraryFine, type InsertLibraryFine,
   type LibraryReservation, type InsertLibraryReservation,
@@ -43,10 +44,9 @@ import {
   type LogbookEntry, type InsertLogbookEntry,
   type StaffAttendanceLog, type InsertStaffAttendanceLog,
   type PosItem, type InsertPosItem,
-  type PosSale, type InsertPosSale,
-  type PosSaleItem, type InsertPosSaleItem,
+  type PosSale,
+  type PosSaleItem,
   type Newsletter, type InsertNewsletter,
-  type Scheme, type InsertScheme,
   type Hostel, type InsertHostel,
   type HostelRollCall, type InsertHostelRollCall,
   type StudentApplication, type InsertStudentApplication,
@@ -76,6 +76,17 @@ import {
   qcReports,
   type ActivityLog, type InsertActivityLog, type InternalTransfer, type InsertInternalTransfer,
 } from "@shared/schema";
+
+
+export class PosSaleProcessingError extends Error {
+  constructor(
+    public readonly code: "ITEM_NOT_FOUND" | "INSUFFICIENT_STOCK" | "INVALID_PRICE",
+    message: string,
+  ) {
+    super(message);
+    this.name = "PosSaleProcessingError";
+  }
+}
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
@@ -297,6 +308,7 @@ export interface IStorage {
 
   // Timetable
   getTimetableSlots(schoolId?: number, classId?: number): Promise<TimetableSlot[]>;
+  getTimetableSlot(id: number): Promise<TimetableSlot | undefined>;
   createTimetableSlot(slot: InsertTimetableSlot): Promise<TimetableSlot>;
   updateTimetableSlot(id: number, slot: Partial<InsertTimetableSlot>): Promise<TimetableSlot | undefined>;
   deleteTimetableSlot(id: number): Promise<boolean>;
@@ -324,8 +336,15 @@ export interface IStorage {
   deletePosItem(id: number): Promise<boolean>;
 
   getPosSales(schoolId?: number): Promise<PosSale[]>;
-  createPosSale(sale: InsertPosSale): Promise<PosSale>;
-  createPosSaleItems(items: InsertPosSaleItem[]): Promise<PosSaleItem[]>;
+  getPosSale(id: number): Promise<PosSale | undefined>;
+  createPosSaleWithItems(args: {
+    schoolId: number;
+    paymentMethod: string;
+    customerName?: string | null;
+    studentId?: number | null;
+    soldBy?: number | null;
+    items: Array<{ itemId: number; quantity: number }>;
+  }): Promise<{ sale: PosSale; items: PosSaleItem[] }>;
   getPosSaleItems(saleId: number): Promise<PosSaleItem[]>;
 
   // Newsletters
@@ -334,12 +353,6 @@ export interface IStorage {
   createNewsletter(newsletter: InsertNewsletter): Promise<Newsletter>;
   updateNewsletter(id: number, newsletter: Partial<InsertNewsletter>): Promise<Newsletter | undefined>;
   deleteNewsletter(id: number): Promise<boolean>;
-
-  // Schemes
-  getSchemes(schoolId?: number, subjectId?: number): Promise<Scheme[]>;
-  createScheme(scheme: InsertScheme): Promise<Scheme>;
-  updateScheme(id: number, scheme: Partial<InsertScheme>): Promise<Scheme | undefined>;
-  deleteScheme(id: number): Promise<boolean>;
 
   // Hostels
   getHostels(schoolId: number): Promise<Hostel[]>;
@@ -1871,7 +1884,7 @@ export class DatabaseStorage implements IStorage {
         runningTotal += item.value;
         return {
           month: item.month,
-          students: runningTotal,
+          count: runningTotal,
         };
       });
     };
@@ -2200,8 +2213,8 @@ export class DatabaseStorage implements IStorage {
 
       const activeStudentsList = schoolStudentsList;
       const approved = activeStudentsList.length;
-      const maleCount = activeStudentsList.filter(s => s.gender === 'male' || s.gender === 'Male').length;
-      const femaleCount = activeStudentsList.filter(s => s.gender === 'female' || s.gender === 'Female').length;
+      const maleCount = activeStudentsList.filter(s => s.gender === 'male').length;
+      const femaleCount = activeStudentsList.filter(s => s.gender === 'female').length;
       const pending = schoolStudentRecordsList.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
       const transferred = schoolStudentRecordsList.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
 
@@ -2258,8 +2271,8 @@ export class DatabaseStorage implements IStorage {
 
     const activeStudentsList = allStudents;
     const approved = activeStudentsList.length;
-    const maleCount = activeStudentsList.filter(s => s.gender === 'male' || s.gender === 'Male').length;
-    const femaleCount = activeStudentsList.filter(s => s.gender === 'female' || s.gender === 'Female').length;
+    const maleCount = activeStudentsList.filter(s => s.gender === 'male').length;
+    const femaleCount = activeStudentsList.filter(s => s.gender === 'female').length;
     const pending = allStudentRecords.filter((s: any) => String(s.status || '').toLowerCase() === 'pending').length;
     const transferred = allStudentRecords.filter((s: any) => String(s.status || '').toLowerCase() === 'transferred').length;
 
@@ -2398,12 +2411,6 @@ export class DatabaseStorage implements IStorage {
     await db.delete(libraryCategories).where(eq(libraryCategories.id, id));
     return true;
   }
-
-  // Library - Shelves
-  getLibraryShelves(schoolId: number): Promise<LibraryShelf[]>;
-  createLibraryShelf(shelf: InsertLibraryShelf): Promise<LibraryShelf>;
-  updateLibraryShelf(id: number, shelf: Partial<InsertLibraryShelf>): Promise<LibraryShelf | undefined>;
-  deleteLibraryShelf(id: number): Promise<boolean>;
 
   // Library - Shelves
   async getLibraryShelves(schoolId: number): Promise<LibraryShelf[]> {
@@ -2569,13 +2576,23 @@ export class DatabaseStorage implements IStorage {
 
   // Timetable methods
   async getTimetableSlots(schoolId?: number, classId?: number): Promise<TimetableSlot[]> {
-    if (classId) {
-      return db.select().from(timetableSlots).where(eq(timetableSlots.classId, classId));
+    if (schoolId && classId) {
+      return db.select().from(timetableSlots).where(
+        and(eq(timetableSlots.schoolId, schoolId), eq(timetableSlots.classId, classId)),
+      );
     }
     if (schoolId) {
       return db.select().from(timetableSlots).where(eq(timetableSlots.schoolId, schoolId));
     }
+    if (classId) {
+      return db.select().from(timetableSlots).where(eq(timetableSlots.classId, classId));
+    }
     return db.select().from(timetableSlots);
+  }
+
+  async getTimetableSlot(id: number): Promise<TimetableSlot | undefined> {
+    const [slot] = await db.select().from(timetableSlots).where(eq(timetableSlots.id, id));
+    return slot;
   }
 
   async createTimetableSlot(slotData: InsertTimetableSlot): Promise<TimetableSlot> {
@@ -2713,14 +2730,91 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(posSales).orderBy(desc(posSales.saleDate));
   }
 
-  async createPosSale(saleData: InsertPosSale): Promise<PosSale> {
-    const [newSale] = await db.insert(posSales).values(saleData).returning();
-    return newSale;
+  async getPosSale(id: number): Promise<PosSale | undefined> {
+    const [sale] = await db.select().from(posSales).where(eq(posSales.id, id));
+    return sale;
   }
 
-  async createPosSaleItems(itemsData: InsertPosSaleItem[]): Promise<PosSaleItem[]> {
-    if (itemsData.length === 0) return [];
-    return db.insert(posSaleItems).values(itemsData).returning();
+  async createPosSaleWithItems(args: {
+    schoolId: number;
+    paymentMethod: string;
+    customerName?: string | null;
+    studentId?: number | null;
+    soldBy?: number | null;
+    items: Array<{ itemId: number; quantity: number }>;
+  }): Promise<{ sale: PosSale; items: PosSaleItem[] }> {
+    const groupedItems = new Map<number, number>();
+    for (const item of args.items) {
+      groupedItems.set(item.itemId, (groupedItems.get(item.itemId) || 0) + item.quantity);
+    }
+
+    return db.transaction(async (tx) => {
+      const lines: Array<{ item: PosItem; quantity: number; unitPrice: string; totalPrice: string }> = [];
+      let totalCents = 0;
+
+      for (const [itemId, quantity] of [...groupedItems.entries()].sort((a, b) => a[0] - b[0])) {
+        const [item] = await tx
+          .select()
+          .from(posItems)
+          .where(and(
+            eq(posItems.id, itemId),
+            eq(posItems.schoolId, args.schoolId),
+            or(eq(posItems.isActive, true), isNull(posItems.isActive)),
+          ))
+          .for("update");
+
+        if (!item) {
+          throw new PosSaleProcessingError("ITEM_NOT_FOUND", `POS item ${itemId} was not found in the active school.`);
+        }
+
+        const available = item.stockQty ?? 0;
+        if (available < quantity) {
+          throw new PosSaleProcessingError(
+            "INSUFFICIENT_STOCK",
+            `${item.name} has only ${available} unit${available === 1 ? "" : "s"} available.`,
+          );
+        }
+
+        const unitPriceCents = Math.round(Number(item.price) * 100);
+        if (!Number.isFinite(unitPriceCents) || unitPriceCents < 0) {
+          throw new PosSaleProcessingError("INVALID_PRICE", `${item.name} has an invalid selling price.`);
+        }
+
+        const lineTotalCents = unitPriceCents * quantity;
+        totalCents += lineTotalCents;
+        lines.push({
+          item,
+          quantity,
+          unitPrice: (unitPriceCents / 100).toFixed(2),
+          totalPrice: (lineTotalCents / 100).toFixed(2),
+        });
+      }
+
+      const [sale] = await tx.insert(posSales).values({
+        schoolId: args.schoolId,
+        customerName: args.customerName || null,
+        studentId: args.studentId || null,
+        totalAmount: (totalCents / 100).toFixed(2),
+        paymentMethod: args.paymentMethod,
+        soldBy: args.soldBy || null,
+      }).returning();
+
+      const saleItems = await tx.insert(posSaleItems).values(lines.map((line) => ({
+        saleId: sale.id,
+        itemId: line.item.id,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        totalPrice: line.totalPrice,
+      }))).returning();
+
+      for (const line of lines) {
+        await tx.update(posItems)
+          .set({ stockQty: (line.item.stockQty ?? 0) - line.quantity })
+          .where(and(eq(posItems.id, line.item.id), eq(posItems.schoolId, args.schoolId)));
+      }
+
+      return { sale, items: saleItems };
+    });
   }
 
   async getPosSaleItems(saleId: number): Promise<PosSaleItem[]> {
@@ -2752,32 +2846,6 @@ export class DatabaseStorage implements IStorage {
 
   async deleteNewsletter(id: number): Promise<boolean> {
     await db.delete(newsletters).where(eq(newsletters.id, id));
-    return true;
-  }
-
-  // Schemes methods
-  async getSchemes(schoolId?: number, subjectId?: number): Promise<Scheme[]> {
-    if (subjectId) {
-      return db.select().from(schemes).where(eq(schemes.subjectId, subjectId)).orderBy(schemes.week);
-    }
-    if (schoolId) {
-      return db.select().from(schemes).where(eq(schemes.schoolId, schoolId)).orderBy(schemes.week);
-    }
-    return db.select().from(schemes).orderBy(schemes.week);
-  }
-
-  async createScheme(schemeData: InsertScheme): Promise<Scheme> {
-    const [newScheme] = await db.insert(schemes).values(schemeData).returning();
-    return newScheme;
-  }
-
-  async updateScheme(id: number, schemeData: Partial<InsertScheme>): Promise<Scheme | undefined> {
-    const [updated] = await db.update(schemes).set(schemeData).where(eq(schemes.id, id)).returning();
-    return updated;
-  }
-
-  async deleteScheme(id: number): Promise<boolean> {
-    await db.delete(schemes).where(eq(schemes.id, id));
     return true;
   }
 
@@ -2825,8 +2893,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getHostelRollCallByHostel(hostelId: number, date: string, timeSlot: string): Promise<HostelRollCall[]> {
-    const students = await db.select().from(schema.students).where(eq(schema.students.hostelId, hostelId));
-    const studentIds = students.map(s => s.id);
+    const hostelStudents = await db.select().from(students).where(eq(students.hostelId, hostelId));
+    const studentIds = hostelStudents.map((student) => student.id);
     if (studentIds.length === 0) return [];
     return db.select().from(hostelRollCall).where(
       and(
@@ -2838,8 +2906,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getHostelRollCallByHostelRange(hostelId: number, from: string, to: string, timeSlot: string): Promise<HostelRollCall[]> {
-    const students = await db.select().from(schema.students).where(eq(schema.students.hostelId, hostelId));
-    const studentIds = students.map(s => s.id);
+    const hostelStudents = await db.select().from(students).where(eq(students.hostelId, hostelId));
+    const studentIds = hostelStudents.map((student) => student.id);
     if (studentIds.length === 0) return [];
     return db.select().from(hostelRollCall).where(
       and(

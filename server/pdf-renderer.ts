@@ -1,5 +1,7 @@
 import type { Request } from "express";
-import { chromium, type Browser, type BrowserContext, type PDFOptions } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+
+type PDFOptions = NonNullable<Parameters<Page["pdf"]>[0]>;
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_CONCURRENCY = 2;

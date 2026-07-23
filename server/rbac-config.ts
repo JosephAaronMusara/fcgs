@@ -6,6 +6,7 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "students.view", name: "View Students", description: "View student list and profiles", category: "Students" },
   { code: "students.create", name: "Create Students", description: "Add new students to the system", category: "Students" },
   { code: "students.edit", name: "Edit Students", description: "Modify student information", category: "Students" },
+  { code: "students.manage_photo", name: "Manage Student Photos", description: "Upload, replace and download student profile photos", category: "Students" },
   { code: "students.delete", name: "Delete Students", description: "Remove students from the system", category: "Students" },
   
   // Internal Transfers
@@ -17,6 +18,7 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "staff.view", name: "View Staff", description: "View staff list and profiles", category: "Staff" },
   { code: "staff.create", name: "Create Staff", description: "Add new staff members", category: "Staff" },
   { code: "staff.edit", name: "Edit Staff", description: "Modify staff information", category: "Staff" },
+  { code: "staff.manage_photo", name: "Manage Staff Photos", description: "Upload, replace and download staff profile photos", category: "Staff" },
   { code: "staff.delete", name: "Delete Staff", description: "Remove staff from the system", category: "Staff" },
   { code: "staff.assign_subjects", name: "Assign Classes & Subjects", description: "Assign class and subject teaching combinations to staff members", category: "Staff" },
   
@@ -24,6 +26,7 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "parents.view", name: "View Parents", description: "View parent/guardian information", category: "Parents" },
   { code: "parents.create", name: "Create Parents", description: "Add new parents/guardians", category: "Parents" },
   { code: "parents.edit", name: "Edit Parents", description: "Modify parent information", category: "Parents" },
+  { code: "parents.manage_photo", name: "Manage Parent Photos", description: "Upload, replace and download parent profile photos", category: "Parents" },
   { code: "parents.delete", name: "Delete Parents", description: "Remove parents from the system", category: "Parents" },
   
   // Classes
@@ -107,14 +110,7 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "staff_attendance.clock_in", name: "Clock In for Staff Attendance", description: "Clock in to staff attendance", category: "Staff Attendance" },
   { code: "staff_attendance.clock_out", name: "Clock Out for Staff Attendance", description: "Clock out of staff attendance", category: "Staff Attendance" },
   { code: "staff_attendance.reset_device_id", name: "Reset Staff Attendance Device ID", description: "Reset a staff member's attendance device binding", category: "Staff Attendance" },
-  
-  // E-Schemes
-  { code: "schemes.view", name: "View Schemes of Work", description: "View lesson plans and schemes", category: "Schemes" },
-  { code: "schemes.create", name: "Create Scheme of Work", description: "Create lesson plans", category: "Schemes" },
-  { code: "schemes.edit", name: "Edit Scheme of Work", description: "Modify lesson plans", category: "Schemes" },
-  { code: "schemes.delete", name: "Delete Scheme of Work", description: "Remove lesson plans", category: "Schemes" },
-  
-  // POS
+// POS
   { code: "pos.view", name: "View POS", description: "View Point of Sale data", category: "POS" },
   { code: "pos.create_sale", name: "Create POS Sale", description: "Process sales transactions", category: "POS" },
   { code: "pos.manage_items", name: "Manage POS Items", description: "Add/edit POS inventory items", category: "POS" },
@@ -143,6 +139,7 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "users.view", name: "View Users", description: "View user accounts", category: "Users" },
   { code: "users.create", name: "Create Users", description: "Create user accounts", category: "Users" },
   { code: "users.edit", name: "Edit Users", description: "Modify user accounts", category: "Users" },
+  { code: "users.manage_photo", name: "Manage HQ Staff Photos", description: "Upload, replace and download HQ staff profile photos", category: "Users" },
   { code: "users.delete", name: "Delete Users", description: "Remove user accounts", category: "Users" },
   { code: "users.manage_permissions", name: "Manage User Permissions", description: "Modify user access rights", category: "Users" },
   
@@ -251,10 +248,51 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "transport.reports.view", name: "View Transport Reports", description: "View periodic learner, collection, claim and payout reports", category: "Transport" },
   { code: "transport.audit.view", name: "View Transport Audit Trail", description: "View detailed immutable Transport audit events", category: "Transport" },
   { code: "transport.settings.manage", name: "Manage Transport Settings", description: "Manage school-specific effective Transport policy values", category: "Transport" },
+  { code: "transport.organization.view", name: "View Organisation Transport", description: "View consolidated Transport oversight across all schools", category: "Transport" },
+  { code: "transport.organization.reports", name: "View Organisation Transport Reports", description: "View and export organisation Transport comparison reports", category: "Transport" },
+  { code: "transport.organization.export", name: "Export Organisation Transport", description: "Export consolidated Transport oversight data", category: "Transport" },
+  { code: "transport.organization.manage", name: "Manage Organisation Transport", description: "Perform exceptional organisation-level Transport management", category: "Transport" },
+
+  // Assets & Inventory
+  { code: "assets.view", name: "View Assets & Inventory", description: "Open the Assets & Inventory workspace and view school-scoped records", category: "Assets & Inventory" },
+  { code: "assets.create", name: "Register Assets", description: "Register new fixed assets", category: "Assets & Inventory" },
+  { code: "assets.edit", name: "Edit Assets", description: "Edit and archive fixed asset records", category: "Assets & Inventory" },
+  { code: "assets.assign", name: "Assign and Return Assets", description: "Issue assets to custodians and process returns", category: "Assets & Inventory" },
+  { code: "assets.transfer", name: "Transfer Assets", description: "Transfer assets between approved locations", category: "Assets & Inventory" },
+  { code: "assets.maintenance", name: "Manage Asset Maintenance", description: "Report, update and complete maintenance work", category: "Assets & Inventory" },
+  { code: "assets.dispose", name: "Dispose Assets", description: "Approve asset write-off and disposal", category: "Assets & Inventory" },
+  { code: "assets.reports", name: "View Asset Reports", description: "View and export asset reports", category: "Assets & Inventory" },
+  { code: "assets.setup.manage", name: "Manage Asset Setup", description: "Manage categories, stores and locations", category: "Assets & Inventory" },
+  { code: "assets.view.organization", name: "View Organisation Assets", description: "View consolidated assets and inventory across all centres", category: "Assets & Inventory" },
+  { code: "assets.manage.organization", name: "Manage Organisation Assets", description: "Manage HQ and centre-scoped asset operations across the organisation", category: "Assets & Inventory" },
+  { code: "inventory.view", name: "View Inventory", description: "View inventory balances and movement history", category: "Assets & Inventory" },
+  { code: "inventory.items.manage", name: "Manage Inventory Items", description: "Create and edit inventory catalogue items", category: "Assets & Inventory" },
+  { code: "inventory.receive", name: "Receive Inventory", description: "Receive stock through controlled movements", category: "Assets & Inventory" },
+  { code: "inventory.issue", name: "Issue Inventory", description: "Issue and return stock through controlled movements", category: "Assets & Inventory" },
+  { code: "inventory.adjust", name: "Adjust Inventory", description: "Create authorised stock adjustments and write-offs", category: "Assets & Inventory" },
+  { code: "inventory.stocktake", name: "Manage Stocktakes", description: "Create and approve physical stocktakes", category: "Assets & Inventory" },
+  { code: "inventory.reports", name: "View Inventory Reports", description: "View and export inventory reports", category: "Assets & Inventory" },
+  { code: "inventory.low_stock.view", name: "View Low-stock Alerts", description: "View and acknowledge stock threshold alerts", category: "Assets & Inventory" },
+  { code: "inventory.restock.request", name: "Request Restocking", description: "Create replenishment and purchase requests", category: "Assets & Inventory" },
+  { code: "inventory.restock.approve", name: "Approve Restocking", description: "Approve restock and purchase requests", category: "Assets & Inventory" },
+  { code: "inventory.procurement.view", name: "View Procurement", description: "View suppliers, purchase requests, orders and goods receipts", category: "Assets & Inventory" },
+  { code: "inventory.procurement.request", name: "Create Purchase Requests", description: "Create and submit purchase requests", category: "Assets & Inventory" },
+  { code: "inventory.procurement.approve", name: "Approve Procurement", description: "Approve purchase requests and purchase orders", category: "Assets & Inventory" },
+  { code: "inventory.procurement.order", name: "Manage Purchase Orders", description: "Create and issue supplier purchase orders", category: "Assets & Inventory" },
+  { code: "inventory.procurement.receive", name: "Receive Procured Goods", description: "Inspect deliveries and post goods received notes", category: "Assets & Inventory" },
+  { code: "inventory.transfer.request", name: "Request Centre Transfers", description: "Request stock and asset movements between centres", category: "Assets & Inventory" },
+  { code: "inventory.transfer.approve", name: "Approve Centre Transfers", description: "Approve inter-centre asset and stock transfers", category: "Assets & Inventory" },
+  { code: "inventory.transfer.dispatch", name: "Dispatch Centre Transfers", description: "Dispatch approved centre transfers", category: "Assets & Inventory" },
+  { code: "inventory.transfer.receive", name: "Receive Centre Transfers", description: "Receive and reconcile centre transfers", category: "Assets & Inventory" },
+  { code: "damage.view", name: "View Breakage Cases", description: "View damage, loss and breakage cases", category: "Assets & Inventory" },
+  { code: "damage.report", name: "Report Breakages", description: "Report damage, loss and breakages", category: "Assets & Inventory" },
+  { code: "damage.investigate", name: "Investigate Breakages", description: "Record findings and propose liability charges", category: "Assets & Inventory" },
+  { code: "damage.approve_charge", name: "Approve Damage Charges", description: "Approve, reject or waive proposed damage charges", category: "Assets & Inventory" },
+  { code: "damage.record_recovery", name: "Record Damage Recoveries", description: "Record payments and recoveries against approved charges", category: "Assets & Inventory" },
+  { code: "damage.reports", name: "View Damage Reports", description: "View damage liability and recovery reports", category: "Assets & Inventory" },
 
   // Placeholder / Coming Soon Modules
   { code: "kundai.view", name: "View kundAi", description: "Open the kundAi module", category: "kundAi" },
-  { code: "discussion_forum.view", name: "View Discussion Forum", description: "Open the discussion forum module", category: "Discussion Forum" },
   { code: "learning_materials.view", name: "View Learning Materials", description: "Open the learning materials module", category: "Learning Materials" },
   { code: "products.view", name: "View Products", description: "Open the products module", category: "Products" },
   { code: "school_expenses.view", name: "View School Expenses", description: "Open the school expenses module", category: "School Expenses" },

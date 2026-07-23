@@ -200,7 +200,7 @@ export default function ResetPasswordToken() {
           )}
 
           <div className="text-center">
-            <Button variant="link" onClick={() => setLocation("/login")} data-testid="link-back-to-login">
+            <Button variant="ghost" className="underline underline-offset-4" onClick={() => setLocation("/login")} data-testid="link-back-to-login">
               Back to Login
             </Button>
           </div>

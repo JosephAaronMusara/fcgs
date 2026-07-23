@@ -7,6 +7,24 @@ import { RBAC_PERMISSIONS_DATA } from "./rbac-config";
 
 const PERMISSIONS_DATA = RBAC_PERMISSIONS_DATA;
 
+const ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS = new Set([
+  "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.payments.view",
+  "transport.receipts.view", "transport.claims.view", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
+  "transport.organization.view", "transport.organization.reports", "transport.organization.export",
+]);
+
+const ORG_HQ_PERMISSIONS = PERMISSIONS_DATA
+  .filter((permission) => !permission.code.startsWith("transport.") || ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS.has(permission.code))
+  .map((permission) => permission.code);
+
+const ASSET_INVENTORY_OFFICER_PERMISSIONS = [
+  "assets.view", "assets.create", "assets.edit", "assets.assign", "assets.transfer", "assets.maintenance", "assets.reports", "assets.setup.manage",
+  "inventory.view", "inventory.items.manage", "inventory.receive", "inventory.issue", "inventory.adjust", "inventory.stocktake", "inventory.reports", "inventory.low_stock.view",
+  "inventory.restock.request", "inventory.procurement.view", "inventory.procurement.request", "inventory.procurement.order", "inventory.procurement.receive",
+  "inventory.transfer.request", "inventory.transfer.dispatch", "inventory.transfer.receive",
+  "damage.view", "damage.report", "damage.investigate", "damage.reports",
+];
+
 const ACCESS_GROUPS_DATA = [
   {
     name: "School Admin",
@@ -21,6 +39,7 @@ const ACCESS_GROUPS_DATA = [
     permissions: [
       "dashboard.view",
       "students.view",
+      "students.manage_photo",
       "staff.view",
       "parents.view",
       "classes.view",
@@ -34,7 +53,6 @@ const ACCESS_GROUPS_DATA = [
       "timetable.view",
       "logbook.view", "logbook.create", "logbook.edit",
       "staff_attendance.view_own", "staff_attendance.view_logs", "staff_attendance.clock_in", "staff_attendance.clock_out",
-      "schemes.view", "schemes.create", "schemes.edit",
       "newsletters.view",
       "hostel.view",
       "applications.view",
@@ -74,6 +92,7 @@ const ACCESS_GROUPS_DATA = [
     permissions: [
       "dashboard.view",
       "students.view",
+      "students.manage_photo",
       "staff.view",
       "parents.view",
       "classes.view",
@@ -87,7 +106,6 @@ const ACCESS_GROUPS_DATA = [
       "timetable.view",
       "logbook.view", "logbook.create", "logbook.edit",
       "staff_attendance.view_own", "staff_attendance.view_logs", "staff_attendance.clock_in", "staff_attendance.clock_out",
-      "schemes.view", "schemes.create", "schemes.edit",
       "newsletters.view",
       "hostel.view",
       "applications.view",
@@ -177,10 +195,16 @@ const ACCESS_GROUPS_DATA = [
     ],
   },
   {
-    name: "Org HQ",
-    description: "Super user with full access to all schools in the organization. Has all permissions across all campuses.",
+    name: "Assets & Inventory Officer",
+    description: "Manages asset registers, stores, stock movements, procurement receipts, centre transfers, maintenance and damage reporting.",
     isSystemDefault: true,
-    permissions: PERMISSIONS_DATA.map(p => p.code), // All permissions
+    permissions: ASSET_INVENTORY_OFFICER_PERMISSIONS,
+  },
+  {
+    name: "Org HQ",
+    description: "Organization-wide administration with operational Assets & Inventory access and read-only Transport oversight by default.",
+    isSystemDefault: true,
+    permissions: ORG_HQ_PERMISSIONS,
   },
 ];
 

@@ -22,6 +22,7 @@ import * as XLSX from "xlsx";
 import { ResidentialAreaInput } from "@/components/residential-area-input";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
+import { RecordPhotoActions } from "@/components/record-photo-actions";
 
 type PaginatedResponse<T> = {
   items: T[];
@@ -35,7 +36,7 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 export default function StaffPage() {
   const { toast } = useToast();
-  const { currentSchoolId, hasAnyPermission } = useAuth();
+  const { currentSchoolId, hasAnyPermission, hasPermission } = useAuth();
   const canManageAccessRights = hasAnyPermission("access_groups.view", "access_groups.manage", "users.manage_permissions");
   const canResetDeviceId = hasAnyPermission("staff_attendance.reset_device_id");
   const [search, setSearch] = useState("");
@@ -460,9 +461,16 @@ export default function StaffPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center text-sm font-medium">
-                          {s.firstName?.[0]}{s.lastName?.[0]}
-                        </div>
+                        <RecordPhotoActions
+                          entity="staff"
+                          recordId={s.id}
+                          firstName={s.firstName}
+                          lastName={s.lastName}
+                          recordNumber={s.staffNo}
+                          photo={s.photo}
+                          initials={getStaffInitials(s)}
+                          canManage={hasPermission("staff.edit") || hasPermission("staff.manage_photo")}
+                        />
                         <div>
                           <p className="font-medium">{s.gender === "male" ? "Mr." : s.gender === "female" ? "Ms." : ""} {s.firstName} {s.lastName}</p>
                           <div className="flex items-center gap-3 text-sm text-muted-foreground">
@@ -683,13 +691,17 @@ export default function StaffPage() {
                         </div>
 
                         <div className="fcgs-mobile-avatar-box">
-                          <div className="fcgs-mobile-avatar">
-                            {s.photo ? (
-                              <img src={s.photo} alt={`${s.firstName} ${s.lastName}`} className="h-full w-full object-cover" />
-                            ) : (
-                              <span>{getStaffInitials(s)}</span>
-                            )}
-                          </div>
+                          <RecordPhotoActions
+                            entity="staff"
+                            recordId={s.id}
+                            firstName={s.firstName}
+                            lastName={s.lastName}
+                            recordNumber={s.staffNo}
+                            photo={s.photo}
+                            initials={getStaffInitials(s)}
+                            canManage={hasPermission("staff.edit") || hasPermission("staff.manage_photo")}
+                            className="h-full w-full"
+                          />
                         </div>
 
                         <div className="fcgs-mobile-meta">
@@ -1097,7 +1109,7 @@ function StaffForm({
           <Input
             id="nationalIdNumber"
             name="nationalIdNumber"
-            defaultValue={defaultValues?.nationalIdNumber}
+            defaultValue={defaultValues?.nationalIdNumber ?? ""}
             placeholder="e.g. 00-000000A00"
             required
             data-testid="input-national-id-number"
@@ -1108,7 +1120,7 @@ function StaffForm({
           <Input
             id="passportNumber"
             name="passportNumber"
-            defaultValue={defaultValues?.passportNumber}
+            defaultValue={defaultValues?.passportNumber ?? ""}
             data-testid="input-passport-number"
           />
         </div>
