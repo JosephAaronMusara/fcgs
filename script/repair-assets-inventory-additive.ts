@@ -78,6 +78,271 @@ CREATE TABLE IF NOT EXISTS inventory_suppliers (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS inventory_suppliers_org_name_uq ON inventory_suppliers (organization_id, name);
 
+-- Bootstrap the first-generation Assets & Inventory tables when this is the
+-- module's first production deployment. CREATE TABLE IF NOT EXISTS keeps this
+-- safe on databases where the initial module was already installed.
+CREATE TABLE IF NOT EXISTS asset_inventory_categories (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  kind text NOT NULL,
+  name text NOT NULL,
+  code text,
+  description text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS asset_inventory_categories_scope_name_uq
+  ON asset_inventory_categories (organization_id, school_id, kind, name);
+CREATE INDEX IF NOT EXISTS asset_inventory_categories_centre_idx
+  ON asset_inventory_categories (centre_id, kind, name);
+
+CREATE TABLE IF NOT EXISTS asset_inventory_locations (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  name text NOT NULL,
+  code text,
+  location_type text NOT NULL DEFAULT 'general',
+  description text,
+  is_store boolean NOT NULL DEFAULT false,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS asset_inventory_locations_school_name_uq
+  ON asset_inventory_locations (school_id, name);
+CREATE INDEX IF NOT EXISTS asset_inventory_locations_centre_idx
+  ON asset_inventory_locations (centre_id, name);
+
+CREATE TABLE IF NOT EXISTS asset_register (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  owning_centre_id integer REFERENCES asset_centres(id),
+  current_centre_id integer REFERENCES asset_centres(id),
+  asset_number text NOT NULL,
+  asset_class text NOT NULL DEFAULT 'general',
+  name text NOT NULL,
+  category_id integer REFERENCES asset_inventory_categories(id),
+  location_id integer REFERENCES asset_inventory_locations(id),
+  supplier_id integer REFERENCES inventory_suppliers(id),
+  serial_number text,
+  description text,
+  acquisition_date date,
+  acquisition_cost numeric(14,2) NOT NULL DEFAULT 0,
+  current_value numeric(14,2) NOT NULL DEFAULT 0,
+  condition text NOT NULL DEFAULT 'good',
+  status text NOT NULL DEFAULT 'available',
+  warranty_expiry date,
+  supplier text,
+  procurement_reference text,
+  notes text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS asset_register_school_number_uq
+  ON asset_register (school_id, asset_number);
+CREATE UNIQUE INDEX IF NOT EXISTS asset_register_centre_number_uq
+  ON asset_register (current_centre_id, asset_number);
+CREATE INDEX IF NOT EXISTS asset_register_school_idx ON asset_register (school_id);
+CREATE INDEX IF NOT EXISTS asset_register_centre_idx ON asset_register (current_centre_id, status);
+
+CREATE TABLE IF NOT EXISTS inventory_items (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  sku text NOT NULL,
+  name text NOT NULL,
+  item_type text NOT NULL DEFAULT 'consumable',
+  category_id integer REFERENCES asset_inventory_categories(id),
+  default_location_id integer REFERENCES asset_inventory_locations(id),
+  preferred_supplier_id integer REFERENCES inventory_suppliers(id),
+  unit_of_measure text NOT NULL DEFAULT 'unit',
+  purchase_unit text,
+  issue_unit text,
+  unit_conversion_factor numeric(14,4) NOT NULL DEFAULT 1,
+  quantity_on_hand numeric(14,3) NOT NULL DEFAULT 0,
+  reorder_enabled boolean NOT NULL DEFAULT true,
+  reorder_level numeric(14,3) NOT NULL DEFAULT 0,
+  critical_stock_level numeric(14,3) NOT NULL DEFAULT 0,
+  target_stock_level numeric(14,3) NOT NULL DEFAULT 0,
+  preferred_reorder_quantity numeric(14,3) NOT NULL DEFAULT 0,
+  supplier_lead_time_days integer NOT NULL DEFAULT 0,
+  unit_cost numeric(14,2) NOT NULL DEFAULT 0,
+  batch_tracking_enabled boolean NOT NULL DEFAULT false,
+  expiry_tracking_enabled boolean NOT NULL DEFAULT false,
+  description text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS inventory_items_school_sku_uq
+  ON inventory_items (school_id, sku);
+CREATE UNIQUE INDEX IF NOT EXISTS inventory_items_centre_sku_uq
+  ON inventory_items (centre_id, sku);
+CREATE INDEX IF NOT EXISTS inventory_items_school_idx ON inventory_items (school_id);
+CREATE INDEX IF NOT EXISTS inventory_items_centre_idx ON inventory_items (centre_id, is_active);
+
+CREATE TABLE IF NOT EXISTS inventory_movements (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  reference_number text NOT NULL,
+  item_id integer NOT NULL REFERENCES inventory_items(id),
+  movement_type text NOT NULL,
+  quantity numeric(14,3) NOT NULL,
+  quantity_before numeric(14,3) NOT NULL,
+  quantity_after numeric(14,3) NOT NULL,
+  unit_cost numeric(14,2) NOT NULL DEFAULT 0,
+  from_location_id integer REFERENCES asset_inventory_locations(id),
+  to_location_id integer REFERENCES asset_inventory_locations(id),
+  recipient_type text,
+  recipient_id integer,
+  reason text,
+  notes text,
+  created_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS inventory_movements_school_reference_uq
+  ON inventory_movements (school_id, reference_number);
+CREATE INDEX IF NOT EXISTS inventory_movements_item_idx
+  ON inventory_movements (item_id, created_at);
+
+CREATE TABLE IF NOT EXISTS asset_assignments (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  reference_number text NOT NULL,
+  asset_id integer NOT NULL REFERENCES asset_register(id),
+  assignee_type text NOT NULL,
+  assignee_id integer,
+  assignee_name text NOT NULL,
+  assigned_at timestamp without time zone NOT NULL DEFAULT now(),
+  expected_return_date date,
+  returned_at timestamp without time zone,
+  condition_out text NOT NULL DEFAULT 'good',
+  condition_in text,
+  status text NOT NULL DEFAULT 'active',
+  notes text,
+  created_by_user_id integer REFERENCES users(id),
+  returned_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS asset_assignments_school_reference_uq
+  ON asset_assignments (school_id, reference_number);
+CREATE INDEX IF NOT EXISTS asset_assignments_asset_status_idx
+  ON asset_assignments (asset_id, status);
+
+CREATE TABLE IF NOT EXISTS asset_maintenance_records (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  reference_number text NOT NULL,
+  asset_id integer NOT NULL REFERENCES asset_register(id),
+  issue_description text NOT NULL,
+  service_provider text,
+  status text NOT NULL DEFAULT 'reported',
+  date_reported date NOT NULL,
+  date_sent date,
+  date_returned date,
+  estimated_cost numeric(14,2) NOT NULL DEFAULT 0,
+  actual_cost numeric(14,2) NOT NULL DEFAULT 0,
+  work_completed text,
+  next_service_date date,
+  notes text,
+  created_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS asset_damage_cases (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  reference_number text NOT NULL,
+  asset_id integer REFERENCES asset_register(id),
+  inventory_item_id integer REFERENCES inventory_items(id),
+  incident_date date NOT NULL,
+  incident_type text NOT NULL DEFAULT 'breakage',
+  location_id integer REFERENCES asset_inventory_locations(id),
+  description text NOT NULL,
+  classification text NOT NULL DEFAULT 'unconfirmed',
+  responsible_party_type text,
+  responsible_party_id integer,
+  responsible_party_name text,
+  findings text,
+  status text NOT NULL DEFAULT 'reported',
+  proposed_charge numeric(14,2) NOT NULL DEFAULT 0,
+  approved_charge numeric(14,2) NOT NULL DEFAULT 0,
+  amount_recovered numeric(14,2) NOT NULL DEFAULT 0,
+  approval_notes text,
+  approved_by_user_id integer REFERENCES users(id),
+  approved_at timestamp without time zone,
+  created_by_user_id integer REFERENCES users(id),
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS asset_damage_cases_school_reference_uq
+  ON asset_damage_cases (school_id, reference_number);
+
+CREATE TABLE IF NOT EXISTS asset_damage_recoveries (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  damage_case_id integer NOT NULL REFERENCES asset_damage_cases(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  reference_number text NOT NULL,
+  amount numeric(14,2) NOT NULL,
+  payment_method text NOT NULL DEFAULT 'cash',
+  receipt_number text,
+  notes text,
+  received_by_user_id integer REFERENCES users(id),
+  received_at timestamp without time zone DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS inventory_stocktakes (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  organization_id integer NOT NULL REFERENCES organizations(id),
+  school_id integer REFERENCES schools(id),
+  centre_id integer REFERENCES asset_centres(id),
+  reference_number text NOT NULL,
+  location_id integer REFERENCES asset_inventory_locations(id),
+  status text NOT NULL DEFAULT 'draft',
+  count_date date NOT NULL,
+  notes text,
+  created_by_user_id integer REFERENCES users(id),
+  approved_by_user_id integer REFERENCES users(id),
+  approved_at timestamp without time zone,
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS inventory_stocktake_lines (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  stocktake_id integer NOT NULL REFERENCES inventory_stocktakes(id),
+  item_id integer NOT NULL REFERENCES inventory_items(id),
+  expected_quantity numeric(14,3) NOT NULL,
+  counted_quantity numeric(14,3),
+  variance_quantity numeric(14,3),
+  notes text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS inventory_stocktake_lines_item_uq
+  ON inventory_stocktake_lines (stocktake_id, item_id);
+
 -- Existing Assets & Inventory records: additive centre-aware fields only.
 ALTER TABLE asset_inventory_categories
   ADD COLUMN IF NOT EXISTS centre_id integer REFERENCES asset_centres(id);
