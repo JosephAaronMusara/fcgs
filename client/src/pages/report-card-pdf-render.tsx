@@ -6,7 +6,7 @@ import {
   ReportCardSlip,
   type ReportCardData,
   type ReportStudent,
-} from "@/pages/academic-reports";
+} from "@/components/academic-reports/report-card-document";
 
 const REPORT_PDF_CSS = `
   html, body, #root { margin: 0 !important; padding: 0 !important; background: #fff !important; color: #000 !important; }
@@ -60,10 +60,14 @@ export default function ReportCardPdfRenderPage() {
   const requestedStudentIds = useMemo(() => parseIds(params.get("studentIds")), [params]);
 
   const { data, error, isLoading } = useQuery<ReportCardData>({
-    queryKey: ["/api/report-cards", examId, "class", classId, "pdf-render"],
+    queryKey: ["/api/report-cards", examId, "pdf-data", classId, requestedStudentIds.join(",")],
     enabled: Number.isInteger(examId) && examId > 0 && Number.isInteger(classId) && classId > 0,
     queryFn: async () => {
-      const response = await schoolFetch(`/api/report-cards/${examId}/class/${classId}`);
+      const response = await schoolFetch(`/api/report-cards/${examId}/pdf-data`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ classId, studentIds: requestedStudentIds }),
+      });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
         throw new Error(body?.message || "Unable to load report-card data");

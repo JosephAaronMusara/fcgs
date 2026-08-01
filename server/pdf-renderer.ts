@@ -15,14 +15,16 @@ function numberFromEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-async function acquireSlot(): Promise<void> {
+async function acquireSlot(): Promise<number> {
+  const queuedAt = Date.now();
   const limit = numberFromEnv("PDF_RENDER_CONCURRENCY", DEFAULT_CONCURRENCY);
   if (activeJobs < limit) {
     activeJobs += 1;
-    return;
+    return 0;
   }
   await new Promise<void>((resolve) => waiters.push(resolve));
   activeJobs += 1;
+  return Date.now() - queuedAt;
 }
 
 function releaseSlot(): void {
@@ -100,9 +102,12 @@ async function waitForPdfReady(page: import("playwright").Page, timeoutMs: numbe
     undefined,
     { timeout: timeoutMs },
   );
-  await page.evaluate(async () => {
-    if ("fonts" in document) await (document as any).fonts.ready;
-  });
+}
+
+export async function prewarmPdfRenderer(): Promise<void> {
+  const startedAt = Date.now();
+  await getBrowser();
+  console.info(`[pdf-renderer] Chromium prewarmed in ${Date.now() - startedAt}ms`);
 }
 
 export async function renderAppRoutePdf(args: {
@@ -112,29 +117,42 @@ export async function renderAppRoutePdf(args: {
   pdfOptions?: PDFOptions;
   timeoutMs?: number;
 }): Promise<Buffer> {
-  await acquireSlot();
+  const totalStartedAt = Date.now();
+  const queueWaitMs = await acquireSlot();
   let context: BrowserContext | null = null;
   try {
+    const contextStartedAt = Date.now();
     const created = await createContext({
       cookieHeader: args.req?.headers.cookie,
       schoolId: args.schoolId,
     });
     context = created.context;
+    const contextMs = Date.now() - contextStartedAt;
     const page = await context.newPage();
     const timeoutMs = args.timeoutMs || numberFromEnv("PDF_RENDER_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
     page.setDefaultTimeout(timeoutMs);
     await page.emulateMedia({ media: "print" });
 
     const url = new URL(args.route, created.baseUrl).toString();
+    const navigationStartedAt = Date.now();
     const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    const navigationMs = Date.now() - navigationStartedAt;
     if (!response || !response.ok()) {
       throw new Error(`PDF render page failed with HTTP ${response?.status() ?? "unknown"}`);
     }
 
+    const readyStartedAt = Date.now();
     await waitForPdfReady(page, timeoutMs);
+    const readyMs = Date.now() - readyStartedAt;
     const renderError = await page.evaluate(() => document.documentElement.dataset.pdfError || "");
     if (renderError) throw new Error(renderError);
-    return Buffer.from(await page.pdf({ ...A4_TWO_MM, ...args.pdfOptions }));
+    const pdfStartedAt = Date.now();
+    const buffer = Buffer.from(await page.pdf({ ...A4_TWO_MM, ...args.pdfOptions }));
+    const pdfMs = Date.now() - pdfStartedAt;
+    console.info(
+      `[pdf-renderer] route=${args.route.split("?")[0]} queueMs=${queueWaitMs} contextMs=${contextMs} navigationMs=${navigationMs} readyMs=${readyMs} pdfMs=${pdfMs} totalMs=${Date.now() - totalStartedAt} bytes=${buffer.length}`,
+    );
+    return buffer;
   } finally {
     await context?.close().catch(() => undefined);
     releaseSlot();
@@ -146,7 +164,7 @@ export async function renderHtmlPdf(args: {
   pdfOptions?: PDFOptions;
   timeoutMs?: number;
 }): Promise<Buffer> {
-  await acquireSlot();
+  const queueWaitMs = await acquireSlot();
   let context: BrowserContext | null = null;
   try {
     const created = await createContext();
@@ -169,7 +187,9 @@ export async function renderHtmlPdf(args: {
         });
       }));
     });
-    return Buffer.from(await page.pdf({ ...A4_TWO_MM, ...args.pdfOptions }));
+    const buffer = Buffer.from(await page.pdf({ ...A4_TWO_MM, ...args.pdfOptions }));
+    if (queueWaitMs > 0) console.info(`[pdf-renderer] HTML job waited ${queueWaitMs}ms for a render slot`);
+    return buffer;
   } finally {
     await context?.close().catch(() => undefined);
     releaseSlot();

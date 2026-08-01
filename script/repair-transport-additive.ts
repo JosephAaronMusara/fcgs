@@ -209,6 +209,54 @@ BEGIN
   END LOOP;
 END $$;
 
+
+-- Stage 2/3 Transport master-data backfills after the additive schema push.
+-- Preserve the legacy contact person as the new alternative contact name.
+UPDATE transport_owners
+SET alternative_contact_name = contact_person,
+    updated_at = COALESCE(updated_at, now())
+WHERE alternative_contact_name IS NULL
+  AND NULLIF(TRIM(contact_person), '') IS NOT NULL;
+
+-- A linked staff record is the authoritative signal that this is a staff owner.
+UPDATE transport_owners
+SET is_staff_owner = true,
+    updated_at = COALESCE(updated_at, now())
+WHERE staff_id IS NOT NULL
+  AND COALESCE(is_staff_owner, false) = false;
+
+-- Remove the retired 60-day notification threshold while retaining the approved defaults.
+UPDATE transport_settings
+SET compliance_notification_days = '[30,14,7,1,0]'::jsonb,
+    updated_at = COALESCE(updated_at, now())
+WHERE compliance_notification_days IS NULL
+   OR compliance_notification_days @> '[60]'::jsonb;
+
+-- Existing incidents did not have immutable relationship snapshots. Capture their stored
+-- foreign-key context without rewriting any historical selections.
+UPDATE transport_incidents
+SET actual_context = jsonb_strip_nulls(jsonb_build_object(
+      'vehicleId', vehicle_id,
+      'ownerId', owner_id,
+      'driverId', driver_id,
+      'routeId', route_id,
+      'pathId', path_id,
+      'pathTraversal', path_traversal
+    )),
+    expected_context = CASE
+      WHEN expected_context IS NULL OR expected_context = '{}'::jsonb
+      THEN jsonb_strip_nulls(jsonb_build_object(
+        'vehicleId', vehicle_id,
+        'ownerId', owner_id,
+        'driverId', driver_id,
+        'routeId', route_id,
+        'pathId', path_id,
+        'pathTraversal', path_traversal
+      ))
+      ELSE expected_context
+    END
+WHERE actual_context IS NULL OR actual_context = '{}'::jsonb;
+
 COMMIT;
 `;
 
@@ -223,6 +271,18 @@ const expectedColumns: Array<[string, string]> = [
   ["transport_payments", "verification_status"],
   ["transport_payments", "verification_token"],
   ["transport_payment_allocations", "service_month"],
+  ["transport_owners", "alternative_contact_name"],
+  ["transport_owners", "is_staff_owner"],
+  ["transport_owners", "staff_id"],
+  ["transport_drivers", "owner_id"],
+  ["transport_drivers", "home_address"],
+  ["transport_drivers", "next_of_kin_name"],
+  ["transport_vehicles", "registration_expiry"],
+  ["transport_vehicles", "radio_licence_expiry"],
+  ["transport_vehicle_paths", "is_two_way"],
+  ["transport_path_nodes", "reverse_expected_time"],
+  ["transport_incidents", "expected_context"],
+  ["transport_incidents", "actual_context"],
 ];
 
 async function main() {

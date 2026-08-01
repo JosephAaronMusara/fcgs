@@ -3614,19 +3614,31 @@ export class DatabaseStorage implements IStorage {
   }
 
   async setAssessmentPapers(assessmentId: number, papers: InsertAssessmentPaper[]): Promise<AssessmentPaper[]> {
-    // Get existing papers for this assessment
-    const existingPapers = await db.select().from(assessmentPapers).where(eq(assessmentPapers.assessmentId, assessmentId));
-    
-    // Delete all assessment_mark_papers that reference these papers
-    for (const paper of existingPapers) {
-      await db.delete(assessmentMarkPapers).where(eq(assessmentMarkPapers.assessmentPaperId, paper.id));
-    }
-    
-    // Now delete the papers
-    await db.delete(assessmentPapers).where(eq(assessmentPapers.assessmentId, assessmentId));
-    if (papers.length === 0) return [];
-    const created = await db.insert(assessmentPapers).values(papers).returning();
-    return created;
+    return db.transaction(async (tx) => {
+      const existingPapers = await tx
+        .select()
+        .from(assessmentPapers)
+        .where(eq(assessmentPapers.assessmentId, assessmentId));
+
+      // This replacement helper is safe only during initial assessment creation. Updates
+      // must use reconcileAssessmentPapersAndMarks so paper IDs and learner marks survive.
+      if (existingPapers.length > 0) {
+        const existingMarks = await tx
+          .select({ id: assessmentMarks.id })
+          .from(assessmentMarks)
+          .where(eq(assessmentMarks.assessmentId, assessmentId))
+          .limit(1);
+        if (existingMarks.length > 0) {
+          throw new Error(
+            "Unsafe assessment paper replacement blocked because learner marks already exist. Use the reconciliation workflow instead.",
+          );
+        }
+      }
+
+      await tx.delete(assessmentPapers).where(eq(assessmentPapers.assessmentId, assessmentId));
+      if (papers.length === 0) return [];
+      return tx.insert(assessmentPapers).values(papers).returning();
+    });
   }
 
   // Assessment Comments

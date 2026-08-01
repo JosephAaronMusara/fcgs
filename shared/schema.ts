@@ -494,8 +494,17 @@ export const transportOwners = pgTable("transport_owners", {
   schoolId: integer("school_id").references(() => schools.id).notNull(),
   name: text("name").notNull(),
   ownerType: text("owner_type").notNull().default("individual"),
+  // Legacy column retained additively. New UI writes alternativeContactName.
   contactPerson: text("contact_person"),
   phone: text("phone"),
+  email: text("email"),
+  address: text("address"),
+  alternativeContactName: text("alternative_contact_name"),
+  alternativeContactPhone: text("alternative_contact_phone"),
+  alternativeContactEmail: text("alternative_contact_email"),
+  alternativeContactRelationship: text("alternative_contact_relationship"),
+  isStaffOwner: boolean("is_staff_owner").notNull().default(false),
+  staffId: integer("staff_id").references(() => staff.id),
   nationalIdOrRegistration: text("national_id_or_registration"),
   paymentDetails: text("payment_details"),
   isActive: boolean("is_active").notNull().default(true),
@@ -504,18 +513,32 @@ export const transportOwners = pgTable("transport_owners", {
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  schoolStaffOwnerUnique: uniqueIndex("transport_owners_school_staff_uidx")
+    .on(table.schoolId, table.staffId)
+    .where(sql`${table.staffId} is not null`),
+}));
 
 export const transportDrivers = pgTable("transport_drivers", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
   firstName: text("first_name").notNull(),
   lastName: text("last_name").notNull(),
   phone: text("phone"),
+  homeAddress: text("home_address"),
+  photo: text("photo"),
   nationalId: text("national_id"),
   licenceNumber: text("licence_number"),
   licenceExpiry: date("licence_expiry"),
   engagementType: text("engagement_type").notNull().default("internal"),
+  nextOfKinName: text("next_of_kin_name"),
+  nextOfKinRelationship: text("next_of_kin_relationship"),
+  nextOfKinPhone: text("next_of_kin_phone"),
+  nextOfKinAlternativePhone: text("next_of_kin_alternative_phone"),
+  nextOfKinEmail: text("next_of_kin_email"),
+  nextOfKinAddress: text("next_of_kin_address"),
+  complianceStatus: text("compliance_status").notNull().default("unknown"),
   isActive: boolean("is_active").notNull().default(true),
   effectiveFrom: date("effective_from"),
   effectiveTo: date("effective_to"),
@@ -533,8 +556,12 @@ export const transportVehicles = pgTable("transport_vehicles", {
   ownershipType: text("ownership_type").notNull().default("school"),
   ownerId: integer("owner_id").references(() => transportOwners.id),
   driverId: integer("driver_id").references(() => transportDrivers.id),
+  registrationExpiry: date("registration_expiry"),
   insuranceExpiry: date("insurance_expiry"),
   fitnessExpiry: date("fitness_expiry"),
+  radioLicenceExpiry: date("radio_licence_expiry"),
+  primaryImage: text("primary_image"),
+  complianceStatus: text("compliance_status").notNull().default("unknown"),
   status: text("status").notNull().default("active"),
   isActive: boolean("is_active").notNull().default(true),
   notes: text("notes"),
@@ -571,6 +598,9 @@ export const transportSettings = pgTable("transport_settings", {
   fortnightAnchorDate: date("fortnight_anchor_date"),
   mapProvider: text("map_provider").notNull().default("openstreetmap"),
   defaultCheckpointRadiusMeters: integer("default_checkpoint_radius_meters").notNull().default(50),
+  attachmentSizeLimitMB: integer("attachment_size_limit_mb").notNull().default(25),
+  complianceNotificationDays: jsonb("compliance_notification_days").notNull().default(sql`'[30,14,7,1,0]'::jsonb`),
+  complianceNotificationRecipients: jsonb("compliance_notification_recipients").notNull().default(sql`'["transport_manager"]'::jsonb`),
   approvalWorkflow: jsonb("approval_workflow").notNull().default(sql`'{}'::jsonb`),
   deductionPriority: jsonb("deduction_priority").notNull().default(sql`'["refund","subscription","penalty","advance","other"]'::jsonb`),
   createdAt: timestamp("created_at").defaultNow(),
@@ -603,6 +633,8 @@ export const transportVehiclePaths = pgTable("transport_vehicle_paths", {
   routeId: integer("route_id").references(() => transportRoutes.id).notNull(),
   vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
   direction: text("direction").notNull(),
+  isTwoWay: boolean("is_two_way").notNull().default(false),
+  canonicalTraversal: text("canonical_traversal").notNull().default("forward"),
   name: text("name").notNull(),
   versionNumber: integer("version_number").notNull().default(1),
   status: text("status").notNull().default("draft"),
@@ -629,6 +661,7 @@ export const transportPathNodes = pgTable("transport_path_nodes", {
   longitude: decimal("longitude", { precision: 10, scale: 7 }).notNull(),
   stopOrder: integer("stop_order").notNull(),
   expectedTime: text("expected_time"),
+  reverseExpectedTime: text("reverse_expected_time"),
   checkpointRadiusMeters: integer("checkpoint_radius_meters"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow(),
@@ -644,7 +677,9 @@ export const transportAssignments = pgTable("transport_assignments", {
   driverId: integer("driver_id").references(() => transportDrivers.id),
   outboundVehicleId: integer("outbound_vehicle_id").references(() => transportVehicles.id),
   inboundPathId: integer("inbound_path_id").references(() => transportVehiclePaths.id),
+  inboundPathTraversal: text("inbound_path_traversal").notNull().default("forward"),
   outboundPathId: integer("outbound_path_id").references(() => transportVehiclePaths.id),
+  outboundPathTraversal: text("outbound_path_traversal").notNull().default("forward"),
   pickupServicePointId: integer("pickup_service_point_id").references(() => transportServicePoints.id),
   dropoffServicePointId: integer("dropoff_service_point_id").references(() => transportServicePoints.id),
   pickupPathNodeId: integer("pickup_path_node_id").references(() => transportPathNodes.id),
@@ -971,9 +1006,15 @@ export const transportIncidents = pgTable("transport_incidents", {
   schoolId: integer("school_id").references(() => schools.id).notNull(),
   incidentNumber: text("incident_number").notNull().unique(),
   vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
   driverId: integer("driver_id").references(() => transportDrivers.id),
   routeId: integer("route_id").references(() => transportRoutes.id),
   pathId: integer("path_id").references(() => transportVehiclePaths.id),
+  pathTraversal: text("path_traversal").notNull().default("forward"),
+  assignmentOverride: boolean("assignment_override").notNull().default(false),
+  overrideReason: text("override_reason"),
+  expectedContext: jsonb("expected_context").notNull().default(sql`'{}'::jsonb`),
+  actualContext: jsonb("actual_context").notNull().default(sql`'{}'::jsonb`),
   incidentType: text("incident_type").notNull(),
   severity: text("severity").notNull().default("medium"),
   occurredAt: timestamp("occurred_at").notNull(),
@@ -990,6 +1031,100 @@ export const transportIncidents = pgTable("transport_incidents", {
   resolvedAt: timestamp("resolved_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+export const transportDriverOwnerHistory = pgTable("transport_driver_owner_history", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  driverId: integer("driver_id").references(() => transportDrivers.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  reason: text("reason").notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  currentDriverOwnerUnique: uniqueIndex("transport_driver_owner_current_uidx")
+    .on(table.driverId)
+    .where(sql`${table.effectiveTo} is null`),
+}));
+
+export const transportDocumentRequirements = pgTable("transport_document_requirements", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  entityType: text("entity_type").notNull(), // owner | driver | vehicle
+  ownerType: text("owner_type"),
+  scopeKey: text("scope_key").notNull().default("all"),
+  categoryCode: text("category_code").notNull(),
+  label: text("label").notNull(),
+  isRequired: boolean("is_required").notNull().default(false),
+  allowsMultiple: boolean("allows_multiple").notNull().default(false),
+  tracksExpiry: boolean("tracks_expiry").notNull().default(false),
+  isImage: boolean("is_image").notNull().default(false),
+  displayOrder: integer("display_order").notNull().default(100),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolEntityCategoryUnique: uniqueIndex("transport_document_requirements_scope_uidx")
+    .on(table.schoolId, table.entityType, table.scopeKey, table.categoryCode),
+}));
+
+export const transportDocuments = pgTable("transport_documents", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  entityType: text("entity_type").notNull(), // owner | driver | vehicle
+  entityId: integer("entity_id").notNull(),
+  categoryCode: text("category_code").notNull(),
+  originalName: text("original_name").notNull(),
+  storedName: text("stored_name").notNull(),
+  storageKey: text("storage_key").notNull().unique(),
+  mimeType: text("mime_type").notNull(),
+  fileSize: integer("file_size").notNull(),
+  expiryDate: date("expiry_date"),
+  isPrimary: boolean("is_primary").notNull().default(false),
+  isActive: boolean("is_active").notNull().default(true),
+  replacedByDocumentId: integer("replaced_by_document_id").references((): AnyPgColumn => transportDocuments.id),
+  uploadedByUserId: integer("uploaded_by_user_id").references(() => users.id).notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+  archivedAt: timestamp("archived_at"),
+}, (table) => ({
+  entityActiveIdx: index("transport_documents_entity_active_idx").on(table.schoolId, table.entityType, table.entityId, table.isActive),
+  categoryIdx: index("transport_documents_category_idx").on(table.categoryCode, table.expiryDate),
+}));
+
+export const transportComplianceOverrides = pgTable("transport_compliance_overrides", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: integer("entity_id").notNull(),
+  documentId: integer("document_id").references(() => transportDocuments.id),
+  reason: text("reason").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  revokedByUserId: integer("revoked_by_user_id").references(() => users.id),
+  revokedAt: timestamp("revoked_at"),
+  revokeReason: text("revoke_reason"),
+}, (table) => ({
+  activeEntityIdx: index("transport_compliance_overrides_entity_idx").on(table.schoolId, table.entityType, table.entityId, table.expiresAt),
+}));
+
+export const transportComplianceNotificationLog = pgTable("transport_compliance_notification_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: integer("entity_id").notNull(),
+  documentId: integer("document_id").references(() => transportDocuments.id),
+  categoryCode: text("category_code").notNull(),
+  thresholdDays: integer("threshold_days").notNull(),
+  expiryDate: date("expiry_date").notNull(),
+  recipientUserId: integer("recipient_user_id").references(() => users.id).notNull(),
+  notificationId: integer("notification_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  dedupeUnique: uniqueIndex("transport_compliance_notification_dedupe_uidx")
+    .on(table.schoolId, table.entityType, table.entityId, table.categoryCode, table.thresholdDays, table.expiryDate, table.recipientUserId),
+}));
 
 export const transportClaims = pgTable("transport_claims", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -1417,6 +1552,193 @@ export const studentApplications = pgTable("student_applications", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Staff recruitment is intentionally separate from student admissions.
+export const recruitmentSettings = pgTable("recruitment_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  publicApplicationsOpen: boolean("public_applications_open").notNull().default(true),
+  generalApplicationsOpen: boolean("general_applications_open").notNull().default(true),
+  attachmentSizeLimitMB: integer("attachment_size_limit_mb").notNull().default(15),
+  careersPageTitle: text("careers_page_title").notNull().default("Careers at First Choice Group of Schools"),
+  careersPageMessage: text("careers_page_message").notNull().default("Apply for an advertised vacancy or submit a general application for future opportunities."),
+  generalApplicationCategories: jsonb("general_application_categories").notNull().default(sql`'["Teaching","Administration","Finance","Quality Control","Information Technology","Transport","Assets & Inventory","Call Centre","Ancillary Staff","Other"]'::jsonb`),
+  duplicateMatchFields: jsonb("duplicate_match_fields").notNull().default(sql`'["email","phone","national_id"]'::jsonb`),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ organizationUnique: uniqueIndex("recruitment_settings_org_uidx").on(table.organizationId) }));
+
+export const recruitmentVacancies = pgTable("recruitment_vacancies", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id),
+  code: text("code").notNull(),
+  title: text("title").notNull(),
+  employmentCategory: text("employment_category").notNull(),
+  description: text("description").notNull(),
+  locationText: text("location_text"),
+  positionsAvailable: integer("positions_available").notNull().default(1),
+  status: text("status").notNull().default("draft"),
+  publishedAt: timestamp("published_at"),
+  opensAt: timestamp("opens_at"),
+  closesAt: timestamp("closes_at"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationCodeUnique: uniqueIndex("recruitment_vacancies_org_code_uidx").on(table.organizationId, table.code),
+  publicStatusIdx: index("recruitment_vacancies_public_idx").on(table.organizationId, table.status, table.closesAt),
+}));
+
+export const recruitmentRequirements = pgTable("recruitment_requirements", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id),
+  employmentCategory: text("employment_category"),
+  scopeKey: text("scope_key").notNull(),
+  code: text("code").notNull(),
+  label: text("label").notNull(),
+  helpText: text("help_text"),
+  inputType: text("input_type").notNull().default("boolean"),
+  acceptedValues: jsonb("accepted_values").notNull().default(sql`'[]'::jsonb`),
+  minimumNumber: decimal("minimum_number", { precision: 12, scale: 2 }),
+  maximumNumber: decimal("maximum_number", { precision: 12, scale: 2 }),
+  isMandatory: boolean("is_mandatory").notNull().default(false),
+  autoRejectOnFail: boolean("auto_reject_on_fail").notNull().default(false),
+  alternativePassKeywords: jsonb("alternative_pass_keywords").notNull().default(sql`'[]'::jsonb`),
+  alternativePassNote: text("alternative_pass_note"),
+  displayOrder: integer("display_order").notNull().default(100),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  scopeCodeUnique: uniqueIndex("recruitment_requirements_scope_code_uidx").on(table.organizationId, table.scopeKey, table.code),
+}));
+
+export const recruitmentDocumentCategories = pgTable("recruitment_document_categories", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id),
+  employmentCategory: text("employment_category"),
+  scopeKey: text("scope_key").notNull(),
+  code: text("code").notNull(),
+  label: text("label").notNull(),
+  isRequired: boolean("is_required").notNull().default(false),
+  allowsMultiple: boolean("allows_multiple").notNull().default(false),
+  displayOrder: integer("display_order").notNull().default(100),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  scopeCodeUnique: uniqueIndex("recruitment_document_categories_scope_code_uidx").on(table.organizationId, table.scopeKey, table.code),
+}));
+
+export const recruitmentApplications = pgTable("recruitment_applications", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id),
+  vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id),
+  applicationType: text("application_type").notNull(),
+  employmentCategory: text("employment_category").notNull(),
+  firstName: text("first_name").notNull(),
+  lastName: text("last_name").notNull(),
+  email: text("email").notNull(),
+  phone: text("phone").notNull(),
+  nationalId: text("national_id").notNull(),
+  dateOfBirth: date("date_of_birth"),
+  gender: text("gender"),
+  address: text("address"),
+  preferredSchoolIds: jsonb("preferred_school_ids").notNull().default(sql`'[]'::jsonb`),
+  qualifications: text("qualifications"),
+  yearsExperience: decimal("years_experience", { precision: 6, scale: 2 }).notNull().default("0"),
+  currentEmployer: text("current_employer"),
+  coverLetter: text("cover_letter"),
+  normalizedEmail: text("normalized_email").notNull(),
+  normalizedPhone: text("normalized_phone").notNull(),
+  normalizedNationalId: text("normalized_national_id").notNull(),
+  eligibilityStatus: text("eligibility_status").notNull().default("eligible"),
+  failedRequirementCodes: jsonb("failed_requirement_codes").notNull().default(sql`'[]'::jsonb`),
+  status: text("status").notNull().default("submitted"),
+  recruiterNotes: text("recruiter_notes"),
+  reviewedByUserId: integer("reviewed_by_user_id").references(() => users.id),
+  reviewedAt: timestamp("reviewed_at"),
+  submittedAt: timestamp("submitted_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationStatusIdx: index("recruitment_applications_org_status_idx").on(table.organizationId, table.status, table.submittedAt),
+  emailUnique: uniqueIndex("recruitment_applications_normalized_email_uidx").on(table.organizationId, table.normalizedEmail),
+  phoneUnique: uniqueIndex("recruitment_applications_normalized_phone_uidx").on(table.organizationId, table.normalizedPhone),
+  nationalIdUnique: uniqueIndex("recruitment_applications_normalized_national_id_uidx").on(table.organizationId, table.normalizedNationalId),
+}));
+
+export const recruitmentApplicationAnswers = pgTable("recruitment_application_answers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id).notNull(),
+  requirementId: integer("requirement_id").references(() => recruitmentRequirements.id).notNull(),
+  answerValue: jsonb("answer_value").notNull(),
+  passed: boolean("passed").notNull().default(true),
+  alternativeAccepted: boolean("alternative_accepted").notNull().default(false),
+  evaluationNote: text("evaluation_note"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ applicationRequirementUnique: uniqueIndex("recruitment_application_answers_uidx").on(table.applicationId, table.requirementId) }));
+
+export const recruitmentApplicationDocuments = pgTable("recruitment_application_documents", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id).notNull(),
+  categoryCode: text("category_code").notNull(),
+  originalName: text("original_name").notNull(),
+  storedName: text("stored_name").notNull(),
+  storageKey: text("storage_key").notNull().unique(),
+  mimeType: text("mime_type").notNull(),
+  fileSize: integer("file_size").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+  archivedAt: timestamp("archived_at"),
+}, (table) => ({ applicationIdx: index("recruitment_application_documents_application_idx").on(table.applicationId, table.isActive) }));
+
+export const recruitmentApplicationStatusHistory = pgTable("recruitment_application_status_history", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id).notNull(),
+  previousStatus: text("previous_status"),
+  newStatus: text("new_status").notNull(),
+  notes: text("notes"),
+  changedByUserId: integer("changed_by_user_id").references(() => users.id),
+  actorType: text("actor_type").notNull().default("staff"),
+  actorLabel: text("actor_label"),
+  changedAt: timestamp("changed_at").defaultNow(),
+});
+
+export const recruitmentRejectionAttempts = pgTable("recruitment_rejection_attempts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id),
+  applicationType: text("application_type").notNull(),
+  employmentCategory: text("employment_category").notNull(),
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  normalizedEmail: text("normalized_email"),
+  normalizedPhone: text("normalized_phone"),
+  normalizedNationalId: text("normalized_national_id"),
+  reasonCode: text("reason_code").notNull(),
+  failedRequirementCodes: jsonb("failed_requirement_codes").notNull().default(sql`'[]'::jsonb`),
+  duplicateApplicationId: integer("duplicate_application_id").references(() => recruitmentApplications.id),
+  attemptedAt: timestamp("attempted_at").defaultNow(),
+}, (table) => ({ organizationReasonIdx: index("recruitment_rejection_attempts_org_reason_idx").on(table.organizationId, table.reasonCode, table.attemptedAt) }));
+
+export const recruitmentInterviews = pgTable("recruitment_interviews", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id).notNull(),
+  scheduledAt: timestamp("scheduled_at").notNull(),
+  location: text("location"),
+  interviewType: text("interview_type").notNull().default("in_person"),
+  panelUserIds: jsonb("panel_user_ids").notNull().default(sql`'[]'::jsonb`),
+  notes: text("notes"),
+  outcome: text("outcome"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 export const permissions = pgTable("permissions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: text("code").notNull().unique(),
@@ -1523,6 +1845,11 @@ export const insertTransportPeriodLockSchema = omitInsertFields(createInsertSche
 export const insertTransportVehicleOwnerHistorySchema = omitInsertFields(createInsertSchema(transportVehicleOwnerHistory), { id: true, createdAt: true });
 export const insertTransportVehicleDriverHistorySchema = omitInsertFields(createInsertSchema(transportVehicleDriverHistory), { id: true, createdAt: true });
 export const insertTransportAuditEventSchema = omitInsertFields(createInsertSchema(transportAuditEvents), { id: true, createdAt: true });
+export const insertTransportDriverOwnerHistorySchema = omitInsertFields(createInsertSchema(transportDriverOwnerHistory), { id: true, createdAt: true });
+export const insertTransportDocumentRequirementSchema = omitInsertFields(createInsertSchema(transportDocumentRequirements), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportDocumentSchema = omitInsertFields(createInsertSchema(transportDocuments), { id: true, uploadedAt: true, archivedAt: true });
+export const insertTransportComplianceOverrideSchema = omitInsertFields(createInsertSchema(transportComplianceOverrides), { id: true, createdAt: true, revokedAt: true });
+export const insertTransportComplianceNotificationLogSchema = omitInsertFields(createInsertSchema(transportComplianceNotificationLog), { id: true, createdAt: true });
 
 export const insertLibraryResourceSchema = omitInsertFields(createInsertSchema(libraryResources), { id: true, createdAt: true });
 export const insertLibraryCategorySchema = omitInsertFields(createInsertSchema(libraryCategories), { id: true, createdAt: true });
@@ -1543,6 +1870,16 @@ export const insertNewsletterSchema = omitInsertFields(createInsertSchema(newsle
 export const insertHostelSchema = omitInsertFields(createInsertSchema(hostels), { id: true, createdAt: true });
 export const insertHostelRollCallSchema = omitInsertFields(createInsertSchema(hostelRollCall), { id: true, createdAt: true });
 export const insertStudentApplicationSchema = omitInsertFields(createInsertSchema(studentApplications), { id: true, createdAt: true });
+export const insertRecruitmentSettingSchema = omitInsertFields(createInsertSchema(recruitmentSettings), { id: true, createdAt: true, updatedAt: true });
+export const insertRecruitmentVacancySchema = omitInsertFields(createInsertSchema(recruitmentVacancies), { id: true, createdAt: true, updatedAt: true, publishedAt: true });
+export const insertRecruitmentRequirementSchema = omitInsertFields(createInsertSchema(recruitmentRequirements), { id: true, createdAt: true, updatedAt: true });
+export const insertRecruitmentDocumentCategorySchema = omitInsertFields(createInsertSchema(recruitmentDocumentCategories), { id: true, createdAt: true, updatedAt: true });
+export const insertRecruitmentApplicationSchema = omitInsertFields(createInsertSchema(recruitmentApplications), { id: true, createdAt: true, updatedAt: true, submittedAt: true, reviewedAt: true });
+export const insertRecruitmentApplicationAnswerSchema = omitInsertFields(createInsertSchema(recruitmentApplicationAnswers), { id: true, createdAt: true });
+export const insertRecruitmentApplicationDocumentSchema = omitInsertFields(createInsertSchema(recruitmentApplicationDocuments), { id: true, uploadedAt: true, archivedAt: true });
+export const insertRecruitmentApplicationStatusHistorySchema = omitInsertFields(createInsertSchema(recruitmentApplicationStatusHistory), { id: true, changedAt: true });
+export const insertRecruitmentRejectionAttemptSchema = omitInsertFields(createInsertSchema(recruitmentRejectionAttempts), { id: true, attemptedAt: true });
+export const insertRecruitmentInterviewSchema = omitInsertFields(createInsertSchema(recruitmentInterviews), { id: true, createdAt: true, updatedAt: true });
 export const insertPermissionSchema = omitInsertFields(createInsertSchema(permissions), { id: true, createdAt: true });
 export const insertAccessGroupSchema = omitInsertFields(createInsertSchema(accessGroups), { id: true, createdAt: true });
 export const insertAccessGroupPermissionSchema = omitInsertFields(createInsertSchema(accessGroupPermissions), { id: true });
@@ -1630,6 +1967,16 @@ export type InsertHostelRollCall = z.infer<typeof insertHostelRollCallSchema>;
 export type HostelRollCall = typeof hostelRollCall.$inferSelect;
 export type InsertStudentApplication = z.infer<typeof insertStudentApplicationSchema>;
 export type StudentApplication = typeof studentApplications.$inferSelect;
+export type RecruitmentSetting = typeof recruitmentSettings.$inferSelect;
+export type RecruitmentVacancy = typeof recruitmentVacancies.$inferSelect;
+export type RecruitmentRequirement = typeof recruitmentRequirements.$inferSelect;
+export type RecruitmentDocumentCategory = typeof recruitmentDocumentCategories.$inferSelect;
+export type RecruitmentApplication = typeof recruitmentApplications.$inferSelect;
+export type RecruitmentApplicationAnswer = typeof recruitmentApplicationAnswers.$inferSelect;
+export type RecruitmentApplicationDocument = typeof recruitmentApplicationDocuments.$inferSelect;
+export type RecruitmentApplicationStatusHistory = typeof recruitmentApplicationStatusHistory.$inferSelect;
+export type RecruitmentRejectionAttempt = typeof recruitmentRejectionAttempts.$inferSelect;
+export type RecruitmentInterview = typeof recruitmentInterviews.$inferSelect;
 export type InsertPermission = z.infer<typeof insertPermissionSchema>;
 export type Permission = typeof permissions.$inferSelect;
 export type InsertAccessGroup = z.infer<typeof insertAccessGroupSchema>;

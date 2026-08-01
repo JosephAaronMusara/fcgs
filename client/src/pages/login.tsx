@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
+  BriefcaseBusiness,
   Download,
   ExternalLink,
   Eye,
@@ -386,7 +387,7 @@ export default function Login() {
                 </div>
               </form>
 
-              <div className="border-t pt-4 mt-2">
+              <div className="border-t pt-4 mt-2 space-y-2">
                 <Button
                   type="button"
                   variant="default"
@@ -397,6 +398,16 @@ export default function Login() {
                 >
                   <FileText className="h-4 w-4 mr-2" />
                   Apply for Admission
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full border-primary/30 text-primary hover:bg-primary hover:text-primary-foreground"
+                  onClick={() => setLocation("/careers")}
+                  data-testid="button-apply-job"
+                >
+                  <BriefcaseBusiness className="h-4 w-4 mr-2" />
+                  Apply for a Job
                 </Button>
               </div>
 

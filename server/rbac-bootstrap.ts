@@ -60,6 +60,7 @@ const TRANSPORT_MANAGER_PERMISSIONS = [
   "transport.view", "transport.dashboard.view",
   "transport.routes.create", "transport.routes.edit", "transport.stops.manage", "transport.paths.manage",
   "transport.vehicles.create", "transport.vehicles.edit", "transport.drivers.manage", "transport.owners.manage",
+  "transport.documents.view", "transport.documents.manage", "transport.compliance.view", "transport.compliance.manage",
   "transport.learners.enrol", "transport.learners.edit_service", "transport.learners.transfer",
   "transport.charges.view", "transport.charges.generate", "transport.payments.view", "transport.receipts.view", "transport.receipts.verify",
   "transport.payment_plans.manage", "transport.refunds.request", "transport.cashups.prepare",
@@ -98,6 +99,7 @@ async function ensureAccessGroupPermissions(groupName: string, permissionCodes: 
 const ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS = [
   "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.payments.view",
   "transport.receipts.view", "transport.claims.view", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
+  "transport.documents.view", "transport.compliance.view",
   "transport.organization.view", "transport.organization.reports", "transport.organization.export",
 ];
 
@@ -127,6 +129,30 @@ async function ensureTransportAccessGroupDefaults() {
     "Manages school transport operations, learner services, path setup, claims verification and transport reporting.",
   );
   await ensureAccessGroupPermissions("Quality Control Officer", ["transport.view", "transport.dashboard.view", "transport.reports.view", "transport.audit.view"]);
+}
+
+
+const RECRUITMENT_MANAGER_PERMISSIONS = RBAC_PERMISSIONS_DATA
+  .filter((permission) => permission.code.startsWith("recruitment."))
+  .map((permission) => permission.code);
+
+async function ensureRecruitmentAccessGroupDefaults() {
+  await ensureAccessGroupPermissions("Org HQ", RECRUITMENT_MANAGER_PERMISSIONS);
+  await ensureAccessGroupPermissions(
+    "Recruitment Manager",
+    RECRUITMENT_MANAGER_PERMISSIONS,
+    true,
+    "Manages staff vacancies, screening requirements, private applicant documents, interviews and recruitment settings.",
+  );
+  await ensureAccessGroupPermissions("School Admin", [
+    "recruitment.view",
+    "recruitment.vacancies.manage",
+    "recruitment.applications.review",
+    "recruitment.applications.process",
+    "recruitment.documents.view",
+    "recruitment.documents.manage",
+    "recruitment.interviews.manage",
+  ]);
 }
 
 const ASSET_INVENTORY_OFFICER_PERMISSIONS = [
@@ -188,6 +214,7 @@ export async function ensureRbacBaseline() {
   await ensurePermissionsCatalog();
   await removeRetiredPermissions();
   await ensureTransportAccessGroupDefaults();
+  await ensureRecruitmentAccessGroupDefaults();
   await ensureAssetsInventoryAccessGroupDefaults();
   await ensurePhotoAccessGroupDefaults();
   await cleanupLegacyBlanketAdminOverrides();

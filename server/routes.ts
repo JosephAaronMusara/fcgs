@@ -11,19 +11,23 @@ import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "dr
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
 import { registerTransportRoutes } from "./transport-routes";
+import { registerTransportDocumentRoutes } from "./transport-document-routes";
 import { registerAssetsInventoryRoutes } from "./assets-inventory-routes";
 import { registerHqOperationsRoutes } from "./hq-operations-routes";
+import { registerRecruitmentRoutes } from "./recruitment-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
+import { AssessmentPaperReconciliationError, reconcileAssessmentPapersAndMarks } from "./assessment-paper-reconciliation";
+import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
 import { assessClassSubjectGradeConfiguration, planExactProfileClassAttachment, resolveExpectedGradeProfile, type GradeConfigurationProfileStatus } from "./grading-configuration";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 import path from "path";
 import fs from "fs/promises";
-import { 
-  insertStaffSchema, insertStudentSchema, insertParentSchema, 
+import {
+  insertStaffSchema, insertStudentSchema, insertParentSchema,
   insertClassSchema, insertSubjectSchema, insertGradeSchema,
   insertAssessmentSchema, insertMarkSchema, insertAttendanceRecordSchema,
   insertDisciplineRecordSchema, insertClinicRecordSchema, insertFeesPaymentSchema, insertStreamSchema,
@@ -164,6 +168,7 @@ type AssessmentPaperValidationResult = {
   valid: boolean;
   message: string;
   normalizedPapers: Array<{
+    id?: number;
     paperName: string;
     paperMarks: number;
     paperWeightPct: string;
@@ -178,6 +183,7 @@ function validateAssessmentPapers(papers: unknown): AssessmentPaperValidationRes
 
   const normalizedPapers: AssessmentPaperValidationResult["normalizedPapers"] = [];
   const paperNames = new Set<string>();
+  const paperIds = new Set<number>();
   let totalWeight = 0;
 
   for (let index = 0; index < papers.length; index += 1) {
@@ -185,6 +191,19 @@ function validateAssessmentPapers(papers: unknown): AssessmentPaperValidationRes
     const paperName = String(paper?.paperName || "").trim();
     const paperMarks = Number(paper?.paperMarks);
     const paperWeightPct = Number(paper?.paperWeightPct);
+    const paperId = paper?.id === undefined || paper?.id === null || paper?.id === ""
+      ? undefined
+      : Number(paper.id);
+
+    if (paperId !== undefined) {
+      if (!Number.isInteger(paperId) || paperId <= 0) {
+        return { valid: false, message: `Paper ${index + 1} has an invalid ID`, normalizedPapers: [] };
+      }
+      if (paperIds.has(paperId)) {
+        return { valid: false, message: `Paper ${index + 1} was submitted more than once`, normalizedPapers: [] };
+      }
+      paperIds.add(paperId);
+    }
 
     if (!paperName) {
       return { valid: false, message: `Paper ${index + 1} requires a name`, normalizedPapers: [] };
@@ -204,10 +223,11 @@ function validateAssessmentPapers(papers: unknown): AssessmentPaperValidationRes
 
     totalWeight += paperWeightPct;
     normalizedPapers.push({
+      ...(paperId !== undefined ? { id: paperId } : {}),
       paperName,
       paperMarks,
       paperWeightPct: paperWeightPct.toFixed(2),
-      ...(paper?.sortOrder !== undefined ? { sortOrder: Number(paper.sortOrder) } : {}),
+      sortOrder: index,
     });
   }
 
@@ -2342,8 +2362,10 @@ export async function registerRoutes(
   registerObjectStorageRoutes(app);
   registerCalendarRoutes(app);
   registerTransportRoutes(app);
+  registerTransportDocumentRoutes(app);
   registerAssetsInventoryRoutes(app);
   registerHqOperationsRoutes(app);
+  registerRecruitmentRoutes(app);
   await ensureEcdSeedData();
 
   const readOnlyExemptPaths = [
@@ -2376,7 +2398,7 @@ export async function registerRoutes(
     try {
       const school = await storage.getSchool(schoolId);
       if (school && (school.terminationStatus === "pending" || school.terminationStatus === "archived")) {
-        return res.status(403).json({ 
+        return res.status(403).json({
           message: school.terminationStatus === "archived"
             ? "This school is archived and in read-only mode. No changes can be made."
             : "This school is in read-only mode due to pending termination. No changes can be made.",
@@ -2423,7 +2445,7 @@ export async function registerRoutes(
       const { username, email, phone, excludeUserId } = req.query;
       const conflicts: Record<string, boolean> = {};
       const excludeId = excludeUserId ? parseInt(excludeUserId as string) : null;
-      
+
       if (username) {
         const existing = await storage.getUserByUsername(username as string);
         conflicts.username = !!existing && existing.id !== excludeId;
@@ -3508,7 +3530,7 @@ export async function registerRoutes(
   app.get("/api/streams", requireAuth, async (req, res, next) => {
     try {
       const schoolType = req.query.schoolType as string | undefined;
-      const streamList = schoolType 
+      const streamList = schoolType
         ? await storage.getStreamsBySchoolType(schoolType)
         : await storage.getAllStreams();
       res.json(streamList);
@@ -3531,7 +3553,7 @@ export async function registerRoutes(
     try {
       const schoolId = getSchoolContext(req);
       const classList = await storage.getAllClasses();
-      const filtered = schoolId 
+      const filtered = schoolId
         ? classList.filter(c => c.schoolId === schoolId)
         : classList;
       res.json(filtered);
@@ -3810,22 +3832,22 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req);
       const fromClassId = parseIdParam(req.params.id);
       const { toClassId, studentIds } = req.body;
-      
+
       if (!toClassId) {
         return res.status(400).json({ message: "toClassId is required" });
       }
-      
+
       const fromClass = await storage.getClass(fromClassId);
       const toClass = await storage.getClass(toClassId);
-      
+
       if (!fromClass || !toClass) {
         return res.status(404).json({ message: "Class not found" });
       }
-      
+
       if (schoolId && (fromClass.schoolId !== schoolId || toClass.schoolId !== schoolId)) {
         return res.status(403).json({ message: "Access denied" });
       }
-      
+
       const count = await storage.migrateStudents(fromClassId, toClassId, studentIds);
       res.json({ message: `Migrated ${count} student(s)`, count });
     } catch (error) {
@@ -3896,14 +3918,14 @@ export async function registerRoutes(
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const data = insertParentSchema.parse(req.body);
-      
+
       // Determine effective schoolId - require context for all roles
       const effectiveSchoolId = schoolId || currentUser.schoolId;
-      
+
       if (!effectiveSchoolId) {
         return res.status(400).json({ message: "School context required to create parent" });
       }
-      
+
       const newParent = await storage.createParent({
         ...data,
         schoolId: effectiveSchoolId,
@@ -3961,19 +3983,19 @@ export async function registerRoutes(
       if (!Array.isArray(parentData)) {
         return res.status(400).json({ message: "Invalid data format" });
       }
-      
+
       const schoolId = getSchoolContext(req);
       if (!schoolId) {
         return res.status(400).json({ message: "School context required for import" });
       }
-      
+
       // Preload all parents for this school once (performance optimization)
       const allParents = await storage.getAllParents();
       const schoolParents = allParents.filter(p => p.schoolId === schoolId);
-      
+
       let imported = 0;
       let skipped = 0;
-      
+
       for (const row of parentData) {
         try {
           // Validate basic required fields
@@ -3981,9 +4003,9 @@ export async function registerRoutes(
             skipped++;
             continue;
           }
-          
+
           const phone = row.phone?.replace(/\D/g, "").slice(-9) || "";
-          
+
           // Check if parent already exists by phone (scoped to current school)
           let existingParent = null;
           if (phone && phone.length >= 9) {
@@ -3992,7 +4014,7 @@ export async function registerRoutes(
               return pPhone === phone && pPhone.length >= 9;
             });
           }
-          
+
           if (existingParent) {
             // Update existing parent
             await storage.updateParent(existingParent.id, {
@@ -4023,7 +4045,7 @@ export async function registerRoutes(
           skipped++;
         }
       }
-      
+
       res.json({ imported, skipped, total: parentData.length });
     } catch (error) {
       next(error);
@@ -4039,12 +4061,12 @@ export async function registerRoutes(
       if (!parent) {
         return res.status(404).json({ message: "Parent not found" });
       }
-      
+
       // Enforce school context - school_admin must match parent.schoolId exactly
       if (schoolId && parent.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      
+
       if (parent.userId) {
         const user = await storage.getUser(parent.userId);
         if (user) {
@@ -4053,7 +4075,7 @@ export async function registerRoutes(
           return res.json({ user: safeUser });
         }
       }
-      
+
       res.json({ user: null });
     } catch (error) {
       next(error);
@@ -4065,34 +4087,34 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req);
       const parentId = parseIdParam(req.params.id);
       const { username, password, sendResetToken } = req.body;
-      
+
       if (!username) {
         return res.status(400).json({ message: "Username is required" });
       }
-      
+
       const parent = await storage.getParent(parentId);
       if (!parent) {
         return res.status(404).json({ message: "Parent not found" });
       }
-      
+
       if (schoolId && parent.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      
+
       if (parent.userId) {
         return res.status(400).json({ message: "Parent already has a user account" });
       }
-      
+
       const uniqueError = await validateUserUniqueness(username);
       if (uniqueError) {
         return res.status(400).json({ message: uniqueError });
       }
-      
+
       const effectiveSchoolId = schoolId || parent.schoolId;
       if (!effectiveSchoolId) {
         return res.status(400).json({ message: "School context required to create user account" });
       }
-      
+
       let hashedPassword: string;
       let tokenData: any = {};
       let passwordToSend: string | null = null;
@@ -4127,7 +4149,7 @@ export async function registerRoutes(
         schoolId: effectiveSchoolId,
         ...tokenData,
       });
-      
+
       await storage.updateParent(parentId, { userId: newUser.id });
 
       const name = `${parent.firstName} ${parent.lastName}`;
@@ -4154,7 +4176,7 @@ export async function registerRoutes(
           await communicationService.sendEmail({ to: parent.email, subject: "Account Created - Your Login Credentials", html: credMsg.replace(/\n/g, '<br>'), text: credMsg, schoolId: effectiveSchoolId, recipientType: "parent", recipientId: parentId, sentBy: userId, category: "account", recipientName: name });
         }
       }
-      
+
       const { password: _pw, ...safeUser } = newUser;
       res.status(201).json({ user: safeUser, message: "User account created successfully" });
     } catch (error) {
@@ -4167,24 +4189,24 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req);
       const parentId = parseIdParam(req.params.id);
       const { password } = req.body;
-      
+
       if (!password || password.length < 6) {
         return res.status(400).json({ message: "Password must be at least 6 characters" });
       }
-      
+
       const parent = await storage.getParent(parentId);
       if (!parent || !parent.userId) {
         return res.status(404).json({ message: "Parent or user account not found" });
       }
-      
+
       // Enforce school context - school_admin must match parent.schoolId exactly
       if (schoolId && parent.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      
+
       const hashedPassword = await bcrypt.hash(password, 10);
       await storage.updateUser(parent.userId, { password: hashedPassword });
-      
+
       res.json({ message: "Password reset successfully" });
     } catch (error) {
       next(error);
@@ -4196,19 +4218,19 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req);
       const parentId = parseIdParam(req.params.id);
       const { isActive } = req.body;
-      
+
       const parent = await storage.getParent(parentId);
       if (!parent || !parent.userId) {
         return res.status(404).json({ message: "Parent or user account not found" });
       }
-      
+
       // Enforce school context - school_admin must match parent.schoolId exactly
       if (schoolId && parent.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      
+
       await storage.updateUser(parent.userId, { isActive: !!isActive });
-      
+
       res.json({ message: isActive ? "Account activated" : "Account deactivated" });
     } catch (error) {
       next(error);
@@ -4378,7 +4400,7 @@ export async function registerRoutes(
     try {
       const requestedParentId = parseIdParam(req.params.parentId);
       const user = req.user as User;
-      
+
       if (user.role === "parent") {
         if (user.id !== requestedParentId) {
           return res.status(403).json({ message: "Access denied" });
@@ -4391,7 +4413,7 @@ export async function registerRoutes(
         const studentList = await storage.getStudentsByParent(parentRecord.id);
         return res.json(studentList);
       }
-      
+
       const studentList = await storage.getStudentsByParent(requestedParentId);
       res.json(studentList);
     } catch (error) {
@@ -4833,7 +4855,7 @@ export async function registerRoutes(
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const effectiveSchoolId = schoolId || currentUser.schoolId;
-      
+
       interface ImportStudentData {
         admissionNo?: string;
         firstName?: string;
@@ -4853,9 +4875,9 @@ export async function registerRoutes(
         religion?: string;
         transferReason?: string;
       }
-      
+
       const { students: studentData } = req.body as { students: ImportStudentData[] };
-      
+
       if (!Array.isArray(studentData)) {
         return res.status(400).json({ message: "Invalid data format" });
       }
@@ -4865,12 +4887,12 @@ export async function registerRoutes(
       const allParents = await storage.getAllParents();
       const schoolParents = effectiveSchoolId ? allParents.filter(p => p.schoolId === effectiveSchoolId) : allParents;
       const allStudents = await storage.getAllStudents();
-      
+
       const classMap = new Map<string, number>();
       for (const c of schoolClasses) {
         classMap.set(c.className.toLowerCase().trim(), c.id);
       }
-      
+
       const parentPhoneMap = new Map<string, number>();
       for (const p of schoolParents) {
         if (p.phone) {
@@ -4878,28 +4900,28 @@ export async function registerRoutes(
           parentPhoneMap.set(normalizedPhone, p.id);
         }
       }
-      
+
       const existingAdmissionNos = new Set(allStudents.map(s => s.admissionNo?.toLowerCase()));
-      
+
       let imported = 0;
       let skipped = 0;
       let parentsCreated = 0;
       let classesCreated = 0;
       const errors: string[] = [];
-      
+
       for (const student of studentData) {
         try {
           if (!student.firstName || !student.lastName) {
             skipped++;
             continue;
           }
-          
+
           let admissionNo = student.admissionNo?.trim() || "";
           if (admissionNo && existingAdmissionNos.has(admissionNo.toLowerCase())) {
             skipped++;
             continue;
           }
-          
+
           if (!admissionNo) {
             const existingNumbers = allStudents
               .map(s => s.admissionNo)
@@ -4908,7 +4930,7 @@ export async function registerRoutes(
             const maxNo = existingNumbers.length > 0 ? Math.max(...existingNumbers) : 0;
             admissionNo = `FCGSM${String(maxNo + 1 + imported).padStart(4, "0")}`;
           }
-          
+
           let classId: number | undefined;
           if (student.className) {
             const classNameLower = student.className.toLowerCase().trim();
@@ -4924,18 +4946,18 @@ export async function registerRoutes(
               classesCreated++;
             }
           }
-          
+
           let parentId: number | undefined;
           if (student.parentName || student.parentPhone) {
             const normalizedPhone = student.parentPhone?.replace(/\D/g, "").slice(-9) || "";
-            
+
             if (normalizedPhone && parentPhoneMap.has(normalizedPhone)) {
               parentId = parentPhoneMap.get(normalizedPhone);
             } else if (student.parentName && effectiveSchoolId) {
               const nameParts = student.parentName.trim().split(/\s+/);
               const firstName = nameParts[0] || "Parent";
               const lastName = nameParts.slice(1).join(" ") || student.lastName;
-              
+
               const newParent = await storage.createParent({
                 firstName,
                 lastName,
@@ -4944,7 +4966,7 @@ export async function registerRoutes(
                 relationship: student.parentRelationship?.trim() || undefined,
                 schoolId: effectiveSchoolId,
               });
-              
+
               if (normalizedPhone) {
                 parentPhoneMap.set(normalizedPhone, newParent.id);
               }
@@ -4952,7 +4974,7 @@ export async function registerRoutes(
               parentsCreated++;
             }
           }
-          
+
           await storage.createStudent({
             admissionNo,
             firstName: student.firstName.trim(),
@@ -4968,7 +4990,7 @@ export async function registerRoutes(
             status: (student.status as "active" | "inactive" | "transferred" | "graduated") || "active",
             isDayScholar: true,
           });
-          
+
           existingAdmissionNos.add(admissionNo.toLowerCase());
           imported++;
         } catch (err) {
@@ -4978,8 +5000,8 @@ export async function registerRoutes(
         }
       }
 
-      res.json({ 
-        imported, 
+      res.json({
+        imported,
         skipped,
         parentsCreated,
         classesCreated,
@@ -5137,7 +5159,7 @@ export async function registerRoutes(
       const parsed = studentPasswordSchema.parse(req.body);
       const bcrypt = await import("bcrypt");
       const hashedPassword = await bcrypt.hash(parsed.password, 10);
-      
+
       await storage.updateUser(student.userId, { password: hashedPassword });
       res.json({ message: "Password updated successfully" });
     } catch (error) {
@@ -5271,7 +5293,7 @@ export async function registerRoutes(
       if (description !== undefined) updateData.description = description;
       if (streamId !== undefined) updateData.streamId = streamId;
       if (streamIds !== undefined) updateData.streamIds = streamIds;
-      
+
       const updated = await storage.updateSubject(parseIdParam(req.params.id), updateData);
       res.json(updated);
     } catch (error) {
@@ -5303,28 +5325,28 @@ export async function registerRoutes(
       const perPage = parseInt(req.query.perPage as string) || 50;
       const search = (req.query.search as string) || "";
       const gradeLevel = req.query.gradeLevel as string || "";
-      
+
       const gradeList = await storage.getAllGrades();
-      let filtered = schoolId 
+      let filtered = schoolId
         ? gradeList.filter(g => g.schoolId === schoolId)
         : gradeList;
-      
+
       if (gradeLevel) {
         filtered = filterItemsByGradeProfileKey(filtered, gradeLevel);
       }
-      
+
       if (search) {
         const searchLower = search.toLowerCase();
-        filtered = filtered.filter(g => 
+        filtered = filtered.filter(g =>
           g.gradeName.toLowerCase().includes(searchLower) ||
           (g.gradeStatus && g.gradeStatus.toLowerCase().includes(searchLower))
         );
       }
-      
+
       const total = filtered.length;
       const start = (page - 1) * perPage;
       const items = filtered.slice(start, start + perPage);
-      
+
       res.json({
         items,
         total,
@@ -5373,7 +5395,7 @@ export async function registerRoutes(
       if (gradePoints !== undefined) updateData.gradePoints = gradePoints;
       if (gradeStatus !== undefined) updateData.gradeStatus = gradeStatus;
       if (gradeType !== undefined) updateData.gradeType = gradeType;
-      
+
       const updated = await storage.updateGrade(parseIdParam(req.params.id), updateData);
       res.json(updated);
     } catch (error) {
@@ -6471,7 +6493,7 @@ ${schoolName}`;
         res.json(school ? [school] : []);
       } else {
         const currentUser = req.user as User;
-        const filtered = currentUser.organizationId 
+        const filtered = currentUser.organizationId
           ? schoolsList.filter(s => s.organizationId === currentUser.organizationId)
           : schoolsList;
         res.json(filtered);
@@ -7930,7 +7952,7 @@ ${schoolName}`;
           const total = Number.isNaN(totalRaw) || totalRaw < 1 ? 1 : totalRaw;
 
           const subjectId: number | undefined = undefined;
-          
+
           const existingBook = existingBooks.find((b) => {
             const sameTitle = (b.title || "").toLowerCase().trim() === title.toLowerCase();
             const sameIsbn = isbn ? (b.isbn || "").trim() === isbn : true;
@@ -10028,7 +10050,7 @@ ${schoolName}`;
     try {
       const requestedUserId = parseIdParam(req.params.userId);
       const currentUser = req.user as User;
-      
+
       // Allow checking own permissions
       if (currentUser.id !== requestedUserId) {
         // Check if admin with proper tenant scope
@@ -10046,7 +10068,7 @@ ${schoolName}`;
           return res.status(403).json({ message: "Access denied" });
         }
       }
-      
+
       const hasPermission = await storage.userHasPermission(requestedUserId, routeParam(req.params.code));
       res.json({ hasPermission });
     } catch (error) {
@@ -10495,7 +10517,7 @@ ${schoolName}`;
         // School-level users must not be able to create global or other-school linked records.
         examData.schoolId = schoolId;
       }
-      
+
       if (!examData.assessmentTypeId && examData.examTypeId) {
         const examType = await storage.getExamType(examData.examTypeId);
         if (examType && schoolId) {
@@ -10694,11 +10716,53 @@ ${schoolName}`;
       if (!scoped) return;
       if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
-      const papers = Array.isArray(req.body.papers) ? req.body.papers : [];
-      const papersWithAssessmentId = papers.map((p: any, i: number) => ({ ...p, assessmentId: scoped.assessment.id, sortOrder: i }));
-      const result = await storage.setAssessmentPapers(scoped.assessment.id, papersWithAssessmentId);
-      res.json(result);
+      const paperValidation = validateAssessmentPapers(req.body.papers);
+      if (!paperValidation.valid) {
+        return res.status(400).json({
+          message: paperValidation.message,
+          code: "ASSESSMENT_PAPERS_INVALID",
+        });
+      }
+
+      const gradingConfiguration = await requireAssessmentGradingConfiguration({
+        schoolId: scoped.schoolId,
+        classId: Number(scoped.assessment.classId),
+        subjectId: Number(scoped.assessment.subjectId),
+        res,
+      });
+      if (!gradingConfiguration) return;
+
+      const result = await reconcileAssessmentPapersAndMarks({
+        assessmentId: scoped.assessment.id,
+        papers: paperValidation.normalizedPapers,
+        schoolId: scoped.schoolId,
+        classId: Number(scoped.assessment.classId),
+        subjectId: Number(scoped.assessment.subjectId),
+        confirmPaperRemoval: req.body.confirmPaperRemoval === true,
+      });
+
+      logActivity(req, {
+        schoolId: scoped.schoolId,
+        action: "paper_configuration_update",
+        category: "assessments",
+        description: result.summary.recalculationPerformed
+          ? `Updated assessment paper configuration and recalculated ${result.summary.totalMarks} learner result(s)`
+          : "Updated assessment paper configuration without changing learner results",
+        targetType: "assessment",
+        targetId: scoped.assessment.id,
+        targetName: scoped.assessment.topic,
+        metadata: {
+          beforePapers: result.beforePapers,
+          afterPapers: result.papers,
+          recalculation: result.summary,
+        },
+      });
+
+      res.json(result.papers);
     } catch (error) {
+      if (error instanceof AssessmentPaperReconciliationError) {
+        return res.status(error.status).json({ message: error.message, code: error.code, details: error.details });
+      }
       next(error);
     }
   });
@@ -11426,6 +11490,174 @@ ${schoolName}`;
     }
   });
 
+
+  const reportCardBulkCommentSchema = z.object({
+    examId: z.coerce.number().int().positive(),
+    classId: z.coerce.number().int().positive(),
+    overall: z.array(z.object({
+      studentId: z.coerce.number().int().positive(),
+      commentType: z.enum(["principal", "class_teacher"]),
+      commentText: z.string(),
+    })).max(1_000).default([]),
+    subjects: z.array(z.object({
+      studentId: z.coerce.number().int().positive(),
+      assessmentId: z.coerce.number().int().positive(),
+      subjectId: z.coerce.number().int().positive(),
+      commentText: z.string(),
+    })).max(5_000).default([]),
+  });
+
+  app.post("/api/report-card-comments/bulk", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const input = reportCardBulkCommentSchema.parse(req.body);
+      const [classInfo, exam] = await Promise.all([
+        storage.getClass(input.classId),
+        storage.getExam(input.examId),
+      ]);
+      if (!classInfo || Number(classInfo.schoolId) !== Number(schoolId)) {
+        return res.status(404).json({ message: "Class not found" });
+      }
+      if (!exam || (exam.schoolId && Number(exam.schoolId) !== Number(schoolId))) {
+        return res.status(404).json({ message: "Exam not found" });
+      }
+      if (await isClassExamPublished(input.examId, input.classId)) {
+        return res.status(423).json({
+          message: "This report has been published. Comments are read-only until it is unpublished.",
+          code: "ASSESSMENT_PUBLISHED",
+        });
+      }
+
+      const studentIds = Array.from(new Set([
+        ...input.overall.map((row) => row.studentId),
+        ...input.subjects.map((row) => row.studentId),
+      ]));
+      const classStudents = await storage.getStudentsByClass(input.classId);
+      const classStudentMap = new Map(classStudents.map((student) => [Number(student.id), student] as const));
+      const invalidStudentId = studentIds.find((studentId) => !classStudentMap.has(studentId));
+      if (invalidStudentId) {
+        return res.status(400).json({ message: `Learner ${invalidStudentId} does not belong to this class` });
+      }
+
+      const examAssessments = (await storage.getAssessmentsByExam(input.examId))
+        .filter((assessment) => Number(assessment.classId) === Number(input.classId));
+      const assessmentMap = new Map(examAssessments.map((assessment) => [Number(assessment.id), assessment] as const));
+      for (const row of input.subjects) {
+        const assessment = assessmentMap.get(row.assessmentId);
+        if (!assessment || Number(assessment.subjectId) !== Number(row.subjectId) || Number(assessment.schoolId) !== Number(schoolId)) {
+          return res.status(400).json({ message: `Assessment ${row.assessmentId} is not valid for this class and exam` });
+        }
+      }
+
+      const assessmentIds = Array.from(new Set(input.subjects.map((row) => row.assessmentId)));
+      const markRows = assessmentIds.length && studentIds.length
+        ? await db.select().from(assessmentMarksSchema).where(and(
+            eq(assessmentMarksSchema.schoolId, schoolId),
+            inArray(assessmentMarksSchema.assessmentId, assessmentIds),
+            inArray(assessmentMarksSchema.studentId, studentIds),
+          ))
+        : [];
+      const markMap = new Map(markRows.map((mark) => [`${mark.studentId}:${mark.assessmentId}`, mark] as const));
+      const missingMark = input.subjects.find((row) => !markMap.has(`${row.studentId}:${row.assessmentId}`));
+      if (missingMark) {
+        return res.status(404).json({ message: `Assessment mark not found for learner ${missingMark.studentId}` });
+      }
+
+      const poolCache = new Map<string, { id: number; commentText: string } | null>();
+      for (const row of input.subjects) {
+        const mark = markMap.get(`${row.studentId}:${row.assessmentId}`)!;
+        const assessment = assessmentMap.get(row.assessmentId)!;
+        if (!mark.gradeId) continue;
+        const poolKey = `${assessment.classId}:${assessment.subjectId}:${mark.gradeId}`;
+        if (!poolCache.has(poolKey)) {
+          const pool = await storage.findAssessmentComment(
+            Number(assessment.classId),
+            Number(assessment.subjectId),
+            Number(mark.gradeId),
+          );
+          poolCache.set(poolKey, pool ? { id: pool.id, commentText: pool.commentText } : null);
+        }
+      }
+
+      const overrideKeys = Array.from(new Set(input.overall.map((row) => buildReportCardOverrideKey(row.studentId, input.examId))));
+      const existingOverrides = overrideKeys.length
+        ? await db.select().from(reportComments).where(and(
+            eq(reportComments.schoolId, schoolId),
+            inArray(reportComments.commentGrade, overrideKeys),
+            inArray(reportComments.commentType, ["principal", "class_teacher"] as any),
+          ))
+        : [];
+      const overrideMap = new Map(existingOverrides.map((row) => [`${row.commentGrade}:${row.commentType}`, row] as const));
+
+      const result = await db.transaction(async (tx) => {
+        const overallResults: Array<{ studentId: number; commentType: "principal" | "class_teacher"; commentText: string }> = [];
+        for (const row of input.overall) {
+          const student = classStudentMap.get(row.studentId)!;
+          const overrideKey = buildReportCardOverrideKey(row.studentId, input.examId);
+          const mapKey = `${overrideKey}:${row.commentType}`;
+          const existing = overrideMap.get(mapKey);
+          const trimmed = row.commentText.trim();
+          if (!trimmed) {
+            if (existing) await tx.delete(reportComments).where(eq(reportComments.id, existing.id));
+          } else if (existing) {
+            await tx.update(reportComments).set({
+              commentText: trimmed,
+              classId: row.commentType === "class_teacher" ? student.classId ?? null : null,
+            }).where(eq(reportComments.id, existing.id));
+          } else {
+            await tx.insert(reportComments).values({
+              schoolId,
+              gradeId: null,
+              commentGrade: overrideKey,
+              gradeLevel: null,
+              subjectId: null,
+              classId: row.commentType === "class_teacher" ? student.classId ?? null : null,
+              commentText: trimmed,
+              commentType: row.commentType,
+            });
+          }
+          overallResults.push({ studentId: row.studentId, commentType: row.commentType, commentText: trimmed });
+        }
+
+        const subjectResults: Array<{ studentId: number; assessmentId: number; subjectId: number; commentText: string; commentPool: string }> = [];
+        for (const row of input.subjects) {
+          const assessment = assessmentMap.get(row.assessmentId)!;
+          const mark = markMap.get(`${row.studentId}:${row.assessmentId}`)!;
+          const poolKey = mark.gradeId ? `${assessment.classId}:${assessment.subjectId}:${mark.gradeId}` : "";
+          const poolComment = poolKey ? poolCache.get(poolKey) || null : null;
+          const trimmed = row.commentText.trim();
+          const usePool = trimmed.length === 0;
+          await tx.update(assessmentMarksSchema).set({
+            commentId: usePool ? poolComment?.id ?? null : null,
+            customCommentText: usePool ? null : trimmed,
+            autoCommentSnapshot: poolComment?.commentText ?? null,
+            commentSource: usePool ? "pool" : "custom",
+            updatedAt: new Date(),
+          }).where(and(
+            eq(assessmentMarksSchema.id, mark.id),
+            eq(assessmentMarksSchema.schoolId, schoolId),
+          ));
+          subjectResults.push({
+            studentId: row.studentId,
+            assessmentId: row.assessmentId,
+            subjectId: row.subjectId,
+            commentText: usePool ? poolComment?.commentText || "" : trimmed,
+            commentPool: poolComment?.commentText || "",
+          });
+        }
+        return { overall: overallResults, subjects: subjectResults };
+      });
+
+      return res.json({ ok: true, ...result });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid report comments", errors: error.errors });
+      }
+      next(error);
+    }
+  });
+
   // Enhanced Assessments with Papers
   app.get("/api/assessments", requireAuth, async (req, res, next) => {
     try {
@@ -11508,7 +11740,13 @@ ${schoolName}`;
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
 
-      const { papers, schoolId: _ignoredSchoolId, ...assessmentData } = req.body;
+      const {
+        papers,
+        confirmPaperRemoval: _ignoredPaperRemovalConfirmation,
+        classIds: _ignoredClassIds,
+        schoolId: _ignoredSchoolId,
+        ...assessmentData
+      } = req.body;
       const paperValidation = validateAssessmentPapers(papers);
       if (!paperValidation.valid) {
         return res.status(400).json({
@@ -11574,7 +11812,13 @@ ${schoolName}`;
       if (!scoped) return;
       if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
 
-      const { papers, schoolId: _ignoredSchoolId, ...assessmentData } = req.body;
+      const {
+        papers,
+        confirmPaperRemoval,
+        classIds: _ignoredClassIds,
+        schoolId: _ignoredSchoolId,
+        ...assessmentData
+      } = req.body;
       const paperValidation = papers === undefined ? null : validateAssessmentPapers(papers);
       if (paperValidation && !paperValidation.valid) {
         return res.status(400).json({
@@ -11612,8 +11856,8 @@ ${schoolName}`;
       const updatePayload = {
         ...assessmentData,
         schoolId: scoped.schoolId,
-        classId: assessmentData.classId !== undefined ? Number(assessmentData.classId) : scoped.assessment.classId,
-        subjectId: assessmentData.subjectId !== undefined ? Number(assessmentData.subjectId) : scoped.assessment.subjectId,
+        classId: resolvedClassId,
+        subjectId: resolvedSubjectId,
         assessmentTypeId: assessmentData.assessmentTypeId === undefined
           ? scoped.assessment.assessmentTypeId
           : (assessmentData.assessmentTypeId ? Number(assessmentData.assessmentTypeId) : null),
@@ -11623,27 +11867,65 @@ ${schoolName}`;
         isPublished: true,
       };
 
-      const updated = await storage.updateAssessment(scoped.assessment.id, updatePayload);
-      if (!updated) return res.status(404).json({ message: "Assessment not found" });
-
       if (paperValidation) {
-        const papersWithAssessmentId = paperValidation.normalizedPapers.map((paper, index) => ({
-          ...paper,
+        const result = await reconcileAssessmentPapersAndMarks({
           assessmentId: scoped.assessment.id,
-          sortOrder: index,
-        }));
-        await storage.setAssessmentPapers(scoped.assessment.id, papersWithAssessmentId);
+          papers: paperValidation.normalizedPapers,
+          assessmentPatch: updatePayload,
+          schoolId: scoped.schoolId,
+          classId: resolvedClassId,
+          subjectId: resolvedSubjectId,
+          confirmPaperRemoval: confirmPaperRemoval === true,
+        });
+
+        logActivity(req, {
+          schoolId: scoped.schoolId,
+          action: "paper_configuration_update",
+          category: "assessments",
+          description: result.summary.recalculationPerformed
+            ? `Updated assessment and recalculated ${result.summary.totalMarks} learner result(s)`
+            : "Updated assessment without changing learner results",
+          targetType: "assessment",
+          targetId: scoped.assessment.id,
+          targetName: result.assessment.topic,
+          metadata: {
+            beforePapers: result.beforePapers,
+            afterPapers: result.papers,
+            recalculation: result.summary,
+          },
+        });
+
+        return res.json({ ...result.assessment, papers: result.papers, recalculation: result.summary });
       }
 
+      if (
+        resolvedClassId !== Number(scoped.assessment.classId) ||
+        resolvedSubjectId !== Number(scoped.assessment.subjectId)
+      ) {
+        const existingMarks = await storage.getAssessmentMarks(scoped.assessment.id);
+        if (existingMarks.length > 0) {
+          return res.status(409).json({
+            message: "The class or subject cannot be changed after learner marks have been entered. Create a new assessment instead.",
+            code: "ASSESSMENT_CONTEXT_CHANGE_BLOCKED",
+            details: { markCount: existingMarks.length },
+          });
+        }
+      }
+
+      const updated = await storage.updateAssessment(scoped.assessment.id, updatePayload);
+      if (!updated) return res.status(404).json({ message: "Assessment not found" });
       const savedPapers = await storage.getAssessmentPapers(scoped.assessment.id);
       res.json({ ...updated, papers: savedPapers });
     } catch (error) {
+      if (error instanceof AssessmentPaperReconciliationError) {
+        return res.status(error.status).json({ message: error.message, code: error.code, details: error.details });
+      }
       next(error);
     }
   });
 
   // ==================== MARKS ENTRY ====================
-  
+
   // Get marks entry data for an assessment (students with their marks)
   app.get("/api/marks-entry/:assessmentId", requireAuth, async (req, res, next) => {
     try {
@@ -11724,10 +12006,12 @@ ${schoolName}`;
 
   // Save/update marks for a student
   app.post("/api/marks-entry", requireAuth, async (req, res, next) => {
+    let releaseAssessmentLock: (() => void) | null = null;
     try {
       const scoped = await getScopedAssessmentOrRespond(req, res, Number(req.body.assessmentId));
       if (!scoped) return;
       if (await rejectIfAssessmentPublished(scoped.assessment, res)) return;
+      releaseAssessmentLock = await acquireAssessmentMutationLock(scoped.assessment.id);
 
       const { studentId, paperMarks, attStatus, customCommentText, commentSource } = req.body;
       if (!Array.isArray(paperMarks)) {
@@ -11804,7 +12088,7 @@ ${schoolName}`;
       // Calculate weighted percentage
       let totalWeightedScore = 0;
       let totalWeight = 0;
-      
+
       for (const pm of normalizedPaperMarks) {
         const paper = papers.find(p => p.id === pm.assessmentPaperId);
         if (paper && pm.markObtained !== null && pm.markObtained !== "") {
@@ -11814,7 +12098,7 @@ ${schoolName}`;
           totalWeight += weight;
         }
       }
-      
+
       const allRequiredPapersMarked = papers.length > 0 && papers.every((paper: any) =>
         normalizedPaperMarks.some((pm: any) =>
           Number(pm.assessmentPaperId) === Number(paper.id) &&
@@ -11822,7 +12106,7 @@ ${schoolName}`;
         )
       );
       const percentage = allRequiredPapersMarked && totalWeight > 0 ? Math.round(totalWeightedScore) : null;
-      
+
       // Get grade from percentage only after every required paper has been recorded.
       const allGrades = await storage.getGradesBySchool(schoolId);
       const { profileKey } = await resolveGradeProfileContext({
@@ -11862,7 +12146,7 @@ ${schoolName}`;
           profileKey,
         });
       }
-      
+
       // Always look up pool comment for this grade (used for auto snapshot)
       let commentId = null;
       let autoCommentSnapshot: string | null = null;
@@ -11879,7 +12163,7 @@ ${schoolName}`;
         commentId = null;
         autoCommentSnapshot = statusOnlyComment;
       }
-      
+
       // Smart comment source detection (matches PHP behavior):
       // Treat as POOL if custom text is empty OR matches the auto snapshot
       let finalCommentSource = commentSource || "pool";
@@ -11894,7 +12178,7 @@ ${schoolName}`;
         finalCommentSource = "pool";
         finalCustomText = null;
       }
-      
+
       // Check if mark exists for this student/assessment
       let existingMark = await storage.getAssessmentMarkByStudentAssessment(Number(studentId), assessment.id);
 
@@ -11934,17 +12218,17 @@ ${schoolName}`;
           commentSource: finalCommentSource,
         });
       }
-      
+
       if (!mark) {
         return res.status(500).json({ message: "Failed to save mark" });
       }
-      
+
       // Save paper marks
       await storage.setMarkPapers(mark.id, normalizedPaperMarks);
-      
+
       // Get saved paper marks
       const savedPaperMarks = await storage.getMarkPapers(mark.id);
-      
+
       res.json({
         ...mark,
         paperMarks: savedPaperMarks,
@@ -11952,20 +12236,26 @@ ${schoolName}`;
       });
     } catch (error) {
       next(error);
+    } finally {
+      if (releaseAssessmentLock) releaseAssessmentLock();
     }
   });
 
   // Delete a mark
   app.delete("/api/marks-entry/:markId", requireAuth, async (req, res, next) => {
+    let releaseAssessmentLock: (() => void) | null = null;
     try {
       const scopedMark = await getScopedAssessmentMarkOrRespond(req, res, parseIdParam(req.params.markId));
       if (!scopedMark) return;
       if (await rejectIfAssessmentPublished(scopedMark.assessment, res)) return;
+      releaseAssessmentLock = await acquireAssessmentMutationLock(scopedMark.assessment.id);
 
       await storage.deleteAssessmentMark(scopedMark.mark.id);
       res.json({ message: "Mark deleted successfully" });
     } catch (error) {
       next(error);
+    } finally {
+      if (releaseAssessmentLock) releaseAssessmentLock();
     }
   });
 
@@ -12120,14 +12410,14 @@ ${schoolName}`;
   });
 
   // ==================== ACADEMIC REPORTS / REPORT CARDS ====================
-  
+
   // Get available exams for report cards (grouped by exam)
   app.get("/api/report-cards/exams", requireAuth, async (req, res, next) => {
     try {
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
-      
+
       let exams = await storage.getExamsBySchool(schoolId);
       if (currentUser?.role === "student" || currentUser?.role === "parent") {
         let classIds: number[] = [];
@@ -12156,43 +12446,68 @@ ${schoolName}`;
     }
   });
 
-  // Get report card data for a class and exam
-  app.get("/api/report-cards/:examId/class/:classId", requireAuth, async (req, res, next) => {
+  // Get report card data for a class and exam. The same handler powers the
+  // interactive class view and the selected-learner PDF data endpoint.
+  const handleClassReportCardData = async (req: Request, res: Response, next: NextFunction) => {
+    const requestStartedAt = Date.now();
+    const timingMarks: Array<{ name: string; duration: number }> = [];
+    let previousMark = requestStartedAt;
+    const markTiming = (name: string) => {
+      const now = Date.now();
+      timingMarks.push({ name, duration: now - previousMark });
+      previousMark = now;
+    };
     try {
       const examId = parseIdParam(req.params.examId);
       const classId = parseIdParam(req.params.classId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
-      
+
       if (!schoolId) return res.status(400).json({ message: "School context required" });
       if (currentUser?.role === "student" || currentUser?.role === "parent") {
         return res.status(403).json({ message: "Class-wide report data is not available in the student or parent portal" });
       }
-      
+
       const school = await storage.getSchool(schoolId);
       const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : undefined;
-      
+
       const classInfo = await storage.getClass(classId);
       if (!classInfo) return res.status(404).json({ message: "Class not found" });
       if (classInfo.schoolId && classInfo.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      
+
       const exam = await storage.getExam(examId);
       if (!exam) return res.status(404).json({ message: "Exam not found" });
       if (exam.schoolId && exam.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      
+
       const students = await storage.getStudentsByClass(classId);
+      const requestedStudentIds = Array.from(new Set(
+        String(req.query.studentIds || "")
+          .split(",")
+          .map((value) => Number(value))
+          .filter((value) => Number.isInteger(value) && value > 0),
+      ));
+      const classStudentIds = new Set(students.map((student) => Number(student.id)));
+      if (requestedStudentIds.some((studentId) => !classStudentIds.has(studentId))) {
+        return res.status(400).json({ message: "One or more selected learners do not belong to this class" });
+      }
+      const requestedStudentIdSet = new Set(requestedStudentIds);
+      const reportStudents = requestedStudentIds.length
+        ? students.filter((student) => requestedStudentIdSet.has(Number(student.id)))
+        : students;
+      const reportStudentIdSet = new Set(reportStudents.map((student) => Number(student.id)));
+      markTiming("context");
       const allAssessments = (await storage.getAssessmentsByExam(examId))
         .filter((assessment: any) => Number(assessment.classId) === Number(classId));
       const publication = await getClassExamPublication(examId, classId);
-      
+
       const subjectIds = [...new Set(allAssessments.map(a => a.subjectId))];
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const subjects = subjectsData.filter(Boolean);
-      
+
       const grades = await storage.getGradesBySchool(schoolId);
       const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
       const gradeCandidatesBySubject = new Map<number, any[]>();
@@ -12209,16 +12524,17 @@ ${schoolName}`;
           }).grades,
         );
       }
-      
+
       const assessmentIds = allAssessments.map(a => a.id);
       const allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
-      
+      markTiming("current-data");
+
       const marksMap = new Map<string, typeof allMarks[0]>();
       for (const mark of allMarks) {
         const key = `${mark.studentId}-${mark.assessmentId}`;
         marksMap.set(key, mark);
       }
-      
+
       const teacherMap = new Map<string, string>();
       const getTeacherDisplayName = async (staffId: number) => {
         const staffMember = await storage.getStaff(staffId);
@@ -12250,14 +12566,20 @@ ${schoolName}`;
         }).from(staffSubjects).where(
           eq(staffSubjects.classId, classId)
         );
+        const staffIds: number[] = Array.from(new Set<number>(
+          allStaffSubjects.map((row) => Number(row.staffId)).filter((staffId) => Number.isInteger(staffId) && staffId > 0),
+        ));
+        const staffNameEntries = await Promise.all(
+          staffIds.map(async (staffId) => [staffId, await getTeacherDisplayName(staffId)] as const),
+        );
+        const staffNameMap = new Map(staffNameEntries);
         for (const ss of allStaffSubjects) {
-          const name = await getTeacherDisplayName(ss.staffId);
-          teacherMap.set(`${ss.subjectId}-${ss.classId}`, name);
+          teacherMap.set(`${ss.subjectId}-${ss.classId}`, staffNameMap.get(Number(ss.staffId)) || `Staff #${ss.staffId}`);
         }
       } catch (e) {}
-      
+
       const bySubject: Record<number, Record<number, number>> = {};
-      
+
       const studentSubjectRows: Record<number, Record<number, {
         assessmentId: number;
         percentage: number | null;
@@ -12269,26 +12591,26 @@ ${schoolName}`;
         subjectId: number;
         subjectName: string;
       }>> = {};
-      
+
       const studentIdSet = new Set(students.map(s => s.id));
-      
+
       for (const subject of subjects) {
         if (!subject) continue;
         const assessment = allAssessments.find(a => a.subjectId === subject.id && a.classId === classId);
         if (!assessment) continue;
-        
+
         const teacher = teacherMap.get(`${subject.id}-${classId}`) || "";
-        
+
         for (const student of students) {
           const markKey = `${student.id}-${assessment.id}`;
           const mark = marksMap.get(markKey);
-          
+
           if (!mark) continue;
-          
+
           const pctRaw = parseFinitePercentage(mark.percentage);
           const statusComment = markStatusLabel(mark.attStatus);
           if (pctRaw === null && !statusComment) continue;
-          
+
           let gradeName = "";
           let gradePoints = 0;
           const resolvedGrade = resolveStoredAssessmentGrade({
@@ -12302,14 +12624,14 @@ ${schoolName}`;
             gradeName = resolvedGrade.gradeName;
             gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
           }
-          
+
           const comment = statusComment || mark.customCommentText || mark.autoCommentSnapshot || "";
-          
+
           if (pctRaw !== null) {
             if (!bySubject[subject.id]) bySubject[subject.id] = {};
             bySubject[subject.id][student.id] = pctRaw;
           }
-          
+
           if (!studentSubjectRows[student.id]) studentSubjectRows[student.id] = {};
           studentSubjectRows[student.id][subject.id] = {
             assessmentId: assessment.id,
@@ -12324,15 +12646,15 @@ ${schoolName}`;
           };
         }
       }
-      
+
       const subjectAvg: Record<number, number> = {};
       const subjectRank: Record<number, Record<number, string>> = {};
-      
+
       for (const [subjIdStr, sidToPct] of Object.entries(bySubject)) {
         const subjId = parseInt(subjIdStr);
         const vals = Object.values(sidToPct);
         subjectAvg[subjId] = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
-        
+
         const sorted = Object.entries(sidToPct)
           .sort(([, a], [, b]) => b - a);
         const n = sorted.length;
@@ -12341,7 +12663,7 @@ ${schoolName}`;
           subjectRank[subjId][parseInt(sid)] = `${i + 1}/${n}`;
         });
       }
-      
+
       const prevPctMap: Record<string, number> = {};
       const overtimeMap: Record<number, Array<{ label: string; avg: number }>> = {};
       try {
@@ -12353,25 +12675,32 @@ ${schoolName}`;
             const dateB = b.startDate ? new Date(b.startDate).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
             return dateB - dateA;
           });
-        
+
         const prevExam = sortedExams.length > 0 ? sortedExams[0] : null;
-        
+
         if (prevExam) {
           const prevAssessments = await storage.getAssessmentsByExam(prevExam.id);
           const prevAssessmentIds = prevAssessments.map(a => a.id);
           let prevMarks: any[] = [];
           if (prevAssessmentIds.length > 0) {
-            prevMarks = await storage.getAssessmentMarksByAssessments(prevAssessmentIds);
+            prevMarks = requestedStudentIds.length
+              ? await db.select().from(assessmentMarksSchema).where(and(
+                  inArray(assessmentMarksSchema.assessmentId, prevAssessmentIds),
+                  inArray(assessmentMarksSchema.studentId, requestedStudentIds),
+                  eq(assessmentMarksSchema.schoolId, schoolId),
+                ))
+              : await storage.getAssessmentMarksByAssessments(prevAssessmentIds);
           }
-          
+
           for (const mark of prevMarks) {
+            if (!reportStudentIdSet.has(Number(mark.studentId))) continue;
             if (mark.percentage !== null && mark.percentage !== undefined) {
               const key = `${mark.studentId}-${mark.subjectId}`;
               prevPctMap[key] = parseFloat(mark.percentage);
             }
           }
         }
-        
+
         const currentExamAssessmentTypeId = exam.assessmentTypeId;
         const chronoExams = [...allSchoolExams]
           .filter(e => currentExamAssessmentTypeId ? e.assessmentTypeId === currentExamAssessmentTypeId : true)
@@ -12380,17 +12709,23 @@ ${schoolName}`;
             const dateB = b.startDate ? new Date(b.startDate).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
             return dateA - dateB;
           });
-        
+
         const examMarksCache: Array<{ exam: typeof chronoExams[0]; marks: any[] }> = [];
         for (const pastExam of chronoExams) {
           const pastAssessments = await storage.getAssessmentsByExam(pastExam.id);
           const pastAssessmentIds = pastAssessments.map(a => a.id);
           if (pastAssessmentIds.length === 0) continue;
-          const pastMarks = await storage.getAssessmentMarksByAssessments(pastAssessmentIds);
+          const pastMarks = requestedStudentIds.length
+            ? await db.select().from(assessmentMarksSchema).where(and(
+                inArray(assessmentMarksSchema.assessmentId, pastAssessmentIds),
+                inArray(assessmentMarksSchema.studentId, requestedStudentIds),
+                eq(assessmentMarksSchema.schoolId, schoolId),
+              ))
+            : await storage.getAssessmentMarksByAssessments(pastAssessmentIds);
           examMarksCache.push({ exam: pastExam, marks: pastMarks });
         }
-        
-        for (const studentObj of students) {
+
+        for (const studentObj of reportStudents) {
           const studentOvertime: Array<{ label: string; avg: number }> = [];
           for (const cached of examMarksCache) {
             const studentPastMarks = cached.marks.filter(m => m.studentId === studentObj.id && m.percentage !== null && m.percentage !== undefined);
@@ -12404,8 +12739,17 @@ ${schoolName}`;
           overtimeMap[studentObj.id] = studentOvertime;
         }
       } catch (e) {}
-      
-      const reportCards = await Promise.all(students.map(async (student) => {
+
+      markTiming("historical-data");
+      const uniqueStreamIds: number[] = Array.from(new Set<number>(
+        reportStudents.map((student) => Number(student.streamId)).filter((id) => Number.isInteger(id) && id > 0),
+      ));
+      const studentStreams = new Map<number, any>();
+      await Promise.all(uniqueStreamIds.map(async (streamId) => {
+        studentStreams.set(streamId, await storage.getStream(streamId));
+      }));
+
+      const reportCards = await Promise.all(reportStudents.map(async (student) => {
         const rows = studentSubjectRows[student.id] || {};
         const subjectResults: Array<{
           assessmentId?: number;
@@ -12421,20 +12765,20 @@ ${schoolName}`;
           teacher: string;
           gradePoints: number;
         }> = [];
-        
+
         const sortedSubjects = Object.values(rows).sort((a, b) =>
           a.subjectName.localeCompare(b.subjectName)
         );
-        
+
         let sumMarks = 0;
         let passed = 0;
         let points = 0;
         let nSubjects = 0;
-        
+
         const chartSubjectLabels: string[] = [];
         const chartStudentMarks: number[] = [];
         const chartClassAvgs: (number | null)[] = [];
-        
+
         for (const row of sortedSubjects) {
           const pct = row.percentage;
           const hasNumericMark = pct !== null && Number.isFinite(pct);
@@ -12444,15 +12788,15 @@ ${schoolName}`;
             if ((pct as number) >= 60) passed++;
             points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
           }
-          
+
           const avgVal = subjectAvg[row.subjectId];
           const classAvgStr = hasNumericMark && avgVal !== undefined
             ? parseFloat(avgVal.toFixed(1)).toString()
             : '';
-          
+
           const rankStr = hasNumericMark ? (subjectRank[row.subjectId]?.[student.id] || '') : '';
           const markStr = hasNumericMark ? parseFloat((pct as number).toFixed(1)).toString() : '';
-          
+
           const prevKey = `${student.id}-${row.subjectId}`;
           const prevPct = prevPctMap[prevKey];
           let dev = '';
@@ -12466,7 +12810,7 @@ ${schoolName}`;
               else dev = '0';
             }
           }
-          
+
           subjectResults.push({
             assessmentId: row.assessmentId,
             subjectId: row.subjectId,
@@ -12481,25 +12825,24 @@ ${schoolName}`;
             teacher: row.teacher,
             gradePoints: row.gradePoints,
           });
-          
+
           if (hasNumericMark) {
             chartSubjectLabels.push(row.subjectName);
             chartStudentMarks.push(parseFloat((pct as number).toFixed(1)));
             chartClassAvgs.push(avgVal !== undefined ? parseFloat(avgVal.toFixed(1)) : null);
           }
         }
-        
+
         const totalMark = nSubjects > 0 ? `${Math.round(sumMarks)}/${100 * nSubjects}` : '';
         const avgPct = nSubjects > 0 ? parseFloat((sumMarks / nSubjects).toFixed(1)) : null;
         const avgMarkStr = avgPct !== null ? `${parseFloat(avgPct.toFixed(1))}%` : '';
         const subjectsPassed = nSubjects > 0 ? `${passed}/${nSubjects}` : '';
-        
+
         const chartOvertimeLabels = (overtimeMap[student.id] || []).map(o => o.label);
         const chartOvertimeAvgs = (overtimeMap[student.id] || []).map(o => o.avg);
-        const studentStream = student.streamId ? await storage.getStream(student.streamId) : null;
-        const classStream = classInfo?.streamId ? await storage.getStream(classInfo.streamId) : null;
+        const studentStream = student.streamId ? studentStreams.get(Number(student.streamId)) : null;
         const ecdSections = await loadEcdSectionsForStudentExam(student.id, examId, [studentStream?.name, classStream?.name]);
-        
+
         return {
           student: {
             id: student.id,
@@ -12529,7 +12872,7 @@ ${schoolName}`;
           ecdSections,
         };
       }));
-      
+
       const allReportComments = await storage.getReportComments(schoolId);
       const allGrades = (await storage.getAllGrades()).filter((grade) => grade.schoolId === schoolId);
 
@@ -12574,10 +12917,17 @@ ${schoolName}`;
         }
       }
 
-      const studentsWithMarks = reportCards.filter(r => r.summary.averagePercentage !== null);
-      const classPositionMap = calculatePositionMap(
-        studentsWithMarks.map((rc) => ({ id: rc.student.id, value: rc.summary.averagePercentage }))
-      );
+      const allStudentAverages = students.map((student) => {
+        const rows = Object.values(studentSubjectRows[student.id] || {});
+        const numericMarks = rows
+          .map((row) => row.percentage)
+          .filter((value): value is number => value !== null && Number.isFinite(value));
+        return {
+          id: Number(student.id),
+          value: numericMarks.length ? numericMarks.reduce((sum, value) => sum + value, 0) / numericMarks.length : null,
+        };
+      }).filter((row) => row.value !== null);
+      const classPositionMap = calculatePositionMap(allStudentAverages);
       const streamPositionMap = await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
       const classSize = classPositionMap.size;
 
@@ -12586,8 +12936,9 @@ ${schoolName}`;
         rc.summary.classPosition = classPositionMap.map.get(rc.student.id) || '';
         rc.summary.overallPosition = streamPositionMap.map.get(rc.student.id) || rc.summary.classPosition || '';
       }
-      
-      res.json({
+
+      markTiming("assemble");
+      const payload = {
         school: {
           id: school?.id,
           name: school?.name,
@@ -12613,10 +12964,35 @@ ${schoolName}`;
           publicationVersion: publication?.publicationVersion || 0,
           publishedAt: publication?.publishedAt || null,
         },
-      });
+      };
+      markTiming("serialize");
+      const totalDuration = Date.now() - requestStartedAt;
+      const serverTiming = [...timingMarks, { name: "total", duration: totalDuration }]
+        .map((item) => `${item.name};dur=${Math.max(0, item.duration)}`)
+        .join(", ");
+      res.setHeader("Server-Timing", serverTiming);
+      if (req.query.pdfData === "1" || req.path.endsWith("/pdf-data")) {
+        console.info(`[academic-pdf] report data exam=${examId} class=${classId} learners=${reportCards.length} totalMs=${totalDuration} ${serverTiming}`);
+      }
+      res.json(payload);
     } catch (error) {
       next(error);
     }
+  };
+
+  app.get("/api/report-cards/:examId/class/:classId", requireAuth, handleClassReportCardData);
+  app.post("/api/report-cards/:examId/pdf-data", requireAuth, (req, res, next) => {
+    const parsed = z.object({
+      classId: z.coerce.number().int().positive(),
+      studentIds: z.array(z.coerce.number().int().positive()).min(1).max(500),
+    }).safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid PDF report selection", errors: parsed.error.errors });
+    }
+    req.params.classId = String(parsed.data.classId);
+    req.query.studentIds = Array.from(new Set(parsed.data.studentIds)).join(",");
+    req.query.pdfData = "1";
+    return handleClassReportCardData(req, res, next);
   });
 
   // Get individual student report card
@@ -12626,24 +13002,24 @@ ${schoolName}`;
       const studentId = parseIdParam(req.params.studentId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
-      
+
       if (!schoolId) return res.status(400).json({ message: "School context required" });
-      
+
       const school = await storage.getSchool(schoolId);
       const org2 = school?.organizationId ? await storage.getOrganization(school.organizationId) : undefined;
       const student = await storage.getStudent(studentId);
       if (!student) return res.status(404).json({ message: "Student not found" });
-      
+
       const classInfo = student.classId ? await storage.getClass(student.classId) : null;
       const exam = await storage.getExam(examId);
       if (!exam) return res.status(404).json({ message: "Exam not found" });
       if (!classInfo) return res.status(400).json({ message: "Student class context required" });
       if (!currentUser || !(await ensurePublishedPortalAccess({ user: currentUser, examId, classId: classInfo.id, studentId, res }))) return;
-      
+
       const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
       const grades = await storage.getGradesBySchool(schoolId);
       const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
-      
+
       const subjectResults: Array<{
         subjectId: number;
         subjectName: string;
@@ -12652,22 +13028,22 @@ ${schoolName}`;
         gradePoints: number;
         comment: string;
       }> = [];
-      
+
       let totalPercentage = 0;
       let totalGradePoints = 0;
       let subjectCount = 0;
-      
+
       for (const assessment of allAssessments) {
         const subject = await storage.getSubject(assessment.subjectId);
         if (!subject) continue;
-        
+
         const mark = await storage.getAssessmentMarkByStudentAssessment(studentId, assessment.id);
-        
+
         let percentage: number | null = null;
         let gradeName = "";
         let gradePoints = 0;
         let comment = "";
-        
+
         if (mark) {
           percentage = parseFinitePercentage(mark.percentage);
           const applicableGrades = getClassSubjectGradeCandidates({
@@ -12688,16 +13064,16 @@ ${schoolName}`;
             gradeName = resolvedGrade.gradeName;
             gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
           }
-          
+
           comment = mark.customCommentText || mark.autoCommentSnapshot || "";
-          
+
           if (percentage !== null) {
             totalPercentage += percentage;
             totalGradePoints += gradePoints;
             subjectCount++;
           }
         }
-        
+
         subjectResults.push({
           subjectId: subject.id,
           subjectName: subject.name,
@@ -12707,10 +13083,10 @@ ${schoolName}`;
           comment,
         });
       }
-      
+
       const averagePercentage = subjectCount > 0 ? Math.round(totalPercentage / subjectCount) : null;
       const averageGradePoints = subjectCount > 0 ? (totalGradePoints / subjectCount).toFixed(1) : null;
-      
+
       res.json({
         school: {
           id: school?.id,
@@ -12910,19 +13286,66 @@ async function buildReportCardMessage(
   }
 
 
+  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v2-selected-data";
+
+  function reportPdfCacheDirectory(): string {
+    const objectRoot = path.resolve(process.env.LOCAL_OBJECT_DIR?.trim() || path.join(process.cwd(), "object_storage"));
+    return path.join(objectRoot, "private", "academic-report-pdf-cache");
+  }
+
+  function reportPdfCacheKey(args: {
+    schoolId: number;
+    examId: number;
+    classId: number;
+    publicationVersion: number;
+    studentIds: number[];
+  }): string {
+    const selection = Array.from(new Set(args.studentIds)).sort((a, b) => a - b).join(",");
+    return crypto.createHash("sha256").update([
+      REPORT_PDF_TEMPLATE_VERSION,
+      args.schoolId,
+      args.examId,
+      args.classId,
+      args.publicationVersion,
+      selection,
+    ].join("|")).digest("hex");
+  }
+
   async function generateReportCardChromiumPdf(args: {
     req: Request;
     schoolId: number;
     examId: number;
     classId: number;
     studentIds: number[];
-  }): Promise<Buffer> {
+  }): Promise<{ buffer: Buffer; cacheStatus: "HIT" | "MISS" | "BYPASS" }> {
+    const publication = await getClassExamPublication(args.examId, args.classId);
+    const shouldCache = publication?.isPublished === true;
+    const publicationVersion = Number(publication?.publicationVersion || 0);
+    const cacheKey = shouldCache ? reportPdfCacheKey({
+      schoolId: args.schoolId,
+      examId: args.examId,
+      classId: args.classId,
+      publicationVersion,
+      studentIds: args.studentIds,
+    }) : null;
+    const cachePath = cacheKey ? path.join(reportPdfCacheDirectory(), `${cacheKey}.pdf`) : null;
+
+    if (cachePath) {
+      try {
+        const buffer = await fs.readFile(cachePath);
+        console.info(`[academic-pdf] cache hit exam=${args.examId} class=${args.classId} learners=${args.studentIds.length} bytes=${buffer.length}`);
+        return { buffer, cacheStatus: "HIT" };
+      } catch (error: any) {
+        if (error?.code !== "ENOENT") console.warn("Unable to read report PDF cache:", error);
+      }
+    }
+
     const params = new URLSearchParams({
       examId: String(args.examId),
       classId: String(args.classId),
       studentIds: args.studentIds.join(","),
     });
-    return renderAppRoutePdf({
+    const buffer = await renderAppRoutePdf({
       req: args.req,
       schoolId: args.schoolId,
       route: `/pdf-render/report-cards?${params.toString()}`,
@@ -12932,6 +13355,52 @@ async function buildReportCardMessage(
         preferCSSPageSize: true,
         margin: { top: "2mm", right: "2mm", bottom: "2mm", left: "2mm" },
       },
+    });
+
+    if (cachePath) {
+      try {
+        await fs.mkdir(path.dirname(cachePath), { recursive: true });
+        const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+        await fs.writeFile(temporaryPath, buffer, { flag: "wx" });
+        await fs.rename(temporaryPath, cachePath).catch(async (error: any) => {
+          await fs.unlink(temporaryPath).catch(() => undefined);
+          if (error?.code !== "EEXIST") throw error;
+        });
+      } catch (error) {
+        console.warn("Unable to persist report PDF cache:", error);
+      }
+    }
+
+    return { buffer, cacheStatus: shouldCache ? "MISS" : "BYPASS" };
+  }
+
+  function queuePublishedReportPdfGeneration(args: {
+    req: Request;
+    schoolId: number;
+    examId: number;
+    classId: number;
+  }): void {
+    if (process.env.PDF_PREGENERATE_ON_PUBLISH === "false") return;
+    const cookieHeader = args.req.headers.cookie;
+    const schoolHeader = args.req.headers["x-school-id"];
+    const backgroundRequest = {
+      headers: {
+        cookie: cookieHeader,
+        "x-school-id": schoolHeader,
+      },
+      protocol: args.req.protocol,
+      get: (name: string) => args.req.get(name),
+    } as Request;
+    setImmediate(() => {
+      void (async () => {
+        const learners = await storage.getStudentsByClass(args.classId);
+        const studentIds = learners.map((student) => Number(student.id)).filter((id) => Number.isInteger(id) && id > 0);
+        if (!studentIds.length) return;
+        await generateReportCardChromiumPdf({ ...args, req: backgroundRequest, studentIds });
+        console.info(`[academic-pdf] background cache ready exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
+      })().catch((error) => {
+        console.warn(`[academic-pdf] background generation failed exam=${args.examId} class=${args.classId}:`, error);
+      });
     });
   }
 
@@ -12960,7 +13429,9 @@ async function buildReportCardMessage(
       if (exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
       if (!currentUser || !(await ensurePublishedPortalAccess({ user: currentUser, examId, classId: activeClassId, studentId, res }))) return;
 
-      const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId, classId: activeClassId, studentIds: [studentId] });
+      const generatedPdf = await generateReportCardChromiumPdf({ req, schoolId, examId, classId: activeClassId, studentIds: [studentId] });
+      const pdfBuffer = generatedPdf.buffer;
+      res.setHeader("X-PDF-Cache", generatedPdf.cacheStatus);
       const safeStudentName = `${student.firstName}_${student.lastName}`.replace(/\s+/g, "_");
       const safeClassName = (classInfo.className || 'Class').replace(/\s+/g, "_");
       const safeExamName = (exam.examName || 'Exam').replace(/\s+/g, "_");
@@ -12999,18 +13470,43 @@ async function buildReportCardMessage(
       if (!exam || (exam.schoolId && Number(exam.schoolId) !== Number(schoolId))) return res.status(404).json({ message: "Exam not found" });
 
       const validIds = new Set(classStudents.map((student: any) => Number(student.id)));
-      const requestedIds = Array.from(new Set(parsed.studentIds));
+      const requestedIds: number[] = Array.from(new Set<number>(parsed.studentIds));
       if (requestedIds.some((id) => !validIds.has(id))) {
         return res.status(400).json({ message: "One or more selected learners do not belong to this class" });
       }
 
-      const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId, classId: parsed.classId, studentIds: requestedIds });
+      const generatedPdf = await generateReportCardChromiumPdf({ req, schoolId, examId, classId: parsed.classId, studentIds: requestedIds });
+      const pdfBuffer = generatedPdf.buffer;
+      res.setHeader("X-PDF-Cache", generatedPdf.cacheStatus);
       const filename = reportPdfFilename(`Filtered_Report_Cards_${classInfo.className || "Class"}_${exam.examName || "Exam"}`);
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${filename}.pdf"`);
       res.send(pdfBuffer);
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid report selection", errors: error.errors });
+      next(error);
+    }
+  });
+
+  app.post("/api/report-cards/:examId/pdf/prewarm", requireAuth, async (req, res, next) => {
+    try {
+      const examId = Number(req.params.examId);
+      const classId = Number(req.body?.classId);
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId || !currentUser || !Number.isInteger(examId) || !Number.isInteger(classId)) {
+        return res.status(400).json({ message: "School, exam and class context are required" });
+      }
+      if (!(await userHasAnyPermission(currentUser.id, ["academic_reports.publish.class", "academic_reports.publish.stream"]))) {
+        return res.status(403).json({ message: "Permission required to prepare published report PDFs" });
+      }
+      const publication = await getClassExamPublication(examId, classId);
+      if (!publication?.isPublished) return res.status(409).json({ message: "Publish the class reports before preparing the PDF cache" });
+      const classInfo = await storage.getClass(classId);
+      if (!classInfo || Number(classInfo.schoolId) !== Number(schoolId)) return res.status(404).json({ message: "Class not found" });
+      queuePublishedReportPdfGeneration({ req, schoolId, examId, classId });
+      return res.status(202).json({ queued: true, examId, classId });
+    } catch (error) {
       next(error);
     }
   });
@@ -13168,7 +13664,7 @@ async function buildReportCardMessage(
     try {
       const { examId, classId, studentId } = req.body;
       if (!examId || !classId || !studentId) return res.status(400).json({ message: "Missing parameters" });
-      
+
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId || !currentUser) return res.status(400).json({ message: "School context required" });
@@ -13178,16 +13674,16 @@ async function buildReportCardMessage(
       if (!(await isClassExamPublished(Number(examId), Number(classId)))) {
         return res.status(409).json({ message: "Publish this exercise/exam for the class before sending reports" });
       }
-      
+
       const school = await storage.getSchool(schoolId);
       const classInfo = await storage.getClass(classId);
       const student = await storage.getStudent(studentId);
       if (!student) return res.status(404).json({ message: "Student not found" });
-      
+
       if (!student.parentId) return res.status(400).json({ message: "No parent linked to this student" });
       const parent = await storage.getParent(student.parentId);
       if (!parent) return res.status(400).json({ message: "Parent not found" });
-      
+
       const exam = await storage.getExam(examId);
       const userId = (req.user as any).id;
       const name = `${student.firstName} ${student.lastName}`;
@@ -13204,10 +13700,10 @@ async function buildReportCardMessage(
           details: { smsCount: 0, emailCount: 0, errors: [] },
         });
       }
-      
+
       let smsCount = 0, emailCount = 0;
       const errors: string[] = [];
-      
+
       if (parent.phone) {
         const smsResult = await communicationService.sendSms({
           to: parent.phone,
@@ -13222,7 +13718,7 @@ async function buildReportCardMessage(
         if (smsResult.success) smsCount++;
         else if (smsResult.error) errors.push(`SMS: ${smsResult.error}`);
       }
-      
+
       if (parent.email) {
         try {
           const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId: Number(examId), classId: Number(classId), studentIds: [student.id] });
@@ -13245,15 +13741,15 @@ async function buildReportCardMessage(
           errors.push(`PDF/Email: ${pdfErr instanceof Error ? pdfErr.message : 'unknown error'}`);
         }
       }
-      
+
       if (smsCount === 0 && emailCount === 0) {
-        return res.json({ 
-          success: false, 
+        return res.json({
+          success: false,
           message: `Could not send report card. ${errors.join('. ')}`,
           details: { smsCount, emailCount, errors },
         });
       }
-      
+
       const publication = await getClassExamPublication(Number(examId), Number(classId));
       await db.insert(assessmentPublicationEvents).values({
         publicationId: publication?.id || null,
@@ -13269,8 +13765,8 @@ async function buildReportCardMessage(
         metadata: { studentId, smsCount, emailCount },
       });
 
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: `Report card sent. [SMS: ${smsCount}, Email: ${emailCount}]`,
         details: { smsCount, emailCount, errors },
       });
@@ -13462,6 +13958,10 @@ async function buildReportCardMessage(
         metadata: { examId: data.examId, classId: data.classId, reason: data.publish ? undefined : data.reason, summary: progress.totals },
       });
 
+      if (data.publish && result.publication?.isPublished) {
+        queuePublishedReportPdfGeneration({ req, schoolId, examId: data.examId, classId: data.classId });
+      }
+
       res.json({
         changed: result.changed,
         action: result.action,
@@ -13513,6 +14013,12 @@ async function buildReportCardMessage(
           userId: currentUser.id,
         });
         if (result.changed) changedClasses.push(classInfo.id);
+      }
+
+      if (data.publish) {
+        for (const classId of changedClasses) {
+          queuePublishedReportPdfGeneration({ req, schoolId, examId: data.examId, classId });
+        }
       }
 
       const rows = await db.select().from(assessmentPublications).where(and(

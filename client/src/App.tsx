@@ -21,6 +21,8 @@ import ResetPasswordToken from "@/pages/reset-password-token";
 import NotFound from "@/pages/not-found";
 
 const ApplyPage = lazy(() => import("@/pages/apply"));
+const CareersPage = lazy(() => import("@/pages/careers"));
+const RecruitmentPage = lazy(() => import("@/pages/recruitment"));
 const ReportCardPdfRenderPage = lazy(() => import("@/pages/report-card-pdf-render"));
 const Dashboard = lazy(() => import("@/pages/dashboard"));
 const OrgDashboard = lazy(() => import("@/pages/org-dashboard"));
@@ -129,6 +131,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/hostel$/, permissions: ["hostel.view"] },
   { pattern: /^\/hostels$/, permissions: ["hostels.view"] },
   { pattern: /^\/applications$/, permissions: ["applications.view"] },
+  { pattern: /^\/recruitment$/, permissions: ["recruitment.view"] },
   { pattern: /^\/messages$/, permissions: ["communication.view"] },
   { pattern: /^\/my-classes$/, allowRoles: ["student"] },
   { pattern: /^\/my-attendance$/, allowRoles: ["student"] },
@@ -145,9 +148,9 @@ function getPermissionRuleForPath(path: string): RoutePermissionRule | undefined
   return ROUTE_PERMISSION_RULES.find(rule => rule.pattern.test(path));
 }
 
-function ProtectedRoute({ 
-  component: Component 
-}: { 
+function ProtectedRoute({
+  component: Component
+}: {
   component: React.ComponentType;
 }) {
   const { user, isLoading, isInSchoolContext, hasAnyPermission } = useAuth();
@@ -525,7 +528,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   const { user, exitSchool, currentSchoolId } = useAuth();
   const [, setLocation] = useLocation();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  
+
   const [currentTime, setCurrentTime] = useState(() =>
     new Date().toLocaleString("en-US", {
       timeZone: "Africa/Harare",
@@ -640,9 +643,9 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           <header className="sticky top-0 z-50 flex flex-wrap items-center gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60 sm:gap-4 sm:px-4">
             <SidebarTrigger data-testid="button-sidebar-toggle" />
             {user?.role === "org_admin" && currentSchoolId && (
-              <Button 
-                variant="ghost" 
-                size="sm" 
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={handleBackToOrg}
                 className="text-muted-foreground"
                 data-testid="button-back-to-org"
@@ -872,6 +875,7 @@ function AuthenticatedRoutes() {
         <Route path="/hostel"><ProtectedRoute component={HostelPage} /></Route>
         <Route path="/hostels"><ProtectedRoute component={HostelsPage} /></Route>
         <Route path="/applications"><ProtectedRoute component={ApplicationsPage} /></Route>
+        <Route path="/recruitment"><ProtectedRoute component={RecruitmentPage} /></Route>
         <Route path="/messages"><ProtectedRoute component={MessagesPage} /></Route>
         <Route path="/my-classes"><ProtectedRoute component={MyClassesPage} /></Route>
         <Route path="/my-attendance"><ProtectedRoute component={MyAttendancePage} /></Route>
@@ -902,6 +906,7 @@ function Router() {
     <Switch>
       <Route path="/pdf-render/report-cards" component={ReportCardPdfRenderPage} />
       <Route path="/apply" component={ApplyPage} />
+      <Route path="/careers" component={CareersPage} />
       <Route path="/reset-password" component={ResetPasswordToken} />
       <Route path="/force-reset-password">
         {user?.mustResetPassword ? (

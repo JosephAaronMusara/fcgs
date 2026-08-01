@@ -1,0 +1,21 @@
+{
+  "generatedAtUtc": "2026-07-28T23:19:04Z",
+  "sourceBaselineCommit": "89284ebf8c8b7223a9fddb5470668d1886426c61",
+  "recruitmentCompletion": {
+    "publicApplyButton": "implemented",
+    "generalApplicationCategories": "implemented and recruiter-configurable",
+    "closedApplicationsUx": "implemented",
+    "alternativeQualificationScreening": "implemented, hidden publicly and auditable internally",
+    "screeningLogicTest": "passed",
+    "recruitmentPreflightUpdated": true
+  },
+  "validation": {
+    "typescriptSyntaxFiles": 180,
+    "typescriptSyntaxDiagnostics": 0,
+    "missingLocalImports": 0,
+    "focusedRecruitmentScreeningTests": "passed",
+    "npmCi": "not completed in packaging environment because the internal npm registry returned 404 for zod 3.24.2",
+    "npmRunCheck": "must run locally with installed dependencies",
+    "npmRunBuild": "must run locally with installed dependencies"
+  }
+}

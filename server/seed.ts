@@ -81,7 +81,7 @@ const ACCESS_GROUPS_DATA = [
     name: "Quality Control Officer",
     description: "Same access as School Admin, but cannot manage finances (view-only for fees).",
     isSystemDefault: true,
-    permissions: PERMISSIONS_DATA.filter(p => 
+    permissions: PERMISSIONS_DATA.filter(p =>
       !["fees.create", "fees.edit", "fees.delete", "fees.manage_structure"].includes(p.code)
     ).map(p => p.code),
   },
@@ -186,12 +186,24 @@ const ACCESS_GROUPS_DATA = [
       "transport.view", "transport.dashboard.view",
       "transport.routes.create", "transport.routes.edit", "transport.stops.manage", "transport.paths.manage",
       "transport.vehicles.create", "transport.vehicles.edit", "transport.drivers.manage", "transport.owners.manage",
+      "transport.documents.view", "transport.documents.manage", "transport.compliance.view", "transport.compliance.manage",
       "transport.learners.enrol", "transport.learners.edit_service", "transport.learners.transfer",
       "transport.charges.view", "transport.charges.generate", "transport.payments.view",
       "transport.receipts.view", "transport.receipts.verify", "transport.payment_plans.manage", "transport.refunds.request",
       "transport.cashups.prepare", "transport.incidents.manage",
       "transport.claims.view", "transport.claims.generate", "transport.claims.submit", "transport.claims.verify",
       "transport.advances.request", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
+    ],
+  },
+  {
+    name: "Recruitment Manager",
+    description: "Manages staff vacancies, screening requirements, applications, interviews and recruitment settings.",
+    isSystemDefault: true,
+    permissions: [
+      "recruitment.view", "recruitment.vacancies.manage", "recruitment.requirements.manage",
+      "recruitment.applications.review", "recruitment.applications.process", "recruitment.rejected_attempts.view",
+      "recruitment.documents.view", "recruitment.documents.manage", "recruitment.interviews.manage", "recruitment.settings.manage",
+      "staff.view", "settings.view", "communication.view", "communication.send",
     ],
   },
   {
@@ -214,7 +226,7 @@ async function seed() {
   // Create organization if not exists
   const existingOrg = await db.select().from(organizations).where(eq(organizations.name, "First Choice Group Of Schools"));
   let orgId: number;
-  
+
   if (existingOrg.length === 0) {
     const [newOrg] = await db.insert(organizations).values({
       name: "First Choice Group Of Schools",
@@ -239,7 +251,7 @@ async function seed() {
   ];
 
   const schoolMap = new Map<string, number>();
-  
+
   for (const school of schoolsData) {
     const existing = await db.select().from(schools).where(eq(schools.shortCode, school.shortCode));
     if (existing.length === 0) {
@@ -279,7 +291,7 @@ async function seed() {
   for (const admin of schoolAdmins) {
     const schoolId = schoolMap.get(admin.schoolCode);
     const existingAdmin = await db.select().from(users).where(eq(users.username, admin.username));
-    
+
     if (existingAdmin.length === 0) {
       const [newAdmin] = await db.insert(users).values({
         username: admin.username,
@@ -295,10 +307,10 @@ async function seed() {
       console.log(`Admin user created: ${admin.username} / admin123`);
     } else {
       // Update password and school assignment
-      await db.update(users).set({ 
+      await db.update(users).set({
         password: hashedPassword,
-        schoolId: schoolId, 
-        organizationId: orgId 
+        schoolId: schoolId,
+        organizationId: orgId
       }).where(eq(users.username, admin.username));
       adminUserIds.push(existingAdmin[0].id);
       console.log(`Admin user updated: ${admin.username}`);
@@ -339,7 +351,7 @@ async function seed() {
     await db.delete(userPermissionOverrides).where(inArray(userPermissionOverrides.permissionId, legacyIds));
     await db.delete(permissions).where(inArray(permissions.id, legacyIds));
   }
-  
+
   for (const perm of PERMISSIONS_DATA) {
     const existing = await db.select().from(permissions).where(eq(permissions.code, perm.code));
     if (existing.length === 0) {
@@ -358,7 +370,7 @@ async function seed() {
   for (const group of ACCESS_GROUPS_DATA) {
     const existing = await db.select().from(accessGroups).where(eq(accessGroups.name, group.name));
     let groupId: number;
-    
+
     if (existing.length === 0) {
       const [newGroup] = await db.insert(accessGroups).values({
         name: group.name,
@@ -373,7 +385,7 @@ async function seed() {
 
     // Clear existing permissions for this group and reassign
     await db.delete(accessGroupPermissions).where(eq(accessGroupPermissions.accessGroupId, groupId));
-    
+
     for (const permCode of group.permissions) {
       const permId = permissionMap.get(permCode);
       if (permId) {

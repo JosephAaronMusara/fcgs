@@ -52,6 +52,7 @@ import {
   Bell,
   Package,
   ArrowRightLeft,
+  BriefcaseBusiness,
 } from "lucide-react";
 import type { School as SchoolType } from "@shared/schema";
 
@@ -95,6 +96,7 @@ const staffMenuGroups: MenuGroup[] = [
     label: "Human Resources",
     items: [
       { title: "School Staff", url: "/staff", icon: Users, requiredPermissions: ["staff.view"] },
+      { title: "Recruitment", url: "/recruitment", icon: BriefcaseBusiness, requiredPermissions: ["recruitment.view"] },
       { title: "Timetable", url: "/timetable", icon: Calendar, requiredPermissions: ["timetable.view"] },
       { title: "Staff Attendance", url: "/logbook", icon: Clock, requiredPermissions: ["staff_attendance.view_own", "staff_attendance.view_all", "staff_attendance.view_logs", "staff_attendance.view_overview", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"], featureKey: "enableELogbook" },
     ],

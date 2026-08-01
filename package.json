@@ -19,7 +19,16 @@
     "transport:preflight:prod": "tsx script/preflight-transport-upgrade.ts",
     "assets-inventory:preflight": "tsx script/preflight-assets-inventory-upgrade.ts",
     "assets-inventory:repair": "tsx script/repair-assets-inventory-additive.ts",
-    "assets-inventory:repair:prod": "tsx script/repair-assets-inventory-additive.ts"
+    "assets-inventory:repair:prod": "tsx script/repair-assets-inventory-additive.ts",
+    "transport:repair": "tsx script/repair-transport-additive.ts",
+    "transport:repair:prod": "tsx script/repair-transport-additive.ts",
+    "transport:preflight:post-schema": "tsx script/preflight-transport-upgrade.ts --post-schema",
+    "recruitment:preflight": "tsx script/preflight-recruitment.ts",
+    "academic-pdf:preflight": "tsx script/preflight-academic-pdf.ts",
+    "recruitment:logic-test": "tsx script/test-recruitment-screening.ts",
+    "grades:paper-recalc-test": "tsx script/test-assessment-paper-recalculation.ts",
+    "grades:paper-recalc:preflight": "tsx script/recalculate-assessment-paper-results.ts",
+    "grades:paper-recalc:apply": "tsx script/recalculate-assessment-paper-results.ts --apply"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

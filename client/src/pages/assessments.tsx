@@ -331,10 +331,18 @@ export default function AssessmentsPage() {
       const res = await apiRequest("PUT", `/api/assessments/${id}`, data);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/assessments"] });
+    onSuccess: (result) => {
+      const recalculation = result?.recalculation;
+      if (recalculation?.recalculationPerformed) {
+        queryClient.invalidateQueries();
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["/api/assessments"] });
+      }
       setEditingAssessment(null);
-      toast({ title: "Success", description: "Assessment updated successfully" });
+      const description = recalculation?.resultAffectingChange
+        ? `Assessment updated. ${recalculation.recalculatedMarks} complete result(s) recalculated; ${recalculation.incompleteMarks} result(s) are incomplete.`
+        : "Assessment updated successfully";
+      toast({ title: "Success", description });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -706,6 +714,28 @@ function AssessmentDialog({
     setPapers(updated);
   };
   const totalWeight = papers.reduce((sum, p) => sum + parseFloat(p.paperWeightPct || "0"), 0);
+  const originalPapersById = useMemo(
+    () => new Map((assessment?.papers || []).filter((paper) => paper.id !== undefined).map((paper) => [Number(paper.id), paper])),
+    [assessment],
+  );
+  const currentPaperIds = useMemo(
+    () => new Set(papers.filter((paper) => paper.id !== undefined).map((paper) => Number(paper.id))),
+    [papers],
+  );
+  const removedExistingPapers = useMemo(
+    () => Array.from(originalPapersById.values()).filter((paper) => !currentPaperIds.has(Number(paper.id))),
+    [originalPapersById, currentPaperIds],
+  );
+  const recalculationRequired = useMemo(() => {
+    if (!assessment) return false;
+    if (removedExistingPapers.length > 0 || papers.some((paper) => paper.id === undefined)) return true;
+    return papers.some((paper) => {
+      const original = paper.id === undefined ? undefined : originalPapersById.get(Number(paper.id));
+      if (!original) return true;
+      return Number(original.paperMarks) !== Number(paper.paperMarks)
+        || Number(original.paperWeightPct) !== Number(paper.paperWeightPct);
+    });
+  }, [assessment, papers, originalPapersById, removedExistingPapers]);
   const paperValuesValid = papers.every((paper) => {
     const marks = Number(paper.paperMarks);
     const weight = Number(paper.paperWeightPct);
@@ -844,6 +874,15 @@ useEffect(() => {
     
     const primaryClassId = assessment ? parseInt(classId) : selectedClassIds[0];
 
+    let confirmPaperRemoval = false;
+    if (assessment && removedExistingPapers.length > 0) {
+      confirmPaperRemoval = window.confirm(
+        `You are removing ${removedExistingPapers.length} existing paper(s): ${removedExistingPapers.map((paper) => paper.paperName).join(", ")}. `
+        + "Any learner marks recorded for those papers will be permanently removed, and all remaining results will be recalculated. Continue?",
+      );
+      if (!confirmPaperRemoval) return;
+    }
+
     onSubmit({
       topic: topic.trim(),
       classId: primaryClassId,
@@ -853,7 +892,9 @@ useEffect(() => {
       assessmentDate: assessmentDate || null,
       dueDate: dueDate || null,
       examId: parseInt(examId),
-          papers: papers.map(p => ({
+      ...(assessment ? { confirmPaperRemoval } : {}),
+      papers: papers.map(p => ({
+        ...(p.id !== undefined ? { id: p.id } : {}),
         paperName: p.paperName,
         paperMarks: p.paperMarks,
         paperWeightPct: p.paperWeightPct,
@@ -999,6 +1040,19 @@ useEffect(() => {
               </div>
             )}
             
+            {assessment && recalculationRequired && (
+              <div className="flex items-start gap-2 p-3 bg-amber-50 text-amber-900 border border-amber-200 rounded-md text-sm dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900">
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                <div>
+                  <p className="font-medium">Saved learner results will be recalculated automatically.</p>
+                  <p className="mt-1">
+                    Weight and maximum-mark changes preserve existing paper marks. Adding a paper makes existing results incomplete until that paper is marked.
+                    {removedExistingPapers.length > 0 ? " Removing a paper requires confirmation and removes only that paper's saved marks." : ""}
+                  </p>
+                </div>
+              </div>
+            )}
+
             {!paperValuesValid && papers.length > 0 && (
               <div className="flex items-center gap-2 p-2 bg-destructive/10 text-destructive rounded-md text-sm">
                 <AlertTriangle className="w-4 h-4" />
@@ -1015,7 +1069,7 @@ useEffect(() => {
 
             <div className="space-y-2">
               {papers.map((paper, index) => (
-                <div key={index} className="flex items-center gap-2 p-3 border rounded-md">
+                <div key={paper.id ?? `new-${index}`} className="flex items-center gap-2 p-3 border rounded-md">
                   <Input
                     value={paper.paperName}
                     onChange={(e) => updatePaper(index, "paperName", e.target.value)}

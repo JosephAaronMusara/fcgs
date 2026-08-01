@@ -25,6 +25,7 @@ import {
   transportClaimDeductions,
   transportClaims,
   transportDrivers,
+  transportDriverOwnerHistory,
   transportIncidents,
   transportOwners,
   transportPathNodeLearners,
@@ -102,6 +103,14 @@ const ownerInput = z.object({
   ownerType: z.enum(["individual", "company"]).default("individual"),
   contactPerson: optionalText,
   phone: optionalText,
+  email: z.string().trim().email().optional().nullable().or(z.literal("")),
+  address: optionalText,
+  alternativeContactName: optionalText,
+  alternativeContactPhone: optionalText,
+  alternativeContactEmail: z.string().trim().email().optional().nullable().or(z.literal("")),
+  alternativeContactRelationship: optionalText,
+  isStaffOwner: z.boolean().optional().default(false),
+  staffId: nullablePositiveInt,
   nationalIdOrRegistration: optionalText,
   paymentDetails: optionalText,
   effectiveFrom: dateString.optional().nullable(),
@@ -111,17 +120,28 @@ const ownerInput = z.object({
 });
 
 const driverInput = z.object({
+  ownerId: nullablePositiveInt,
   firstName: z.string().trim().min(1),
   lastName: z.string().trim().min(1),
   phone: optionalText,
+  homeAddress: optionalText,
+  photo: optionalText,
   nationalId: optionalText,
   licenceNumber: optionalText,
   licenceExpiry: dateString.optional().nullable(),
   engagementType: z.enum(["internal", "external"]).default("internal"),
+  nextOfKinName: optionalText,
+  nextOfKinRelationship: optionalText,
+  nextOfKinPhone: optionalText,
+  nextOfKinAlternativePhone: optionalText,
+  nextOfKinEmail: z.string().trim().email().optional().nullable().or(z.literal("")),
+  nextOfKinAddress: optionalText,
   effectiveFrom: dateString.optional().nullable(),
   effectiveTo: dateString.optional().nullable(),
   notes: optionalText,
   isActive: z.boolean().optional().default(true),
+  effectiveDate: dateString.optional(),
+  changeReason: optionalText,
 });
 
 const vehicleInput = z.object({
@@ -131,8 +151,11 @@ const vehicleInput = z.object({
   ownershipType: z.enum(["school", "staff", "contracted"]).default("school"),
   ownerId: nullablePositiveInt,
   driverId: nullablePositiveInt,
+  registrationExpiry: dateString.optional().nullable(),
   insuranceExpiry: dateString.optional().nullable(),
   fitnessExpiry: dateString.optional().nullable(),
+  radioLicenceExpiry: dateString.optional().nullable(),
+  primaryImage: optionalText,
   status: z.enum(["draft", "active", "suspended", "retired"]).default("active"),
   notes: optionalText,
   isActive: z.boolean().optional().default(true),
@@ -163,6 +186,7 @@ const pathNodeInput = z.object({
   longitude: z.coerce.number().min(-180).max(180),
   stopOrder: z.coerce.number().int().min(1),
   expectedTime: optionalText,
+  reverseExpectedTime: optionalText,
   checkpointRadiusMeters: z.coerce.number().int().positive().optional().nullable(),
   notes: optionalText,
   learnerLinks: z.array(z.object({
@@ -179,6 +203,8 @@ const pathInput = z.object({
   routeId: z.coerce.number().int().positive(),
   vehicleId: z.coerce.number().int().positive(),
   direction: z.enum(["pickup", "dropoff"]),
+  isTwoWay: z.boolean().optional().default(false),
+  canonicalTraversal: z.enum(["forward", "reverse"]).optional().default("forward"),
   name: z.string().trim().min(1),
   effectiveFrom: dateString,
   effectiveTo: dateString.optional().nullable(),
@@ -196,7 +222,9 @@ const assignmentInput = z.object({
   outboundVehicleId: nullablePositiveInt,
   driverId: nullablePositiveInt,
   inboundPathId: nullablePositiveInt,
+  inboundPathTraversal: z.enum(["forward", "reverse"]).optional().default("forward"),
   outboundPathId: nullablePositiveInt,
+  outboundPathTraversal: z.enum(["forward", "reverse"]).optional().default("forward"),
   pickupServicePointId: nullablePositiveInt,
   dropoffServicePointId: nullablePositiveInt,
   pickupPathNodeId: nullablePositiveInt,
@@ -323,9 +351,13 @@ const advanceInput = z.object({
 
 const incidentInput = z.object({
   vehicleId: z.coerce.number().int().positive(),
+  ownerId: nullablePositiveInt,
   driverId: nullablePositiveInt,
   routeId: nullablePositiveInt,
   pathId: nullablePositiveInt,
+  pathTraversal: z.enum(["forward", "reverse"]).optional().default("forward"),
+  assignmentOverride: z.boolean().optional().default(false),
+  overrideReason: optionalText,
   incidentType: z.string().trim().min(1),
   severity: z.enum(["low", "medium", "high", "critical"]).default("medium"),
   occurredAt: z.string().min(1),
@@ -334,6 +366,10 @@ const incidentInput = z.object({
   description: z.string().trim().min(3),
   resolution: optionalText,
   affectedStudentIds: z.array(z.coerce.number().int().positive()).optional().default([]),
+}).superRefine((value, context) => {
+  if (value.assignmentOverride && !String(value.overrideReason || "").trim()) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["overrideReason"], message: "Explain why the normal driver, route or path was overridden." });
+  }
 });
 
 const claimInput = z.object({
@@ -374,6 +410,9 @@ const settingsInput = z.object({
   fortnightAnchorDate: dateString.optional().nullable(),
   mapProvider: z.literal("openstreetmap").default("openstreetmap"),
   defaultCheckpointRadiusMeters: z.coerce.number().int().min(1).max(5000),
+  attachmentSizeLimitMB: z.coerce.number().int().refine((value) => [5, 10, 15, 20, 25, 50].includes(value), "Choose a supported Transport attachment limit"),
+  complianceNotificationDays: z.array(z.coerce.number().int()).transform((values) => Array.from(new Set(values.filter((value) => [30, 14, 7, 1, 0].includes(value))))),
+  complianceNotificationRecipients: z.array(z.string()).optional(),
   approvalWorkflow: z.any().optional(),
   deductionPriority: z.array(z.string()).optional(),
 }).partial();
@@ -740,8 +779,14 @@ async function validateAssignmentSelection(
     checkedVehicles.add(Number(vehicleId));
     const vehicle = await assertSchoolRecord(transportVehicles, Number(vehicleId), schoolId);
     if (!vehicle || !vehicle.isActive || vehicle.status !== "active") throw Object.assign(new Error("The selected vehicle is not active in this school"), { status: 409 });
+    if (vehicle.registrationExpiry && vehicle.registrationExpiry < today) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has expired registration`), { status: 409 });
     if (vehicle.insuranceExpiry && vehicle.insuranceExpiry < today) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has expired insurance`), { status: 409 });
     if (vehicle.fitnessExpiry && vehicle.fitnessExpiry < today) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has expired fitness certification`), { status: 409 });
+    if (vehicle.radioLicenceExpiry && vehicle.radioLicenceExpiry < today) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has an expired radio licence`), { status: 409 });
+    if (["expired", "missing"].includes(vehicle.complianceStatus)) {
+      const mayOverrideCompliance = await userHasAnyPermission(userId, "transport.vehicles.override_compliance", "transport.compliance.manage");
+      if (!mayOverrideCompliance) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} is non-compliant and cannot receive a new assignment.`), { status: 409 });
+    }
     const countResult = await db.execute(sql`
       SELECT COUNT(DISTINCT id)::int AS count
       FROM transport_assignments
@@ -758,17 +803,19 @@ async function validateAssignmentSelection(
   await validateVehicle(input.vehicleId);
   await validateVehicle(input.outboundVehicleId);
 
-  const validatePath = async (pathId: number | null | undefined, expectedDirection: "pickup" | "dropoff", vehicleId: number | null | undefined) => {
+  const validatePath = async (pathId: number | null | undefined, expectedDirection: "pickup" | "dropoff", vehicleId: number | null | undefined, traversal: string | null | undefined) => {
     if (!pathId) return null;
     const path = await assertSchoolRecord(transportVehiclePaths, Number(pathId), schoolId);
-    if (!path || path.routeId !== Number(input.routeId) || path.direction !== expectedDirection || (vehicleId && path.vehicleId !== Number(vehicleId))) {
+    const directionMatches = path && (path.direction === expectedDirection || path.isTwoWay);
+    if (!path || path.routeId !== Number(input.routeId) || !directionMatches || (vehicleId && path.vehicleId !== Number(vehicleId))) {
       throw Object.assign(new Error(`The selected ${expectedDirection} path does not match the route and vehicle`), { status: 409 });
     }
+    if (traversal === "reverse" && !path.isTwoWay) throw Object.assign(new Error("Reverse traversal is only available for a two-way vehicle path"), { status: 409 });
     if (!["active", "scheduled", "draft"].includes(path.status)) throw Object.assign(new Error("The selected vehicle path is not available"), { status: 409 });
     return path;
   };
-  await validatePath(input.inboundPathId, "pickup", input.vehicleId);
-  await validatePath(input.outboundPathId, "dropoff", input.outboundVehicleId || input.vehicleId);
+  await validatePath(input.inboundPathId, "pickup", input.vehicleId, input.inboundPathTraversal);
+  await validatePath(input.outboundPathId, "dropoff", input.outboundVehicleId || input.vehicleId, input.outboundPathTraversal);
 }
 
 async function linkAssignmentNodes(executor: any, schoolId: number, assignment: any) {
@@ -957,6 +1004,62 @@ function routeError(res: Response, error: any) {
   return res.status(Number.isFinite(status) ? status : 400).json({ message: error?.message || "Transport operation failed" });
 }
 
+async function validateTransportMasterValues(args: {
+  entityType: string;
+  values: any;
+  school: SchoolRow;
+  previous?: any;
+}): Promise<any> {
+  const values = { ...args.values };
+  if (args.entityType === "owner") {
+    if (!values.isStaffOwner) values.staffId = null;
+    if (values.isStaffOwner && !values.staffId) throw Object.assign(new Error("Select the staff member linked to this Staff Owner."), { status: 400 });
+    if (values.staffId) {
+      const [linkedStaff] = await db.select({ id: staff.id, organizationId: schools.organizationId }).from(staff)
+        .innerJoin(schools, eq(schools.id, staff.schoolId))
+        .where(eq(staff.id, Number(values.staffId))).limit(1);
+      if (!linkedStaff || linkedStaff.organizationId !== args.school.organizationId) {
+        throw Object.assign(new Error("The selected staff member must belong to this organization."), { status: 400 });
+      }
+    }
+  }
+  if (args.entityType === "driver") {
+    if (values.engagementType === "internal") values.ownerId = null;
+    if (values.engagementType === "external" && !values.ownerId) {
+      throw Object.assign(new Error("Select the vehicle owner who employs this external driver."), { status: 400 });
+    }
+    if (values.ownerId) {
+      const owner = await assertSchoolRecord(transportOwners, Number(values.ownerId), args.school.id);
+      if (!owner || !owner.isActive) throw Object.assign(new Error("The selected owner is unavailable for this school."), { status: 400 });
+    }
+  }
+  if (args.entityType === "vehicle") {
+    if (values.ownershipType === "school") values.ownerId = null;
+    if (values.ownershipType !== "school" && !values.ownerId) {
+      throw Object.assign(new Error("Select the owner of this vehicle."), { status: 400 });
+    }
+    let owner: any = null;
+    if (values.ownerId) {
+      owner = await assertSchoolRecord(transportOwners, Number(values.ownerId), args.school.id);
+      if (!owner || !owner.isActive) throw Object.assign(new Error("The selected owner is unavailable for this school."), { status: 400 });
+      if (values.ownershipType === "staff" && !owner.isStaffOwner) throw Object.assign(new Error("Staff-owned vehicles can only be linked to a Staff Owner."), { status: 400 });
+      if (values.ownershipType === "contracted" && owner.isStaffOwner) throw Object.assign(new Error("Contracted vehicles can only be linked to a non-staff owner."), { status: 400 });
+    }
+    if (values.driverId) {
+      const driver = await assertSchoolRecord(transportDrivers, Number(values.driverId), args.school.id);
+      if (!driver || !driver.isActive) throw Object.assign(new Error("The selected driver is unavailable for this school."), { status: 400 });
+      if (values.ownershipType !== "school" && driver.engagementType === "external" && Number(driver.ownerId || 0) !== Number(values.ownerId || 0)) {
+        throw Object.assign(new Error("The selected driver does not work for this vehicle owner."), { status: 400 });
+      }
+    }
+  }
+  return values;
+}
+
+function previousDay(dateValue: string): string {
+  return isoDate(new Date(new Date(`${dateValue}T00:00:00Z`).getTime() - 86_400_000));
+}
+
 function registerMasterCrud(
   app: Express,
   path: string,
@@ -971,14 +1074,28 @@ function registerMasterCrud(
       const school = await schoolContext(req);
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
-      const parsed = clean(schema.parse(req.body));
-      const values: any = { ...parsed, schoolId: school.id };
-      delete values.effectiveDate;
-      delete values.changeReason;
-      if ("createdByUserId" in table) values.createdByUserId = user.id;
-      const returned: any = await (db.insert(table) as any).values(values).returning();
-      const created = returned[0];
-      await writeAudit(db, school.id, user.id, entityType, created.id, "create", null, created);
+      const raw = clean(schema.parse(req.body));
+      const effectiveDate = (raw as any).effectiveDate || (raw as any).effectiveFrom || isoDate(new Date());
+      const changeReason = (raw as any).changeReason || "Initial assignment";
+      delete (raw as any).effectiveDate;
+      delete (raw as any).changeReason;
+      const parsed = await validateTransportMasterValues({ entityType, values: raw, school });
+      const created = await db.transaction(async (tx) => {
+        const values: any = { ...parsed, schoolId: school.id };
+        if ("createdByUserId" in table) values.createdByUserId = user.id;
+        const [row] = await (tx.insert(table) as any).values(values).returning();
+        if (entityType === "vehicle" && row.ownerId) {
+          await tx.insert(transportVehicleOwnerHistory).values({ schoolId: school.id, vehicleId: row.id, ownerId: row.ownerId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+        }
+        if (entityType === "vehicle" && row.driverId) {
+          await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId: row.id, driverId: row.driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+        }
+        if (entityType === "driver") {
+          await tx.insert(transportDriverOwnerHistory).values({ schoolId: school.id, driverId: row.id, ownerId: row.ownerId || null, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+        }
+        await writeAudit(tx, school.id, user.id, entityType, row.id, "create", null, row, changeReason);
+        return row;
+      });
       return res.status(201).json(created);
     } catch (error) {
       return routeError(res, error);
@@ -993,27 +1110,40 @@ function registerMasterCrud(
       const id = Number(req.params.id);
       const previous = await assertSchoolRecord(table, id, school.id);
       if (!previous) return res.status(404).json({ message: "Record not found" });
-      const parsed: any = clean(schema.partial().parse(req.body));
-      const effectiveDate = parsed.effectiveDate || isoDate(new Date());
-      const changeReason = parsed.changeReason || "Record updated";
-      delete parsed.effectiveDate;
-      delete parsed.changeReason;
+      const partial: any = clean(schema.partial().parse(req.body));
+      const effectiveDate = partial.effectiveDate || isoDate(new Date());
+      const changeReason = partial.changeReason || "Record updated";
+      delete partial.effectiveDate;
+      delete partial.changeReason;
+      const mergedForValidation = { ...previous, ...partial };
+      const validated = await validateTransportMasterValues({ entityType, values: mergedForValidation, school, previous });
+      const parsed: any = {};
+      for (const key of Object.keys(partial)) parsed[key] = validated[key];
+      // Business rules can clear a field even when the browser did not explicitly submit it.
+      if (entityType === "owner" && !validated.isStaffOwner) parsed.staffId = null;
+      if (entityType === "driver" && validated.engagementType === "internal") parsed.ownerId = null;
+      if (entityType === "vehicle" && validated.ownershipType === "school") parsed.ownerId = null;
       parsed.updatedAt = new Date();
 
-      const [updated] = await db.transaction(async (tx) => {
+      const updated = await db.transaction(async (tx) => {
         const [row] = await tx.update(table).set(parsed).where(and(eq(table.id, id), eq(table.schoolId, school.id))).returning();
-        if (entityType === "vehicle" && parsed.ownerId && parsed.ownerId !== previous.ownerId) {
-          await tx.update(transportVehicleOwnerHistory).set({ effectiveTo: isoDate(new Date(new Date(`${effectiveDate}T00:00:00Z`).getTime() - 86400000)) })
+        if (entityType === "vehicle" && Number(row.ownerId || 0) !== Number(previous.ownerId || 0)) {
+          await tx.update(transportVehicleOwnerHistory).set({ effectiveTo: previousDay(effectiveDate) })
             .where(and(eq(transportVehicleOwnerHistory.vehicleId, id), isNull(transportVehicleOwnerHistory.effectiveTo)));
-          await tx.insert(transportVehicleOwnerHistory).values({ schoolId: school.id, vehicleId: id, ownerId: parsed.ownerId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+          if (row.ownerId) await tx.insert(transportVehicleOwnerHistory).values({ schoolId: school.id, vehicleId: id, ownerId: row.ownerId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
         }
-        if (entityType === "vehicle" && parsed.driverId && parsed.driverId !== previous.driverId) {
-          await tx.update(transportVehicleDriverHistory).set({ effectiveTo: isoDate(new Date(new Date(`${effectiveDate}T00:00:00Z`).getTime() - 86400000)) })
+        if (entityType === "vehicle" && Number(row.driverId || 0) !== Number(previous.driverId || 0)) {
+          await tx.update(transportVehicleDriverHistory).set({ effectiveTo: previousDay(effectiveDate) })
             .where(and(eq(transportVehicleDriverHistory.vehicleId, id), isNull(transportVehicleDriverHistory.effectiveTo)));
-          await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId: id, driverId: parsed.driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+          if (row.driverId) await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId: id, driverId: row.driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+        }
+        if (entityType === "driver" && Number(row.ownerId || 0) !== Number(previous.ownerId || 0)) {
+          await tx.update(transportDriverOwnerHistory).set({ effectiveTo: previousDay(effectiveDate) })
+            .where(and(eq(transportDriverOwnerHistory.driverId, id), isNull(transportDriverOwnerHistory.effectiveTo)));
+          await tx.insert(transportDriverOwnerHistory).values({ schoolId: school.id, driverId: id, ownerId: row.ownerId || null, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
         }
         await writeAudit(tx, school.id, user.id, entityType, id, "update", previous, row, changeReason);
-        return [row];
+        return row;
       });
       return res.json(updated);
     } catch (error) {
@@ -1311,6 +1441,8 @@ export function registerTransportRoutes(app: Express) {
           routeId: parsed.routeId,
           vehicleId: parsed.vehicleId,
           direction: parsed.direction,
+          isTwoWay: parsed.isTwoWay,
+          canonicalTraversal: parsed.canonicalTraversal,
           name: parsed.name,
           versionNumber,
           status: "draft",
@@ -1334,6 +1466,7 @@ export function registerTransportRoutes(app: Express) {
             longitude: String(nodeInput.longitude),
             stopOrder: nodeInput.stopOrder,
             expectedTime: nodeInput.expectedTime,
+            reverseExpectedTime: nodeInput.reverseExpectedTime,
             checkpointRadiusMeters: nodeInput.checkpointRadiusMeters,
             notes: nodeInput.notes,
           }).returning();
@@ -1485,7 +1618,9 @@ export function registerTransportRoutes(app: Express) {
           outboundVehicleId: base.outboundVehicleId,
           driverId: base.driverId,
           inboundPathId: base.inboundPathId,
+          inboundPathTraversal: base.inboundPathTraversal || "forward",
           outboundPathId: base.outboundPathId,
+          outboundPathTraversal: base.outboundPathTraversal || "forward",
           pickupServicePointId: base.pickupServicePointId,
           dropoffServicePointId: base.dropoffServicePointId,
           pickupPathNodeId: base.pickupPathNodeId,
@@ -2158,9 +2293,75 @@ export function registerTransportRoutes(app: Express) {
       const school = await schoolContext(req); const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = incidentInput.parse(req.body);
-      const incidentValues: any = { ...parsed, occurredAt: new Date(parsed.occurredAt), latitude: parsed.latitude == null ? null : String(parsed.latitude), longitude: parsed.longitude == null ? null : String(parsed.longitude), schoolId: school.id, incidentNumber: numberCode("INC", school.shortCode, Date.now().toString().slice(-6)), reportedByUserId: user.id };
+      const vehicle = await assertSchoolRecord(transportVehicles, parsed.vehicleId, school.id);
+      if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
+
+      const activePaths = await db.select().from(transportVehiclePaths).where(and(
+        eq(transportVehiclePaths.schoolId, school.id),
+        eq(transportVehiclePaths.vehicleId, vehicle.id),
+        eq(transportVehiclePaths.status, "active"),
+      )).orderBy(desc(transportVehiclePaths.activatedAt), desc(transportVehiclePaths.versionNumber));
+      let expectedPath = parsed.pathId ? activePaths.find((path) => path.id === parsed.pathId) || null : activePaths.length === 1 ? activePaths[0] : null;
+      if (parsed.pathId && !expectedPath) {
+        const selectedPath = await assertSchoolRecord(transportVehiclePaths, parsed.pathId, school.id);
+        if (!selectedPath || selectedPath.vehicleId !== vehicle.id) return res.status(400).json({ message: "The selected path is not assigned to this vehicle." });
+        expectedPath = selectedPath;
+      }
+      if (!parsed.assignmentOverride && activePaths.length > 1 && !expectedPath) {
+        return res.status(400).json({ message: "Select the journey path or direction for this incident." });
+      }
+      if (parsed.pathTraversal === "reverse" && expectedPath && !expectedPath.isTwoWay) {
+        return res.status(400).json({ message: "Reverse traversal is only available on a two-way vehicle path." });
+      }
+
+      const expected = {
+        vehicleId: vehicle.id,
+        registrationNumber: vehicle.registrationNumber,
+        makeModel: vehicle.makeModel,
+        ownershipType: vehicle.ownershipType,
+        ownerId: vehicle.ownerId,
+        driverId: vehicle.driverId,
+        routeId: expectedPath?.routeId || null,
+        pathId: expectedPath?.id || null,
+        pathName: expectedPath?.name || null,
+        pathTraversal: parsed.pathTraversal,
+      };
+      const actual = {
+        vehicleId: vehicle.id,
+        ownerId: parsed.ownerId ?? vehicle.ownerId ?? null,
+        driverId: parsed.driverId ?? vehicle.driverId ?? null,
+        routeId: parsed.routeId ?? expectedPath?.routeId ?? null,
+        pathId: parsed.pathId ?? expectedPath?.id ?? null,
+        pathTraversal: parsed.pathTraversal,
+      };
+      if (!parsed.assignmentOverride) {
+        const mismatched = Number(actual.ownerId || 0) !== Number(expected.ownerId || 0)
+          || Number(actual.driverId || 0) !== Number(expected.driverId || 0)
+          || Number(actual.routeId || 0) !== Number(expected.routeId || 0)
+          || Number(actual.pathId || 0) !== Number(expected.pathId || 0);
+        if (mismatched) return res.status(409).json({ message: "The incident context does not match the vehicle's current owner, driver, route and path. Enable the substitute/deviation option and provide a reason." });
+      }
+      if (actual.ownerId && !(await assertSchoolRecord(transportOwners, Number(actual.ownerId), school.id))) return res.status(400).json({ message: "Incident owner was not found" });
+      if (actual.driverId && !(await assertSchoolRecord(transportDrivers, Number(actual.driverId), school.id))) return res.status(400).json({ message: "Incident driver was not found" });
+      if (actual.routeId && !(await assertSchoolRecord(transportRoutes, Number(actual.routeId), school.id))) return res.status(400).json({ message: "Incident route was not found" });
+
+      const incidentValues: any = {
+        ...parsed,
+        ownerId: actual.ownerId,
+        driverId: actual.driverId,
+        routeId: actual.routeId,
+        pathId: actual.pathId,
+        expectedContext: expected,
+        actualContext: actual,
+        occurredAt: new Date(parsed.occurredAt),
+        latitude: parsed.latitude == null ? null : String(parsed.latitude),
+        longitude: parsed.longitude == null ? null : String(parsed.longitude),
+        schoolId: school.id,
+        incidentNumber: numberCode("INC", school.shortCode, Date.now().toString().slice(-6)),
+        reportedByUserId: user.id,
+      };
       const [created] = await db.insert(transportIncidents).values(incidentValues).returning();
-      await writeAudit(db, school.id, user.id, "incident", created.id, "report", null, created, created.description);
+      await writeAudit(db, school.id, user.id, "incident", created.id, parsed.assignmentOverride ? "report_with_override" : "report", null, created, parsed.overrideReason || created.description);
       return res.status(201).json(created);
     } catch (error) { return routeError(res, error); }
   });

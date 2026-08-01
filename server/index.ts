@@ -8,6 +8,8 @@ import { ensureRbacBaseline } from "./rbac-bootstrap";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import { prewarmPdfRenderer } from "./pdf-renderer";
+import { scanAllTransportCompliance } from "./transport-compliance";
 
 const app = express();
 const httpServer = createServer(app);
@@ -146,6 +148,14 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      void prewarmPdfRenderer().catch((error) => {
+        console.warn("PDF renderer prewarm was skipped:", error instanceof Error ? error.message : error);
+      });
+      const runTransportCompliance = () => {
+        void scanAllTransportCompliance().catch((error) => console.error("Transport compliance scan failed:", error));
+      };
+      setTimeout(runTransportCompliance, 30_000);
+      setInterval(runTransportCompliance, 24 * 60 * 60 * 1000);
 
       setInterval(async () => {
         try {
