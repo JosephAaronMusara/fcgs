@@ -214,6 +214,7 @@ export default function OrgDashboard() {
   const [isAssessmentTypesDialogOpen, setIsAssessmentTypesDialogOpen] = useState(false);
   const [assessmentTypeName, setAssessmentTypeName] = useState("");
   const [assessmentTypeDesc, setAssessmentTypeDesc] = useState("");
+  const [assessmentTypeCardinality, setAssessmentTypeCardinality] = useState<"single_per_exam" | "multiple_per_exam">("multiple_per_exam");
   const [editingAssessmentType, setEditingAssessmentType] = useState<AssessmentType | null>(null);
   const [isExamsDialogOpen, setIsExamsDialogOpen] = useState(false);
   const [examName, setExamName] = useState("");
@@ -338,7 +339,12 @@ export default function OrgDashboard() {
   });
 
   const createAssessmentTypeMutation = useMutation({
-    mutationFn: async (data: { name: string; description: string | null }) => {
+    mutationFn: async (data: {
+      name: string;
+      description: string | null;
+      assessmentCardinality: "single_per_exam" | "multiple_per_exam";
+      reportAggregationMode: "single" | "best_coverage";
+    }) => {
       const res = await apiRequest("POST", "/api/assessment-types", data);
       return res.json();
     },
@@ -346,6 +352,7 @@ export default function OrgDashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/assessment-types"] });
       setAssessmentTypeName("");
       setAssessmentTypeDesc("");
+      setAssessmentTypeCardinality("multiple_per_exam");
       toast({ title: "Success", description: "Assessment type created" });
     },
     onError: (error: Error) => {
@@ -354,7 +361,15 @@ export default function OrgDashboard() {
   });
 
   const updateAssessmentTypeMutation = useMutation({
-    mutationFn: async ({ id, data }: { id: number; data: { name: string; description: string | null } }) => {
+    mutationFn: async ({ id, data }: {
+      id: number;
+      data: {
+        name: string;
+        description: string | null;
+        assessmentCardinality: "single_per_exam" | "multiple_per_exam";
+        reportAggregationMode: "single" | "best_coverage";
+      };
+    }) => {
       const res = await apiRequest("PUT", `/api/assessment-types/${id}`, data);
       return res.json();
     },
@@ -363,6 +378,7 @@ export default function OrgDashboard() {
       setEditingAssessmentType(null);
       setAssessmentTypeName("");
       setAssessmentTypeDesc("");
+      setAssessmentTypeCardinality("multiple_per_exam");
       toast({ title: "Success", description: "Assessment type updated" });
     },
     onError: (error: Error) => {
@@ -388,7 +404,12 @@ export default function OrgDashboard() {
       toast({ title: "Error", description: "Type name is required", variant: "destructive" });
       return;
     }
-    const payload = { name: assessmentTypeName.trim(), description: assessmentTypeDesc.trim() || null };
+    const payload = {
+      name: assessmentTypeName.trim(),
+      description: assessmentTypeDesc.trim() || null,
+      assessmentCardinality: assessmentTypeCardinality,
+      reportAggregationMode: assessmentTypeCardinality === "single_per_exam" ? "single" as const : "best_coverage" as const,
+    };
     if (editingAssessmentType) {
       updateAssessmentTypeMutation.mutate({ id: editingAssessmentType.id, data: payload });
     } else {
@@ -2536,6 +2557,11 @@ export default function OrgDashboard() {
                       {type.description && (
                         <p className="text-xs text-muted-foreground">{type.description}</p>
                       )}
+                      <Badge variant="outline" className="mt-1 text-[10px]">
+                        {type.assessmentCardinality === "single_per_exam"
+                          ? "One assessment per subject/exam"
+                          : "Multiple assessments allowed"}
+                      </Badge>
                     </div>
                     <div className="flex items-center gap-1">
                       <Button
@@ -2545,6 +2571,11 @@ export default function OrgDashboard() {
                           setEditingAssessmentType(type);
                           setAssessmentTypeName(type.name);
                           setAssessmentTypeDesc(type.description || "");
+                          setAssessmentTypeCardinality(
+                            type.assessmentCardinality === "single_per_exam"
+                              ? "single_per_exam"
+                              : "multiple_per_exam",
+                          );
                         }}
                         data-testid={`button-edit-type-${type.id}`}
                       >
@@ -2580,6 +2611,26 @@ export default function OrgDashboard() {
                   data-testid="input-assessment-type-desc"
                 />
               </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="assessment-type-cardinality">Assessment creation rule</Label>
+                <Select
+                  value={assessmentTypeCardinality}
+                  onValueChange={(value) => setAssessmentTypeCardinality(
+                    value === "single_per_exam" ? "single_per_exam" : "multiple_per_exam",
+                  )}
+                >
+                  <SelectTrigger id="assessment-type-cardinality" data-testid="select-assessment-type-cardinality">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="single_per_exam">One assessment per subject and exercise/exam</SelectItem>
+                    <SelectItem value="multiple_per_exam">Allow multiple assessments under the same exercise/exam</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Formal exam and test types should use the one-assessment rule. Other continuous assessment types can allow multiple records.
+                </p>
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   onClick={handleAssessmentTypeSubmit}
@@ -2595,6 +2646,7 @@ export default function OrgDashboard() {
                     setEditingAssessmentType(null);
                     setAssessmentTypeName("");
                     setAssessmentTypeDesc("");
+                    setAssessmentTypeCardinality("multiple_per_exam");
                   }} data-testid="button-cancel-edit-assessment-type">
                     Cancel Edit
                   </Button>

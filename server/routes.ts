@@ -1,10 +1,10 @@
-import type { Express, Request, Response } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { setupAuth, requireAuth, requirePermission, requireAnyPermission, requireRole } from "./auth";
 import { storage, PosSaleProcessingError } from "./storage";
 import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
@@ -20,6 +20,7 @@ import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
 import { AssessmentPaperReconciliationError, reconcileAssessmentPapersAndMarks } from "./assessment-paper-reconciliation";
 import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
+import { ASSESSMENT_CARDINALITY, inferAssessmentTypePolicy, isSinglePerExamAssessmentType, selectCanonicalAssessments } from "./assessment-policy";
 import { assessClassSubjectGradeConfiguration, planExactProfileClassAttachment, resolveExpectedGradeProfile, type GradeConfigurationProfileStatus } from "./grading-configuration";
 import { z } from "zod";
 import bcrypt from "bcrypt";
@@ -41,7 +42,7 @@ import {
   insertPermissionSchema, insertAccessGroupSchema,
   type User, type AccessGroup, type Staff, type InsertStudent, type InsertActivityLog, type InsertStaffAttendanceLog
 } from "@shared/schema";
-import { ECD_DOMAIN_SEEDS, filterItemsByGradeProfileKey, getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, getSubjectTypeOptionsForSchool, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, type GradeProfileKey } from "@shared/academic-profiles";
+import { ECD_DOMAIN_SEEDS, filterItemsByGradeProfileKey, getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, getStrictGradeProfileKeys, getSubjectTypeOptionsForSchool, gradeProfileMatchesStrict, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, subjectMatchesGradeProfile, type GradeProfileKey } from "@shared/academic-profiles";
 
 function requestText(value: unknown): string {
   if (Array.isArray(value)) return requestText(value[0]);
@@ -476,7 +477,12 @@ async function calculateStreamPositionMap(examId: number, schoolId: number, stre
     studentsByClass.set(cls.id, await storage.getStudentsByClass(cls.id));
   }
 
-  const marks = await storage.getAssessmentMarksByAssessments(streamAssessments.map((assessment) => assessment.id));
+  const allMarks = await storage.getAssessmentMarksByAssessments(streamAssessments.map((assessment) => assessment.id));
+  const selectedAssessmentIds = new Set(
+    selectCanonicalAssessments(streamAssessments, allMarks).assessments
+      .map((assessment) => Number(assessment.id)),
+  );
+  const marks = allMarks.filter((mark) => selectedAssessmentIds.has(Number(mark.assessmentId)));
   const totals = new Map<number, { sum: number; count: number }>();
   for (const mark of marks) {
     if (mark.percentage === null || mark.percentage === undefined) continue;
@@ -1776,7 +1782,7 @@ async function validateAssessmentPayloadForSchool(
   const classId = assessmentData.classId ?? existingAssessment?.classId;
   const subjectId = assessmentData.subjectId ?? existingAssessment?.subjectId;
   const examId = assessmentData.examId !== undefined ? assessmentData.examId : existingAssessment?.examId;
-  const assessmentTypeId = assessmentData.assessmentTypeId !== undefined
+  const requestedAssessmentTypeId = assessmentData.assessmentTypeId !== undefined
     ? assessmentData.assessmentTypeId
     : existingAssessment?.assessmentTypeId;
 
@@ -1795,13 +1801,34 @@ async function validateAssessmentPayloadForSchool(
   const subjectInfo = await ensureSubjectInSchool(Number(subjectId), schoolId, res);
   if (!subjectInfo) return null;
 
+  let exam: any = null;
   if (examId !== null && examId !== undefined && examId !== "") {
-    const exam = await ensureExamInSchool(Number(examId), schoolId, res);
+    exam = await ensureExamInSchool(Number(examId), schoolId, res);
     if (!exam) return null;
   }
 
-  if (assessmentTypeId !== null && assessmentTypeId !== undefined && assessmentTypeId !== "") {
-    const assessmentType = await ensureAssessmentTypeInSchool(Number(assessmentTypeId), schoolId, res);
+  let assessmentType: any = null;
+  const resolvedAssessmentTypeId = exam?.assessmentTypeId ?? requestedAssessmentTypeId ?? null;
+  if (
+    exam?.assessmentTypeId &&
+    requestedAssessmentTypeId !== null &&
+    requestedAssessmentTypeId !== undefined &&
+    requestedAssessmentTypeId !== "" &&
+    Number(requestedAssessmentTypeId) !== Number(exam.assessmentTypeId)
+  ) {
+    res.status(400).json({
+      message: "The selected assessment type does not match the linked exercise/exam assessment type.",
+      code: "ASSESSMENT_TYPE_EXAM_MISMATCH",
+      details: {
+        examAssessmentTypeId: Number(exam.assessmentTypeId),
+        requestedAssessmentTypeId: Number(requestedAssessmentTypeId),
+      },
+    });
+    return null;
+  }
+
+  if (resolvedAssessmentTypeId !== null && resolvedAssessmentTypeId !== undefined && resolvedAssessmentTypeId !== "") {
+    assessmentType = await ensureAssessmentTypeInSchool(Number(resolvedAssessmentTypeId), schoolId, res);
     if (!assessmentType) return null;
   }
 
@@ -1816,7 +1843,51 @@ async function validateAssessmentPayloadForSchool(
     return null;
   }
 
-  return { classInfo, subjectInfo };
+  return {
+    classInfo,
+    subjectInfo,
+    exam,
+    assessmentType,
+    resolvedAssessmentTypeId: resolvedAssessmentTypeId ? Number(resolvedAssessmentTypeId) : null,
+  };
+}
+
+async function ensureAssessmentUniquenessPolicy(args: {
+  schoolId: number;
+  classId: number;
+  subjectId: number;
+  examId: number | null;
+  assessmentType: any | null;
+  excludeAssessmentId?: number | null;
+  res: Response;
+}) {
+  const enforceExamUniqueness = Boolean(args.examId && isSinglePerExamAssessmentType(args.assessmentType));
+  if (!enforceExamUniqueness || !args.examId) {
+    return { enforceExamUniqueness: false };
+  }
+
+  const existing = (await storage.getAssessmentsByExam(args.examId)).find((assessment: any) =>
+    Number(assessment.classId) === Number(args.classId) &&
+    Number(assessment.subjectId) === Number(args.subjectId) &&
+    Number(assessment.id) !== Number(args.excludeAssessmentId || 0)
+  );
+
+  if (existing) {
+    args.res.status(409).json({
+      message: "An assessment already exists for this class, subject and exercise/exam. Open the existing assessment instead of creating another one.",
+      code: "ASSESSMENT_SINGLE_PER_EXAM_CONFLICT",
+      details: {
+        existingAssessmentId: Number(existing.id),
+        examId: Number(args.examId),
+        classId: Number(args.classId),
+        subjectId: Number(args.subjectId),
+        assessmentTypeId: args.assessmentType?.id ? Number(args.assessmentType.id) : null,
+      },
+    });
+    return null;
+  }
+
+  return { enforceExamUniqueness: true };
 }
 
 async function ensureAssessmentCommentPairAllowed(
@@ -1853,6 +1924,64 @@ async function ensureAssessmentCommentPairAllowed(
   if (!hasTeacherAssignment) return null;
 
   return { classInfo, subjectInfo };
+}
+
+async function ensureAssessmentCommentProfileAllowed(
+  res: Response,
+  schoolId: number,
+  classInfo: any,
+  subjectInfo: any,
+  grade: any,
+) {
+  const school = await storage.getSchool(schoolId);
+  if (!school) {
+    res.status(404).json({ message: "School not found" });
+    return null;
+  }
+
+  const stream = classInfo.streamId ? await storage.getStream(Number(classInfo.streamId)) : null;
+  const streamName = stream?.name || classInfo.className || null;
+  const expectedProfiles = getGradingProfilesForSchool(
+    school.schoolType,
+    school.examinationBoard,
+  ).filter((profile) =>
+    profileMatchesStreamName(profile.key, streamName) &&
+    subjectMatchesGradeProfile({
+      profileKey: profile.key,
+      schoolType: school.schoolType,
+      examinationBoard: school.examinationBoard,
+      streamName,
+      subjectType: subjectInfo.subjectType,
+    })
+  );
+
+  if (expectedProfiles.length === 0) {
+    res.status(400).json({
+      message: "The selected subject type does not match the chosen class grading profile",
+      code: "ASSESSMENT_COMMENT_SUBJECT_PROFILE_MISMATCH",
+    });
+    return null;
+  }
+
+  const selectedProfile = expectedProfiles.find((profile) =>
+    gradeProfileMatchesStrict(grade.gradeLevel, profile.key)
+  );
+  if (!selectedProfile) {
+    res.status(400).json({
+      message: `The selected grade belongs to ${getGradeProfileLabel(grade.gradeLevel)}, but this class and subject require ${expectedProfiles.map((profile) => profile.label).join(" or ")}.`,
+      code: "ASSESSMENT_COMMENT_GRADE_PROFILE_MISMATCH",
+      details: {
+        expectedProfiles: expectedProfiles.map((profile) => profile.key),
+        selectedGradeProfile: grade.gradeLevel || null,
+        classId: Number(classInfo.id),
+        subjectId: Number(subjectInfo.id),
+        gradeId: Number(grade.id),
+      },
+    });
+    return null;
+  }
+
+  return selectedProfile.key;
 }
 
 async function getScopedAssessmentCommentOrRespond(req: Request, res: Response, id: number) {
@@ -1915,6 +2044,186 @@ function markStatusLabel(status: unknown): string {
   if (normalized === "sick") return "Sick";
   if (normalized === "excused") return "Excused";
   return "";
+}
+
+function assessmentCommentPoolKey(classId: number, subjectId: number, gradeId: number): string {
+  return `${Number(classId)}:${Number(subjectId)}:${Number(gradeId)}`;
+}
+
+function buildAssessmentCommentPoolMap(comments: Array<{ classId: number; subjectId: number; gradeId: number; id: number; commentText: string }>) {
+  const result = new Map<string, (typeof comments)[number]>();
+  for (const comment of comments) {
+    const key = assessmentCommentPoolKey(comment.classId, comment.subjectId, comment.gradeId);
+    const current = result.get(key);
+    if (!current || Number(comment.id) > Number(current.id)) result.set(key, comment);
+  }
+  return result;
+}
+
+function resolveEffectiveAssessmentComment(args: {
+  mark: any;
+  statusComment?: string;
+  currentPoolComment?: string | null;
+  isPublished: boolean;
+}): string {
+  const statusComment = String(args.statusComment || "").trim();
+  if (statusComment) return statusComment;
+
+  const customComment = String(args.mark?.customCommentText || "").trim();
+  const snapshot = String(args.mark?.autoCommentSnapshot || "").trim();
+  const currentPoolComment = String(args.currentPoolComment || "").trim();
+  const source = String(args.mark?.commentSource || "pool").trim().toLowerCase();
+
+  if (source === "custom") return customComment;
+
+  if (args.isPublished) {
+    // Published pool-based reports use the frozen snapshot. The current pool is
+    // retained only as a legacy fallback for old rows that predate snapshot hardening.
+    return snapshot || currentPoolComment;
+  }
+
+  // Unpublished pool-based reports mirror Marks Entry: pool comments are live
+  // until the publication transaction refreshes and freezes the snapshot.
+  return currentPoolComment || snapshot;
+}
+
+async function syncAssessmentPoolCommentToUnpublishedMarks(args: {
+  schoolId: number;
+  classId: number;
+  subjectId: number;
+  gradeId: number;
+  commentId: number | null;
+  commentText: string | null;
+}) {
+  const assessmentRows = await db
+    .select({
+      id: assessmentsSchema.id,
+      examId: assessmentsSchema.examId,
+      classId: assessmentsSchema.classId,
+    })
+    .from(assessmentsSchema)
+    .where(and(
+      eq(assessmentsSchema.schoolId, args.schoolId),
+      eq(assessmentsSchema.classId, args.classId),
+      eq(assessmentsSchema.subjectId, args.subjectId),
+    ));
+
+  if (!assessmentRows.length) return { updatedMarks: 0 };
+
+  const examIds = Array.from(new Set(
+    assessmentRows
+      .map((assessment) => Number(assessment.examId || 0))
+      .filter((examId) => Number.isInteger(examId) && examId > 0),
+  ));
+
+  const publishedExamIds = new Set<number>();
+  if (examIds.length > 0) {
+    const publicationRows = await db
+      .select({ examId: assessmentPublications.examId })
+      .from(assessmentPublications)
+      .where(and(
+        eq(assessmentPublications.schoolId, args.schoolId),
+        eq(assessmentPublications.classId, args.classId),
+        eq(assessmentPublications.isPublished, true),
+        inArray(assessmentPublications.examId, examIds),
+      ));
+    publicationRows.forEach((row) => publishedExamIds.add(Number(row.examId)));
+  }
+
+  const editableAssessmentIds = assessmentRows
+    .filter((assessment) => !assessment.examId || !publishedExamIds.has(Number(assessment.examId)))
+    .map((assessment) => Number(assessment.id));
+  if (!editableAssessmentIds.length) return { updatedMarks: 0 };
+
+  const updated = await db
+    .update(assessmentMarksSchema)
+    .set({
+      commentId: args.commentId,
+      autoCommentSnapshot: args.commentText,
+    })
+    .where(and(
+      eq(assessmentMarksSchema.schoolId, args.schoolId),
+      inArray(assessmentMarksSchema.assessmentId, editableAssessmentIds),
+      eq(assessmentMarksSchema.gradeId, args.gradeId),
+      eq(assessmentMarksSchema.commentSource, "pool"),
+    ))
+    .returning({ id: assessmentMarksSchema.id });
+
+  return { updatedMarks: updated.length };
+}
+
+async function refreshAssessmentCommentSnapshotsForPublication(tx: any, args: {
+  schoolId: number;
+  examId: number;
+  classId: number;
+}) {
+  const assessmentRows = await tx
+    .select({
+      id: assessmentsSchema.id,
+      subjectId: assessmentsSchema.subjectId,
+      classId: assessmentsSchema.classId,
+    })
+    .from(assessmentsSchema)
+    .where(and(
+      eq(assessmentsSchema.schoolId, args.schoolId),
+      eq(assessmentsSchema.examId, args.examId),
+      eq(assessmentsSchema.classId, args.classId),
+    ));
+
+  const assessmentIds = assessmentRows.map((assessment: any) => Number(assessment.id));
+  if (!assessmentIds.length) return { reviewedMarks: 0, updatedMarks: 0 };
+
+  const [markRows, commentRows] = await Promise.all([
+    tx
+      .select()
+      .from(assessmentMarksSchema)
+      .where(and(
+        eq(assessmentMarksSchema.schoolId, args.schoolId),
+        inArray(assessmentMarksSchema.assessmentId, assessmentIds),
+        eq(assessmentMarksSchema.commentSource, "pool"),
+      )),
+    tx
+      .select()
+      .from(assessmentCommentsSchema)
+      .where(and(
+        eq(assessmentCommentsSchema.schoolId, args.schoolId),
+        eq(assessmentCommentsSchema.classId, args.classId),
+      )),
+  ]);
+
+  const assessmentById = new Map(assessmentRows.map((assessment: any) => [Number(assessment.id), assessment]));
+  const poolMap = buildAssessmentCommentPoolMap(commentRows);
+  let updatedMarks = 0;
+
+  for (const mark of markRows) {
+    const assessment: any = assessmentById.get(Number(mark.assessmentId));
+    if (!assessment) continue;
+
+    const statusComment = markStatusLabel(mark.attStatus);
+    const poolComment = !statusComment && mark.gradeId
+      ? poolMap.get(assessmentCommentPoolKey(args.classId, Number(assessment.subjectId), Number(mark.gradeId)))
+      : null;
+    const nextCommentId = statusComment ? null : poolComment?.id ?? null;
+    const nextSnapshot = statusComment || poolComment?.commentText || null;
+
+    if (
+      Number(mark.commentId || 0) === Number(nextCommentId || 0) &&
+      String(mark.autoCommentSnapshot || "") === String(nextSnapshot || "")
+    ) {
+      continue;
+    }
+
+    await tx
+      .update(assessmentMarksSchema)
+      .set({
+        commentId: nextCommentId,
+        autoCommentSnapshot: nextSnapshot,
+      })
+      .where(eq(assessmentMarksSchema.id, Number(mark.id)));
+    updatedMarks += 1;
+  }
+
+  return { reviewedMarks: markRows.length, updatedMarks };
 }
 
 async function getClassExamPublication(examId: number, classId: number) {
@@ -2131,10 +2440,13 @@ async function loadExamProgressContext(schoolId: number, examId: number): Promis
     studentSubjectIdsByStudent.set(studentId, resolved);
   }
 
+  const canonicalAssessmentSelection = selectCanonicalAssessments(assessments, assessmentMarks);
   const assessmentByClassSubject = new Map<string, any>();
-  for (const assessment of assessments) {
-    const key = classSubjectKey(Number(assessment.classId), Number(assessment.subjectId));
-    if (!assessmentByClassSubject.has(key)) assessmentByClassSubject.set(key, assessment);
+  for (const assessment of canonicalAssessmentSelection.assessments) {
+    assessmentByClassSubject.set(
+      classSubjectKey(Number(assessment.classId), Number(assessment.subjectId)),
+      assessment,
+    );
   }
 
   const marksByAssessmentStudent = new Map<number, Map<number, any>>();
@@ -10392,6 +10704,15 @@ ${schoolName}`;
   });
 
   // Assessment Types
+  const assessmentTypeWriteSchema = z.object({
+    schoolId: z.coerce.number().int().positive().nullable().optional(),
+    name: z.string().trim().min(1),
+    code: z.string().trim().min(1).max(100).optional().nullable(),
+    assessmentCardinality: z.enum(["single_per_exam", "multiple_per_exam"]).optional().nullable(),
+    reportAggregationMode: z.enum(["single", "best_coverage"]).optional().nullable(),
+    description: z.string().optional().nullable(),
+  });
+
   app.get("/api/assessment-types", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
@@ -10399,7 +10720,10 @@ ${schoolName}`;
         ? await storage.getAssessmentTypes(schoolId)
         : await storage.getAssessmentTypes();
 
-      res.json(types);
+      res.json(types.map((type) => ({
+        ...type,
+        ...inferAssessmentTypePolicy(type),
+      })));
     } catch (error) {
       next(error);
     }
@@ -10407,9 +10731,19 @@ ${schoolName}`;
 
   app.post("/api/assessment-types", requireAuth, async (req, res, next) => {
     try {
-      const created = await storage.createAssessmentType(req.body);
+      const parsed = assessmentTypeWriteSchema.parse(req.body);
+      const inferred = inferAssessmentTypePolicy(parsed);
+      const created = await storage.createAssessmentType({
+        ...parsed,
+        code: parsed.code || inferred.code,
+        assessmentCardinality: parsed.assessmentCardinality || inferred.assessmentCardinality,
+        reportAggregationMode: parsed.reportAggregationMode || inferred.reportAggregationMode,
+      } as any);
       res.status(201).json(created);
     } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid assessment type", errors: error.errors });
+      }
       next(error);
     }
   });
@@ -10417,10 +10751,84 @@ ${schoolName}`;
   app.put("/api/assessment-types/:id", requireAuth, async (req, res, next) => {
     try {
       const id = parseIdParam(req.params.id);
-      const updated = await storage.updateAssessmentType(id, req.body);
-      if (!updated) return res.status(404).json({ message: "Assessment type not found" });
+      const existing = await storage.getAssessmentType(id);
+      if (!existing) return res.status(404).json({ message: "Assessment type not found" });
+
+      const parsed = assessmentTypeWriteSchema.partial().parse(req.body);
+      const merged = { ...existing, ...parsed };
+      if (!merged.name?.trim()) return res.status(400).json({ message: "Assessment type name is required" });
+      const inferred = inferAssessmentTypePolicy(merged);
+      const nextCardinality = parsed.assessmentCardinality || existing.assessmentCardinality || inferred.assessmentCardinality;
+      const nextAggregation = nextCardinality === ASSESSMENT_CARDINALITY.SINGLE_PER_EXAM
+        ? "single"
+        : parsed.reportAggregationMode || existing.reportAggregationMode || inferred.reportAggregationMode;
+      const wasSingle = existing.assessmentCardinality === ASSESSMENT_CARDINALITY.SINGLE_PER_EXAM;
+      const becomingSingle = !wasSingle && nextCardinality === ASSESSMENT_CARDINALITY.SINGLE_PER_EXAM;
+
+      const linkedAssessments = (await storage.getAllAssessments()).filter(
+        (assessment: any) => Number(assessment.assessmentTypeId) === id && assessment.examId,
+      );
+
+      if (becomingSingle) {
+        const duplicateGroups = new Map<string, number[]>();
+        for (const assessment of linkedAssessments) {
+          const key = `${Number(assessment.examId)}:${Number(assessment.classId)}:${Number(assessment.subjectId)}`;
+          const bucket = duplicateGroups.get(key) || [];
+          bucket.push(Number(assessment.id));
+          duplicateGroups.set(key, bucket);
+        }
+        const conflicts = Array.from(duplicateGroups.entries())
+          .filter(([, assessmentIds]) => assessmentIds.length > 1)
+          .map(([key, assessmentIds]) => ({ key, assessmentIds: assessmentIds.sort((a, b) => a - b) }));
+        if (conflicts.length > 0) {
+          return res.status(409).json({
+            message: "This assessment type cannot be changed to single-per-exam while duplicate class/subject/exam assessments exist.",
+            code: "ASSESSMENT_TYPE_POLICY_DUPLICATES",
+            details: { conflicts },
+          });
+        }
+      }
+
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(assessmentTypesSchema)
+          .set({
+            ...parsed,
+            code: parsed.code || existing.code || inferred.code,
+            assessmentCardinality: nextCardinality,
+            reportAggregationMode: nextAggregation,
+          })
+          .where(eq(assessmentTypesSchema.id, id))
+          .returning();
+
+        if (nextCardinality === ASSESSMENT_CARDINALITY.MULTIPLE_PER_EXAM) {
+          await tx
+            .update(assessmentsSchema)
+            .set({ enforceExamUniqueness: false })
+            .where(eq(assessmentsSchema.assessmentTypeId, id));
+        } else if (becomingSingle) {
+          // The duplicate preflight above guarantees that every linked
+          // class/subject/exam combination can safely be protected.
+          await tx
+            .update(assessmentsSchema)
+            .set({ enforceExamUniqueness: true })
+            .where(eq(assessmentsSchema.assessmentTypeId, id));
+        }
+
+        return row;
+      });
+
       res.json(updated);
-    } catch (error) {
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid assessment type", errors: error.errors });
+      }
+      if (error?.code === "23505" && error?.constraint === "assessments_single_per_exam_subject_uidx") {
+        return res.status(409).json({
+          message: "The single-per-exam policy could not be applied because duplicate assessments still exist.",
+          code: "ASSESSMENT_TYPE_POLICY_DUPLICATES",
+        });
+      }
       next(error);
     }
   });
@@ -10849,15 +11257,31 @@ ${schoolName}`;
         for (const sid of subjectIds) {
           const pair = await ensureAssessmentCommentPairAllowed(req, res, schoolId, Number(cid), Number(sid));
           if (!pair) return;
+          const profileAllowed = await ensureAssessmentCommentProfileAllowed(
+            res,
+            schoolId,
+            pair.classInfo,
+            pair.subjectInfo,
+            grade,
+          );
+          if (!profileAllowed) return;
 
           const existing = await storage.findAssessmentComment(Number(cid), Number(sid), Number(grade.id));
           if (existing) continue;
-          await storage.createAssessmentComment({
+          const createdComment = await storage.createAssessmentComment({
             schoolId,
             classId: Number(cid),
             subjectId: Number(sid),
             gradeId: Number(grade.id),
             commentText: commentText.trim(),
+          });
+          await syncAssessmentPoolCommentToUnpublishedMarks({
+            schoolId,
+            classId: Number(cid),
+            subjectId: Number(sid),
+            gradeId: Number(grade.id),
+            commentId: Number(createdComment.id),
+            commentText: createdComment.commentText,
           });
           created++;
         }
@@ -10890,6 +11314,14 @@ ${schoolName}`;
         for (const sid of subjectIds) {
           const pair = await ensureAssessmentCommentPairAllowed(req, res, schoolId, Number(cid), Number(sid));
           if (!pair) return;
+          const profileAllowed = await ensureAssessmentCommentProfileAllowed(
+            res,
+            schoolId,
+            pair.classInfo,
+            pair.subjectInfo,
+            grade,
+          );
+          if (!profileAllowed) return;
           const { classInfo: cls, subjectInfo: subject } = pair;
 
           const existing = await storage.findAssessmentComment(Number(cid), Number(sid), Number(gradeId));
@@ -10945,9 +11377,27 @@ ${schoolName}`;
         for (const id of overwriteIds) {
           const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, Number(id));
           if (!scopedComment) return;
+          const profileAllowed = await ensureAssessmentCommentProfileAllowed(
+            res,
+            schoolId,
+            scopedComment.classInfo,
+            scopedComment.subjectInfo,
+            grade,
+          );
+          if (!profileAllowed) return;
 
           if (scopedComment.comment.gradeId === Number(grade.id)) {
-            await storage.updateAssessmentComment(scopedComment.comment.id, { commentText: commentText.trim() });
+            const updatedComment = await storage.updateAssessmentComment(scopedComment.comment.id, { commentText: commentText.trim() });
+            if (updatedComment) {
+              await syncAssessmentPoolCommentToUnpublishedMarks({
+                schoolId,
+                classId: Number(updatedComment.classId),
+                subjectId: Number(updatedComment.subjectId),
+                gradeId: Number(updatedComment.gradeId),
+                commentId: Number(updatedComment.id),
+                commentText: updatedComment.commentText,
+              });
+            }
             overwritten++;
           }
         }
@@ -10964,15 +11414,31 @@ ${schoolName}`;
             Number(pair.subjectId),
           );
           if (!allowedPair) return;
+          const profileAllowed = await ensureAssessmentCommentProfileAllowed(
+            res,
+            schoolId,
+            allowedPair.classInfo,
+            allowedPair.subjectInfo,
+            grade,
+          );
+          if (!profileAllowed) return;
 
           const existing = await storage.findAssessmentComment(Number(pair.classId), Number(pair.subjectId), Number(grade.id));
           if (existing) continue;
-          await storage.createAssessmentComment({
+          const createdComment = await storage.createAssessmentComment({
             schoolId,
             classId: Number(pair.classId),
             subjectId: Number(pair.subjectId),
             gradeId: Number(grade.id),
             commentText: commentText.trim(),
+          });
+          await syncAssessmentPoolCommentToUnpublishedMarks({
+            schoolId,
+            classId: Number(pair.classId),
+            subjectId: Number(pair.subjectId),
+            gradeId: Number(grade.id),
+            commentId: Number(createdComment.id),
+            commentText: createdComment.commentText,
           });
           created++;
         }
@@ -10994,7 +11460,15 @@ ${schoolName}`;
       if (!commentText?.trim()) return res.status(400).json({ message: "Comment text is required" });
       const updated = await storage.updateAssessmentComment(scopedComment.comment.id, { commentText: commentText.trim() });
       if (!updated) return res.status(404).json({ message: "Comment not found" });
-      res.json(updated);
+      const syncResult = await syncAssessmentPoolCommentToUnpublishedMarks({
+        schoolId: scopedComment.schoolId,
+        classId: Number(updated.classId),
+        subjectId: Number(updated.subjectId),
+        gradeId: Number(updated.gradeId),
+        commentId: Number(updated.id),
+        commentText: updated.commentText,
+      });
+      res.json({ ...updated, syncedMarks: syncResult.updatedMarks });
     } catch (error) {
       next(error);
     }
@@ -11005,6 +11479,23 @@ ${schoolName}`;
       const scopedComment = await getScopedAssessmentCommentOrRespond(req, res, parseIdParam(req.params.id));
       if (!scopedComment) return;
 
+      await syncAssessmentPoolCommentToUnpublishedMarks({
+        schoolId: scopedComment.schoolId,
+        classId: Number(scopedComment.comment.classId),
+        subjectId: Number(scopedComment.comment.subjectId),
+        gradeId: Number(scopedComment.comment.gradeId),
+        commentId: null,
+        commentText: null,
+      });
+      // Published rows keep their frozen snapshot, but the foreign-key link must
+      // be cleared before the pool row can be deleted.
+      await db
+        .update(assessmentMarksSchema)
+        .set({ commentId: null })
+        .where(and(
+          eq(assessmentMarksSchema.schoolId, scopedComment.schoolId),
+          eq(assessmentMarksSchema.commentId, scopedComment.comment.id),
+        ));
       await storage.deleteAssessmentComment(scopedComment.comment.id);
       res.status(204).send();
     } catch (error) {
@@ -11037,6 +11528,57 @@ ${schoolName}`;
     return comment.commentGrade === commentGrade && (comment.gradeLevel || null) === (gradeLevel || null);
   };
 
+  async function ensureReportCommentGradeProfileAllowed(
+    res: Response,
+    schoolId: number,
+    grade: any,
+    classInfo?: any | null,
+  ) {
+    const school = await storage.getSchool(schoolId);
+    if (!school) {
+      res.status(404).json({ message: "School not found" });
+      return null;
+    }
+
+    const schoolProfiles = getGradingProfilesForSchool(school.schoolType, school.examinationBoard);
+    const matchingProfiles = schoolProfiles.filter((profile) =>
+      gradeProfileMatchesStrict(grade.gradeLevel, profile.key)
+    );
+
+    if (matchingProfiles.length === 0) {
+      res.status(400).json({
+        message: "The selected grade does not belong to a grading profile configured for this school",
+        code: "REPORT_COMMENT_GRADE_PROFILE_MISMATCH",
+        details: { gradeId: Number(grade.id), gradeLevel: grade.gradeLevel || null },
+      });
+      return null;
+    }
+
+    if (classInfo) {
+      const stream = classInfo.streamId ? await storage.getStream(Number(classInfo.streamId)) : null;
+      const streamName = stream?.name || classInfo.className || null;
+      const classCompatibleProfiles = matchingProfiles.filter((profile) =>
+        profileMatchesStreamName(profile.key, streamName)
+      );
+
+      if (classCompatibleProfiles.length === 0) {
+        res.status(400).json({
+          message: `The selected grade profile does not match ${classInfo.className || "the selected class"}.`,
+          code: "REPORT_COMMENT_CLASS_PROFILE_MISMATCH",
+          details: {
+            classId: Number(classInfo.id),
+            gradeId: Number(grade.id),
+            gradeLevel: grade.gradeLevel || null,
+          },
+        });
+        return null;
+      }
+      return classCompatibleProfiles[0].key;
+    }
+
+    return matchingProfiles[0].key;
+  }
+
   function resolveReportCommentGradeForAverage(grades: any[], averagePercentage: number | null) {
     if (averagePercentage === null) return null;
     const resolution = resolveGradeForPercentage(Math.round(averagePercentage), grades);
@@ -11051,7 +11593,7 @@ ${schoolName}`;
     classId?: number | null;
   }) {
     if (!args.grade) return "";
-    const compatibleKeys = new Set(getCompatibleGradeProfileKeys(args.profileKey));
+    const compatibleKeys = new Set(getStrictGradeProfileKeys(args.profileKey));
     const matches = args.comments.filter((comment) => {
       if (comment.commentType !== args.commentType) return false;
       if (args.commentType === "class_teacher" && args.classId && comment.classId && Number(comment.classId) !== Number(args.classId)) return false;
@@ -11139,9 +11681,13 @@ ${schoolName}`;
       let resolvedCommentGrade = commentGrade;
       let resolvedGradeLevel = gradeLevel;
       let resolvedGradeId = gradeId ? Number(gradeId) : null;
+      let selectedGrade: any | null = null;
       if (resolvedGradeId) {
         const grade = await ensureGradeInSchool(resolvedGradeId, schoolId, res);
         if (!grade) return;
+        const profileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade);
+        if (!profileAllowed) return;
+        selectedGrade = grade;
         resolvedCommentGrade = grade.gradeName;
         resolvedGradeLevel = grade.gradeLevel;
       }
@@ -11153,6 +11699,10 @@ ${schoolName}`;
         for (const selectedClassId of normalizedClassIds) {
           const classInfo = await ensureClassInSchool(selectedClassId, schoolId, res);
           if (!classInfo) return;
+          if (selectedGrade) {
+            const profileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, selectedGrade, classInfo);
+            if (!profileAllowed) return;
+          }
           const comment = await storage.createReportComment({
             schoolId,
             gradeId: resolvedGradeId,
@@ -11194,6 +11744,8 @@ ${schoolName}`;
 
       const grade = await ensureGradeInSchool(Number(gradeId), schoolId, res);
       if (!grade) return;
+      const profileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade);
+      if (!profileAllowed) return;
       const resolvedGradeId = Number(grade.id);
       const resolvedCommentGrade = grade.gradeName;
       const resolvedGradeLevel = grade.gradeLevel || gradeLevel || null;
@@ -11224,6 +11776,8 @@ ${schoolName}`;
       for (const classId of normalizedClassIds) {
         const classInfo = await ensureClassInSchool(classId, schoolId, res);
         if (!classInfo) return;
+        const classProfileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade, classInfo);
+        if (!classProfileAllowed) return;
         const existing = allComments.find((comment: any) => Number(comment.classId) === classId && reportCommentMatchesGrade(comment, resolvedGradeId, resolvedCommentGrade, resolvedGradeLevel));
         if (existing) {
           duplicates.push({
@@ -11260,6 +11814,8 @@ ${schoolName}`;
 
       const grade = await ensureGradeInSchool(Number(gradeId), schoolId, res);
       if (!grade) return;
+      const profileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade);
+      if (!profileAllowed) return;
       const resolvedGradeId = Number(grade.id);
       const resolvedCommentGrade = grade.gradeName;
       const resolvedGradeLevel = grade.gradeLevel || gradeLevel || null;
@@ -11269,6 +11825,12 @@ ${schoolName}`;
         for (const id of overwriteIds) {
           const [existing] = await db.select().from(reportComments).where(and(eq(reportComments.id, Number(id)), eq(reportComments.schoolId, schoolId), eq(reportComments.commentType, commentType as any)));
           if (!existing) continue;
+          if (commentType === "class_teacher") {
+            const classInfo = existing.classId ? await ensureClassInSchool(Number(existing.classId), schoolId, res) : null;
+            if (!classInfo) return;
+            const classProfileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade, classInfo);
+            if (!classProfileAllowed) return;
+          }
           await db.update(reportComments).set({
             commentText: commentText.trim(),
             gradeId: resolvedGradeId,
@@ -11287,6 +11849,8 @@ ${schoolName}`;
             classId = Number(target.classId);
             const classInfo = await ensureClassInSchool(classId, schoolId, res);
             if (!classInfo) return;
+            const classProfileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade, classInfo);
+            if (!classProfileAllowed) return;
           }
           await storage.createReportComment({
             schoolId,
@@ -11779,13 +12343,25 @@ ${schoolName}`;
       });
       if (!gradingConfiguration) return;
 
+      const resolvedExamId = validatedRefs.exam ? Number(validatedRefs.exam.id) : null;
+      const uniquenessPolicy = await ensureAssessmentUniquenessPolicy({
+        schoolId,
+        classId: Number(validatedRefs.classInfo.id),
+        subjectId: Number(validatedRefs.subjectInfo.id),
+        examId: resolvedExamId,
+        assessmentType: validatedRefs.assessmentType,
+        res,
+      });
+      if (!uniquenessPolicy) return;
+
       const assessmentWithName = {
         ...assessmentData,
         schoolId,
-        classId: Number(assessmentData.classId),
-        subjectId: Number(assessmentData.subjectId),
-        assessmentTypeId: assessmentData.assessmentTypeId ? Number(assessmentData.assessmentTypeId) : null,
-        examId: assessmentData.examId ? Number(assessmentData.examId) : null,
+        classId: Number(validatedRefs.classInfo.id),
+        subjectId: Number(validatedRefs.subjectInfo.id),
+        assessmentTypeId: validatedRefs.resolvedAssessmentTypeId,
+        examId: resolvedExamId,
+        enforceExamUniqueness: uniquenessPolicy.enforceExamUniqueness,
         name: assessmentData.name || assessmentData.topic,
         isPublished: true,
       };
@@ -11801,7 +12377,13 @@ ${schoolName}`;
 
       const savedPapers = await storage.getAssessmentPapers(assessment.id);
       res.status(201).json({ ...assessment, papers: savedPapers });
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.code === "23505" && error?.constraint === "assessments_single_per_exam_subject_uidx") {
+        return res.status(409).json({
+          message: "An assessment already exists for this class, subject and exercise/exam.",
+          code: "ASSESSMENT_SINGLE_PER_EXAM_CONFLICT",
+        });
+      }
       next(error);
     }
   });
@@ -11853,17 +12435,26 @@ ${schoolName}`;
       });
       if (!gradingConfiguration) return;
 
+      const resolvedExamId = validatedRefs.exam ? Number(validatedRefs.exam.id) : null;
+      const uniquenessPolicy = await ensureAssessmentUniquenessPolicy({
+        schoolId: scoped.schoolId,
+        classId: resolvedClassId,
+        subjectId: resolvedSubjectId,
+        examId: resolvedExamId,
+        assessmentType: validatedRefs.assessmentType,
+        excludeAssessmentId: Number(scoped.assessment.id),
+        res,
+      });
+      if (!uniquenessPolicy) return;
+
       const updatePayload = {
         ...assessmentData,
         schoolId: scoped.schoolId,
         classId: resolvedClassId,
         subjectId: resolvedSubjectId,
-        assessmentTypeId: assessmentData.assessmentTypeId === undefined
-          ? scoped.assessment.assessmentTypeId
-          : (assessmentData.assessmentTypeId ? Number(assessmentData.assessmentTypeId) : null),
-        examId: assessmentData.examId === undefined
-          ? scoped.assessment.examId
-          : (assessmentData.examId ? Number(assessmentData.examId) : null),
+        assessmentTypeId: validatedRefs.resolvedAssessmentTypeId,
+        examId: resolvedExamId,
+        enforceExamUniqueness: uniquenessPolicy.enforceExamUniqueness,
         isPublished: true,
       };
 
@@ -11916,9 +12507,15 @@ ${schoolName}`;
       if (!updated) return res.status(404).json({ message: "Assessment not found" });
       const savedPapers = await storage.getAssessmentPapers(scoped.assessment.id);
       res.json({ ...updated, papers: savedPapers });
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof AssessmentPaperReconciliationError) {
         return res.status(error.status).json({ message: error.message, code: error.code, details: error.details });
+      }
+      if (error?.code === "23505" && error?.constraint === "assessments_single_per_exam_subject_uidx") {
+        return res.status(409).json({
+          message: "An assessment already exists for this class, subject and exercise/exam.",
+          code: "ASSESSMENT_SINGLE_PER_EXAM_CONFLICT",
+        });
       }
       next(error);
     }
@@ -12500,12 +13097,39 @@ ${schoolName}`;
         : students;
       const reportStudentIdSet = new Set(reportStudents.map((student) => Number(student.id)));
       markTiming("context");
-      const allAssessments = (await storage.getAssessmentsByExam(examId))
+      const rawAssessments = (await storage.getAssessmentsByExam(examId))
         .filter((assessment: any) => Number(assessment.classId) === Number(classId));
-      const publication = await getClassExamPublication(examId, classId);
+      const rawAssessmentIds = rawAssessments.map((assessment: any) => Number(assessment.id));
+      const [publication, allMarks, assessmentType, assessmentCommentRows] = await Promise.all([
+        getClassExamPublication(examId, classId),
+        rawAssessmentIds.length > 0
+          ? storage.getAssessmentMarksByAssessments(rawAssessmentIds)
+          : Promise.resolve([]),
+        exam.assessmentTypeId
+          ? storage.getAssessmentType(Number(exam.assessmentTypeId))
+          : Promise.resolve(undefined),
+        storage.getAssessmentComments(schoolId, classId),
+      ]);
+      const canonicalAssessmentSelection = selectCanonicalAssessments(rawAssessments, allMarks);
+      const allAssessments = canonicalAssessmentSelection.assessments;
+      if (
+        isSinglePerExamAssessmentType(assessmentType) &&
+        canonicalAssessmentSelection.duplicatesByClassSubject.size > 0
+      ) {
+        console.warn("[academic-reports] Legacy duplicate formal assessments detected", {
+          schoolId,
+          examId,
+          classId,
+          duplicateGroups: Array.from(canonicalAssessmentSelection.duplicatesByClassSubject.entries()).map(([key, rows]) => ({
+            key,
+            assessmentIds: rows.map((row: any) => Number(row.id)),
+          })),
+        });
+      }
+      const assessmentCommentPool = buildAssessmentCommentPoolMap(assessmentCommentRows);
 
-      const subjectIds = [...new Set(allAssessments.map(a => a.subjectId))];
-      const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
+      const subjectIds = [...new Set(allAssessments.map((assessment: any) => Number(assessment.subjectId)))];
+      const subjectsData = await Promise.all(subjectIds.map((id) => storage.getSubject(id)));
       const subjects = subjectsData.filter(Boolean);
 
       const grades = await storage.getGradesBySchool(schoolId);
@@ -12525,8 +13149,6 @@ ${schoolName}`;
         );
       }
 
-      const assessmentIds = allAssessments.map(a => a.id);
-      const allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
       markTiming("current-data");
 
       const marksMap = new Map<string, typeof allMarks[0]>();
@@ -12594,9 +13216,12 @@ ${schoolName}`;
 
       const studentIdSet = new Set(students.map(s => s.id));
 
+      const assessmentBySubject = new Map(
+        allAssessments.map((assessment: any) => [Number(assessment.subjectId), assessment]),
+      );
       for (const subject of subjects) {
         if (!subject) continue;
-        const assessment = allAssessments.find(a => a.subjectId === subject.id && a.classId === classId);
+        const assessment = assessmentBySubject.get(Number(subject.id));
         if (!assessment) continue;
 
         const teacher = teacherMap.get(`${subject.id}-${classId}`) || "";
@@ -12625,7 +13250,17 @@ ${schoolName}`;
             gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
           }
 
-          const comment = statusComment || mark.customCommentText || mark.autoCommentSnapshot || "";
+          const poolComment = mark.gradeId
+            ? assessmentCommentPool.get(
+                assessmentCommentPoolKey(classId, Number(subject.id), Number(mark.gradeId)),
+              )
+            : null;
+          const comment = resolveEffectiveAssessmentComment({
+            mark,
+            statusComment,
+            currentPoolComment: poolComment?.commentText,
+            isPublished: publication?.isPublished === true,
+          });
 
           if (pctRaw !== null) {
             if (!bySubject[subject.id]) bySubject[subject.id] = {};
@@ -12639,7 +13274,7 @@ ${schoolName}`;
             grade: gradeName,
             gradePoints,
             comment,
-            commentPool: mark.autoCommentSnapshot || "",
+            commentPool: poolComment?.commentText || mark.autoCommentSnapshot || "",
             teacher,
             subjectId: subject.id,
             subjectName: subject.name,
@@ -12679,8 +13314,9 @@ ${schoolName}`;
         const prevExam = sortedExams.length > 0 ? sortedExams[0] : null;
 
         if (prevExam) {
-          const prevAssessments = await storage.getAssessmentsByExam(prevExam.id);
-          const prevAssessmentIds = prevAssessments.map(a => a.id);
+          const prevAssessments = (await storage.getAssessmentsByExam(prevExam.id))
+            .filter((assessment: any) => Number(assessment.classId) === Number(classId));
+          const prevAssessmentIds = prevAssessments.map((assessment: any) => Number(assessment.id));
           let prevMarks: any[] = [];
           if (prevAssessmentIds.length > 0) {
             prevMarks = requestedStudentIds.length
@@ -12690,6 +13326,11 @@ ${schoolName}`;
                   eq(assessmentMarksSchema.schoolId, schoolId),
                 ))
               : await storage.getAssessmentMarksByAssessments(prevAssessmentIds);
+            const selectedAssessmentIds = new Set(
+              selectCanonicalAssessments(prevAssessments, prevMarks).assessments
+                .map((assessment: any) => Number(assessment.id)),
+            );
+            prevMarks = prevMarks.filter((mark: any) => selectedAssessmentIds.has(Number(mark.assessmentId)));
           }
 
           for (const mark of prevMarks) {
@@ -12712,16 +13353,22 @@ ${schoolName}`;
 
         const examMarksCache: Array<{ exam: typeof chronoExams[0]; marks: any[] }> = [];
         for (const pastExam of chronoExams) {
-          const pastAssessments = await storage.getAssessmentsByExam(pastExam.id);
-          const pastAssessmentIds = pastAssessments.map(a => a.id);
+          const pastAssessments = (await storage.getAssessmentsByExam(pastExam.id))
+            .filter((assessment: any) => Number(assessment.classId) === Number(classId));
+          const pastAssessmentIds = pastAssessments.map((assessment: any) => Number(assessment.id));
           if (pastAssessmentIds.length === 0) continue;
-          const pastMarks = requestedStudentIds.length
+          let pastMarks = requestedStudentIds.length
             ? await db.select().from(assessmentMarksSchema).where(and(
                 inArray(assessmentMarksSchema.assessmentId, pastAssessmentIds),
                 inArray(assessmentMarksSchema.studentId, requestedStudentIds),
                 eq(assessmentMarksSchema.schoolId, schoolId),
               ))
             : await storage.getAssessmentMarksByAssessments(pastAssessmentIds);
+          const selectedAssessmentIds = new Set(
+            selectCanonicalAssessments(pastAssessments, pastMarks).assessments
+              .map((assessment: any) => Number(assessment.id)),
+          );
+          pastMarks = pastMarks.filter((mark: any) => selectedAssessmentIds.has(Number(mark.assessmentId)));
           examMarksCache.push({ exam: pastExam, marks: pastMarks });
         }
 
@@ -13016,9 +13663,25 @@ ${schoolName}`;
       if (!classInfo) return res.status(400).json({ message: "Student class context required" });
       if (!currentUser || !(await ensurePublishedPortalAccess({ user: currentUser, examId, classId: classInfo.id, studentId, res }))) return;
 
-      const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
-      const grades = await storage.getGradesBySchool(schoolId);
-      const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+      const rawAssessments = (await storage.getAssessmentsByExam(examId))
+        .filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
+      const rawAssessmentIds = rawAssessments.map((assessment: any) => Number(assessment.id));
+      const [allClassMarks, grades, classStream, publication, assessmentCommentRows] = await Promise.all([
+        rawAssessmentIds.length > 0
+          ? storage.getAssessmentMarksByAssessments(rawAssessmentIds)
+          : Promise.resolve([]),
+        storage.getGradesBySchool(schoolId),
+        classInfo.streamId ? storage.getStream(classInfo.streamId) : Promise.resolve(undefined),
+        getClassExamPublication(examId, Number(classInfo.id)),
+        storage.getAssessmentComments(schoolId, Number(classInfo.id)),
+      ]);
+      const allAssessments = selectCanonicalAssessments(rawAssessments, allClassMarks).assessments;
+      const marksByAssessment = new Map(
+        allClassMarks
+          .filter((mark: any) => Number(mark.studentId) === Number(studentId))
+          .map((mark: any) => [Number(mark.assessmentId), mark]),
+      );
+      const assessmentCommentPool = buildAssessmentCommentPoolMap(assessmentCommentRows);
 
       const subjectResults: Array<{
         subjectId: number;
@@ -13037,15 +13700,17 @@ ${schoolName}`;
         const subject = await storage.getSubject(assessment.subjectId);
         if (!subject) continue;
 
-        const mark = await storage.getAssessmentMarkByStudentAssessment(studentId, assessment.id);
+        const mark: any = marksByAssessment.get(Number(assessment.id));
+        if (!mark) continue;
 
-        let percentage: number | null = null;
+        const percentage = parseFinitePercentage(mark.percentage);
+        const statusComment = markStatusLabel(mark.attStatus);
+        if (percentage === null && !statusComment) continue;
+
         let gradeName = "";
         let gradePoints = 0;
-        let comment = "";
 
-        if (mark) {
-          percentage = parseFinitePercentage(mark.percentage);
+        {
           const applicableGrades = getClassSubjectGradeCandidates({
             allGrades: grades,
             school,
@@ -13065,14 +13730,24 @@ ${schoolName}`;
             gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
           }
 
-          comment = mark.customCommentText || mark.autoCommentSnapshot || "";
-
           if (percentage !== null) {
             totalPercentage += percentage;
             totalGradePoints += gradePoints;
             subjectCount++;
           }
         }
+
+        const poolComment = mark.gradeId
+          ? assessmentCommentPool.get(
+              assessmentCommentPoolKey(Number(classInfo.id), Number(subject.id), Number(mark.gradeId)),
+            )
+          : null;
+        const comment = resolveEffectiveAssessmentComment({
+          mark,
+          statusComment,
+          currentPoolComment: poolComment?.commentText,
+          isPublished: publication?.isPublished === true,
+        });
 
         subjectResults.push({
           subjectId: subject.id,
@@ -13136,7 +13811,18 @@ async function buildReportCardMessage(
     regNo: string,
   ): Promise<string | null> {
     const studentForClass = await storage.getStudent(studentId);
-    const allAssessments = (await storage.getAssessmentsByExam(examId)).filter((assessment: any) => !studentForClass?.classId || Number(assessment.classId) === Number(studentForClass.classId));
+    const rawAssessments = (await storage.getAssessmentsByExam(examId))
+      .filter((assessment: any) => !studentForClass?.classId || Number(assessment.classId) === Number(studentForClass.classId));
+    const rawAssessmentIds = rawAssessments.map((assessment: any) => Number(assessment.id));
+    const allAssessmentMarks = rawAssessmentIds.length > 0
+      ? await storage.getAssessmentMarksByAssessments(rawAssessmentIds)
+      : [];
+    const allAssessments = selectCanonicalAssessments(rawAssessments, allAssessmentMarks).assessments;
+    const marksByAssessment = new Map(
+      allAssessmentMarks
+        .filter((mark: any) => Number(mark.studentId) === Number(studentId))
+        .map((mark: any) => [Number(mark.assessmentId), mark]),
+    );
     const grades = await storage.getGradesBySchool(schoolId);
     const [exam, schoolInfo] = await Promise.all([
       storage.getExam(examId),
@@ -13167,7 +13853,7 @@ async function buildReportCardMessage(
       const subject = await storage.getSubject(assessment.subjectId);
       if (!subject) continue;
 
-      const mark = await storage.getAssessmentMarkByStudentAssessment(studentId, assessment.id);
+      const mark: any = marksByAssessment.get(Number(assessment.id));
       if (!mark) continue;
 
       const statusComment = markStatusLabel(mark.attStatus);
@@ -13827,9 +14513,22 @@ async function buildReportCardMessage(
       let publication: any;
       let action = args.publish ? "published" : "unpublished";
       let version = existing?.publicationVersion || 0;
+      let snapshotRefresh = { reviewedMarks: 0, updatedMarks: 0 };
 
       if (args.publish) {
-        if (existing?.isPublished) return { publication: existing, changed: false, action: existing.lastAction || "published" };
+        if (existing?.isPublished) {
+          return {
+            publication: existing,
+            changed: false,
+            action: existing.lastAction || "published",
+            snapshotRefresh,
+          };
+        }
+        snapshotRefresh = await refreshAssessmentCommentSnapshotsForPublication(tx, {
+          schoolId: args.schoolId,
+          examId: args.examId,
+          classId: args.classId,
+        });
         version += 1;
         action = version > 1 ? "republished" : "published";
         const values = {
@@ -13853,7 +14552,14 @@ async function buildReportCardMessage(
           [publication] = await tx.insert(assessmentPublications).values(values).returning();
         }
       } else {
-        if (!existing?.isPublished) return { publication: existing, changed: false, action: "unpublished" };
+        if (!existing?.isPublished) {
+          return {
+            publication: existing,
+            changed: false,
+            action: "unpublished",
+            snapshotRefresh,
+          };
+        }
         [publication] = await tx.update(assessmentPublications).set({
           isPublished: false,
           lastAction: "unpublished",
@@ -13876,7 +14582,7 @@ async function buildReportCardMessage(
         performedByUserId: args.userId,
       });
 
-      return { publication, changed: true, action };
+      return { publication, changed: true, action, snapshotRefresh };
     });
   }
 
@@ -13955,7 +14661,14 @@ async function buildReportCardMessage(
         targetId: result.publication?.id,
         targetName: `${exam.examName} - ${classInfo.className}`,
         schoolId,
-        metadata: { examId: data.examId, classId: data.classId, reason: data.publish ? undefined : data.reason, summary: progress.totals },
+        metadata: {
+          examId: data.examId,
+          classId: data.classId,
+          reason: data.publish ? undefined : data.reason,
+          summary: progress.totals,
+          warningAcknowledged: data.publish && (progress.totals.partial + progress.totals.unrecorded > 0),
+          snapshotRefresh: result.snapshotRefresh,
+        },
       });
 
       if (data.publish && result.publication?.isPublished) {
@@ -13968,6 +14681,8 @@ async function buildReportCardMessage(
         isPublished: result.publication?.isPublished === true,
         status: result.publication?.isPublished ? (result.action === "republished" ? "Republished" : "Published") : "Unpublished",
         summary: progress.totals,
+        warningAcknowledged: data.publish && (progress.totals.partial + progress.totals.unrecorded > 0),
+        snapshotRefresh: result.snapshotRefresh,
       });
     } catch (error: any) {
       if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid publication request", errors: error.errors });
@@ -13997,6 +14712,7 @@ async function buildReportCardMessage(
 
       const changedClasses: number[] = [];
       const summaries: any[] = [];
+      const snapshotRefreshes: Array<{ classId: number; reviewedMarks: number; updatedMarks: number }> = [];
       for (const classInfo of classes) {
         const current = progressContext.publicationByClass.get(Number(classInfo.id));
         if (data.publish && current?.isPublished) continue;
@@ -14013,6 +14729,13 @@ async function buildReportCardMessage(
           userId: currentUser.id,
         });
         if (result.changed) changedClasses.push(classInfo.id);
+        if (data.publish && result.changed) {
+          snapshotRefreshes.push({
+            classId: Number(classInfo.id),
+            reviewedMarks: Number(result.snapshotRefresh?.reviewedMarks || 0),
+            updatedMarks: Number(result.snapshotRefresh?.updatedMarks || 0),
+          });
+        }
       }
 
       if (data.publish) {
@@ -14037,7 +14760,15 @@ async function buildReportCardMessage(
         targetId: data.streamId,
         targetName: exam.examName,
         schoolId,
-        metadata: { examId: data.examId, streamId: data.streamId, changedClasses, reason: data.publish ? undefined : data.reason, summaries },
+        metadata: {
+          examId: data.examId,
+          streamId: data.streamId,
+          changedClasses,
+          reason: data.publish ? undefined : data.reason,
+          summaries,
+          warningAcknowledged: data.publish && summaries.some((summary) => (Number(summary.partial || 0) + Number(summary.unrecorded || 0)) > 0),
+          snapshotRefreshes,
+        },
       });
 
       res.json({
@@ -14047,6 +14778,8 @@ async function buildReportCardMessage(
         allPublished,
         status: allPublished ? "Published" : "Unpublished",
         summaries,
+        warningAcknowledged: data.publish && summaries.some((summary) => (Number(summary.partial || 0) + Number(summary.unrecorded || 0)) > 0),
+        snapshotRefreshes,
       });
     } catch (error: any) {
       if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid publication request", errors: error.errors });
@@ -16281,14 +17014,16 @@ async function buildReportCardMessage(
   async function getPublishedPortalGradesForStudent(student: any) {
     if (!student?.classId || !student?.schoolId) return [];
 
-    const [markRows, classInfo, school, allGrades] = await Promise.all([
+    const [markRows, classInfo, school, allGrades, assessmentCommentRows] = await Promise.all([
       db.select().from(assessmentMarksSchema).where(eq(assessmentMarksSchema.studentId, student.id)),
       storage.getClass(Number(student.classId)),
       storage.getSchool(Number(student.schoolId)),
       storage.getGradesBySchool(Number(student.schoolId)),
+      storage.getAssessmentComments(Number(student.schoolId), Number(student.classId)),
     ]);
     if (!classInfo) return [];
     const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+    const assessmentCommentPool = buildAssessmentCommentPoolMap(assessmentCommentRows);
 
     const results: any[] = [];
     for (const mark of markRows) {
@@ -16322,11 +17057,22 @@ async function buildReportCardMessage(
         : null;
       const statusComment = markStatusLabel(mark.attStatus);
       if (percentage === null && !statusComment) continue;
+      const poolComment = mark.gradeId
+        ? assessmentCommentPool.get(
+            assessmentCommentPoolKey(Number(student.classId), Number(assessment.subjectId), Number(mark.gradeId)),
+          )
+        : null;
+      const comment = resolveEffectiveAssessmentComment({
+        mark,
+        statusComment,
+        currentPoolComment: poolComment?.commentText,
+        isPublished: true,
+      });
       results.push({
         id: mark.id,
         percentage: mark.percentage,
         grade: statusComment ? null : grade?.gradeName || null,
-        comment: statusComment || mark.customCommentText || mark.autoCommentSnapshot || null,
+        comment: comment || null,
         assessmentName: assessment.name || exam?.examName || "Assessment",
         assessmentType: assessmentType?.name || "Assessment",
         subjectName: subject?.name || "Unknown",

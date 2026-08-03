@@ -28,7 +28,10 @@
     "recruitment:logic-test": "tsx script/test-recruitment-screening.ts",
     "grades:paper-recalc-test": "tsx script/test-assessment-paper-recalculation.ts",
     "grades:paper-recalc:preflight": "tsx script/recalculate-assessment-paper-results.ts",
-    "grades:paper-recalc:apply": "tsx script/recalculate-assessment-paper-results.ts --apply"
+    "grades:paper-recalc:apply": "tsx script/recalculate-assessment-paper-results.ts --apply",
+    "assessments:policy:schema": "tsx script/apply-assessment-policy-schema.ts",
+    "assessments:policy:preflight": "tsx script/repair-assessment-policies.ts",
+    "assessments:policy:apply": "tsx script/repair-assessment-policies.ts --apply"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

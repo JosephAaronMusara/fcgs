@@ -90,6 +90,50 @@ export function filterItemsByGradeProfileKey<T extends { gradeLevel?: string | n
   return items.filter((item) => !!item.gradeLevel && compatibleKeys.has(item.gradeLevel));
 }
 
+const STRICT_PROFILE_LEGACY_ALIASES: Partial<Record<GradeProfileKey, GradeProfileKey[]>> = {
+  SEC_ZIM_A: ["A_Level"],
+  SEC_CAM_A: ["A_Level"],
+  SEC_ZIM_O: ["O_Level"],
+  SEC_CAM_O: ["O_Level"],
+  SEC_CAM_IGCSE: ["IGCSE"],
+};
+
+/**
+ * Returns only the selected profile and its direct legacy alias.
+ * Unlike getCompatibleGradeProfileKeys(), this deliberately does not treat
+ * current Ordinary Level and IGCSE profiles as interchangeable.
+ */
+export function getStrictGradeProfileKeys(profileKey?: string | null): string[] {
+  if (!profileKey) return [];
+  const key = profileKey as GradeProfileKey;
+  return Array.from(new Set([profileKey, ...(STRICT_PROFILE_LEGACY_ALIASES[key] || [])]));
+}
+
+export function gradeProfileMatchesStrict(
+  candidateProfileKey?: string | null,
+  selectedProfileKey?: string | null,
+): boolean {
+  if (!selectedProfileKey) return true;
+  if (!candidateProfileKey) return false;
+  return getStrictGradeProfileKeys(selectedProfileKey).includes(candidateProfileKey);
+}
+
+/**
+ * Prefer exact rows for a UI tab. Only fall back to the tab's direct legacy
+ * alias when the database has no exact rows for that profile.
+ */
+export function filterItemsByStrictGradeProfileKey<T extends { gradeLevel?: string | null }>(
+  items: T[],
+  profileKey?: string | null,
+): T[] {
+  if (!profileKey) return items;
+  const exact = items.filter((item) => (item.gradeLevel || null) === profileKey);
+  if (exact.length > 0) return exact;
+  const legacyAliases = new Set(getStrictGradeProfileKeys(profileKey).filter((key) => key !== profileKey));
+  if (legacyAliases.size === 0) return exact;
+  return items.filter((item) => !!item.gradeLevel && legacyAliases.has(item.gradeLevel));
+}
+
 export const ECD_RATINGS = ["YES", "NO", "ALMOST"] as const;
 export type EcdRating = (typeof ECD_RATINGS)[number];
 
@@ -349,6 +393,53 @@ export function getGradeTypeOptionsForProfile(profileKey: string, schoolType?: s
         ? ["Cambridge Advanced Level", "Cambridge Ordinary Level", "Cambridge IGCSE", ...universal]
         : ["ZIMSEC Advanced Level", "ZIMSEC Ordinary Level", ...universal];
   }
+}
+
+export function subjectMatchesGradeProfile(args: {
+  profileKey?: string | null;
+  schoolType?: string | null;
+  examinationBoard?: string | null;
+  streamName?: string | null;
+  subjectType?: string | null;
+}): boolean {
+  if (!args.profileKey) return true;
+  if (!args.subjectType) return false;
+
+  const schoolType = normalizeSchoolType(args.schoolType);
+  const universalSecondaryTypes = new Set(["DELF", "HEXCO", "HSK"]);
+  if (schoolType === "secondary" && universalSecondaryTypes.has(args.subjectType)) {
+    if (args.profileKey === "IGCSE" || args.profileKey.endsWith("_IGCSE")) return false;
+    if (!args.streamName) {
+      return args.profileKey === "A_Level" ||
+        args.profileKey === "O_Level" ||
+        args.profileKey.endsWith("_A") ||
+        args.profileKey.endsWith("_O");
+    }
+    const grouping = resolveSecondaryGroupingFromStream(args.streamName);
+    if (grouping === "ADVANCED") {
+      return args.profileKey === "A_Level" || args.profileKey.endsWith("_A");
+    }
+    if (grouping === "LOWER") {
+      return args.profileKey === "O_Level" || args.profileKey.endsWith("_O");
+    }
+    return false;
+  }
+
+  if (args.streamName) {
+    const resolvedProfile = resolveGradeProfileKey({
+      schoolType: args.schoolType,
+      examinationBoard: args.examinationBoard,
+      streamName: args.streamName,
+      subjectType: args.subjectType,
+    });
+    return gradeProfileMatchesStrict(resolvedProfile, args.profileKey);
+  }
+
+  return getGradeTypeOptionsForProfile(
+    args.profileKey,
+    args.schoolType,
+    args.examinationBoard,
+  ).includes(args.subjectType);
 }
 
 export function isSubjectTypeCompatibleWithGradeType(subjectType?: string | null, gradeType?: string | null): boolean {
