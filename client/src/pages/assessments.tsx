@@ -19,7 +19,7 @@ import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 import { useAuth } from "@/lib/auth";
 import type { Assessment, Subject, Class as ClassType, AssessmentType, Exam, Grade, AssessmentComment, School } from "@shared/schema";
-import { getGradingProfilesForSchool, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName } from "@shared/academic-profiles";
+import { filterItemsByStrictGradeProfileKey, getGradingProfilesForSchool, gradeProfileMatchesStrict, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, subjectMatchesGradeProfile } from "@shared/academic-profiles";
 
 interface AssessmentPaper {
   id?: number;
@@ -1344,6 +1344,25 @@ function CommentsDialog({
 
   const subjectOptions = useMemo(() => (subjects || [])
     .filter((subject) => {
+      const profileCompatible = selectedClasses.length > 0
+        ? selectedClasses.every((klass) => {
+            const streamName = klass.streamId ? streamMap.get(klass.streamId) : klass.className;
+            return subjectMatchesGradeProfile({
+              profileKey: activeTab,
+              schoolType,
+              examinationBoard,
+              streamName,
+              subjectType: subject.subjectType,
+            });
+          })
+        : subjectMatchesGradeProfile({
+            profileKey: activeTab,
+            schoolType,
+            examinationBoard,
+            subjectType: subject.subjectType,
+          });
+      if (!profileCompatible) return false;
+
       if (selectedClasses.length > 0 && !selectedClasses.every((klass) => subjectIsCompatibleWithClass(subject, klass))) {
         return false;
       }
@@ -1360,7 +1379,18 @@ function CommentsDialog({
         )
       );
     })
-    .map(s => ({ id: s.id, name: s.name })), [subjects, selectedClasses, teacherScopedDialog, selectedClassIds, teacherAssignmentsWithClass, classSubjects]);
+    .map(s => ({ id: s.id, name: s.name })), [
+      subjects,
+      selectedClasses,
+      activeTab,
+      schoolType,
+      examinationBoard,
+      streamMap,
+      teacherScopedDialog,
+      selectedClassIds,
+      teacherAssignmentsWithClass,
+      classSubjects,
+    ]);
   const subjectOptionIds = useMemo(() => new Set(subjectOptions.map((option) => option.id)), [subjectOptions]);
 
   useEffect(() => {
@@ -1377,32 +1407,83 @@ function CommentsDialog({
     setSelectedSubjectIds((prev) => prev.filter((id) => subjectOptionIds.has(id)));
   }, [subjectOptionIds]);
 
-  const gradeMap = useMemo(() => new Map((grades || []).map((grade) => [grade.id, grade])), [grades]);
-  const gradeRankMap: Record<string, number> = { 'A*': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'U': 6 };
-  const sortedGrades = [...(grades || [])].sort((a, b) => {
-    const ra = gradeRankMap[a.gradeName.toUpperCase().replace(/\s/g, '')] ?? 999;
-    const rb = gradeRankMap[b.gradeName.toUpperCase().replace(/\s/g, '')] ?? 999;
-    return ra - rb;
-  });
-  const filteredGrades = useMemo(
-    () => sortedGrades.filter((grade) => !activeTab || grade.gradeLevel === activeTab),
-    [sortedGrades, activeTab],
-  );
-  const filteredComments = useMemo(
-    () =>
-      (comments || []).filter((comment) => {
-        if (teacherScopedDialog && !teacherAssignmentsWithClass.some((row) =>
-          Number(row.classId) === Number(comment.classId) && Number(row.subjectId) === Number(comment.subjectId)
-        )) {
-          return false;
-        }
+  useEffect(() => {
+    setGradeId("");
+  }, [activeTab]);
 
-        if (!activeTab) return true;
-        const grade = gradeMap.get(comment.gradeId);
-        return grade?.gradeLevel === activeTab;
-      }),
-    [comments, activeTab, gradeMap, teacherScopedDialog, teacherAssignmentsWithClass],
-  );
+  const gradeMap = useMemo(() => new Map((grades || []).map((grade) => [grade.id, grade])), [grades]);
+  const sortedGrades = useMemo(() => [...(grades || [])].sort((a, b) => {
+    const upperDiff = Number(b.upperLimit ?? 0) - Number(a.upperLimit ?? 0);
+    if (upperDiff !== 0) return upperDiff;
+    const lowerDiff = Number(b.lowerLimit ?? 0) - Number(a.lowerLimit ?? 0);
+    if (lowerDiff !== 0) return lowerDiff;
+    return String(a.gradeName || "").localeCompare(String(b.gradeName || ""), undefined, { numeric: true });
+  }), [grades]);
+
+  const filteredGrades = useMemo(() => {
+    const profileGrades = filterItemsByStrictGradeProfileKey(sortedGrades, activeTab);
+    const unique = new Map<string, Grade>();
+    profileGrades.forEach((grade) => {
+      const key = [
+        String(grade.gradeName || "").trim().toLowerCase(),
+        Number(grade.lowerLimit ?? 0),
+        Number(grade.upperLimit ?? 0),
+        String(grade.gradeStatus || "").trim().toLowerCase(),
+        String(grade.gradeType || "").trim().toLowerCase(),
+      ].join("|");
+      if (!unique.has(key)) unique.set(key, grade);
+    });
+    return Array.from(unique.values());
+  }, [sortedGrades, activeTab]);
+
+  const filteredComments = useMemo(() => {
+    const visible = (comments || []).filter((comment) => {
+      if (teacherScopedDialog && !teacherAssignmentsWithClass.some((row) =>
+        Number(row.classId) === Number(comment.classId) && Number(row.subjectId) === Number(comment.subjectId)
+      )) {
+        return false;
+      }
+
+      if (!activeTab) return true;
+      const grade = gradeMap.get(comment.gradeId);
+      if (!gradeProfileMatchesStrict(grade?.gradeLevel, activeTab)) return false;
+
+      const klass = classMap.get(Number(comment.classId));
+      const subject = subjectMap.get(Number(comment.subjectId));
+      if (!klass || !subject) return false;
+      const streamName = klass.streamId ? streamMap.get(klass.streamId) : klass.className;
+      return subjectMatchesGradeProfile({
+        profileKey: activeTab,
+        schoolType,
+        examinationBoard,
+        streamName,
+        subjectType: subject.subjectType,
+      });
+    });
+
+    return visible.sort((a, b) => {
+      const classDiff = String(a.className || "").localeCompare(String(b.className || ""), undefined, { numeric: true });
+      if (classDiff !== 0) return classDiff;
+      const subjectDiff = String(a.subjectName || "").localeCompare(String(b.subjectName || ""), undefined, { numeric: true });
+      if (subjectDiff !== 0) return subjectDiff;
+      const gradeA = gradeMap.get(a.gradeId);
+      const gradeB = gradeMap.get(b.gradeId);
+      const upperDiff = Number(gradeB?.upperLimit ?? 0) - Number(gradeA?.upperLimit ?? 0);
+      if (upperDiff !== 0) return upperDiff;
+      return Number(a.id) - Number(b.id);
+    });
+  }, [
+    comments,
+    activeTab,
+    gradeMap,
+    classMap,
+    subjectMap,
+    streamMap,
+    schoolType,
+    examinationBoard,
+    teacherScopedDialog,
+    teacherAssignmentsWithClass,
+  ]);
 
   const createMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -1411,6 +1492,8 @@ function CommentsDialog({
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/assessment-comments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/marks-entry"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
       setCommentText("");
       toast({ title: "Success", description: `Created ${data.created || 0} comment(s)` });
     },
@@ -1426,6 +1509,8 @@ function CommentsDialog({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/assessment-comments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/marks-entry"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
       setEditingId(null);
       setEditText("");
       toast({ title: "Success", description: "Comment updated" });
@@ -1441,6 +1526,8 @@ function CommentsDialog({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/assessment-comments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/marks-entry"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
       toast({ title: "Success", description: "Comment deleted" });
     },
     onError: (error: Error) => {
@@ -1455,6 +1542,8 @@ function CommentsDialog({
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/assessment-comments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/marks-entry"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
       setDupModalOpen(false);
       setDuplicates([]);
       setMissingPairs([]);
@@ -1609,8 +1698,8 @@ function CommentsDialog({
           </p>
 
           <div className="flex-1 min-h-0 overflow-y-auto border rounded-md mt-3">
-            {comments.length === 0 ? (
-              <div className="p-4 sm:p-6 text-center text-muted-foreground text-sm">No comments yet.</div>
+            {filteredComments.length === 0 ? (
+              <div className="p-4 sm:p-6 text-center text-muted-foreground text-sm">No comments for the selected grading tab.</div>
             ) : (
               <div className="divide-y">
                 {filteredComments.map((c) => (

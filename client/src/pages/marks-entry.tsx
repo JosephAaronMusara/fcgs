@@ -837,7 +837,12 @@ export default function MarksEntryPage() {
       method: "POST",
       url: "/api/marks-entry",
       body: payload,
-      invalidateKeys: ["/api/marks-entry"],
+      invalidateKeys: [
+        "/api/marks-entry",
+        "/api/report-cards",
+        "/api/report-hub/class-progress",
+        "/api/report-hub/stream-stats",
+      ],
     });
     return draftKey;
   }, []);
@@ -977,6 +982,21 @@ export default function MarksEntryPage() {
             };
           },
         );
+
+        const assessment = marksDataByAssessmentRef.current[assessmentId]?.assessment;
+        void queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
+        if (assessment?.examId && assessment?.classId) {
+          void queryClient.invalidateQueries({
+            queryKey: [
+              "/api/report-hub/class-progress",
+              String(assessment.examId),
+              Number(assessment.classId),
+            ],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["/api/report-hub/stream-stats", String(assessment.examId)],
+          });
+        }
       }
 
       window.setTimeout(() => {

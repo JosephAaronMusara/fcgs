@@ -82,7 +82,7 @@ import type {
   ReportComment,
   AssessmentType,
 } from "@shared/schema";
-import { getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, type GradeProfileKey } from "@shared/academic-profiles";
+import { filterItemsByStrictGradeProfileKey, getGradingProfilesForSchool, getGradeProfileLabel, gradeProfileMatchesStrict, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, type GradeProfileKey } from "@shared/academic-profiles";
 import { EcdAssessmentTab } from "@/components/academic-reports/ecd-assessment-tab";
 import { ReportCardSlip } from "@/components/academic-reports/report-card-document";
 
@@ -768,25 +768,8 @@ function normalizeReportCommentProfileToken(value?: string | null) {
   return (value || "").trim().toLowerCase();
 }
 
-function getReportCommentProfileTokens(profileKey?: string | null) {
-  if (!profileKey) return new Set<string>();
-  const keys = Array.from(new Set([profileKey, ...getCompatibleGradeProfileKeys(profileKey)]));
-  const tokens = new Set<string>();
-  keys.forEach((key) => {
-    const normalizedKey = normalizeReportCommentProfileToken(key);
-    if (normalizedKey) tokens.add(normalizedKey);
-    const label = getGradeProfileLabel(key);
-    const normalizedLabel = normalizeReportCommentProfileToken(label);
-    if (normalizedLabel) tokens.add(normalizedLabel);
-  });
-  return tokens;
-}
-
 function reportCommentGradeMatchesTab(gradeLevel: string | null | undefined, activeTab?: string | null) {
-  if (!activeTab) return true;
-  const normalizedGradeLevel = normalizeReportCommentProfileToken(gradeLevel);
-  if (!normalizedGradeLevel) return false;
-  return getReportCommentProfileTokens(activeTab).has(normalizedGradeLevel);
+  return gradeProfileMatchesStrict(gradeLevel, activeTab);
 }
 
 function clampDisplayPercent(value: number | null | undefined) {
@@ -1591,7 +1574,10 @@ function ExamStreamTable({
       `Publish ${exam.examName} for ${stat.streamName}?`,
       `${remaining} remaining class${remaining === 1 ? "" : "es"} will be published.`,
       `${stat.assessmentCreatedCount} assessment${stat.assessmentCreatedCount === 1 ? "" : "s"} created; ${stat.assessmentMissingCount} offered subject${stat.assessmentMissingCount === 1 ? "" : "s"} without an assessment.`,
-      `${stat.withMarksCount} entries have marks, ${stat.acknowledgedCount} are acknowledged not written, and ${stat.unrecordedCount} are incomplete or not recorded.`,
+      `${stat.withMarksCount} entries have marks and ${stat.acknowledgedCount} are acknowledged not written.`,
+      stat.partialCount + stat.unrecordedCount > 0
+        ? `Warning: ${stat.partialCount + stat.unrecordedCount} learner-subject entr${stat.partialCount + stat.unrecordedCount === 1 ? "y has" : "ies have"} neither a completed mark nor an absent, sick, or excused status. Those subject rows will not appear on report cards. Confirming will publish anyway.`
+        : "All expected learner-subject entries have a completed mark or an acknowledged not-written status.",
       "Publishing locks marks and assessment structure and makes the results visible in student and parent portals.",
     ].join("\n\n");
     if (window.confirm(warning)) publicationMutation.mutate({ streamId: stat.streamId, publish: true });
@@ -1897,6 +1883,8 @@ export default function AcademicReportsPage() {
       queryKey: ["/api/report-cards", selectedExamId, "class", selectedClassId],
       enabled:
         viewMode === "report-cards" && !!selectedExamId && !!selectedClassId,
+      staleTime: 0,
+      refetchOnMount: "always",
     });
 
   const filteredStudents = useMemo(() => {
@@ -3003,7 +2991,12 @@ function ClassLevelBlock({
     const warning = [
       `Publish ${examName} for ${classLabel}?`,
       totals ? `${totals.assessmentsCreated} of ${totals.offeredSubjects} offered subjects have assessments. ${totals.assessmentsMissing} assessment${totals.assessmentsMissing === 1 ? " is" : "s are"} not created.` : "",
-      totals ? `${totals.withMarks} entries have marks, ${totals.acknowledged} are acknowledged not written, and ${totals.unrecorded} are incomplete or not recorded.` : "",
+      totals ? `${totals.withMarks} entries have marks and ${totals.acknowledged} are acknowledged not written.` : "",
+      totals && totals.partial + totals.unrecorded > 0
+        ? `Warning: ${totals.partial + totals.unrecorded} learner-subject entr${totals.partial + totals.unrecorded === 1 ? "y has" : "ies have"} neither a completed mark nor an absent, sick, or excused status. Those subject rows will not appear on report cards. Confirming will publish anyway.`
+        : totals
+          ? "All expected learner-subject entries have a completed mark or an acknowledged not-written status."
+          : "",
       "Publishing locks marks and assessment structure and makes the report visible in student and parent portals.",
     ].filter(Boolean).join("\n\n");
     if (window.confirm(warning)) publicationMutation.mutate({ publish: true });
@@ -3404,26 +3397,30 @@ function ReportCommentsModal({
   }, [gradesData]);
 
   const filteredGrades = useMemo<ReportCommentGradeOption[]>(() => {
-    const matchedGrades = sortedGrades.filter((grade) => reportCommentGradeMatchesTab(grade.gradeLevel, activeTab));
-    const blankProfileGrades = sortedGrades.filter((grade) => !normalizeReportCommentProfileToken(grade.gradeLevel));
+    const sourceGrades = filterItemsByStrictGradeProfileKey(sortedGrades, activeTab);
+    const unique = new Map<string, ReportCommentGradeOption>();
 
-    const sourceGrades =
-      matchedGrades.length > 0
-        ? matchedGrades
-        : blankProfileGrades.length > 0
-          ? blankProfileGrades
-          : sortedGrades;
+    sourceGrades.forEach((grade) => {
+      const option: ReportCommentGradeOption = {
+        id: grade.id,
+        gradeName: grade.gradeName,
+        gradeLevel: grade.gradeLevel,
+        lowerLimit: Number(grade.lowerLimit ?? 0),
+        upperLimit: Number(grade.upperLimit ?? 0),
+        gradePoints: Number(grade.gradePoints ?? 0),
+        gradeStatus: grade.gradeStatus,
+        gradeType: grade.gradeType,
+      };
+      const key = [
+        normalizeReportCommentProfileToken(option.gradeName),
+        option.lowerLimit,
+        option.upperLimit,
+        normalizeReportCommentProfileToken(option.gradeStatus),
+      ].join("|");
+      if (!unique.has(key)) unique.set(key, option);
+    });
 
-    return sourceGrades.map((grade) => ({
-      id: grade.id,
-      gradeName: grade.gradeName,
-      gradeLevel: grade.gradeLevel,
-      lowerLimit: Number(grade.lowerLimit ?? 0),
-      upperLimit: Number(grade.upperLimit ?? 0),
-      gradePoints: Number(grade.gradePoints ?? 0),
-      gradeStatus: grade.gradeStatus,
-      gradeType: grade.gradeType,
-    }));
+    return Array.from(unique.values());
   }, [sortedGrades, activeTab]);
 
   const selectableGradeMap = useMemo(() => {
@@ -3469,24 +3466,33 @@ function ReportCommentsModal({
       if (activeTab) {
         const linkedGrade = comment.gradeId ? fetchedGradeMap.get(comment.gradeId) : undefined;
         const commentProfile = linkedGrade?.gradeLevel || comment.gradeLevel || null;
-        if (!reportCommentGradeMatchesTab(commentProfile, activeTab)) {
-          const visibleGradeNames = new Set(filteredGrades.map((grade) => grade.gradeName.trim().toLowerCase()));
-          const fallbackGradeName = (comment.commentGrade || "").trim().toLowerCase();
-          if (!fallbackGradeName || !visibleGradeNames.has(fallbackGradeName)) return false;
-        }
+        if (!reportCommentGradeMatchesTab(commentProfile, activeTab)) return false;
       }
       if (isClassTeacher && selectedClassIds.length > 0 && !selectedClassIds.includes(comment.classId || -1)) return false;
       return true;
     });
-  }, [comments, activeTab, selectedClassIds, isClassTeacher, commentType, fetchedGradeMap, filteredGrades]);
+  }, [comments, activeTab, selectedClassIds, isClassTeacher, commentType, fetchedGradeMap]);
 
   const sortedComments = useMemo(() => {
     return [...filteredComments].sort((a, b) => {
+      if (isClassTeacher) {
+        const classDiff = String(classMap[Number(a.classId)] || "").localeCompare(
+          String(classMap[Number(b.classId)] || ""),
+          undefined,
+          { numeric: true },
+        );
+        if (classDiff !== 0) return classDiff;
+      }
+
       const gradeA = findCommentGradeOption(a);
       const gradeB = findCommentGradeOption(b);
-      return (gradeB?.upperLimit ?? 0) - (gradeA?.upperLimit ?? 0);
+      const upperDiff = Number(gradeB?.upperLimit ?? 0) - Number(gradeA?.upperLimit ?? 0);
+      if (upperDiff !== 0) return upperDiff;
+      const lowerDiff = Number(gradeB?.lowerLimit ?? 0) - Number(gradeA?.lowerLimit ?? 0);
+      if (lowerDiff !== 0) return lowerDiff;
+      return Number(a.id) - Number(b.id);
     });
-  }, [filteredComments, findCommentGradeOption]);
+  }, [filteredComments, findCommentGradeOption, isClassTeacher, classMap]);
 
   const refreshComments = async () => {
     await queryClient.invalidateQueries({ queryKey: ["/api/report-comments", schoolScopeId, commentType] });
@@ -3627,7 +3633,7 @@ function ReportCommentsModal({
       if (
         selectedGrade &&
         comment.commentGrade === selectedGrade.gradeName &&
-        (!activeTab || commentProfile === activeTab)
+        (!activeTab || reportCommentGradeMatchesTab(commentProfile, activeTab))
       ) {
         return true;
       }
@@ -3651,7 +3657,7 @@ function ReportCommentsModal({
       if (comment.commentType !== commentType) return false;
       if (!activeTab) return true;
       const commentProfile = comment.gradeLevel || findCommentGradeOption(comment)?.gradeLevel || null;
-      return commentProfile === activeTab;
+      return reportCommentGradeMatchesTab(commentProfile, activeTab);
     });
 
     if (isClassTeacher) {

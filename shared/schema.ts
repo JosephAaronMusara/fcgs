@@ -373,10 +373,15 @@ export const assessments = pgTable("assessments", {
   termId: integer("term_id"),
   year: integer("year"),
   examId: integer("exam_id"),
+  enforceExamUniqueness: boolean("enforce_exam_uniqueness").notNull().default(false),
   isPublished: boolean("is_published").default(true),
   createdBy: integer("created_by").references(() => staff.id),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  singlePerExamSubjectUnique: uniqueIndex("assessments_single_per_exam_subject_uidx")
+    .on(table.classId, table.subjectId, table.examId)
+    .where(sql`${table.enforceExamUniqueness} = true and ${table.examId} is not null`),
+}));
 
 export const marks = pgTable("marks", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -2048,6 +2053,9 @@ export const assessmentTypes = pgTable("assessment_types", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id),
   name: text("name").notNull(),
+  code: text("code"),
+  assessmentCardinality: text("assessment_cardinality"),
+  reportAggregationMode: text("report_aggregation_mode"),
   description: text("description"),
   createdAt: timestamp("created_at").defaultNow(),
 });
