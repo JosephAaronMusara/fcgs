@@ -283,7 +283,7 @@ function ReportAssetImage({
     assetTimeoutRef.current = window.setTimeout(() => {
       assetTimeoutRef.current = null;
       setFailed(true);
-    }, 10_000);
+    }, 5_000);
     return clearAssetTimeout;
   }, [src]);
 
@@ -296,6 +296,8 @@ function ReportAssetImage({
       style={style}
       data-testid={testId}
       data-pdf-asset="true"
+      loading="eager"
+      decoding="async"
       onLoad={clearAssetTimeout}
       onError={() => {
         clearAssetTimeout();

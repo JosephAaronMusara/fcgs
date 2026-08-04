@@ -17,7 +17,8 @@ import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { registerRecruitmentRoutes } from "./recruitment-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
-import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportCommentsFingerprint, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
+import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, academicReportPreparationDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportCommentsFingerprint, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
+import { mergePdfBuffers } from "./pdf-merge";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
 import { AssessmentPaperReconciliationError, reconcileAssessmentPapersAndMarks } from "./assessment-paper-reconciliation";
 import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
@@ -13572,7 +13573,8 @@ ${schoolName}`;
 
   // ==================== ACADEMIC REPORTS / REPORT CARDS ====================
 
-  const REPORT_DATA_TEMPLATE_VERSION = "report-data-v4-overall-comment-versioning";
+  const REPORT_DATA_TEMPLATE_VERSION = "report-data-v5-canonical-full-class-cache";
+  const reportDataBuildInFlight = new Map<string, Promise<void>>();
 
   function reportDataCachePath(args: {
     schoolId: number;
@@ -13645,6 +13647,7 @@ ${schoolName}`;
       timingMarks.push({ name, duration: now - previousMark });
       previousMark = now;
     };
+    let dataBuildLock: { key: string; promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void } | null = null;
     try {
       const examId = parseIdParam(req.params.examId);
       const classId = parseIdParam(req.params.classId);
@@ -13652,9 +13655,6 @@ ${schoolName}`;
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
 
       if (!schoolId) return res.status(400).json({ message: "School context required" });
-      if (currentUser?.role === "student" || currentUser?.role === "parent") {
-        return res.status(403).json({ message: "Class-wide report data is not available in the student or parent portal" });
-      }
 
       const school = await storage.getSchool(schoolId);
       const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : undefined;
@@ -13682,11 +13682,20 @@ ${schoolName}`;
       if (requestedStudentIds.some((studentId) => !classStudentIds.has(studentId))) {
         return res.status(400).json({ message: "One or more selected learners do not belong to this class" });
       }
+      if (currentUser?.role === "student" || currentUser?.role === "parent") {
+        const isInternalIndividualPdfData = req.query.pdfData === "1" && requestedStudentIds.length === 1;
+        if (!isInternalIndividualPdfData) {
+          return res.status(403).json({ message: "Class-wide report data is not available in the student or parent portal" });
+        }
+        if (!(await ensurePublishedPortalAccess({
+          user: currentUser,
+          examId,
+          classId,
+          studentId: requestedStudentIds[0],
+          res,
+        }))) return;
+      }
       const requestedStudentIdSet = new Set(requestedStudentIds);
-      const reportStudents = requestedStudentIds.length
-        ? students.filter((student) => requestedStudentIdSet.has(Number(student.id)))
-        : students;
-      const reportStudentIdSet = new Set(reportStudents.map((student) => Number(student.id)));
       const [publication, profileSettingsForCache, gradesForCache, reportCommentRowsForCache] = await Promise.all([
         getClassExamPublication(examId, classId),
         db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
@@ -13697,6 +13706,14 @@ ${schoolName}`;
       const brandingFingerprint = reportBrandingFingerprint(school);
       const effectiveReportCommentRowsForCache = effectiveOverallCommentRows(publication, reportCommentRowsForCache);
       const overallCommentsFingerprint = reportCommentsFingerprint(effectiveReportCommentRowsForCache);
+      const buildCanonicalFullClassPayload = publication?.isPublished === true;
+      const reportStudents = buildCanonicalFullClassPayload
+        ? students
+        : requestedStudentIds.length
+          ? students.filter((student) => requestedStudentIdSet.has(Number(student.id)))
+          : students;
+      const reportStudentIds = reportStudents.map((student) => Number(student.id));
+      const reportStudentIdSet = new Set(reportStudentIds);
       if (publication?.isPublished === true) {
         const cacheArgs = {
           schoolId,
@@ -13722,6 +13739,29 @@ ${schoolName}`;
           }
           return res.json(payload);
         }
+
+        const existingBuild = reportDataBuildInFlight.get(fullCachePath);
+        if (existingBuild) {
+          console.info(`[academic-pdf] waiting for full-class report data exam=${examId} class=${classId}`);
+          await existingBuild.catch(() => undefined);
+          const payloadAfterWait = await readJsonCache<any>(fullCachePath);
+          if (payloadAfterWait) {
+            const payload = filterCachedReportPayload(payloadAfterWait, requestedStudentIds);
+            res.setHeader("X-Report-Data-Cache", "HIT-WAIT");
+            res.setHeader("Server-Timing", `cache_wait;dur=${Date.now() - requestStartedAt}, total;dur=${Date.now() - requestStartedAt}`);
+            return res.json(payload);
+          }
+        }
+
+        let resolveBuild!: () => void;
+        let rejectBuild!: (error: unknown) => void;
+        const buildPromise = new Promise<void>((resolve, reject) => {
+          resolveBuild = resolve;
+          rejectBuild = reject;
+        });
+        buildPromise.catch(() => undefined);
+        dataBuildLock = { key: fullCachePath, promise: buildPromise, resolve: resolveBuild, reject: rejectBuild };
+        reportDataBuildInFlight.set(fullCachePath, buildPromise);
       }
       markTiming("context");
       const rawAssessments = (await storage.getAssessmentsByExam(examId))
@@ -13988,10 +14028,10 @@ ${schoolName}`;
           : [];
         const historicalAssessmentIds = historicalAssessments.map((assessment: any) => Number(assessment.id));
         const historicalMarks = historicalAssessmentIds.length
-          ? requestedStudentIds.length
+          ? reportStudentIds.length < students.length
             ? await db.select().from(assessmentMarksSchema).where(and(
                 inArray(assessmentMarksSchema.assessmentId, historicalAssessmentIds),
-                inArray(assessmentMarksSchema.studentId, requestedStudentIds),
+                inArray(assessmentMarksSchema.studentId, reportStudentIds),
                 eq(assessmentMarksSchema.schoolId, schoolId),
               ))
             : await storage.getAssessmentMarksByAssessments(historicalAssessmentIds)
@@ -14342,19 +14382,29 @@ ${schoolName}`;
           gradingConfigurationFingerprint,
           brandingFingerprint,
           reportCommentsFingerprint: overallCommentsFingerprint,
-          ...(requestedStudentIds.length ? { studentIds: requestedStudentIds } : {}),
         });
-        await writeJsonCache(cachePath, payload).catch((error) => {
-          console.warn("[academic-report-cache] unable to persist report data:", error);
-        });
-        res.setHeader("X-Report-Data-Cache", "MISS");
-        queueAcademicReportCacheCleanup();
+        let cachePersisted = false;
+        try {
+          await writeJsonCache(cachePath, payload);
+          cachePersisted = true;
+          queueAcademicReportCacheCleanup();
+        } catch (cacheError) {
+          // A cache filesystem problem must not make a valid report request fail.
+          console.warn(`[academic-report-cache] unable to persist full-class data exam=${examId} class=${classId}:`, cacheError);
+        }
+        dataBuildLock?.resolve();
+        res.setHeader("X-Report-Data-Cache", cachePersisted ? "MISS" : "MISS-NOT-STORED");
       } else {
         res.setHeader("X-Report-Data-Cache", "BYPASS");
       }
-      res.json(payload);
+      res.json(filterCachedReportPayload(payload, requestedStudentIds));
     } catch (error) {
+      dataBuildLock?.reject(error);
       next(error);
+    } finally {
+      if (dataBuildLock && reportDataBuildInFlight.get(dataBuildLock.key) === dataBuildLock.promise) {
+        reportDataBuildInFlight.delete(dataBuildLock.key);
+      }
     }
   };
 
@@ -14721,16 +14771,60 @@ async function buildReportCardMessage(
   }
 
 
-  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v5-paginated-overall-comment-versioning";
-  const reportPdfInFlight = new Map<string, Promise<{ buffer: Buffer; cacheStatus: "MISS" | "BYPASS" }>>();
-
-  async function generateReportCardChromiumPdf(args: {
-    req: Request;
+  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v6-canonical-individual-merge";
+  const REPORT_PDF_PREPARATION_VERSION = "report-card-preparation-v1";
+  type ReportPdfCacheStatus = "HIT" | "MISS" | "MERGED" | "BYPASS";
+  type ReportPdfPriority = "interactive" | "background";
+  type ReportPdfContext = {
+    shouldCache: boolean;
+    publicationVersion: number;
+    gradingConfigurationFingerprint: string;
+    brandingFingerprint: string;
+    reportCommentsFingerprint: string;
+    publishedCommentSnapshotAvailable: boolean;
     schoolId: number;
     examId: number;
     classId: number;
-    studentIds: number[];
-  }): Promise<{ buffer: Buffer; cacheStatus: "HIT" | "MISS" | "BYPASS" }> {
+  };
+  type ReportPdfPreparationStatus = {
+    version: 1;
+    state: "idle" | "queued" | "running" | "ready" | "failed" | "interrupted";
+    schoolId: number;
+    examId: number;
+    classId: number;
+    publicationVersion: number;
+    total: number;
+    completed: number;
+    failed: number;
+    startedAt: string | null;
+    updatedAt: string;
+    finishedAt: string | null;
+    message: string | null;
+  };
+
+  const reportPdfInFlight = new Map<string, Promise<{ buffer: Buffer; cacheStatus: ReportPdfCacheStatus }>>();
+  const reportPreparationInFlight = new Map<string, Promise<void>>();
+
+  function positiveIntegerFromEnv(name: string, fallback: number): number {
+    const value = Number(process.env[name]);
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+  }
+
+  async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+    const runners = Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) }, async () => {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= items.length) return;
+        results[index] = await worker(items[index]);
+      }
+    });
+    await Promise.all(runners);
+    return results;
+  }
+
+  async function loadReportPdfContext(args: { schoolId: number; examId: number; classId: number }): Promise<ReportPdfContext> {
     const [publication, school, settingsRows, gradeRows, reportCommentRows] = await Promise.all([
       getClassExamPublication(args.examId, args.classId),
       storage.getSchool(args.schoolId),
@@ -14739,75 +14833,117 @@ async function buildReportCardMessage(
       db.select().from(reportComments).where(eq(reportComments.schoolId, args.schoolId)),
     ]);
     const shouldCache = publication?.isPublished === true;
-    const publicationVersion = Number(publication?.publicationVersion || 0);
-    const gradingConfigurationFingerprint = reportGradingConfigurationFingerprint(settingsRows, gradeRows);
-    const publishedCommentSnapshotAvailable = shouldCache && Array.isArray(publication?.overallCommentRowsSnapshot);
     const effectiveReportCommentRows = effectiveOverallCommentRows(publication, reportCommentRows);
-    const initialReportCommentsFingerprint = reportCommentsFingerprint(effectiveReportCommentRows);
-    const cacheKey = reportCacheKey({
-      templateVersion: REPORT_PDF_TEMPLATE_VERSION,
+    return {
+      shouldCache,
+      publicationVersion: Number(publication?.publicationVersion || 0),
+      gradingConfigurationFingerprint: reportGradingConfigurationFingerprint(settingsRows, gradeRows),
+      brandingFingerprint: reportBrandingFingerprint(school),
+      reportCommentsFingerprint: reportCommentsFingerprint(effectiveReportCommentRows),
+      publishedCommentSnapshotAvailable: shouldCache && Array.isArray(publication?.overallCommentRowsSnapshot),
       schoolId: args.schoolId,
       examId: args.examId,
       classId: args.classId,
-      publicationVersion,
-      gradingConfigurationFingerprint,
-      brandingFingerprint: reportBrandingFingerprint(school),
-      reportCommentsFingerprint: initialReportCommentsFingerprint,
-      studentIds: args.studentIds,
-    });
-    const cachePath = shouldCache ? path.join(academicReportPdfCacheDirectory(), `${cacheKey}.pdf`) : null;
+    };
+  }
 
+  function reportPdfCachePath(context: ReportPdfContext, studentIds: number[]): string {
+    const cacheKey = reportCacheKey({
+      templateVersion: REPORT_PDF_TEMPLATE_VERSION,
+      schoolId: context.schoolId,
+      examId: context.examId,
+      classId: context.classId,
+      publicationVersion: context.publicationVersion,
+      gradingConfigurationFingerprint: context.gradingConfigurationFingerprint,
+      brandingFingerprint: context.brandingFingerprint,
+      reportCommentsFingerprint: context.reportCommentsFingerprint,
+      studentIds,
+    });
+    return path.join(academicReportPdfCacheDirectory(), `${cacheKey}.pdf`);
+  }
+
+  function reportPreparationStatusPath(context: ReportPdfContext): string {
+    const key = reportCacheKey({
+      templateVersion: REPORT_PDF_PREPARATION_VERSION,
+      schoolId: context.schoolId,
+      examId: context.examId,
+      classId: context.classId,
+      publicationVersion: context.publicationVersion,
+      gradingConfigurationFingerprint: context.gradingConfigurationFingerprint,
+      brandingFingerprint: context.brandingFingerprint,
+      reportCommentsFingerprint: context.reportCommentsFingerprint,
+    });
+    return path.join(academicReportPreparationDirectory(), `${key}.json`);
+  }
+
+  async function reportPdfContextIsStable(context: ReportPdfContext): Promise<boolean> {
+    if (!context.shouldCache || context.publishedCommentSnapshotAvailable) return context.shouldCache;
+    const currentRows = await db.select().from(reportComments).where(eq(reportComments.schoolId, context.schoolId));
+    return reportCommentsFingerprint(currentRows) === context.reportCommentsFingerprint;
+  }
+
+  async function renderReportPdfRoute(args: {
+    req: Request;
+    context: ReportPdfContext;
+    studentIds: number[];
+    priority: ReportPdfPriority;
+  }): Promise<Buffer> {
+    const params = new URLSearchParams({
+      examId: String(args.context.examId),
+      classId: String(args.context.classId),
+      studentIds: args.studentIds.join(","),
+    });
+    return renderAppRoutePdf({
+      req: args.req,
+      schoolId: args.context.schoolId,
+      route: `/pdf-render/report-cards?${params.toString()}`,
+      priority: args.priority,
+      pdfOptions: {
+        format: "A4",
+        printBackground: true,
+        preferCSSPageSize: true,
+        margin: { top: "2mm", right: "2mm", bottom: "2mm", left: "2mm" },
+      },
+    });
+  }
+
+  async function generateCanonicalIndividualReportPdf(args: {
+    req: Request;
+    context: ReportPdfContext;
+    studentId: number;
+    priority: ReportPdfPriority;
+  }): Promise<{ buffer: Buffer; cacheStatus: ReportPdfCacheStatus }> {
+    const studentIds = [args.studentId];
+    const cachePath = args.context.shouldCache ? reportPdfCachePath(args.context, studentIds) : null;
     if (cachePath) {
       const cached = await readBufferCache(cachePath);
-      if (cached) {
-        console.info(`[academic-pdf] cache hit exam=${args.examId} class=${args.classId} learners=${args.studentIds.length} bytes=${cached.length}`);
-        return { buffer: cached, cacheStatus: "HIT" };
-      }
+      if (cached) return { buffer: cached, cacheStatus: "HIT" };
     }
 
-    const inFlightKey = cachePath || `bypass:${cacheKey}`;
+    const inFlightKey = cachePath || `bypass:${args.context.schoolId}:${args.context.examId}:${args.context.classId}:${args.studentId}`;
     const existing = reportPdfInFlight.get(inFlightKey);
-    if (existing) {
-      console.info(`[academic-pdf] joined in-flight render exam=${args.examId} class=${args.classId} learners=${args.studentIds.length}`);
-      return existing;
-    }
+    if (existing) return existing;
 
-    const job = (async (): Promise<{ buffer: Buffer; cacheStatus: "MISS" | "BYPASS" }> => {
-      const params = new URLSearchParams({
-        examId: String(args.examId),
-        classId: String(args.classId),
-        studentIds: args.studentIds.join(","),
-      });
-      const buffer = await renderAppRoutePdf({
+    const job = (async (): Promise<{ buffer: Buffer; cacheStatus: ReportPdfCacheStatus }> => {
+      const buffer = await renderReportPdfRoute({
         req: args.req,
-        schoolId: args.schoolId,
-        route: `/pdf-render/report-cards?${params.toString()}`,
-        pdfOptions: {
-          format: "A4",
-          printBackground: true,
-          preferCSSPageSize: true,
-          margin: { top: "2mm", right: "2mm", bottom: "2mm", left: "2mm" },
-        },
+        context: args.context,
+        studentIds,
+        priority: args.priority,
       });
-      let cacheStable = shouldCache;
-      if (cachePath) {
-        if (!publishedCommentSnapshotAvailable) {
-          const currentReportCommentRows = await db
-            .select()
-            .from(reportComments)
-            .where(eq(reportComments.schoolId, args.schoolId));
-          cacheStable = reportCommentsFingerprint(currentReportCommentRows) === initialReportCommentsFingerprint;
-        }
-        if (cacheStable) {
-          await writeBufferCache(cachePath, buffer).catch((error) => {
-            console.warn("Unable to persist report PDF cache:", error);
-          });
+      const cacheStable = await reportPdfContextIsStable(args.context);
+      let cachePersisted = false;
+      if (cachePath && cacheStable) {
+        try {
+          await writeBufferCache(cachePath, buffer);
+          cachePersisted = true;
           queueAcademicReportCacheCleanup();
-        } else {
-          console.info(`[academic-pdf] overall comments changed during render; cache write skipped exam=${args.examId} class=${args.classId}`);
+        } catch (cacheError) {
+          // Serve the rendered PDF even when persistent caching is temporarily unavailable.
+          console.warn(`[academic-report-cache] unable to persist learner PDF exam=${args.context.examId} class=${args.context.classId} student=${args.studentId}:`, cacheError);
         }
       }
-      return { buffer, cacheStatus: cacheStable ? "MISS" : "BYPASS" };
+      return { buffer, cacheStatus: cachePersisted ? "MISS" : "BYPASS" };
     })();
     reportPdfInFlight.set(inFlightKey, job);
     try {
@@ -14817,47 +14953,276 @@ async function buildReportCardMessage(
     }
   }
 
-  function queuePublishedReportPdfGeneration(args: {
+  async function canonicalizeReportSelection(classId: number, requestedStudentIds: number[]): Promise<number[]> {
+    const requested = new Set(requestedStudentIds.map(Number));
+    const learners = await storage.getStudentsByClass(classId);
+    return learners.map((student) => Number(student.id)).filter((studentId) => requested.has(studentId));
+  }
+
+  async function generateReportCardChromiumPdf(args: {
     req: Request;
     schoolId: number;
     examId: number;
     classId: number;
-  }): void {
-    if (process.env.PDF_PREGENERATE_ON_PUBLISH === "false") return;
+    studentIds: number[];
+    priority?: ReportPdfPriority;
+    context?: ReportPdfContext;
+  }): Promise<{ buffer: Buffer; cacheStatus: ReportPdfCacheStatus }> {
+    const priority = args.priority || "interactive";
+    const requestedStudentIds = Array.from(new Set(args.studentIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+    if (!requestedStudentIds.length) throw new Error("At least one learner is required for report PDF generation");
+    const context = args.context || await loadReportPdfContext(args);
+
+    if (!context.shouldCache) {
+      const buffer = await renderReportPdfRoute({ req: args.req, context, studentIds: requestedStudentIds, priority });
+      return { buffer, cacheStatus: "BYPASS" };
+    }
+
+    const studentIds = await canonicalizeReportSelection(args.classId, requestedStudentIds);
+    if (studentIds.length !== requestedStudentIds.length) {
+      throw new Error("One or more selected learners do not belong to this class");
+    }
+    if (studentIds.length === 1) {
+      return generateCanonicalIndividualReportPdf({ req: args.req, context, studentId: studentIds[0], priority });
+    }
+
+    const selectionCachePath = reportPdfCachePath(context, studentIds);
+    const cachedSelection = await readBufferCache(selectionCachePath);
+    if (cachedSelection) {
+      console.info(`[academic-pdf] merged selection cache hit exam=${args.examId} class=${args.classId} learners=${studentIds.length} bytes=${cachedSelection.length}`);
+      return { buffer: cachedSelection, cacheStatus: "HIT" };
+    }
+
+    const existing = reportPdfInFlight.get(selectionCachePath);
+    if (existing) {
+      console.info(`[academic-pdf] joined in-flight selection exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
+      return existing;
+    }
+
+    const job = (async (): Promise<{ buffer: Buffer; cacheStatus: ReportPdfCacheStatus }> => {
+      const concurrency = priority === "background"
+        ? 1
+        : Math.max(1, Math.min(positiveIntegerFromEnv("PDF_RENDER_CONCURRENCY", 2), 2));
+      const individualResults = await mapWithConcurrency(studentIds, concurrency, (studentId) =>
+        generateCanonicalIndividualReportPdf({ req: args.req, context, studentId, priority }),
+      );
+      const merged = await mergePdfBuffers(individualResults.map((result) => result.buffer));
+      const cacheStable = await reportPdfContextIsStable(context);
+      let cachePersisted = false;
+      if (cacheStable) {
+        try {
+          await writeBufferCache(selectionCachePath, merged);
+          cachePersisted = true;
+          queueAcademicReportCacheCleanup();
+        } catch (cacheError) {
+          // Merging succeeded, so return the PDF even if the merged cache write fails.
+          console.warn(`[academic-report-cache] unable to persist merged PDF exam=${args.examId} class=${args.classId}:`, cacheError);
+        }
+      }
+      const renderedAny = individualResults.some((result) => result.cacheStatus !== "HIT");
+      return {
+        buffer: merged,
+        cacheStatus: cachePersisted ? (renderedAny ? "MISS" : "MERGED") : "BYPASS",
+      };
+    })();
+    reportPdfInFlight.set(selectionCachePath, job);
+    try {
+      return await job;
+    } finally {
+      if (reportPdfInFlight.get(selectionCachePath) === job) reportPdfInFlight.delete(selectionCachePath);
+    }
+  }
+
+  async function writeReportPreparationStatus(filePath: string, status: ReportPdfPreparationStatus): Promise<void> {
+    await writeJsonCache(filePath, status);
+    queueAcademicReportCacheCleanup();
+  }
+
+  function makePreparationStatus(args: {
+    context: ReportPdfContext;
+    state: ReportPdfPreparationStatus["state"];
+    total: number;
+    completed?: number;
+    failed?: number;
+    startedAt?: string | null;
+    finishedAt?: string | null;
+    message?: string | null;
+  }): ReportPdfPreparationStatus {
+    return {
+      version: 1,
+      state: args.state,
+      schoolId: args.context.schoolId,
+      examId: args.context.examId,
+      classId: args.context.classId,
+      publicationVersion: args.context.publicationVersion,
+      total: args.total,
+      completed: args.completed || 0,
+      failed: args.failed || 0,
+      startedAt: args.startedAt ?? null,
+      updatedAt: new Date().toISOString(),
+      finishedAt: args.finishedAt ?? null,
+      message: args.message ?? null,
+    };
+  }
+
+  async function queuePublishedReportPdfGeneration(args: {
+    req: Request;
+    schoolId: number;
+    examId: number;
+    classId: number;
+    force?: boolean;
+  }): Promise<ReportPdfPreparationStatus> {
+    if (process.env.PDF_PREGENERATE_ON_PUBLISH === "false") {
+      const context = await loadReportPdfContext(args);
+      return makePreparationStatus({ context, state: "idle", total: 0, message: "Automatic preparation is disabled." });
+    }
+
     const cookieHeader = args.req.headers.cookie;
     const schoolHeader = args.req.headers["x-school-id"];
     const backgroundRequest = {
-      headers: {
-        cookie: cookieHeader,
-        "x-school-id": schoolHeader,
-      },
+      headers: { cookie: cookieHeader, "x-school-id": schoolHeader },
       protocol: args.req.protocol,
       get: (name: string) => args.req.get(name),
     } as Request;
-    setImmediate(() => {
-      void (async () => {
-        const learners = await storage.getStudentsByClass(args.classId);
-        const studentIds = learners.map((student) => Number(student.id)).filter((id) => Number.isInteger(id) && id > 0);
-        if (!studentIds.length) return;
-        await generateReportCardChromiumPdf({ ...args, req: backgroundRequest, studentIds });
-        console.info(`[academic-pdf] background class cache ready exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
-        if (process.env.PDF_PREGENERATE_INDIVIDUALS_ON_PUBLISH !== "false") {
-          const concurrency = Math.max(1, Math.min(4, Number(process.env.PDF_RENDER_CONCURRENCY || 2)));
-          for (let index = 0; index < studentIds.length; index += concurrency) {
-            const batch = studentIds.slice(index, index + concurrency);
-            await Promise.all(batch.map((studentId) => generateReportCardChromiumPdf({
+    const context = await loadReportPdfContext(args);
+    if (!context.shouldCache) throw new Error("Publish the class reports before preparing the PDF cache");
+    const learners = await storage.getStudentsByClass(args.classId);
+    const studentIds = learners.map((student) => Number(student.id)).filter((id) => Number.isInteger(id) && id > 0);
+    const statusPath = reportPreparationStatusPath(context);
+    const existingStatus = await readJsonCache<ReportPdfPreparationStatus>(statusPath);
+    if (!args.force && existingStatus?.state === "ready" && existingStatus.total === studentIds.length) return existingStatus;
+    if (reportPreparationInFlight.has(statusPath)) {
+      return existingStatus || makePreparationStatus({ context, state: "running", total: studentIds.length });
+    }
+
+    const queuedStatus = makePreparationStatus({ context, state: "queued", total: studentIds.length });
+    await writeReportPreparationStatus(statusPath, queuedStatus);
+
+    const job = new Promise<void>((resolve) => {
+      setImmediate(() => {
+        void (async () => {
+          const startedAt = new Date().toISOString();
+          let completed = 0;
+          let failed = 0;
+          await writeReportPreparationStatus(statusPath, makePreparationStatus({
+            context,
+            state: "running",
+            total: studentIds.length,
+            startedAt,
+          }));
+
+          const backgroundConcurrency = Math.max(
+            1,
+            Math.min(
+              positiveIntegerFromEnv("PDF_PREGENERATE_CONCURRENCY", Math.max(1, positiveIntegerFromEnv("PDF_RENDER_CONCURRENCY", 2) - 1)),
+              Math.max(1, positiveIntegerFromEnv("PDF_RENDER_CONCURRENCY", 2) - 1),
+            ),
+          );
+
+          for (let index = 0; index < studentIds.length; index += backgroundConcurrency) {
+            const batch = studentIds.slice(index, index + backgroundConcurrency);
+            const results = await Promise.allSettled(batch.map((studentId) =>
+              generateCanonicalIndividualReportPdf({
+                req: backgroundRequest,
+                context,
+                studentId,
+                priority: "background",
+              }),
+            ));
+            for (const result of results) {
+              if (result.status === "fulfilled") completed++;
+              else failed++;
+            }
+            await writeReportPreparationStatus(statusPath, makePreparationStatus({
+              context,
+              state: "running",
+              total: studentIds.length,
+              completed,
+              failed,
+              startedAt,
+              message: failed ? `${failed} report card${failed === 1 ? "" : "s"} need retrying.` : null,
+            }));
+          }
+
+          if (failed > 0) {
+            await writeReportPreparationStatus(statusPath, makePreparationStatus({
+              context,
+              state: "failed",
+              total: studentIds.length,
+              completed,
+              failed,
+              startedAt,
+              finishedAt: new Date().toISOString(),
+              message: `${failed} report card${failed === 1 ? "" : "s"} could not be prepared. Retry preparation to continue from the successful individual caches.`,
+            }));
+            return;
+          }
+
+          if (studentIds.length > 1) {
+            await generateReportCardChromiumPdf({
               ...args,
               req: backgroundRequest,
-              studentIds: [studentId],
-            })));
+              studentIds,
+              priority: "background",
+              context,
+            });
           }
-          console.info(`[academic-pdf] background individual caches ready exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
-        }
-      })().catch((error) => {
-        console.warn(`[academic-pdf] background generation failed exam=${args.examId} class=${args.classId}:`, error);
+          await writeReportPreparationStatus(statusPath, makePreparationStatus({
+            context,
+            state: "ready",
+            total: studentIds.length,
+            completed: studentIds.length,
+            failed: 0,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            message: "Individual report cards and the full-class download are ready.",
+          }));
+          console.info(`[academic-pdf] background preparation ready exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
+        })().catch(async (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[academic-pdf] background preparation failed exam=${args.examId} class=${args.classId}:`, error);
+          const current = await readJsonCache<ReportPdfPreparationStatus>(statusPath);
+          await writeReportPreparationStatus(statusPath, makePreparationStatus({
+            context,
+            state: "failed",
+            total: studentIds.length,
+            completed: current?.completed || 0,
+            failed: Math.max(1, current?.failed || 0),
+            startedAt: current?.startedAt || null,
+            finishedAt: new Date().toISOString(),
+            message,
+          })).catch(() => undefined);
+        }).finally(() => resolve());
       });
     });
+    reportPreparationInFlight.set(statusPath, job);
+    void job.finally(() => {
+      if (reportPreparationInFlight.get(statusPath) === job) reportPreparationInFlight.delete(statusPath);
+    });
+    return queuedStatus;
   }
+
+  async function getReportPreparationStatus(args: {
+    schoolId: number;
+    examId: number;
+    classId: number;
+  }): Promise<ReportPdfPreparationStatus> {
+    const context = await loadReportPdfContext(args);
+    const learners = await storage.getStudentsByClass(args.classId);
+    const statusPath = reportPreparationStatusPath(context);
+    const current = await readJsonCache<ReportPdfPreparationStatus>(statusPath);
+    if (!current) return makePreparationStatus({ context, state: "idle", total: learners.length });
+    if ((current.state === "queued" || current.state === "running") && !reportPreparationInFlight.has(statusPath)) {
+      const lastUpdate = Date.parse(current.updatedAt);
+      if (!Number.isFinite(lastUpdate) || Date.now() - lastUpdate > 2 * 60_000) {
+        const interrupted = { ...current, state: "interrupted" as const, updatedAt: new Date().toISOString(), message: "Preparation was interrupted before completion. Retry to resume from cached learners." };
+        await writeReportPreparationStatus(statusPath, interrupted);
+        return interrupted;
+      }
+    }
+    return current;
+  }
+
 
   app.get("/api/report-cards/:examId/student/:studentId/download", requireAuth, async (req, res, next) => {
     try {
@@ -14943,6 +15308,30 @@ async function buildReportCardMessage(
     }
   });
 
+  app.get("/api/report-cards/:examId/pdf/status", requireAuth, async (req, res, next) => {
+    try {
+      const examId = Number(req.params.examId);
+      const classId = Number(req.query.classId);
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId || !currentUser || !Number.isInteger(examId) || !Number.isInteger(classId)) {
+        return res.status(400).json({ message: "School, exam and class context are required" });
+      }
+      if (currentUser.role === "student" || currentUser.role === "parent") {
+        return res.status(403).json({ message: "Class preparation status is not available in this portal" });
+      }
+      const [publication, classInfo] = await Promise.all([
+        getClassExamPublication(examId, classId),
+        storage.getClass(classId),
+      ]);
+      if (!publication?.isPublished) return res.status(409).json({ message: "Publish the class reports before checking PDF preparation" });
+      if (!classInfo || Number(classInfo.schoolId) !== Number(schoolId)) return res.status(404).json({ message: "Class not found" });
+      return res.json(await getReportPreparationStatus({ schoolId, examId, classId }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/report-cards/:examId/pdf/prewarm", requireAuth, async (req, res, next) => {
     try {
       const examId = Number(req.params.examId);
@@ -14959,8 +15348,8 @@ async function buildReportCardMessage(
       if (!publication?.isPublished) return res.status(409).json({ message: "Publish the class reports before preparing the PDF cache" });
       const classInfo = await storage.getClass(classId);
       if (!classInfo || Number(classInfo.schoolId) !== Number(schoolId)) return res.status(404).json({ message: "Class not found" });
-      queuePublishedReportPdfGeneration({ req, schoolId, examId, classId });
-      return res.status(202).json({ queued: true, examId, classId });
+      const status = await queuePublishedReportPdfGeneration({ req, schoolId, examId, classId, force: req.body?.force === true });
+      return res.status(202).json(status);
     } catch (error) {
       next(error);
     }
@@ -15037,7 +15426,8 @@ async function buildReportCardMessage(
 
             if (parent.email) {
               try {
-                const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId: Number(examId), classId: Number(classId), studentIds: [student.id] });
+                const generatedPdf = await generateReportCardChromiumPdf({ req, schoolId, examId: Number(examId), classId: Number(classId), studentIds: [student.id] });
+                const pdfBuffer = generatedPdf.buffer;
                 const emailResult = await communicationService.sendEmail({
                   to: parent.email,
                   subject: `Report Card - ${name} | ${examName}`,
@@ -15176,7 +15566,8 @@ async function buildReportCardMessage(
 
       if (parent.email) {
         try {
-          const pdfBuffer = await generateReportCardChromiumPdf({ req, schoolId, examId: Number(examId), classId: Number(classId), studentIds: [student.id] });
+          const generatedPdf = await generateReportCardChromiumPdf({ req, schoolId, examId: Number(examId), classId: Number(classId), studentIds: [student.id] });
+          const pdfBuffer = generatedPdf.buffer;
           const emailResult = await communicationService.sendEmail({
             to: parent.email,
             subject: `Report Card - ${name} | ${examName}`,
@@ -15585,7 +15976,9 @@ async function buildReportCardMessage(
       });
 
       if (data.publish && result.publication?.isPublished) {
-        queuePublishedReportPdfGeneration({ req, schoolId, examId: data.examId, classId: data.classId });
+        void queuePublishedReportPdfGeneration({ req, schoolId, examId: data.examId, classId: data.classId }).catch((error) => {
+          console.warn(`[academic-pdf] unable to queue class preparation exam=${data.examId} class=${data.classId}:`, error);
+        });
       }
 
       res.json({
@@ -15670,7 +16063,9 @@ async function buildReportCardMessage(
 
       if (data.publish) {
         for (const classId of changedClasses) {
-          queuePublishedReportPdfGeneration({ req, schoolId, examId: data.examId, classId });
+          void queuePublishedReportPdfGeneration({ req, schoolId, examId: data.examId, classId }).catch((error) => {
+            console.warn(`[academic-pdf] unable to queue stream class preparation exam=${data.examId} class=${classId}:`, error);
+          });
         }
       }
 

@@ -10,6 +10,8 @@ const requiredSourceFiles = [
   "client/src/components/academic-reports/report-card-document.tsx",
   "client/src/pages/report-card-pdf-render.tsx",
   "server/pdf-renderer.ts",
+  "server/pdf-merge.ts",
+  "script/test-academic-pdf-merge.ts",
   "server/routes.ts",
 ];
 
@@ -31,17 +33,32 @@ async function main() {
   const objectRoot = process.env.LOCAL_OBJECT_DIR
     ? path.resolve(process.env.LOCAL_OBJECT_DIR)
     : path.resolve(process.cwd(), "object_storage");
-  const cacheDirectory = path.join(objectRoot, "private", "academic-report-pdf-cache");
-  let cacheWritable = false;
-  let cacheError: string | null = null;
-  const probePath = path.join(cacheDirectory, `.preflight-${process.pid}-${Date.now()}`);
+  const cacheDirectories = [
+    path.join(objectRoot, "private", "academic-report-pdf-cache"),
+    path.join(objectRoot, "private", "academic-report-data-cache"),
+    path.join(objectRoot, "private", "academic-report-preparation"),
+  ];
+  let cacheWritable = true;
+  const cacheErrors: Record<string, string> = {};
+  for (const cacheDirectory of cacheDirectories) {
+    const probePath = path.join(cacheDirectory, `.preflight-${process.pid}-${Date.now()}`);
+    try {
+      await mkdir(cacheDirectory, { recursive: true });
+      await writeFile(probePath, "ok", { flag: "wx" });
+      await rm(probePath, { force: true });
+    } catch (error) {
+      cacheWritable = false;
+      cacheErrors[cacheDirectory] = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  let pdfMergeReady = false;
+  let pdfMergeError: string | null = null;
   try {
-    await mkdir(cacheDirectory, { recursive: true });
-    await writeFile(probePath, "ok", { flag: "wx" });
-    await rm(probePath, { force: true });
-    cacheWritable = true;
+    const module = await import("pdf-lib");
+    pdfMergeReady = typeof module.PDFDocument?.create === "function";
   } catch (error) {
-    cacheError = error instanceof Error ? error.message : String(error);
+    pdfMergeError = error instanceof Error ? error.message : String(error);
   }
 
   let chromiumReady = false;
@@ -74,16 +91,18 @@ async function main() {
 
   const result = {
     missingSourceFiles,
-    cacheDirectory,
+    cacheDirectories,
     cacheWritable,
-    cacheError,
+    cacheErrors,
+    pdfMergeReady,
+    pdfMergeError,
     chromiumReady,
     chromiumExecutable,
     chromiumError,
     databaseChecked: Boolean(process.env.DATABASE_URL),
     publicationTableReady: process.env.DATABASE_URL ? publicationTableReady : null,
     publicationColumnsMissing,
-    status: missingSourceFiles.length || !cacheWritable || !chromiumReady || (process.env.DATABASE_URL && (!publicationTableReady || publicationColumnsMissing.length))
+    status: missingSourceFiles.length || !cacheWritable || !pdfMergeReady || !chromiumReady || (process.env.DATABASE_URL && (!publicationTableReady || publicationColumnsMissing.length))
       ? "BLOCKED"
       : "READY",
   };
