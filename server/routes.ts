@@ -7,7 +7,7 @@ import { db } from "./db";
 import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups, gradeProfileSettings, ecdAssessmentRecords, ecdAssessmentResponses } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
-import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
+import { eq, and, or, inArray, sql, like, desc, isNull, count as drizzleCount } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
 import { registerTransportRoutes } from "./transport-routes";
@@ -17,7 +17,7 @@ import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { registerRecruitmentRoutes } from "./recruitment-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
-import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
+import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportCommentsFingerprint, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
 import { AssessmentPaperReconciliationError, reconcileAssessmentPapersAndMarks } from "./assessment-paper-reconciliation";
 import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
@@ -11925,9 +11925,9 @@ ${schoolName}`;
       if (payload?.classId !== undefined && payload?.classId !== null) return [payload.classId];
       return [];
     })();
-    return rawClassIds
+    return Array.from(new Set(rawClassIds
       .map((value: any) => typeof value === "object" && value !== null ? Number(value.id ?? value.value ?? value.classId) : Number(value))
-      .filter((value: number) => Number.isFinite(value) && value > 0);
+      .filter((value: number) => Number.isFinite(value) && value > 0)));
   };
 
   const reportCommentMatchesGrade = (comment: any, gradeId: number | null, commentGrade: string, gradeLevel?: string | null) => {
@@ -11992,6 +11992,8 @@ ${schoolName}`;
     return resolution.ambiguous ? null : resolution.grade;
   }
 
+  const REPORT_CARD_OVERRIDE_PREFIX = "__REPORT_CARD_OVERRIDE__";
+
   function findReportCommentForConfiguredGrade(args: {
     comments: any[];
     commentType: "principal" | "class_teacher";
@@ -12003,21 +12005,28 @@ ${schoolName}`;
     const compatibleKeys = new Set(getStrictGradeProfileKeys(args.profileKey));
     const matches = args.comments.filter((comment) => {
       if (comment.commentType !== args.commentType) return false;
-      if (args.commentType === "class_teacher" && args.classId && comment.classId && Number(comment.classId) !== Number(args.classId)) return false;
-      if (comment.gradeId && Number(comment.gradeId) === Number(args.grade.id)) return true;
+      if (String(comment.commentGrade || "").startsWith(`${REPORT_CARD_OVERRIDE_PREFIX}:`)) return false;
+
+      if (args.commentType === "class_teacher") {
+        if (!args.classId || Number(comment.classId) !== Number(args.classId)) return false;
+      } else if (comment.classId !== null && comment.classId !== undefined) {
+        return false;
+      }
+
+      if (comment.gradeId !== null && comment.gradeId !== undefined) {
+        return Number(comment.gradeId) === Number(args.grade.id);
+      }
       if ((comment.commentGrade || "") !== (args.grade.gradeName || "")) return false;
       if (!comment.gradeLevel) return true;
       if (compatibleKeys.size === 0) return comment.gradeLevel === args.profileKey;
       return compatibleKeys.has(comment.gradeLevel);
     });
 
-    const exactClass = args.commentType === "class_teacher" && args.classId
-      ? matches.find((comment) => Number(comment.classId) === Number(args.classId))
-      : undefined;
-    return (exactClass || matches.find((comment) => !comment.classId) || matches[0] || {}).commentText || "";
+    // Historical duplicates are resolved deterministically. The newest row is
+    // treated as canonical until the integrity repair removes older duplicates.
+    matches.sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+    return matches[0]?.commentText || "";
   }
-
-  const REPORT_CARD_OVERRIDE_PREFIX = "__REPORT_CARD_OVERRIDE__";
 
   function buildReportCardOverrideKey(studentId: number, examId: number) {
     return `${REPORT_CARD_OVERRIDE_PREFIX}:${studentId}:${examId}`;
@@ -12033,6 +12042,25 @@ ${schoolName}`;
     return { studentId, examId };
   }
 
+  function getReportCardCommentOverrideMapFromRows(rows: any[], examId: number, studentIds?: number[]) {
+    const allowedStudentIds = studentIds ? new Set(studentIds.map((id) => Number(id))) : null;
+    const map = new Map<number, { principal?: string; class_teacher?: string }>();
+
+    // Newest rows win deterministically if legacy duplicates exist.
+    const orderedRows = [...rows].sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+    for (const row of orderedRows) {
+      const parsed = parseReportCardOverrideKey(row.commentGrade);
+      if (!parsed || parsed.examId !== examId) continue;
+      if (allowedStudentIds && !allowedStudentIds.has(parsed.studentId)) continue;
+      const entry = map.get(parsed.studentId) || {};
+      if (row.commentType === "principal" && entry.principal === undefined) entry.principal = row.commentText || "";
+      if (row.commentType === "class_teacher" && entry.class_teacher === undefined) entry.class_teacher = row.commentText || "";
+      map.set(parsed.studentId, entry);
+    }
+
+    return map;
+  }
+
   async function getReportCardCommentOverrideMap(schoolId: number, examId: number, studentIds?: number[]) {
     const rows = await db
       .select()
@@ -12040,22 +12068,198 @@ ${schoolName}`;
       .where(and(
         eq(reportComments.schoolId, schoolId),
         like(reportComments.commentGrade, `${REPORT_CARD_OVERRIDE_PREFIX}:%:${examId}`),
-      ));
+      ))
+      .orderBy(desc(reportComments.id));
+    return getReportCardCommentOverrideMapFromRows(rows, examId, studentIds);
+  }
 
-    const allowedStudentIds = studentIds ? new Set(studentIds.map((id) => Number(id))) : null;
-    const map = new Map<number, { principal?: string; class_teacher?: string }>();
+  function selectOverallCommentRowsForPublicationSnapshot(rows: any[], examId: number, classId: number) {
+    return rows.filter((row) => {
+      const override = parseReportCardOverrideKey(row.commentGrade);
+      if (override) return override.examId === Number(examId);
+      if (row.commentType === "principal") {
+        return row.classId === null || row.classId === undefined;
+      }
+      if (row.commentType === "class_teacher") {
+        return Number(row.classId) === Number(classId);
+      }
+      return false;
+    });
+  }
 
-    for (const row of rows) {
-      const parsed = parseReportCardOverrideKey(row.commentGrade);
-      if (!parsed || parsed.examId !== examId) continue;
-      if (allowedStudentIds && !allowedStudentIds.has(parsed.studentId)) continue;
-      const entry = map.get(parsed.studentId) || {};
-      if (row.commentType === "principal") entry.principal = row.commentText || "";
-      if (row.commentType === "class_teacher") entry.class_teacher = row.commentText || "";
-      map.set(parsed.studentId, entry);
+  function effectiveOverallCommentRows(publication: any, liveRows: any[]) {
+    const snapshot = publication?.overallCommentRowsSnapshot;
+    if (publication?.isPublished === true && Array.isArray(snapshot)) return snapshot;
+    return liveRows;
+  }
+
+  async function loadOverallCommentRowsForPublicationSnapshot(executor: any, args: {
+    schoolId: number;
+    examId: number;
+    classId: number;
+  }) {
+    // Pool and override writes take a ROW EXCLUSIVE table lock. Holding SHARE
+    // here guarantees the publication snapshot is internally consistent and
+    // cannot race a comment edit.
+    await executor.execute(sql`LOCK TABLE report_comments IN SHARE MODE`);
+    const rows = await executor
+      .select()
+      .from(reportComments)
+      .where(eq(reportComments.schoolId, args.schoolId))
+      .orderBy(desc(reportComments.id));
+    return selectOverallCommentRowsForPublicationSnapshot(rows, args.examId, args.classId);
+  }
+
+  type ReportCommentPoolInput = {
+    schoolId: number;
+    gradeId: number | null;
+    commentGrade: string;
+    gradeLevel: string | null;
+    commentText: string;
+    commentType: "principal" | "class_teacher";
+    classId?: number | null;
+  };
+
+  function reportCommentPoolConditions(input: ReportCommentPoolInput) {
+    const conditions: any[] = [
+      eq(reportComments.schoolId, input.schoolId),
+      eq(reportComments.commentType, input.commentType as any),
+    ];
+    if (input.gradeId !== null) {
+      conditions.push(eq(reportComments.gradeId, input.gradeId));
+    } else {
+      conditions.push(eq(reportComments.commentGrade, input.commentGrade));
+      conditions.push(input.gradeLevel ? eq(reportComments.gradeLevel, input.gradeLevel as any) : isNull(reportComments.gradeLevel));
+    }
+    if (input.commentType === "class_teacher") {
+      conditions.push(eq(reportComments.classId, Number(input.classId)));
+    } else {
+      conditions.push(isNull(reportComments.classId));
+    }
+    return conditions;
+  }
+
+  async function saveReportCommentPool(input: ReportCommentPoolInput) {
+    const lockKey = [
+      "report-comment-pool",
+      input.commentType,
+      input.gradeId ?? `${input.commentGrade}:${input.gradeLevel || ""}`,
+      input.classId || 0,
+    ].join(":");
+
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${input.schoolId}, hashtext(${lockKey}))`);
+      const existingRows = await tx
+        .select()
+        .from(reportComments)
+        .where(and(...reportCommentPoolConditions(input)))
+        .orderBy(desc(reportComments.id));
+      const canonical = existingRows[0];
+      const values = {
+        schoolId: input.schoolId,
+        gradeId: input.gradeId,
+        commentGrade: input.commentGrade,
+        gradeLevel: input.gradeLevel as any,
+        subjectId: null,
+        classId: input.commentType === "class_teacher" ? Number(input.classId) : null,
+        commentText: input.commentText.trim(),
+        commentType: input.commentType,
+      } as any;
+
+      let saved: any;
+      if (canonical) {
+        [saved] = await tx
+          .update(reportComments)
+          .set(values)
+          .where(eq(reportComments.id, canonical.id))
+          .returning();
+      } else {
+        [saved] = await tx.insert(reportComments).values(values).returning();
+      }
+
+      const duplicateIds = existingRows.slice(1).map((row) => Number(row.id));
+      if (duplicateIds.length) {
+        await tx.delete(reportComments).where(inArray(reportComments.id, duplicateIds));
+      }
+      return saved;
+    });
+  }
+
+  async function deleteReportCommentPoolById(id: number, schoolId: number) {
+    return db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(reportComments)
+        .where(and(eq(reportComments.id, id), eq(reportComments.schoolId, schoolId)));
+      if (!existing || String(existing.commentGrade || "").startsWith(`${REPORT_CARD_OVERRIDE_PREFIX}:`)) return false;
+      const input: ReportCommentPoolInput = {
+        schoolId,
+        gradeId: existing.gradeId ? Number(existing.gradeId) : null,
+        commentGrade: existing.commentGrade,
+        gradeLevel: existing.gradeLevel || null,
+        commentText: existing.commentText,
+        commentType: existing.commentType,
+        classId: existing.classId ? Number(existing.classId) : null,
+      };
+      const lockKey = [
+        "report-comment-pool",
+        input.commentType,
+        input.gradeId ?? `${input.commentGrade}:${input.gradeLevel || ""}`,
+        input.classId || 0,
+      ].join(":");
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${schoolId}, hashtext(${lockKey}))`);
+      await tx.delete(reportComments).where(and(...reportCommentPoolConditions(input)));
+      return true;
+    });
+  }
+
+  async function persistReportCardOverride(executor: any, args: {
+    schoolId: number;
+    studentId: number;
+    examId: number;
+    classId: number | null;
+    commentType: "principal" | "class_teacher";
+    commentText: string;
+  }) {
+    const overrideKey = buildReportCardOverrideKey(args.studentId, args.examId);
+    const lockKey = `report-card-override:${overrideKey}:${args.commentType}`;
+    await executor.execute(sql`SELECT pg_advisory_xact_lock(${args.schoolId}, hashtext(${lockKey}))`);
+    const existingRows = await executor
+      .select()
+      .from(reportComments)
+      .where(and(
+        eq(reportComments.schoolId, args.schoolId),
+        eq(reportComments.commentType, args.commentType as any),
+        eq(reportComments.commentGrade, overrideKey),
+      ))
+      .orderBy(desc(reportComments.id));
+
+    const trimmed = args.commentText.trim();
+    if (!trimmed) {
+      const ids = existingRows.map((row: any) => Number(row.id));
+      if (ids.length) await executor.delete(reportComments).where(inArray(reportComments.id, ids));
+      return null;
     }
 
-    return map;
+    const values = {
+      schoolId: args.schoolId,
+      gradeId: null,
+      commentGrade: overrideKey,
+      gradeLevel: null,
+      subjectId: null,
+      classId: args.commentType === "class_teacher" ? args.classId : null,
+      commentText: trimmed,
+      commentType: args.commentType,
+    } as any;
+    const canonical = existingRows[0];
+    if (canonical) {
+      await executor.update(reportComments).set(values).where(eq(reportComments.id, canonical.id));
+    } else {
+      await executor.insert(reportComments).values(values);
+    }
+    const duplicateIds = existingRows.slice(1).map((row: any) => Number(row.id));
+    if (duplicateIds.length) await executor.delete(reportComments).where(inArray(reportComments.id, duplicateIds));
+    return trimmed;
   }
 
   app.get("/api/report-comments", requireAuth, async (req, res, next) => {
@@ -12085,54 +12289,45 @@ ${schoolName}`;
       if (commentType === "class_teacher" && normalizedClassIds.length === 0) {
         return res.status(400).json({ message: "classId is required for class teacher comments" });
       }
-      let resolvedCommentGrade = commentGrade;
-      let resolvedGradeLevel = gradeLevel;
-      let resolvedGradeId = gradeId ? Number(gradeId) : null;
-      let selectedGrade: any | null = null;
-      if (resolvedGradeId) {
-        const grade = await ensureGradeInSchool(resolvedGradeId, schoolId, res);
-        if (!grade) return;
-        const profileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade);
-        if (!profileAllowed) return;
-        selectedGrade = grade;
-        resolvedCommentGrade = grade.gradeName;
-        resolvedGradeLevel = grade.gradeLevel;
+      const resolvedGradeId = Number(gradeId);
+      if (!Number.isInteger(resolvedGradeId) || resolvedGradeId <= 0) {
+        return res.status(400).json({ message: "gradeId is required" });
       }
-      if (!resolvedCommentGrade) {
-        return res.status(400).json({ message: "A grade must be selected" });
-      }
+      const selectedGrade = await ensureGradeInSchool(resolvedGradeId, schoolId, res);
+      if (!selectedGrade) return;
+      const profileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, selectedGrade);
+      if (!profileAllowed) return;
+      const resolvedCommentGrade = selectedGrade.gradeName;
+      const resolvedGradeLevel = selectedGrade.gradeLevel;
       const createdComments = [];
       if (commentType === "class_teacher") {
         for (const selectedClassId of normalizedClassIds) {
           const classInfo = await ensureClassInSchool(selectedClassId, schoolId, res);
           if (!classInfo) return;
-          if (selectedGrade) {
-            const profileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, selectedGrade, classInfo);
-            if (!profileAllowed) return;
-          }
-          const comment = await storage.createReportComment({
+          const classProfileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, selectedGrade, classInfo);
+          if (!classProfileAllowed) return;
+          const comment = await saveReportCommentPool({
             schoolId,
             gradeId: resolvedGradeId,
             commentGrade: resolvedCommentGrade,
-            gradeLevel: resolvedGradeLevel,
-            subjectId: null,
+            gradeLevel: resolvedGradeLevel || null,
             commentText,
             commentType,
             classId: selectedClassId,
-          } as any);
+          });
           createdComments.push(comment);
         }
         return res.status(201).json(createdComments);
       }
-      const comment = await storage.createReportComment({
+      const comment = await saveReportCommentPool({
         schoolId,
         gradeId: resolvedGradeId,
         commentGrade: resolvedCommentGrade,
-        gradeLevel: resolvedGradeLevel,
-        subjectId: null,
+        gradeLevel: resolvedGradeLevel || null,
         commentText,
         commentType,
-      } as any);
+        classId: null,
+      });
       res.status(201).json(comment);
     } catch (error) {
       next(error);
@@ -12238,12 +12433,15 @@ ${schoolName}`;
             const classProfileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade, classInfo);
             if (!classProfileAllowed) return;
           }
-          await db.update(reportComments).set({
-            commentText: commentText.trim(),
+          await saveReportCommentPool({
+            schoolId,
             gradeId: resolvedGradeId,
             commentGrade: resolvedCommentGrade,
             gradeLevel: resolvedGradeLevel,
-          }).where(and(eq(reportComments.id, existing.id), eq(reportComments.schoolId, schoolId)));
+            commentText,
+            commentType,
+            classId: commentType === "class_teacher" ? Number(existing.classId) : null,
+          });
           overwritten++;
         }
       }
@@ -12259,16 +12457,15 @@ ${schoolName}`;
             const classProfileAllowed = await ensureReportCommentGradeProfileAllowed(res, schoolId, grade, classInfo);
             if (!classProfileAllowed) return;
           }
-          await storage.createReportComment({
+          await saveReportCommentPool({
             schoolId,
             gradeId: resolvedGradeId,
             commentGrade: resolvedCommentGrade,
             gradeLevel: resolvedGradeLevel,
-            subjectId: null,
-            commentText: commentText.trim(),
+            commentText,
             commentType,
             classId,
-          } as any);
+          });
           created++;
         }
       }
@@ -12284,7 +12481,8 @@ ${schoolName}`;
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });
       const id = parseIdParam(req.params.id);
-      await storage.deleteReportComment(id, schoolId);
+      const deleted = await deleteReportCommentPoolById(id, schoolId);
+      if (!deleted) return res.status(404).json({ message: "Report comment not found" });
       res.status(204).send();
     } catch (error) {
       next(error);
@@ -12416,46 +12614,16 @@ ${schoolName}`;
         return res.status(423).json({ message: "This report has been published. Comments are read-only until it is unpublished.", code: "ASSESSMENT_PUBLISHED" });
       }
 
-      const overrideKey = buildReportCardOverrideKey(studentId, examId);
-      const [existing] = await db
-        .select()
-        .from(reportComments)
-        .where(and(
-          eq(reportComments.schoolId, schoolId),
-          eq(reportComments.commentType, commentType as any),
-          eq(reportComments.commentGrade, overrideKey),
-        ));
+      const overrideText = await db.transaction((tx) => persistReportCardOverride(tx, {
+        schoolId,
+        studentId,
+        examId,
+        classId: student.classId ? Number(student.classId) : null,
+        commentType,
+        commentText,
+      }));
 
-      const trimmed = commentText.trim();
-      if (!trimmed) {
-        if (existing) {
-          await db.delete(reportComments).where(eq(reportComments.id, existing.id));
-        }
-        return res.json({ ok: true, overrideText: null });
-      }
-
-      if (existing) {
-        await db
-          .update(reportComments)
-          .set({
-            commentText: trimmed,
-            classId: commentType === "class_teacher" ? student.classId ?? null : null,
-          })
-          .where(eq(reportComments.id, existing.id));
-      } else {
-        await db.insert(reportComments).values({
-          schoolId,
-          gradeId: null,
-          commentGrade: overrideKey,
-          gradeLevel: null,
-          subjectId: null,
-          classId: commentType === "class_teacher" ? student.classId ?? null : null,
-          commentText: trimmed,
-          commentType,
-        });
-      }
-
-      res.json({ ok: true, overrideText: trimmed });
+      res.json({ ok: true, overrideText });
     } catch (error) {
       next(error);
     }
@@ -12551,44 +12719,23 @@ ${schoolName}`;
         }
       }
 
-      const overrideKeys = Array.from(new Set(input.overall.map((row) => buildReportCardOverrideKey(row.studentId, input.examId))));
-      const existingOverrides = overrideKeys.length
-        ? await db.select().from(reportComments).where(and(
-            eq(reportComments.schoolId, schoolId),
-            inArray(reportComments.commentGrade, overrideKeys),
-            inArray(reportComments.commentType, ["principal", "class_teacher"] as any),
-          ))
-        : [];
-      const overrideMap = new Map(existingOverrides.map((row) => [`${row.commentGrade}:${row.commentType}`, row] as const));
-
       const result = await db.transaction(async (tx) => {
         const overallResults: Array<{ studentId: number; commentType: "principal" | "class_teacher"; commentText: string }> = [];
         for (const row of input.overall) {
           const student = classStudentMap.get(row.studentId)!;
-          const overrideKey = buildReportCardOverrideKey(row.studentId, input.examId);
-          const mapKey = `${overrideKey}:${row.commentType}`;
-          const existing = overrideMap.get(mapKey);
-          const trimmed = row.commentText.trim();
-          if (!trimmed) {
-            if (existing) await tx.delete(reportComments).where(eq(reportComments.id, existing.id));
-          } else if (existing) {
-            await tx.update(reportComments).set({
-              commentText: trimmed,
-              classId: row.commentType === "class_teacher" ? student.classId ?? null : null,
-            }).where(eq(reportComments.id, existing.id));
-          } else {
-            await tx.insert(reportComments).values({
-              schoolId,
-              gradeId: null,
-              commentGrade: overrideKey,
-              gradeLevel: null,
-              subjectId: null,
-              classId: row.commentType === "class_teacher" ? student.classId ?? null : null,
-              commentText: trimmed,
-              commentType: row.commentType,
-            });
-          }
-          overallResults.push({ studentId: row.studentId, commentType: row.commentType, commentText: trimmed });
+          const overrideText = await persistReportCardOverride(tx, {
+            schoolId,
+            studentId: row.studentId,
+            examId: input.examId,
+            classId: student.classId ? Number(student.classId) : null,
+            commentType: row.commentType,
+            commentText: row.commentText,
+          });
+          overallResults.push({
+            studentId: row.studentId,
+            commentType: row.commentType,
+            commentText: overrideText || "",
+          });
         }
 
         const subjectResults: Array<{ studentId: number; assessmentId: number; subjectId: number; commentText: string; commentPool: string }> = [];
@@ -13425,7 +13572,7 @@ ${schoolName}`;
 
   // ==================== ACADEMIC REPORTS / REPORT CARDS ====================
 
-  const REPORT_DATA_TEMPLATE_VERSION = "report-data-v3-exact-grading-ranking";
+  const REPORT_DATA_TEMPLATE_VERSION = "report-data-v4-overall-comment-versioning";
 
   function reportDataCachePath(args: {
     schoolId: number;
@@ -13434,6 +13581,7 @@ ${schoolName}`;
     publicationVersion: number;
     gradingConfigurationFingerprint: string;
     brandingFingerprint: string;
+    reportCommentsFingerprint: string;
     studentIds?: number[];
   }): string {
     const key = reportCacheKey({ templateVersion: REPORT_DATA_TEMPLATE_VERSION, ...args });
@@ -13539,13 +13687,16 @@ ${schoolName}`;
         ? students.filter((student) => requestedStudentIdSet.has(Number(student.id)))
         : students;
       const reportStudentIdSet = new Set(reportStudents.map((student) => Number(student.id)));
-      const [publication, profileSettingsForCache, gradesForCache] = await Promise.all([
+      const [publication, profileSettingsForCache, gradesForCache, reportCommentRowsForCache] = await Promise.all([
         getClassExamPublication(examId, classId),
         db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
         storage.getGradesBySchool(schoolId),
+        db.select().from(reportComments).where(eq(reportComments.schoolId, schoolId)),
       ]);
       const gradingConfigurationFingerprint = reportGradingConfigurationFingerprint(profileSettingsForCache, gradesForCache);
       const brandingFingerprint = reportBrandingFingerprint(school);
+      const effectiveReportCommentRowsForCache = effectiveOverallCommentRows(publication, reportCommentRowsForCache);
+      const overallCommentsFingerprint = reportCommentsFingerprint(effectiveReportCommentRowsForCache);
       if (publication?.isPublished === true) {
         const cacheArgs = {
           schoolId,
@@ -13554,6 +13705,7 @@ ${schoolName}`;
           publicationVersion: Number(publication.publicationVersion || 0),
           gradingConfigurationFingerprint,
           brandingFingerprint,
+          reportCommentsFingerprint: overallCommentsFingerprint,
         };
         const fullCachePath = reportDataCachePath(cacheArgs);
         const selectedCachePath = requestedStudentIds.length
@@ -14044,7 +14196,9 @@ ${schoolName}`;
         };
       });
 
-      const allReportComments = await storage.getReportComments(schoolId);
+      const allReportComments = effectiveReportCommentRowsForCache.filter(
+        (comment: any) => !String(comment.commentGrade || "").startsWith(`${REPORT_CARD_OVERRIDE_PREFIX}:`),
+      );
       const allGrades = (await storage.getAllGrades()).filter((grade) => grade.schoolId === schoolId);
 
       for (const rc of reportCards) {
@@ -14076,7 +14230,11 @@ ${schoolName}`;
         (rc as any).classTeacherComment = classTeacherPoolComment;
       }
 
-      const overrideMap = await getReportCardCommentOverrideMap(schoolId, examId, reportCards.map((rc) => rc.student.id));
+      const overrideMap = getReportCardCommentOverrideMapFromRows(
+        effectiveReportCommentRowsForCache,
+        examId,
+        reportCards.map((rc) => rc.student.id),
+      );
       for (const rc of reportCards) {
         const overrides = overrideMap.get(rc.student.id);
         if (overrides?.principal !== undefined) {
@@ -14183,6 +14341,7 @@ ${schoolName}`;
           publicationVersion: Number(publication.publicationVersion || 0),
           gradingConfigurationFingerprint,
           brandingFingerprint,
+          reportCommentsFingerprint: overallCommentsFingerprint,
           ...(requestedStudentIds.length ? { studentIds: requestedStudentIds } : {}),
         });
         await writeJsonCache(cachePath, payload).catch((error) => {
@@ -14562,7 +14721,7 @@ async function buildReportCardMessage(
   }
 
 
-  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v4-exact-grading-raw-points-exclusions";
+  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v5-paginated-overall-comment-versioning";
   const reportPdfInFlight = new Map<string, Promise<{ buffer: Buffer; cacheStatus: "MISS" | "BYPASS" }>>();
 
   async function generateReportCardChromiumPdf(args: {
@@ -14572,15 +14731,19 @@ async function buildReportCardMessage(
     classId: number;
     studentIds: number[];
   }): Promise<{ buffer: Buffer; cacheStatus: "HIT" | "MISS" | "BYPASS" }> {
-    const [publication, school, settingsRows, gradeRows] = await Promise.all([
+    const [publication, school, settingsRows, gradeRows, reportCommentRows] = await Promise.all([
       getClassExamPublication(args.examId, args.classId),
       storage.getSchool(args.schoolId),
       db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, args.schoolId)),
       storage.getGradesBySchool(args.schoolId),
+      db.select().from(reportComments).where(eq(reportComments.schoolId, args.schoolId)),
     ]);
     const shouldCache = publication?.isPublished === true;
     const publicationVersion = Number(publication?.publicationVersion || 0);
     const gradingConfigurationFingerprint = reportGradingConfigurationFingerprint(settingsRows, gradeRows);
+    const publishedCommentSnapshotAvailable = shouldCache && Array.isArray(publication?.overallCommentRowsSnapshot);
+    const effectiveReportCommentRows = effectiveOverallCommentRows(publication, reportCommentRows);
+    const initialReportCommentsFingerprint = reportCommentsFingerprint(effectiveReportCommentRows);
     const cacheKey = reportCacheKey({
       templateVersion: REPORT_PDF_TEMPLATE_VERSION,
       schoolId: args.schoolId,
@@ -14589,6 +14752,7 @@ async function buildReportCardMessage(
       publicationVersion,
       gradingConfigurationFingerprint,
       brandingFingerprint: reportBrandingFingerprint(school),
+      reportCommentsFingerprint: initialReportCommentsFingerprint,
       studentIds: args.studentIds,
     });
     const cachePath = shouldCache ? path.join(academicReportPdfCacheDirectory(), `${cacheKey}.pdf`) : null;
@@ -14625,13 +14789,25 @@ async function buildReportCardMessage(
           margin: { top: "2mm", right: "2mm", bottom: "2mm", left: "2mm" },
         },
       });
+      let cacheStable = shouldCache;
       if (cachePath) {
-        await writeBufferCache(cachePath, buffer).catch((error) => {
-          console.warn("Unable to persist report PDF cache:", error);
-        });
-        queueAcademicReportCacheCleanup();
+        if (!publishedCommentSnapshotAvailable) {
+          const currentReportCommentRows = await db
+            .select()
+            .from(reportComments)
+            .where(eq(reportComments.schoolId, args.schoolId));
+          cacheStable = reportCommentsFingerprint(currentReportCommentRows) === initialReportCommentsFingerprint;
+        }
+        if (cacheStable) {
+          await writeBufferCache(cachePath, buffer).catch((error) => {
+            console.warn("Unable to persist report PDF cache:", error);
+          });
+          queueAcademicReportCacheCleanup();
+        } else {
+          console.info(`[academic-pdf] overall comments changed during render; cache write skipped exam=${args.examId} class=${args.classId}`);
+        }
       }
-      return { buffer, cacheStatus: shouldCache ? "MISS" : "BYPASS" };
+      return { buffer, cacheStatus: cacheStable ? "MISS" : "BYPASS" };
     })();
     reportPdfInFlight.set(inFlightKey, job);
     try {
@@ -15249,6 +15425,11 @@ async function buildReportCardMessage(
           examId: args.examId,
           classId: args.classId,
         });
+        const overallCommentRowsSnapshot = await loadOverallCommentRowsForPublicationSnapshot(tx, {
+          schoolId: args.schoolId,
+          examId: args.examId,
+          classId: args.classId,
+        });
         version += 1;
         action = version > 1 ? "republished" : "published";
         const values = {
@@ -15264,6 +15445,7 @@ async function buildReportCardMessage(
           unpublishedByUserId: null,
           unpublishedAt: null,
           unpublishReason: null,
+          overallCommentRowsSnapshot,
           updatedAt: now,
         };
         if (existing) {

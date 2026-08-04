@@ -12,16 +12,25 @@ const REPORT_PDF_CSS = `
   html, body, #root { margin: 0 !important; padding: 0 !important; background: #fff !important; color: #000 !important; }
   @page { size: A4 portrait; margin: 2mm; }
   .report-pdf-document { width: 206mm; margin: 0 auto; background: #fff; }
-  .report-slip { box-shadow: none !important; border-radius: 0 !important; margin: 0 !important; padding: 0 !important; break-after: page; page-break-after: always; background: white !important; color: black !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .report-slip:last-child { break-after: auto; page-break-after: auto; }
-  .report-slip-page--main { min-height: calc(293mm - 2px) !important; height: calc(293mm - 2px) !important; }
+  .report-card-student-document { width: 100%; break-after: page; page-break-after: always; }
+  .report-card-student-document:last-child { break-after: auto; page-break-after: auto; }
+  .report-slip { box-shadow: none !important; border-radius: 0 !important; margin: 0 !important; padding: 0 !important; break-inside: auto !important; page-break-inside: auto !important; background: white !important; color: black !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .report-slip-page--main { min-height: calc(293mm - 2px) !important; height: auto !important; overflow: visible !important; display: block !important; }
+  .report-content-flow { height: auto !important; display: block !important; }
+  .report-slip-inner { border: 1px solid #ccc !important; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+  .report-primary-section { break-inside: auto !important; page-break-inside: auto !important; }
+  .report-subject-table { break-inside: auto !important; page-break-inside: auto !important; }
+  .report-subject-table-head { display: table-header-group !important; }
+  .report-subject-table tfoot { display: table-footer-group !important; }
+  .report-subject-row, .report-subject-table tr { break-inside: avoid !important; page-break-inside: avoid !important; }
+  .report-section { break-inside: avoid-page !important; page-break-inside: avoid !important; }
+  .report-section--graphs, .report-section--class-comment, .report-section--principal-comment, .report-section--footer { width: 100%; }
   .report-graphs-row { align-items: stretch !important; }
   .report-footer-row { align-items: stretch !important; }
   .report-footer-box, .report-principal-info, .report-qr-block { height: 100% !important; }
   .report-slip th { background: #6b7280 !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .report-slip tbody tr[class*="bg-gray-100"] { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .report-slip tbody tr[class*="bg-gray-100"] td { background: #f3f4f6 !important; -webkit-print-color-adjust: exact; }
-  .report-slip-inner { border: 1px solid #ccc !important; }
   .report-slip [class*="text-green"] { color: #16a34a !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .report-slip [class*="text-red"] { color: #dc2626 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .report-slip [class*="text-amber"] { color: #d97706 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }

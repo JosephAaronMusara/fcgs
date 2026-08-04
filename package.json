@@ -25,6 +25,8 @@
     "transport:preflight:post-schema": "tsx script/preflight-transport-upgrade.ts --post-schema",
     "recruitment:preflight": "tsx script/preflight-recruitment.ts",
     "academic-pdf:preflight": "tsx script/preflight-academic-pdf.ts",
+    "reports:comments:integrity": "tsx script/repair-report-comment-integrity.ts",
+    "reports:comments:integrity:apply": "tsx script/repair-report-comment-integrity.ts --apply",
     "recruitment:logic-test": "tsx script/test-recruitment-screening.ts",
     "grades:paper-recalc-test": "tsx script/test-assessment-paper-recalculation.ts",
     "grades:paper-recalc:preflight": "tsx script/recalculate-assessment-paper-results.ts",
