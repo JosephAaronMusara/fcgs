@@ -31,7 +31,15 @@
     "grades:paper-recalc:apply": "tsx script/recalculate-assessment-paper-results.ts --apply",
     "assessments:policy:schema": "tsx script/apply-assessment-policy-schema.ts",
     "assessments:policy:preflight": "tsx script/repair-assessment-policies.ts",
-    "assessments:policy:apply": "tsx script/repair-assessment-policies.ts --apply"
+    "assessments:policy:apply": "tsx script/repair-assessment-policies.ts --apply",
+    "grades:integrity:schema": "tsx script/apply-grading-integrity-schema.ts",
+    "grades:integrity:audit": "tsx script/audit-grading-integrity.ts",
+    "grades:integrity:constraints": "tsx script/enforce-grading-integrity-constraints.ts",
+    "grades:integrity:logic-test": "tsx script/test-grading-engine.ts",
+    "grades:integrity:backfill": "tsx script/backfill-grading-ranking-configuration.ts",
+    "grades:integrity:backfill:apply": "tsx script/backfill-grading-ranking-configuration.ts --apply",
+    "grades:links:repair": "tsx script/repair-assessment-grade-links.ts",
+    "grades:links:repair:apply": "tsx script/repair-assessment-grade-links.ts --apply"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

@@ -16,6 +16,8 @@ export type GradeConfigurationState =
   | "profile_missing"
   | "profile_incomplete"
   | "profile_ambiguous"
+  | "profile_metadata_incomplete"
+  | "profile_settings_missing"
   | "stream_unresolved";
 
 export type GradeConfigurationProfileStatus = {
@@ -23,12 +25,17 @@ export type GradeConfigurationProfileStatus = {
   profileLabel: string;
   state: GradeConfigurationState;
   ready: boolean;
-  resolutionSource: "exact" | "compatible" | "mixed" | "none";
+  resolutionSource: "exact" | "none";
   subjectType: string | null;
   subjectIds: number[];
   gradeRowIds: number[];
   missingPercentages: number[];
   ambiguousPercentages: number[];
+  missingStatusGradeIds: number[];
+  missingPointsGradeIds: number[];
+  missingRankOrderGradeIds: number[];
+  duplicateRankOrders: number[];
+  pointsDirection: "higher_is_better" | "lower_is_better" | null;
   message: string;
 };
 
@@ -72,11 +79,11 @@ function evaluateCoverage<T extends GradeLike>(
 ): {
   missingPercentages: number[];
   ambiguousPercentages: number[];
-  resolutionSources: Set<"exact" | "compatible" | "unscoped">;
+  resolutionSources: Set<"exact" | "unscoped">;
 } {
   const missing = new Set<number>();
   const ambiguous = new Set<number>();
-  const resolutionSources = new Set<"exact" | "compatible" | "unscoped">();
+  const resolutionSources = new Set<"exact" | "unscoped">();
 
   for (const scenarioSubjectType of coverageScenarios(rows, subjectType)) {
     for (let percentage = 0; percentage <= 100; percentage += 1) {
@@ -103,12 +110,9 @@ function evaluateCoverage<T extends GradeLike>(
 }
 
 function summarizeResolutionSource(
-  sources: Set<"exact" | "compatible" | "unscoped">,
-): "exact" | "compatible" | "mixed" | "none" {
-  if (sources.size === 0) return "none";
-  if (sources.size > 1) return "mixed";
-  const [source] = Array.from(sources);
-  return source === "unscoped" ? "exact" : source;
+  sources: Set<"exact" | "unscoped">,
+): "exact" | "none" {
+  return sources.size > 0 ? "exact" : "none";
 }
 
 function buildCoverageMessage(args: {
@@ -116,16 +120,11 @@ function buildCoverageMessage(args: {
   profileLabel: string;
   missingPercentages: number[];
   ambiguousPercentages: number[];
-  resolutionSource?: "exact" | "compatible" | "mixed" | "none";
+  resolutionSource?: "exact" | "none";
 }): string {
-  if (args.state === "ready") {
-    const suffix = args.resolutionSource === "compatible"
-      ? " using a compatible configured profile"
-      : args.resolutionSource === "mixed"
-        ? " using exact and compatible configured ranges"
-        : "";
-    return `${args.profileLabel} grading is ready${suffix}.`;
-  }
+  if (args.state === "ready") return `${args.profileLabel} grading is ready.`;
+  if (args.state === "profile_settings_missing") return `${args.profileLabel} ranking settings have not been configured.`;
+  if (args.state === "profile_metadata_incomplete") return `${args.profileLabel} requires PASS/FAIL status, grade points and a unique rank order for every grade band.`;
   if (args.state === "stream_unresolved") {
     return "The selected stream does not map to a grading profile.";
   }
@@ -159,6 +158,7 @@ export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: 
   streamName?: string | null;
   subjectType?: string | null;
   subjectIds?: number[];
+  profileSetting?: { pointsDirection?: "higher_is_better" | "lower_is_better" | null } | null;
 }): GradeConfigurationProfileStatus {
   const profileKey = resolveExpectedGradeProfile(args);
   const profileLabel = getGradeProfileLabel(profileKey);
@@ -176,6 +176,11 @@ export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: 
       gradeRowIds: [],
       missingPercentages: [],
       ambiguousPercentages: [],
+      missingStatusGradeIds: [],
+      missingPointsGradeIds: [],
+      missingRankOrderGradeIds: [],
+      duplicateRankOrders: [],
+      pointsDirection: args.profileSetting?.pointsDirection || null,
       message: buildCoverageMessage({ state, profileLabel, missingPercentages: [], ambiguousPercentages: [] }),
     };
   }
@@ -194,17 +199,49 @@ export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: 
       gradeRowIds: [],
       missingPercentages: Array.from({ length: 101 }, (_, index) => index),
       ambiguousPercentages: [],
+      missingStatusGradeIds: [],
+      missingPointsGradeIds: [],
+      missingRankOrderGradeIds: [],
+      duplicateRankOrders: [],
+      pointsDirection: args.profileSetting?.pointsDirection || null,
       message: buildCoverageMessage({ state, profileLabel, missingPercentages: [], ambiguousPercentages: [] }),
     };
   }
 
   const coverage = evaluateCoverage(candidates, args.subjectType);
   const resolutionSource = summarizeResolutionSource(coverage.resolutionSources);
+  const relevantRows = profileRowsForSubject(candidates, args.subjectType);
+  const missingStatusGradeIds = uniqueNumbers(relevantRows
+    .filter((grade: any) => !["PASS", "FAIL"].includes(String(grade.gradeStatus || "").trim().toUpperCase()))
+    .map((grade) => grade.id));
+  const missingPointsGradeIds = uniqueNumbers(relevantRows
+    .filter((grade: any) => grade.gradePoints === null || grade.gradePoints === undefined || grade.gradePoints === "" || !Number.isFinite(Number(grade.gradePoints)))
+    .map((grade) => grade.id));
+  const missingRankOrderGradeIds = uniqueNumbers(relevantRows
+    .filter((grade: any) => !Number.isInteger(Number(grade.rankOrder)) || Number(grade.rankOrder) <= 0)
+    .map((grade) => grade.id));
+  const rankCounts = new Map<string, { rank: number; count: number }>();
+  relevantRows.forEach((grade: any) => {
+    const rank = Number(grade.rankOrder);
+    if (!Number.isInteger(rank) || rank <= 0) return;
+    const key = `${String(grade.gradeType || "")}|${rank}`;
+    const current = rankCounts.get(key) || { rank, count: 0 };
+    current.count += 1;
+    rankCounts.set(key, current);
+  });
+  const duplicateRankOrders = Array.from(new Set(
+    Array.from(rankCounts.values()).filter(({ count }) => count > 1).map(({ rank }) => rank),
+  )).sort((a, b) => a - b);
+  const metadataIncomplete = missingStatusGradeIds.length > 0 || missingPointsGradeIds.length > 0 || missingRankOrderGradeIds.length > 0 || duplicateRankOrders.length > 0;
   const state: GradeConfigurationState = coverage.ambiguousPercentages.length > 0
     ? "profile_ambiguous"
     : coverage.missingPercentages.length > 0
       ? "profile_incomplete"
-      : "ready";
+      : metadataIncomplete
+        ? "profile_metadata_incomplete"
+        : !args.profileSetting?.pointsDirection
+          ? "profile_settings_missing"
+          : "ready";
 
   return {
     profileKey,
@@ -217,6 +254,11 @@ export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: 
     gradeRowIds: uniqueNumbers(candidates.map((grade) => grade.id)),
     missingPercentages: coverage.missingPercentages,
     ambiguousPercentages: coverage.ambiguousPercentages,
+    missingStatusGradeIds,
+    missingPointsGradeIds,
+    missingRankOrderGradeIds,
+    duplicateRankOrders,
+    pointsDirection: args.profileSetting?.pointsDirection || null,
     message: buildCoverageMessage({
       state,
       profileLabel,
@@ -228,8 +270,7 @@ export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: 
 }
 
 /**
- * Plans an automatic class attachment for an exact profile only. Compatible profiles remain
- * a read-time fallback; they are never mutated automatically. The attachment is allowed only
+ * Plans an automatic class attachment for an exact profile only. The attachment is allowed only
  * when the exact profile already contains a complete, non-overlapping 0–100 range set.
  */
 export function planExactProfileClassAttachment<T extends GradeLike>(args: {

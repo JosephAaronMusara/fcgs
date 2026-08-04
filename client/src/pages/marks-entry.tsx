@@ -122,7 +122,7 @@ interface AssessmentMark {
 
 type MarksEntryGrade = Grade & {
   resolutionProfilePriority?: number;
-  resolutionProfileSource?: "exact" | "compatible" | "unscoped";
+  resolutionProfileSource?: "exact" | "unscoped";
 };
 
 interface MarksEntryData {
@@ -752,9 +752,8 @@ export default function MarksEntryPage() {
         orderedGrades.map((grade) => Number(grade.resolutionProfilePriority ?? 0)),
       )).sort((a, b) => a - b);
 
-      // Mirror the server's grading precedence: use an exact-profile range when it
-      // covers the percentage, then fall back to a compatible class profile only
-      // when the exact profile has no matching range.
+      // Mirror the server's exact-profile grading precedence. No legacy or
+      // cross-board profile is considered when the configured range is missing.
       for (const priority of profilePriorities) {
         const profileGrades = orderedGrades.filter(
           (grade) => Number(grade.resolutionProfilePriority ?? 0) === priority,

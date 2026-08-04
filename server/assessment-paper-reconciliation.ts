@@ -14,6 +14,7 @@ import {
 } from "@shared/schema";
 import { getProfileAwareGradeCandidates, resolveGradeForPercentage } from "./grade-resolution";
 import { resolveGradeProfileKey } from "@shared/academic-profiles";
+import { isTemporarilyExcludedFromStrictGrading } from "./grading-exclusions";
 import { calculateWeightedAssessmentResult } from "./assessment-paper-calculation";
 import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
 
@@ -153,7 +154,8 @@ async function loadGradingContext(
   const [stream] = classInfo.streamId
     ? await tx.select().from(streams).where(eq(streams.id, classInfo.streamId)).limit(1)
     : [];
-  const profileKey = resolveGradeProfileKey({
+  const excluded = isTemporarilyExcludedFromStrictGrading(subject);
+  const profileKey = excluded ? null : resolveGradeProfileKey({
     schoolType: school.schoolType,
     examinationBoard: school.examinationBoard,
     streamName: stream?.name || null,
@@ -164,7 +166,7 @@ async function loadGradingContext(
     : [];
   const commentByGradeId = new Map(comments.map((comment: any) => [Number(comment.gradeId), comment]));
 
-  return { profileKey, subject, applicableGrades, commentByGradeId };
+  return { profileKey, subject, applicableGrades, commentByGradeId, excluded };
 }
 
 export async function reconcileAssessmentPapersAndMarks(args: {
@@ -397,6 +399,15 @@ export async function reconcileAssessmentPapersAndMarks(args: {
           customCommentText = null;
           commentSource = "pool";
           incompleteMarks += 1;
+        } else if (effectivePercentage !== null && gradingContext.excluded) {
+          gradeId = mark.gradeId === null ? null : Number(mark.gradeId);
+          commentId = mark.commentId === null ? null : Number(mark.commentId);
+          autoCommentSnapshot = mark.autoCommentSnapshot;
+          customCommentText = mark.customCommentText;
+          commentSource = mark.commentSource === "custom" && !!String(mark.customCommentText || "").trim()
+            ? "custom"
+            : "pool";
+          recalculatedMarks += 1;
         } else if (effectivePercentage !== null) {
           const gradeResolution = resolveGradeForPercentage(
             effectivePercentage,

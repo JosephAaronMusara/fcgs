@@ -1,7 +1,4 @@
-import {
-  getCompatibleGradeProfileKeys,
-  isSubjectTypeCompatibleWithGradeType,
-} from "@shared/academic-profiles";
+import { isSubjectTypeCompatibleWithGradeType } from "@shared/academic-profiles";
 
 export type GradeLike = {
   id: number;
@@ -13,7 +10,7 @@ export type GradeLike = {
   appliesAll?: boolean | null;
   classIds?: unknown;
   resolutionProfilePriority?: number;
-  resolutionProfileSource?: "exact" | "compatible" | "unscoped";
+  resolutionProfileSource?: "exact" | "unscoped";
 };
 
 export type GradeResolution<T extends GradeLike> = {
@@ -21,7 +18,7 @@ export type GradeResolution<T extends GradeLike> = {
   ambiguous: boolean;
   matchingGradeIds: number[];
   source: "typed" | "generic" | "all" | "none";
-  profileSource: "exact" | "compatible" | "unscoped" | "none";
+  profileSource: "exact" | "unscoped" | "none";
 };
 
 export function parseFinitePercentage(value: unknown): number | null {
@@ -69,14 +66,8 @@ export function isGradeApplicableToClass(grade: GradeLike, classId: number): boo
 }
 
 /**
- * Builds the profile candidates in the safe order required by assessment grading:
- * 1) remove grades that do not apply to the assessment class;
- * 2) retain exact-profile grades as priority 0;
- * 3) retain compatible legacy/board profile grades as priority 1.
- *
- * Percentage resolution later tries priority 0 first and only falls back to priority 1
- * when the exact profile has no range covering the percentage. This avoids the previous
- * bug where exact grades for unrelated classes suppressed valid compatible class grades.
+ * Builds candidates for the exact configured profile only. Cross-board and
+ * legacy profile fallbacks are intentionally unsupported.
  */
 export function getProfileAwareGradeCandidates<T extends GradeLike>(
   grades: T[],
@@ -84,38 +75,17 @@ export function getProfileAwareGradeCandidates<T extends GradeLike>(
   classId: number,
 ): Array<T & {
   resolutionProfilePriority: number;
-  resolutionProfileSource: "exact" | "compatible" | "unscoped";
+  resolutionProfileSource: "exact" | "unscoped";
 }> {
   const applicable = uniqueGradesById(grades).filter((grade) => isGradeApplicableToClass(grade, classId));
-
-  if (!profileKey) {
-    return applicable.map((grade) => ({
-      ...grade,
-      resolutionProfilePriority: 0,
-      resolutionProfileSource: "unscoped" as const,
-    }));
-  }
-
-  const exact = applicable.filter((grade) => (grade.gradeLevel || null) === profileKey);
-  const compatibleKeys = new Set(
-    getCompatibleGradeProfileKeys(profileKey).filter((key) => key !== profileKey),
-  );
-  const compatible = applicable.filter(
-    (grade) => !!grade.gradeLevel && compatibleKeys.has(String(grade.gradeLevel)),
-  );
-
-  return [
-    ...exact.map((grade) => ({
+  if (!profileKey) return [];
+  return applicable
+    .filter((grade) => (grade.gradeLevel || null) === profileKey)
+    .map((grade) => ({
       ...grade,
       resolutionProfilePriority: 0,
       resolutionProfileSource: "exact" as const,
-    })),
-    ...compatible.map((grade) => ({
-      ...grade,
-      resolutionProfilePriority: 1,
-      resolutionProfileSource: "compatible" as const,
-    })),
-  ];
+    }));
 }
 
 function resolveWithinProfilePriority<T extends GradeLike>(
@@ -160,9 +130,8 @@ function resolveWithinProfilePriority<T extends GradeLike>(
  * Resolves a percentage using profile priority first, then the existing subject-type
  * precedence inside each profile: typed grades, generic grades, then the complete set.
  *
- * Exact-profile ranges are authoritative where they cover the percentage. Compatible
- * profile ranges are only considered when the exact profile has no matching range.
- * Ambiguous exact-profile ranges stop resolution rather than falling through and guessing.
+ * Only exact-profile ranges are considered. Ambiguous exact-profile ranges stop
+ * resolution rather than falling through or guessing.
  */
 export function resolveGradeForPercentage<T extends GradeLike>(
   percentage: number,

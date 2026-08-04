@@ -4,7 +4,7 @@ import { setupAuth, requireAuth, requirePermission, requireAnyPermission, requir
 import { storage, PosSaleProcessingError } from "./storage";
 import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups, gradeProfileSettings, ecdAssessmentRecords, ecdAssessmentResponses } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, count as drizzleCount } from "drizzle-orm";
@@ -17,11 +17,14 @@ import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { registerRecruitmentRoutes } from "./recruitment-routes";
 import { communicationService, createBroadcastNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
+import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
 import { AssessmentPaperReconciliationError, reconcileAssessmentPapersAndMarks } from "./assessment-paper-reconciliation";
 import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
 import { ASSESSMENT_CARDINALITY, inferAssessmentTypePolicy, isSinglePerExamAssessmentType, selectCanonicalAssessments } from "./assessment-policy";
 import { assessClassSubjectGradeConfiguration, planExactProfileClassAttachment, resolveExpectedGradeProfile, type GradeConfigurationProfileStatus } from "./grading-configuration";
+import { calculateConfiguredPositionMap, normalizeGradeStatus, parseGradePoints, resolveExactConfiguredGrade, storedGradeMatchesExactContext, type RankingCandidate, type RankingSubjectResult } from "./grading-engine";
+import { isTemporarilyExcludedFromStrictGrading } from "./grading-exclusions";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
@@ -42,7 +45,7 @@ import {
   insertPermissionSchema, insertAccessGroupSchema,
   type User, type AccessGroup, type Staff, type InsertStudent, type InsertActivityLog, type InsertStaffAttendanceLog
 } from "@shared/schema";
-import { ECD_DOMAIN_SEEDS, filterItemsByGradeProfileKey, getCompatibleGradeProfileKeys, getGradingProfilesForSchool, getGradeProfileLabel, getStrictGradeProfileKeys, getSubjectTypeOptionsForSchool, gradeProfileMatchesStrict, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, subjectMatchesGradeProfile, type GradeProfileKey } from "@shared/academic-profiles";
+import { ECD_DOMAIN_SEEDS, GRADE_PROFILE_KEYS, filterItemsByGradeProfileKey, getGradingProfilesForSchool, getGradeProfileLabel, getGradeTypeOptionsForProfile, getStrictGradeProfileKeys, getSubjectTypeOptionsForSchool, gradeProfileMatchesStrict, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, subjectMatchesGradeProfile, type GradeProfileKey } from "@shared/academic-profiles";
 
 function requestText(value: unknown): string {
   if (Array.isArray(value)) return requestText(value[0]);
@@ -108,12 +111,14 @@ async function resolveGradeProfileContext(args: {
   const streamId = classInfo?.streamId ?? null;
   const stream = streamId ? await storage.getStream(streamId) : undefined;
   const streamName = stream?.name || null;
-  const profileKey = resolveGradeProfileKey({
-    schoolType: school?.schoolType,
-    examinationBoard: school?.examinationBoard,
-    streamName,
-    subjectType: subject?.subjectType,
-  });
+  const profileKey = isTemporarilyExcludedFromStrictGrading(subject)
+    ? null
+    : resolveGradeProfileKey({
+        schoolType: school?.schoolType,
+        examinationBoard: school?.examinationBoard,
+        streamName,
+        subjectType: subject?.subjectType,
+      });
   return { profileKey, school, classInfo, subject, streamName };
 }
 
@@ -138,6 +143,10 @@ function getClassSubjectGradeCandidates(args: {
   classStreamName?: string | null;
   subject: any;
 }) {
+  const excluded = isTemporarilyExcludedFromStrictGrading(args.subject);
+  if (excluded) {
+    return { profileKey: null, grades: [] as any[], excluded: true };
+  }
   const profileKey = resolveGradeProfileKey({
     schoolType: args.school?.schoolType,
     examinationBoard: args.school?.examinationBoard,
@@ -152,6 +161,7 @@ function getClassSubjectGradeCandidates(args: {
           classId: Number(args.classInfo?.id || 0),
         })
       : [],
+    excluded: false,
   };
 }
 
@@ -275,17 +285,40 @@ async function getClassGradingConfiguration(args: {
     };
   }
 
-  const [school, stream, schoolGrades, schoolSubjects] = await Promise.all([
+  const [school, stream, schoolGrades, schoolSubjects, profileSettingsRows] = await Promise.all([
     storage.getSchool(classInfo.schoolId),
     classInfo.streamId ? storage.getStream(classInfo.streamId) : Promise.resolve(undefined),
     storage.getGradesBySchool(classInfo.schoolId),
     storage.getSubjectsBySchool(classInfo.schoolId),
+    db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, classInfo.schoolId)),
   ]);
+
+  if (Array.isArray(args.subjectIds) && args.subjectIds.length === 0) {
+    return {
+      classId: classInfo.id,
+      ready: true,
+      state: "ready",
+      autoAttachedGradeRows: 0,
+      profiles: [],
+      message: "No strict-grading subjects require configuration.",
+    };
+  }
 
   const requestedSubjectIds = Array.isArray(args.subjectIds)
     ? Array.from(new Set(args.subjectIds.map(Number).filter(Number.isFinite)))
     : (await storage.getClassSubjects(classInfo.id)).map((row) => Number(row.subjectId));
-  const selectedSubjects = schoolSubjects.filter((subject) => requestedSubjectIds.includes(subject.id));
+  const requestedSubjects = schoolSubjects.filter((subject) => requestedSubjectIds.includes(subject.id));
+  const selectedSubjects = requestedSubjects.filter((subject) => !isTemporarilyExcludedFromStrictGrading(subject));
+  if (requestedSubjects.length > 0 && selectedSubjects.length === 0) {
+    return {
+      classId: classInfo.id,
+      ready: true,
+      state: "ready",
+      autoAttachedGradeRows: 0,
+      profiles: [],
+      message: "All requested subjects are temporarily excluded from strict grading.",
+    };
+  }
   const contexts = selectedSubjects.length > 0
     ? selectedSubjects.map((subject) => ({
         subjectType: subject.subjectType || null,
@@ -328,8 +361,15 @@ async function getClassGradingConfiguration(args: {
   const effectiveGrades = autoAttachedGradeRows > 0
     ? await storage.getGradesBySchool(classInfo.schoolId)
     : schoolGrades;
-  const statuses = mergeGradeConfigurationStatuses(contexts.map((context) =>
-    assessClassSubjectGradeConfiguration({
+  const statuses = mergeGradeConfigurationStatuses(contexts.map((context) => {
+    const profileKey = resolveExpectedGradeProfile({
+      schoolType: school?.schoolType,
+      examinationBoard: school?.examinationBoard,
+      streamName: stream?.name || null,
+      subjectType: context.subjectType,
+    });
+    const profileSetting = profileSettingsRows.find((row: any) => String(row.gradeLevel) === String(profileKey || "")) || null;
+    return assessClassSubjectGradeConfiguration({
       grades: effectiveGrades,
       classId: classInfo.id,
       schoolType: school?.schoolType,
@@ -337,8 +377,9 @@ async function getClassGradingConfiguration(args: {
       streamName: stream?.name || null,
       subjectType: context.subjectType,
       subjectIds: context.subjectIds,
-    })
-  ));
+      profileSetting,
+    });
+  }));
   const ready = statuses.length > 0 && statuses.every((status) => status.ready);
   const problem = statuses.find((status) => !status.ready);
 
@@ -383,23 +424,22 @@ function resolveStoredAssessmentGrade(args: {
   percentage: number | null;
   applicableGrades: any[];
   allGrades: any[];
+  expectedProfileKey?: string | null;
+  classId: number;
   subjectType?: string | null;
 }) {
-  if (args.percentage === null) return null;
-
-  if (args.mark?.gradeId) {
-    const linkedGrade = args.allGrades.find(
-      (grade) => Number(grade.id) === Number(args.mark.gradeId),
-    );
-    if (linkedGrade) return linkedGrade;
-  }
-
-  const resolution = resolveGradeForPercentage(
-    args.percentage,
-    args.applicableGrades,
-    args.subjectType,
-  );
-  return resolution.ambiguous ? null : resolution.grade;
+  if (args.percentage === null || !args.expectedProfileKey) return null;
+  const linkedGrade = args.mark?.gradeId
+    ? args.allGrades.find((grade) => Number(grade.id) === Number(args.mark.gradeId))
+    : null;
+  return resolveExactConfiguredGrade({
+    percentage: args.percentage,
+    expectedProfileKey: args.expectedProfileKey,
+    classId: args.classId,
+    subjectType: args.subjectType,
+    exactProfileGrades: args.applicableGrades,
+    storedGrade: linkedGrade,
+  }).grade;
 }
 
 async function getCurrentStaffMember(req: Request, schoolId: number) {
@@ -462,44 +502,205 @@ function calculatePositionMap(items: Array<{ id: number; value: number | null }>
   return { size, map };
 }
 
-async function calculateStreamPositionMap(examId: number, schoolId: number, streamId?: number | null) {
-  if (!streamId) return { size: 0, map: new Map<number, string>() };
-  const classes = (await storage.getClassesBySchool(schoolId)).filter((cls) => cls.streamId === streamId);
-  if (classes.length === 0) return { size: 0, map: new Map<number, string>() };
-
-  const allAssessments = await storage.getAssessmentsByExam(examId);
-  const classIds = new Set(classes.map((cls) => cls.id));
-  const streamAssessments = allAssessments.filter((assessment) => classIds.has(assessment.classId));
-  if (streamAssessments.length === 0) return { size: 0, map: new Map<number, string>() };
-
-  const studentsByClass = new Map<number, any[]>();
-  for (const cls of classes) {
-    studentsByClass.set(cls.id, await storage.getStudentsByClass(cls.id));
-  }
-
-  const allMarks = await storage.getAssessmentMarksByAssessments(streamAssessments.map((assessment) => assessment.id));
-  const selectedAssessmentIds = new Set(
-    selectCanonicalAssessments(streamAssessments, allMarks).assessments
-      .map((assessment) => Number(assessment.id)),
+function resolveSharedPointsDirection(profileKeys: Iterable<string>, settingsRows: any[]): "higher_is_better" | "lower_is_better" | null {
+  const keys = Array.from(new Set(Array.from(profileKeys).filter(Boolean)));
+  if (!keys.length) return null;
+  const directionByProfile = new Map(
+    settingsRows.map((row: any) => [String(row.gradeLevel || ""), String(row.pointsDirection || "")]),
   );
-  const marks = allMarks.filter((mark) => selectedAssessmentIds.has(Number(mark.assessmentId)));
-  const totals = new Map<number, { sum: number; count: number }>();
-  for (const mark of marks) {
-    if (mark.percentage === null || mark.percentage === undefined) continue;
-    const current = totals.get(mark.studentId) || { sum: 0, count: 0 };
-    current.sum += parseFloat(mark.percentage as any);
-    current.count += 1;
-    totals.set(mark.studentId, current);
+  const directions = keys.map((key) => directionByProfile.get(key)).filter(Boolean);
+  if (directions.length !== keys.length) return null;
+  const uniqueDirections = new Set(directions);
+  if (uniqueDirections.size !== 1) return null;
+  const direction = directions[0];
+  return direction === "higher_is_better" || direction === "lower_is_better" ? direction : null;
+}
+
+async function calculateClassPositionMap(examId: number, schoolId: number, classId: number) {
+  const [school, classInfo, allAssessments, allGrades, schoolSubjects, settingsRows, students] = await Promise.all([
+    storage.getSchool(schoolId),
+    storage.getClass(classId),
+    storage.getAssessmentsByExam(examId),
+    storage.getGradesBySchool(schoolId),
+    storage.getSubjectsBySchool(schoolId),
+    db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
+    storage.getStudentsByClass(classId),
+  ]);
+  if (!classInfo) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  const stream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+  const rawAssessments = allAssessments.filter((assessment: any) => Number(assessment.classId) === Number(classId));
+  if (!rawAssessments.length) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  const allMarks = await storage.getAssessmentMarksByAssessments(rawAssessments.map((assessment: any) => Number(assessment.id)));
+  const assessments = selectCanonicalAssessments(rawAssessments, allMarks).assessments;
+  const assessmentIds = new Set(assessments.map((assessment: any) => Number(assessment.id)));
+  const marks = allMarks.filter((mark: any) => assessmentIds.has(Number(mark.assessmentId)));
+  const marksMap = new Map(marks.map((mark: any) => [`${Number(mark.studentId)}-${Number(mark.assessmentId)}`, mark]));
+  const subjectMap = new Map(schoolSubjects.map((subject: any) => [Number(subject.id), subject]));
+  const expectedSubjectIds = Array.from(new Set(assessments.map((assessment: any) => Number(assessment.subjectId))))
+    .filter((subjectId) => {
+      const subject = subjectMap.get(subjectId);
+      return !!subject && !isTemporarilyExcludedFromStrictGrading(subject);
+    });
+  const assessmentBySubject = new Map(assessments.map((assessment: any) => [Number(assessment.subjectId), assessment]));
+  const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+  const profileKeys = new Set<string>();
+  for (const subjectId of expectedSubjectIds) {
+    const subject = subjectMap.get(subjectId);
+    if (!subject) continue;
+    const context = getClassSubjectGradeCandidates({
+      allGrades,
+      school,
+      classInfo,
+      classStreamName: stream?.name || null,
+      subject,
+    });
+    gradeContextBySubject.set(subjectId, context);
+    if (context.profileKey) profileKeys.add(context.profileKey);
+  }
+  const studentIds = students.map((student: any) => Number(student.id));
+  const studentSubjectRows = studentIds.length
+    ? await db.select({ studentId: studentSubjectsSchema.studentId, subjectId: studentSubjectsSchema.subjectId })
+      .from(studentSubjectsSchema)
+      .where(inArray(studentSubjectsSchema.studentId, studentIds))
+    : [];
+  const assignedByStudent = new Map<number, Set<number>>();
+  for (const row of studentSubjectRows) {
+    const assigned = assignedByStudent.get(Number(row.studentId)) || new Set<number>();
+    assigned.add(Number(row.subjectId));
+    assignedByStudent.set(Number(row.studentId), assigned);
+  }
+  const candidates: RankingCandidate[] = students.map((student: any) => {
+    const assigned = assignedByStudent.get(Number(student.id));
+    const studentExpectedSubjectIds = assigned?.size
+      ? expectedSubjectIds.filter((subjectId) => assigned.has(Number(subjectId)))
+      : expectedSubjectIds;
+    return {
+    id: Number(student.id),
+    expectedSubjectIds: studentExpectedSubjectIds,
+    results: studentExpectedSubjectIds.map((subjectId): RankingSubjectResult => {
+      const assessment: any = assessmentBySubject.get(subjectId);
+      const subject: any = subjectMap.get(subjectId);
+      const context = gradeContextBySubject.get(subjectId);
+      const mark: any = assessment ? marksMap.get(`${Number(student.id)}-${Number(assessment.id)}`) : null;
+      const percentage = parseFinitePercentage(mark?.percentage);
+      const storedGrade = mark?.gradeId ? allGrades.find((grade: any) => Number(grade.id) === Number(mark.gradeId)) : null;
+      const resolution = resolveExactConfiguredGrade({
+        percentage,
+        expectedProfileKey: context?.profileKey || null,
+        classId,
+        subjectType: subject?.subjectType || null,
+        exactProfileGrades: context?.grades || [],
+        storedGrade,
+      });
+      return { subjectId, percentage, grade: resolution.grade, profileKey: context?.profileKey || null };
+    }),
+  };
+  });
+  const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
+  return calculateConfiguredPositionMap({ candidates, pointsDirection });
+}
+
+async function calculateStreamPositionMap(examId: number, schoolId: number, streamId?: number | null) {
+  if (!streamId) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  const [school, stream, allClasses, allAssessments, allGrades, schoolSubjects, settingsRows] = await Promise.all([
+    storage.getSchool(schoolId),
+    storage.getStream(streamId),
+    storage.getClassesBySchool(schoolId),
+    storage.getAssessmentsByExam(examId),
+    storage.getGradesBySchool(schoolId),
+    storage.getSubjectsBySchool(schoolId),
+    db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
+  ]);
+  const classes = allClasses.filter((classInfo: any) => Number(classInfo.streamId) === Number(streamId));
+  if (!classes.length) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  const classIds = new Set(classes.map((classInfo: any) => Number(classInfo.id)));
+  const rawAssessments = allAssessments.filter((assessment: any) => classIds.has(Number(assessment.classId)));
+  if (!rawAssessments.length) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  const allMarks = await storage.getAssessmentMarksByAssessments(rawAssessments.map((assessment: any) => Number(assessment.id)));
+  const canonicalAssessments = selectCanonicalAssessments(rawAssessments, allMarks).assessments;
+  const canonicalIds = new Set(canonicalAssessments.map((assessment: any) => Number(assessment.id)));
+  const canonicalMarks = allMarks.filter((mark: any) => canonicalIds.has(Number(mark.assessmentId)));
+  const subjectMap = new Map(schoolSubjects.map((subject: any) => [Number(subject.id), subject]));
+  const marksMap = new Map(canonicalMarks.map((mark: any) => [`${Number(mark.studentId)}-${Number(mark.assessmentId)}`, mark]));
+  const studentsByClass = new Map<number, any[]>();
+  await Promise.all(classes.map(async (classInfo: any) => {
+    studentsByClass.set(Number(classInfo.id), await storage.getStudentsByClass(Number(classInfo.id)));
+  }));
+
+  const allStreamStudents = Array.from(studentsByClass.values()).flat();
+  const streamStudentIds = allStreamStudents.map((student: any) => Number(student.id));
+  const streamStudentSubjectRows = streamStudentIds.length
+    ? await db.select({ studentId: studentSubjectsSchema.studentId, subjectId: studentSubjectsSchema.subjectId })
+      .from(studentSubjectsSchema)
+      .where(inArray(studentSubjectsSchema.studentId, streamStudentIds))
+    : [];
+  const streamAssignedByStudent = new Map<number, Set<number>>();
+  for (const row of streamStudentSubjectRows) {
+    const assigned = streamAssignedByStudent.get(Number(row.studentId)) || new Set<number>();
+    assigned.add(Number(row.subjectId));
+    streamAssignedByStudent.set(Number(row.studentId), assigned);
   }
 
-  const items: Array<{ id: number; value: number | null }> = [];
-  for (const students of studentsByClass.values()) {
-    for (const student of students) {
-      const entry = totals.get(student.id);
-      items.push({ id: student.id, value: entry && entry.count > 0 ? entry.sum / entry.count : null });
+  const candidates: RankingCandidate[] = [];
+  const profileKeys = new Set<string>();
+  for (const classInfo of classes) {
+    const classAssessments = canonicalAssessments.filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id));
+    const expectedSubjectIds = Array.from(new Set(classAssessments.map((assessment: any) => Number(assessment.subjectId))))
+      .filter((subjectId) => {
+        const subject = subjectMap.get(subjectId);
+        return !!subject && !isTemporarilyExcludedFromStrictGrading(subject);
+      });
+    const assessmentBySubject = new Map(classAssessments.map((assessment: any) => [Number(assessment.subjectId), assessment]));
+    const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+    for (const subjectId of expectedSubjectIds) {
+      const subject = subjectMap.get(subjectId);
+      if (!subject) continue;
+      const context = getClassSubjectGradeCandidates({
+        allGrades,
+        school,
+        classInfo,
+        classStreamName: stream?.name || null,
+        subject,
+      });
+      gradeContextBySubject.set(subjectId, context);
+      if (context.profileKey) profileKeys.add(context.profileKey);
+    }
+    for (const student of studentsByClass.get(Number(classInfo.id)) || []) {
+      const assigned = streamAssignedByStudent.get(Number(student.id));
+      const studentExpectedSubjectIds = assigned?.size
+        ? expectedSubjectIds.filter((subjectId) => assigned.has(Number(subjectId)))
+        : expectedSubjectIds;
+      const results: RankingSubjectResult[] = [];
+      for (const subjectId of studentExpectedSubjectIds) {
+        const assessment: any = assessmentBySubject.get(subjectId);
+        const subject: any = subjectMap.get(subjectId);
+        const context = gradeContextBySubject.get(subjectId);
+        const mark: any = assessment ? marksMap.get(`${Number(student.id)}-${Number(assessment.id)}`) : null;
+        const percentage = parseFinitePercentage(mark?.percentage);
+        const linkedGrade = mark?.gradeId
+          ? allGrades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
+          : null;
+        const resolved = resolveExactConfiguredGrade({
+          percentage,
+          expectedProfileKey: context?.profileKey || null,
+          classId: Number(classInfo.id),
+          subjectType: subject?.subjectType || null,
+          exactProfileGrades: context?.grades || [],
+          storedGrade: linkedGrade,
+        });
+        results.push({
+          subjectId,
+          percentage,
+          grade: resolved.grade,
+          profileKey: context?.profileKey || null,
+        });
+      }
+      candidates.push({ id: Number(student.id), expectedSubjectIds: studentExpectedSubjectIds, results });
     }
   }
-  return calculatePositionMap(items);
+
+  const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
+  return calculateConfiguredPositionMap({ candidates, pointsDirection });
 }
 
 async function validateSubjectPayloadForSchool(schoolId: number, payload: any, res: Response, existingSubject?: any) {
@@ -666,6 +867,69 @@ async function ensureEcdSeedData() {
       await db.update(ecdAssessmentItems).set({ isActive: false }).where(eq(ecdAssessmentItems.id, item.id));
     }
   }
+}
+
+async function loadEcdSectionsForStudentsExam(args: {
+  studentIds: number[];
+  examId: number;
+  isEndOfTermExam: boolean;
+  classStreamName?: string | null;
+  studentStreamNames?: Map<number, string | null | undefined>;
+}) {
+  const result = new Map<number, Array<{
+    code: string;
+    name: string;
+    items: Array<{ itemText: string; rating: string | null }>;
+  }>>();
+  const studentIds = Array.from(new Set(args.studentIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+  if (!args.isEndOfTermExam || studentIds.length === 0) return result;
+
+  const records = await db.select().from(ecdAssessmentRecords).where(and(
+    eq(ecdAssessmentRecords.examId, args.examId),
+    inArray(ecdAssessmentRecords.studentId, studentIds),
+  ));
+  const recordByStudent = new Map(records.map((record: any) => [Number(record.studentId), record]));
+  const recordIds = records.map((record: any) => Number(record.id));
+  const responses = recordIds.length
+    ? await db.select().from(ecdAssessmentResponses).where(inArray(ecdAssessmentResponses.recordId, recordIds))
+    : [];
+  const responsesByRecord = new Map<number, Map<number, string | null>>();
+  for (const response of responses as any[]) {
+    const map = responsesByRecord.get(Number(response.recordId)) || new Map<number, string | null>();
+    map.set(Number(response.itemId), response.rating || null);
+    responsesByRecord.set(Number(response.recordId), map);
+  }
+  const [domains, items] = await Promise.all([
+    storage.getEcdAssessmentDomains(),
+    storage.getEcdAssessmentItems(),
+  ]);
+  const orderedDomains = [...domains].sort((a: any, b: any) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+  const itemsByDomain = new Map<number, any[]>();
+  for (const item of items as any[]) {
+    const rows = itemsByDomain.get(Number(item.domainId)) || [];
+    rows.push(item);
+    itemsByDomain.set(Number(item.domainId), rows);
+  }
+  for (const rows of itemsByDomain.values()) {
+    rows.sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+  }
+
+  for (const studentId of studentIds) {
+    const record: any = recordByStudent.get(studentId);
+    const studentStreamName = args.studentStreamNames?.get(studentId) || null;
+    const ecdContext = !!record || isEcdStream(studentStreamName) || isEcdStream(args.classStreamName);
+    if (!ecdContext) continue;
+    const responseMap = record ? responsesByRecord.get(Number(record.id)) || new Map<number, string | null>() : new Map<number, string | null>();
+    result.set(studentId, orderedDomains.map((domain: any) => ({
+      code: domain.code,
+      name: domain.name,
+      items: (itemsByDomain.get(Number(domain.id)) || []).map((item: any) => ({
+        itemText: item.itemText,
+        rating: responseMap.get(Number(item.id)) || null,
+      })),
+    })));
+  }
+  return result;
 }
 
 async function loadEcdSectionsForStudentExam(studentId: number, examId: number, streamNames?: Array<string | null | undefined>) {
@@ -2615,6 +2879,88 @@ function buildClassExamProgress(context: ExamProgressContext, classId: number): 
       assessmentsMissing: result.filter((row) => !row.assessmentCreated).length,
     },
   };
+}
+
+const ACTIVE_GRADE_PROFILE_KEY_SET = new Set<string>(GRADE_PROFILE_KEYS as readonly string[]);
+const POINTS_DIRECTION_VALUES = ["higher_is_better", "lower_is_better"] as const;
+
+function normalizeRequiredGradePayload(payload: any, existing?: any) {
+  const merged = { ...(existing || {}), ...(payload || {}) };
+  const gradeLevel = String(merged.gradeLevel || "").trim();
+  const gradeStatus = String(merged.gradeStatus || "").trim().toUpperCase();
+  const gradePointsMissing = merged.gradePoints === null || merged.gradePoints === undefined || String(merged.gradePoints).trim() === "";
+  const lowerLimitMissing = merged.lowerLimit === null || merged.lowerLimit === undefined || String(merged.lowerLimit).trim() === "";
+  const upperLimitMissing = merged.upperLimit === null || merged.upperLimit === undefined || String(merged.upperLimit).trim() === "";
+  const gradePoints = Number(merged.gradePoints);
+  const rankOrder = Number(merged.rankOrder);
+  const lowerLimit = Number(merged.lowerLimit);
+  const upperLimit = Number(merged.upperLimit);
+
+  if (!ACTIVE_GRADE_PROFILE_KEY_SET.has(gradeLevel)) {
+    throw new Error("Select an exact current grading profile. Legacy and compatible profiles are not supported.");
+  }
+  if (!merged.gradeName || !String(merged.gradeName).trim()) throw new Error("Grade name is required");
+  if (lowerLimitMissing || upperLimitMissing || !Number.isInteger(lowerLimit) || !Number.isInteger(upperLimit) || lowerLimit < 0 || upperLimit > 100 || lowerLimit > upperLimit) {
+    throw new Error("Grade limits must be whole percentages between 0 and 100");
+  }
+  if (gradePointsMissing || !Number.isFinite(gradePoints)) throw new Error("Grade points are required");
+  if (!Number.isInteger(rankOrder) || rankOrder <= 0) throw new Error("Rank order must be a positive whole number");
+  if (gradeStatus !== "PASS" && gradeStatus !== "FAIL") throw new Error("Grade status must be PASS or FAIL");
+
+  return {
+    ...payload,
+    gradeLevel,
+    gradeStatus,
+    gradePoints: String(gradePoints),
+    rankOrder,
+    lowerLimit,
+    upperLimit,
+  };
+}
+
+async function ensureGradeProfileAllowedForSchool(schoolId: number, gradeLevel: string, gradeType?: string | null) {
+  const school = await storage.getSchool(schoolId);
+  if (!school) throw new Error("School not found");
+  const allowedProfiles = getGradingProfilesForSchool(school.schoolType, school.examinationBoard).map((profile) => profile.key);
+  if (!allowedProfiles.includes(gradeLevel as GradeProfileKey)) {
+    throw new Error("The selected grading profile does not belong to this school's phase and examination board");
+  }
+  if (gradeType) {
+    const allowedTypes = getGradeTypeOptionsForProfile(gradeLevel, school.schoolType, school.examinationBoard);
+    if (!allowedTypes.includes(gradeType)) {
+      throw new Error("The selected grade type does not belong to this exact grading profile");
+    }
+  }
+}
+
+async function bumpGradeProfileConfigurationVersion(schoolId: number, gradeLevel?: string | null) {
+  if (!gradeLevel || !ACTIVE_GRADE_PROFILE_KEY_SET.has(String(gradeLevel))) return;
+  await db.update(gradeProfileSettings).set({
+    configurationVersion: sql`${gradeProfileSettings.configurationVersion} + 1`,
+    updatedAt: new Date(),
+  }).where(and(
+    eq(gradeProfileSettings.schoolId, schoolId),
+    eq(gradeProfileSettings.gradeLevel, gradeLevel as any),
+  ));
+}
+
+async function ensureUniqueGradeRankOrder(args: {
+  schoolId: number;
+  gradeLevel: string;
+  gradeType?: string | null;
+  rankOrder: number;
+  excludeGradeId?: number;
+}) {
+  const schoolGrades = await storage.getGradesBySchool(args.schoolId);
+  const conflict = schoolGrades.find((grade: any) =>
+    Number(grade.id) !== Number(args.excludeGradeId || 0) &&
+    String(grade.gradeLevel || "") === args.gradeLevel &&
+    String(grade.gradeType || "") === String(args.gradeType || "") &&
+    Number(grade.rankOrder) === args.rankOrder
+  );
+  if (conflict) {
+    throw new Error(`Rank order ${args.rankOrder} is already used by grade ${conflict.gradeName} in this profile${args.gradeType ? ` and grade type ${args.gradeType}` : ""}.`);
+  }
 }
 
 export async function registerRoutes(
@@ -5630,6 +5976,51 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/grade-profile-settings", requireAuth, async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const rows = await db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId));
+      res.json(rows.filter((row: any) => ACTIVE_GRADE_PROFILE_KEY_SET.has(String(row.gradeLevel || ""))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/grade-profile-settings/:gradeLevel", requireAuth, requireRole("school_admin", "org_admin", "quality_control_officer"), async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const gradeLevel = String(req.params.gradeLevel || "").trim();
+      const pointsDirection = String(req.body?.pointsDirection || "").trim();
+      if (!ACTIVE_GRADE_PROFILE_KEY_SET.has(gradeLevel)) {
+        return res.status(400).json({ message: "Only exact current grading profiles can be configured" });
+      }
+      await ensureGradeProfileAllowedForSchool(schoolId, gradeLevel);
+      if (!POINTS_DIRECTION_VALUES.includes(pointsDirection as any)) {
+        return res.status(400).json({ message: "Points direction must be higher_is_better or lower_is_better" });
+      }
+      const [saved] = await db.insert(gradeProfileSettings).values({
+        schoolId,
+        gradeLevel: gradeLevel as any,
+        pointsDirection: pointsDirection as any,
+        updatedByUserId: Number((req.user as any)?.id) || null,
+        updatedAt: new Date(),
+      }).onConflictDoUpdate({
+        target: [gradeProfileSettings.schoolId, gradeProfileSettings.gradeLevel],
+        set: {
+          pointsDirection: pointsDirection as any,
+          configurationVersion: sql`${gradeProfileSettings.configurationVersion} + 1`,
+          updatedByUserId: Number((req.user as any)?.id) || null,
+          updatedAt: new Date(),
+        },
+      }).returning();
+      res.json(saved);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/grades", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
@@ -5639,14 +6030,8 @@ export async function registerRoutes(
       const gradeLevel = req.query.gradeLevel as string || "";
 
       const gradeList = await storage.getAllGrades();
-      let filtered = schoolId
-        ? gradeList.filter(g => g.schoolId === schoolId)
-        : gradeList;
-
-      if (gradeLevel) {
-        filtered = filterItemsByGradeProfileKey(filtered, gradeLevel);
-      }
-
+      let filtered = schoolId ? gradeList.filter(g => g.schoolId === schoolId) : gradeList;
+      if (gradeLevel) filtered = filterItemsByGradeProfileKey(filtered, gradeLevel);
       if (search) {
         const searchLower = search.toLowerCase();
         filtered = filtered.filter(g =>
@@ -5654,19 +6039,11 @@ export async function registerRoutes(
           (g.gradeStatus && g.gradeStatus.toLowerCase().includes(searchLower))
         );
       }
-
+      filtered.sort((a: any, b: any) => Number(a.rankOrder || Number.MAX_SAFE_INTEGER) - Number(b.rankOrder || Number.MAX_SAFE_INTEGER));
       const total = filtered.length;
       const start = (page - 1) * perPage;
       const items = filtered.slice(start, start + perPage);
-
-      res.json({
-        items,
-        total,
-        page,
-        perPage,
-        hasPrev: page > 1,
-        hasNext: start + perPage < total
-      });
+      res.json({ items, total, page, perPage, hasPrev: page > 1, hasNext: start + perPage < total });
     } catch (error) {
       next(error);
     }
@@ -5675,43 +6052,51 @@ export async function registerRoutes(
   app.post("/api/grades", requireAuth, requireRole("school_admin", "org_admin", "teacher", "quality_control_officer"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      if (!schoolId) {
-        return res.status(400).json({ message: "School context required" });
-      }
-      const data = insertGradeSchema.parse({ ...req.body, schoolId });
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const normalized = normalizeRequiredGradePayload(req.body);
+      await ensureGradeProfileAllowedForSchool(schoolId, normalized.gradeLevel, normalized.gradeType || null);
+      await ensureUniqueGradeRankOrder({
+        schoolId,
+        gradeLevel: normalized.gradeLevel,
+        gradeType: normalized.gradeType || null,
+        rankOrder: normalized.rankOrder,
+      });
+      const data = insertGradeSchema.parse({ ...normalized, schoolId });
       const newGrade = await storage.createGrade(data);
+      await bumpGradeProfileConfigurationVersion(schoolId, normalized.gradeLevel);
       res.status(201).json(newGrade);
-    } catch (error) {
-      next(error);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid grade configuration", errors: error.errors });
+      return res.status(400).json({ message: error?.message || "Unable to create grade" });
     }
   });
 
   app.put("/api/grades/:id", requireAuth, requireRole("school_admin", "org_admin", "teacher", "quality_control_officer"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
-      const grade = await storage.getGrade(parseIdParam(req.params.id));
-      if (!grade) {
-        return res.status(404).json({ message: "Grade not found" });
-      }
-      if (schoolId && grade.schoolId !== schoolId) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-      const { gradeName, gradeLevel, classIds, appliesAll, lowerLimit, upperLimit, gradePoints, gradeStatus, gradeType } = req.body;
+      const gradeId = parseIdParam(req.params.id);
+      const grade = await storage.getGrade(gradeId);
+      if (!grade) return res.status(404).json({ message: "Grade not found" });
+      if (schoolId && grade.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      const normalized = normalizeRequiredGradePayload(req.body, grade);
+      await ensureGradeProfileAllowedForSchool(Number(grade.schoolId), normalized.gradeLevel, normalized.gradeType ?? grade.gradeType ?? null);
+      await ensureUniqueGradeRankOrder({
+        schoolId: Number(grade.schoolId),
+        gradeLevel: normalized.gradeLevel,
+        gradeType: normalized.gradeType ?? grade.gradeType ?? null,
+        rankOrder: normalized.rankOrder,
+        excludeGradeId: gradeId,
+      });
       const updateData: Record<string, any> = {};
-      if (gradeName !== undefined) updateData.gradeName = gradeName;
-      if (gradeLevel !== undefined) updateData.gradeLevel = gradeLevel;
-      if (classIds !== undefined) updateData.classIds = classIds;
-      if (appliesAll !== undefined) updateData.appliesAll = appliesAll;
-      if (lowerLimit !== undefined) updateData.lowerLimit = lowerLimit;
-      if (upperLimit !== undefined) updateData.upperLimit = upperLimit;
-      if (gradePoints !== undefined) updateData.gradePoints = gradePoints;
-      if (gradeStatus !== undefined) updateData.gradeStatus = gradeStatus;
-      if (gradeType !== undefined) updateData.gradeType = gradeType;
-
-      const updated = await storage.updateGrade(parseIdParam(req.params.id), updateData);
+      for (const key of ["gradeName", "gradeLevel", "classIds", "appliesAll", "lowerLimit", "upperLimit", "gradePoints", "gradeStatus", "gradeType", "rankOrder"]) {
+        if ((normalized as any)[key] !== undefined) updateData[key] = (normalized as any)[key];
+      }
+      const updated = await storage.updateGrade(gradeId, updateData);
+      await Promise.all(Array.from(new Set([String(grade.gradeLevel || ""), String(normalized.gradeLevel || "")]))
+        .map((gradeLevel) => bumpGradeProfileConfigurationVersion(Number(grade.schoolId), gradeLevel)));
       res.json(updated);
-    } catch (error) {
-      next(error);
+    } catch (error: any) {
+      return res.status(400).json({ message: error?.message || "Unable to update grade" });
     }
   });
 
@@ -5719,13 +6104,10 @@ export async function registerRoutes(
     try {
       const schoolId = getSchoolContext(req);
       const grade = await storage.getGrade(parseIdParam(req.params.id));
-      if (!grade) {
-        return res.status(404).json({ message: "Grade not found" });
-      }
-      if (schoolId && grade.schoolId !== schoolId) {
-        return res.status(403).json({ message: "Access denied" });
-      }
+      if (!grade) return res.status(404).json({ message: "Grade not found" });
+      if (schoolId && grade.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
       await storage.deleteGrade(parseIdParam(req.params.id));
+      await bumpGradeProfileConfigurationVersion(Number(grade.schoolId), grade.gradeLevel);
       res.json({ message: "Grade deleted successfully" });
     } catch (error) {
       next(error);
@@ -12705,22 +13087,39 @@ ${schoolName}`;
       const percentage = allRequiredPapersMarked && totalWeight > 0 ? Math.round(totalWeightedScore) : null;
 
       // Get grade from percentage only after every required paper has been recorded.
+      // Temporarily excluded subjects keep their existing linked grade (the school's
+      // interim alternative) and bypass the new exact-profile pipeline completely.
       const allGrades = await storage.getGradesBySchool(schoolId);
-      const { profileKey } = await resolveGradeProfileContext({
-        schoolId,
-        classId,
-        subjectId,
-      });
+      const subject = await storage.getSubject(subjectId);
+      const strictGradingExcluded = isTemporarilyExcludedFromStrictGrading(subject);
+      const profileContext = strictGradingExcluded
+        ? { profileKey: null as string | null }
+        : await resolveGradeProfileContext({ schoolId, classId, subjectId });
+      const profileKey = profileContext.profileKey;
       const grades = profileKey
         ? getApplicableGradesForContext(allGrades, { profileKey, classId })
         : [];
-      const subject = await storage.getSubject(subjectId);
-      const gradeResolution = percentage !== null
+
+      // Check if mark exists before resolving the grade so a temporary exclusion does
+      // not erase the currently stored alternative grade when marks are edited.
+      let existingMark = await storage.getAssessmentMarkByStudentAssessment(Number(studentId), assessment.id);
+      if (existingMark && existingMark.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Mark not in school context" });
+      }
+      const existingExcludedGrade = strictGradingExcluded && existingMark?.gradeId
+        ? allGrades.find((grade: any) => Number(grade.id) === Number(existingMark?.gradeId))
+        : null;
+      const gradeResolution = percentage !== null && !strictGradingExcluded
         ? calculateGrade(percentage, grades, subject?.subjectType)
-        : { gradeId: null, gradeName: "", ambiguous: false, matchingGradeIds: [] as number[] };
+        : {
+            gradeId: existingExcludedGrade ? Number(existingExcludedGrade.id) : null,
+            gradeName: existingExcludedGrade?.gradeName || "",
+            ambiguous: false,
+            matchingGradeIds: [] as number[],
+          };
       const { gradeId, gradeName } = gradeResolution;
 
-      if (percentage !== null && (!gradeId || gradeResolution.ambiguous)) {
+      if (percentage !== null && !strictGradingExcluded && (!gradeId || gradeResolution.ambiguous)) {
         const detail = gradeResolution.ambiguous
           ? `Overlapping grade ranges matched IDs: ${gradeResolution.matchingGradeIds.join(", ")}`
           : `No grade range covers ${percentage}%`;
@@ -12774,13 +13173,6 @@ ${schoolName}`;
       if (statusOnlyComment) {
         finalCommentSource = "pool";
         finalCustomText = null;
-      }
-
-      // Check if mark exists for this student/assessment
-      let existingMark = await storage.getAssessmentMarkByStudentAssessment(Number(studentId), assessment.id);
-
-      if (existingMark && existingMark.schoolId !== schoolId) {
-        return res.status(403).json({ message: "Mark not in school context" });
       }
 
       let mark;
@@ -13008,6 +13400,32 @@ ${schoolName}`;
 
   // ==================== ACADEMIC REPORTS / REPORT CARDS ====================
 
+  const REPORT_DATA_TEMPLATE_VERSION = "report-data-v3-exact-grading-ranking";
+
+  function reportDataCachePath(args: {
+    schoolId: number;
+    examId: number;
+    classId: number;
+    publicationVersion: number;
+    gradingConfigurationFingerprint: string;
+    brandingFingerprint: string;
+    studentIds?: number[];
+  }): string {
+    const key = reportCacheKey({ templateVersion: REPORT_DATA_TEMPLATE_VERSION, ...args });
+    return path.join(academicReportDataCacheDirectory(), `${key}.json`);
+  }
+
+  function filterCachedReportPayload(payload: any, studentIds: number[]): any {
+    if (!studentIds.length) return payload;
+    const requested = new Set(studentIds.map(Number));
+    return {
+      ...payload,
+      reportCards: Array.isArray(payload?.reportCards)
+        ? payload.reportCards.filter((card: any) => requested.has(Number(card?.student?.id)))
+        : [],
+    };
+  }
+
   // Get available exams for report cards (grouped by exam)
   app.get("/api/report-cards/exams", requireAuth, async (req, res, next) => {
     try {
@@ -13096,12 +13514,43 @@ ${schoolName}`;
         ? students.filter((student) => requestedStudentIdSet.has(Number(student.id)))
         : students;
       const reportStudentIdSet = new Set(reportStudents.map((student) => Number(student.id)));
+      const [publication, profileSettingsForCache, gradesForCache] = await Promise.all([
+        getClassExamPublication(examId, classId),
+        db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
+        storage.getGradesBySchool(schoolId),
+      ]);
+      const gradingConfigurationFingerprint = reportGradingConfigurationFingerprint(profileSettingsForCache, gradesForCache);
+      const brandingFingerprint = reportBrandingFingerprint(school);
+      if (publication?.isPublished === true) {
+        const cacheArgs = {
+          schoolId,
+          examId,
+          classId,
+          publicationVersion: Number(publication.publicationVersion || 0),
+          gradingConfigurationFingerprint,
+          brandingFingerprint,
+        };
+        const fullCachePath = reportDataCachePath(cacheArgs);
+        const selectedCachePath = requestedStudentIds.length
+          ? reportDataCachePath({ ...cacheArgs, studentIds: requestedStudentIds })
+          : fullCachePath;
+        const cachedPayload = await readJsonCache<any>(fullCachePath)
+          || (selectedCachePath !== fullCachePath ? await readJsonCache<any>(selectedCachePath) : null);
+        if (cachedPayload) {
+          const payload = filterCachedReportPayload(cachedPayload, requestedStudentIds);
+          res.setHeader("X-Report-Data-Cache", "HIT");
+          res.setHeader("Server-Timing", `cache;dur=${Date.now() - requestStartedAt}, total;dur=${Date.now() - requestStartedAt}`);
+          if (req.query.pdfData === "1" || req.path.endsWith("/pdf-data")) {
+            console.info(`[academic-pdf] report data cache hit exam=${examId} class=${classId} learners=${payload.reportCards?.length || 0}`);
+          }
+          return res.json(payload);
+        }
+      }
       markTiming("context");
       const rawAssessments = (await storage.getAssessmentsByExam(examId))
         .filter((assessment: any) => Number(assessment.classId) === Number(classId));
       const rawAssessmentIds = rawAssessments.map((assessment: any) => Number(assessment.id));
-      const [publication, allMarks, assessmentType, assessmentCommentRows] = await Promise.all([
-        getClassExamPublication(examId, classId),
+      const [allMarks, assessmentType, assessmentCommentRows] = await Promise.all([
         rawAssessmentIds.length > 0
           ? storage.getAssessmentMarksByAssessments(rawAssessmentIds)
           : Promise.resolve([]),
@@ -13129,12 +13578,13 @@ ${schoolName}`;
       const assessmentCommentPool = buildAssessmentCommentPoolMap(assessmentCommentRows);
 
       const subjectIds = [...new Set(allAssessments.map((assessment: any) => Number(assessment.subjectId)))];
-      const subjectsData = await Promise.all(subjectIds.map((id) => storage.getSubject(id)));
-      const subjects = subjectsData.filter(Boolean);
+      const schoolSubjects = await storage.getSubjectsBySchool(schoolId);
+      const requestedSubjectIdSet = new Set(subjectIds);
+      const subjects = schoolSubjects.filter((subject: any) => requestedSubjectIdSet.has(Number(subject.id)));
 
-      const grades = await storage.getGradesBySchool(schoolId);
+      const grades = gradesForCache;
       const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
-      const gradeCandidatesBySubject = new Map<number, any[]>();
+      const gradeCandidatesBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[]; excluded: boolean }>();
       for (const subject of subjects) {
         if (!subject) continue;
         gradeCandidatesBySubject.set(
@@ -13145,7 +13595,7 @@ ${schoolName}`;
             classInfo,
             classStreamName: classStream?.name || null,
             subject,
-          }).grades,
+          }),
         );
       }
 
@@ -13158,47 +13608,47 @@ ${schoolName}`;
       }
 
       const teacherMap = new Map<string, string>();
-      const getTeacherDisplayName = async (staffId: number) => {
-        const staffMember = await storage.getStaff(staffId);
-        if (!staffMember) return `Staff #${staffId}`;
-
-        const user = staffMember.userId ? await storage.getUser(staffMember.userId) : null;
-        const normalizedGender = (staffMember.gender || "").toString().toLowerCase();
-        const title = normalizedGender === "male" ? "Mr." : normalizedGender === "female" ? "Ms." : "";
-
-        const firstName = ((staffMember.firstName || user?.firstName || "") as string).trim();
-        const lastName = ((staffMember.lastName || user?.lastName || "") as string).trim();
-        const firstInitial = firstName ? `${firstName.charAt(0).toUpperCase()}.` : "";
-
-        if (lastName) {
-          return [title, firstInitial, lastName].filter(Boolean).join(" ").trim();
-        }
-
-        const fallbackName = user
-          ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
-          : `${staffMember.firstName || ""} ${staffMember.lastName || ""}`.trim();
-
-        return fallbackName || `Staff #${staffId}`;
-      };
       try {
         const allStaffSubjects = await db.select({
           staffId: staffSubjects.staffId,
           subjectId: staffSubjects.subjectId,
           classId: staffSubjects.classId,
-        }).from(staffSubjects).where(
-          eq(staffSubjects.classId, classId)
-        );
-        const staffIds: number[] = Array.from(new Set<number>(
+        }).from(staffSubjects).where(eq(staffSubjects.classId, classId));
+        const staffIds = Array.from(new Set(
           allStaffSubjects.map((row) => Number(row.staffId)).filter((staffId) => Number.isInteger(staffId) && staffId > 0),
         ));
-        const staffNameEntries = await Promise.all(
-          staffIds.map(async (staffId) => [staffId, await getTeacherDisplayName(staffId)] as const),
-        );
-        const staffNameMap = new Map(staffNameEntries);
-        for (const ss of allStaffSubjects) {
-          teacherMap.set(`${ss.subjectId}-${ss.classId}`, staffNameMap.get(Number(ss.staffId)) || `Staff #${ss.staffId}`);
+        const staffRows = staffIds.length
+          ? await db.select().from(staffTable).where(inArray(staffTable.id, staffIds))
+          : [];
+        const userIds = Array.from(new Set(
+          staffRows.map((row: any) => Number(row.userId)).filter((userId) => Number.isInteger(userId) && userId > 0),
+        ));
+        const userRows = userIds.length
+          ? await db.select().from(users).where(inArray(users.id, userIds))
+          : [];
+        const usersById = new Map(userRows.map((row: any) => [Number(row.id), row]));
+        const staffNames = new Map<number, string>();
+        for (const staffMember of staffRows as any[]) {
+          const user = staffMember.userId ? usersById.get(Number(staffMember.userId)) : null;
+          const normalizedGender = String(staffMember.gender || "").toLowerCase();
+          const title = normalizedGender === "male" ? "Mr." : normalizedGender === "female" ? "Ms." : "";
+          const firstName = String(staffMember.firstName || user?.firstName || "").trim();
+          const lastName = String(staffMember.lastName || user?.lastName || "").trim();
+          const firstInitial = firstName ? `${firstName.charAt(0).toUpperCase()}.` : "";
+          const displayName = lastName
+            ? [title, firstInitial, lastName].filter(Boolean).join(" ").trim()
+            : `${user?.firstName || staffMember.firstName || ""} ${user?.lastName || staffMember.lastName || ""}`.trim();
+          staffNames.set(Number(staffMember.id), displayName || `Staff #${staffMember.id}`);
         }
-      } catch (e) {}
+        for (const assignment of allStaffSubjects) {
+          teacherMap.set(
+            `${assignment.subjectId}-${assignment.classId}`,
+            staffNames.get(Number(assignment.staffId)) || `Staff #${assignment.staffId}`,
+          );
+        }
+      } catch (error) {
+        console.warn("[academic-reports] unable to bulk-load teacher names:", error);
+      }
 
       const bySubject: Record<number, Record<number, number>> = {};
 
@@ -13207,6 +13657,11 @@ ${schoolName}`;
         percentage: number | null;
         grade: string;
         gradePoints: number;
+        gradeStatus: "PASS" | "FAIL" | "UNRESOLVED";
+        rankOrder: number | null;
+        profileKey: string | null;
+        resolvedGrade: any | null;
+        strictGradingExcluded: boolean;
         comment: string;
         commentPool: string;
         teacher: string;
@@ -13238,16 +13693,31 @@ ${schoolName}`;
 
           let gradeName = "";
           let gradePoints = 0;
-          const resolvedGrade = resolveStoredAssessmentGrade({
-            mark,
-            percentage: pctRaw,
-            applicableGrades: gradeCandidatesBySubject.get(Number(subject.id)) || [],
-            allGrades: grades,
-            subjectType: subject.subjectType,
-          });
+          let gradeStatus: "PASS" | "FAIL" | "UNRESOLVED" = "UNRESOLVED";
+          let rankOrder: number | null = null;
+          const gradeContext = gradeCandidatesBySubject.get(Number(subject.id));
+          const strictGradingExcluded = gradeContext?.excluded === true || isTemporarilyExcludedFromStrictGrading(subject);
+          const linkedGrade = mark.gradeId
+            ? grades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
+            : null;
+          const resolvedGrade = strictGradingExcluded
+            ? linkedGrade
+            : resolveStoredAssessmentGrade({
+                mark,
+                percentage: pctRaw,
+                applicableGrades: gradeContext?.grades || [],
+                allGrades: grades,
+                expectedProfileKey: gradeContext?.profileKey || null,
+                classId,
+                subjectType: subject.subjectType,
+              });
           if (resolvedGrade) {
             gradeName = resolvedGrade.gradeName;
-            gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
+            if (!strictGradingExcluded) {
+              gradePoints = parseGradePoints(resolvedGrade.gradePoints) ?? 0;
+              gradeStatus = normalizeGradeStatus(resolvedGrade.gradeStatus);
+              rankOrder = Number.isInteger(Number(resolvedGrade.rankOrder)) ? Number(resolvedGrade.rankOrder) : null;
+            }
           }
 
           const poolComment = mark.gradeId
@@ -13262,7 +13732,7 @@ ${schoolName}`;
             isPublished: publication?.isPublished === true,
           });
 
-          if (pctRaw !== null) {
+          if (pctRaw !== null && !strictGradingExcluded) {
             if (!bySubject[subject.id]) bySubject[subject.id] = {};
             bySubject[subject.id][student.id] = pctRaw;
           }
@@ -13273,6 +13743,11 @@ ${schoolName}`;
             percentage: pctRaw,
             grade: gradeName,
             gradePoints,
+            gradeStatus,
+            rankOrder,
+            profileKey: strictGradingExcluded ? null : gradeContext?.profileKey || null,
+            resolvedGrade: strictGradingExcluded ? null : resolvedGrade || null,
+            strictGradingExcluded,
             comment,
             commentPool: poolComment?.commentText || mark.autoCommentSnapshot || "",
             teacher,
@@ -13294,8 +13769,14 @@ ${schoolName}`;
           .sort(([, a], [, b]) => b - a);
         const n = sorted.length;
         subjectRank[subjId] = {};
-        sorted.forEach(([sid], i) => {
-          subjectRank[subjId][parseInt(sid)] = `${i + 1}/${n}`;
+        let position = 0;
+        let previousPercentage: number | null = null;
+        sorted.forEach(([sid, percentage], index) => {
+          if (previousPercentage === null || Math.abs(Number(percentage) - previousPercentage) > 1e-9) {
+            position = index + 1;
+            previousPercentage = Number(percentage);
+          }
+          subjectRank[subjId][parseInt(sid)] = `${position}/${n}`;
         });
       }
 
@@ -13303,100 +13784,105 @@ ${schoolName}`;
       const overtimeMap: Record<number, Array<{ label: string; avg: number }>> = {};
       try {
         const allSchoolExams = await storage.getExamsBySchool(schoolId);
-        const sortedExams = allSchoolExams
-          .filter(e => e.id !== examId)
-          .sort((a, b) => {
-            const dateA = a.startDate ? new Date(a.startDate).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-            const dateB = b.startDate ? new Date(b.startDate).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-            return dateB - dateA;
-          });
-
-        const prevExam = sortedExams.length > 0 ? sortedExams[0] : null;
-
-        if (prevExam) {
-          const prevAssessments = (await storage.getAssessmentsByExam(prevExam.id))
-            .filter((assessment: any) => Number(assessment.classId) === Number(classId));
-          const prevAssessmentIds = prevAssessments.map((assessment: any) => Number(assessment.id));
-          let prevMarks: any[] = [];
-          if (prevAssessmentIds.length > 0) {
-            prevMarks = requestedStudentIds.length
-              ? await db.select().from(assessmentMarksSchema).where(and(
-                  inArray(assessmentMarksSchema.assessmentId, prevAssessmentIds),
-                  inArray(assessmentMarksSchema.studentId, requestedStudentIds),
-                  eq(assessmentMarksSchema.schoolId, schoolId),
-                ))
-              : await storage.getAssessmentMarksByAssessments(prevAssessmentIds);
-            const selectedAssessmentIds = new Set(
-              selectCanonicalAssessments(prevAssessments, prevMarks).assessments
-                .map((assessment: any) => Number(assessment.id)),
-            );
-            prevMarks = prevMarks.filter((mark: any) => selectedAssessmentIds.has(Number(mark.assessmentId)));
-          }
-
-          for (const mark of prevMarks) {
-            if (!reportStudentIdSet.has(Number(mark.studentId))) continue;
-            if (mark.percentage !== null && mark.percentage !== undefined) {
-              const key = `${mark.studentId}-${mark.subjectId}`;
-              prevPctMap[key] = parseFloat(mark.percentage);
-            }
-          }
-        }
-
         const currentExamAssessmentTypeId = exam.assessmentTypeId;
         const chronoExams = [...allSchoolExams]
-          .filter(e => currentExamAssessmentTypeId ? e.assessmentTypeId === currentExamAssessmentTypeId : true)
+          .filter((candidate) => currentExamAssessmentTypeId ? candidate.assessmentTypeId === currentExamAssessmentTypeId : true)
           .sort((a, b) => {
             const dateA = a.startDate ? new Date(a.startDate).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
             const dateB = b.startDate ? new Date(b.startDate).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
             return dateA - dateB;
           });
-
-        const examMarksCache: Array<{ exam: typeof chronoExams[0]; marks: any[] }> = [];
-        for (const pastExam of chronoExams) {
-          const pastAssessments = (await storage.getAssessmentsByExam(pastExam.id))
-            .filter((assessment: any) => Number(assessment.classId) === Number(classId));
-          const pastAssessmentIds = pastAssessments.map((assessment: any) => Number(assessment.id));
-          if (pastAssessmentIds.length === 0) continue;
-          let pastMarks = requestedStudentIds.length
+        const sortedPreviousExams = allSchoolExams
+          .filter((candidate) => candidate.id !== examId)
+          .sort((a, b) => {
+            const dateA = a.startDate ? new Date(a.startDate).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+            const dateB = b.startDate ? new Date(b.startDate).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+            return dateB - dateA;
+          });
+        const relevantExamIds = Array.from(new Set([
+          ...chronoExams.map((candidate) => Number(candidate.id)),
+          ...sortedPreviousExams.slice(0, 1).map((candidate) => Number(candidate.id)),
+        ])).filter((id) => Number.isInteger(id) && id > 0);
+        const historicalAssessments = relevantExamIds.length
+          ? await db.select().from(assessmentsSchema).where(and(
+              eq(assessmentsSchema.classId, classId),
+              inArray(assessmentsSchema.examId, relevantExamIds),
+            ))
+          : [];
+        const historicalAssessmentIds = historicalAssessments.map((assessment: any) => Number(assessment.id));
+        const historicalMarks = historicalAssessmentIds.length
+          ? requestedStudentIds.length
             ? await db.select().from(assessmentMarksSchema).where(and(
-                inArray(assessmentMarksSchema.assessmentId, pastAssessmentIds),
+                inArray(assessmentMarksSchema.assessmentId, historicalAssessmentIds),
                 inArray(assessmentMarksSchema.studentId, requestedStudentIds),
                 eq(assessmentMarksSchema.schoolId, schoolId),
               ))
-            : await storage.getAssessmentMarksByAssessments(pastAssessmentIds);
-          const selectedAssessmentIds = new Set(
-            selectCanonicalAssessments(pastAssessments, pastMarks).assessments
-              .map((assessment: any) => Number(assessment.id)),
-          );
-          pastMarks = pastMarks.filter((mark: any) => selectedAssessmentIds.has(Number(mark.assessmentId)));
-          examMarksCache.push({ exam: pastExam, marks: pastMarks });
+            : await storage.getAssessmentMarksByAssessments(historicalAssessmentIds)
+          : [];
+        const assessmentsByExam = new Map<number, any[]>();
+        for (const assessment of historicalAssessments as any[]) {
+          const key = Number(assessment.examId);
+          const rows = assessmentsByExam.get(key) || [];
+          rows.push(assessment);
+          assessmentsByExam.set(key, rows);
+        }
+        const canonicalMarksByExam = new Map<number, any[]>();
+        for (const examKey of relevantExamIds) {
+          const examAssessments = assessmentsByExam.get(examKey) || [];
+          const examAssessmentIds = new Set(examAssessments.map((assessment: any) => Number(assessment.id)));
+          const examMarks = historicalMarks.filter((mark: any) => examAssessmentIds.has(Number(mark.assessmentId)));
+          const canonicalIds = new Set(selectCanonicalAssessments(examAssessments, examMarks).assessments.map((assessment: any) => Number(assessment.id)));
+          canonicalMarksByExam.set(examKey, examMarks.filter((mark: any) => canonicalIds.has(Number(mark.assessmentId))));
+        }
+
+        const prevExam = sortedPreviousExams[0];
+        for (const mark of prevExam ? canonicalMarksByExam.get(Number(prevExam.id)) || [] : []) {
+          if (!reportStudentIdSet.has(Number(mark.studentId))) continue;
+          const percentage = parseFinitePercentage(mark.percentage);
+          if (percentage !== null) prevPctMap[`${mark.studentId}-${mark.subjectId}`] = percentage;
         }
 
         for (const studentObj of reportStudents) {
           const studentOvertime: Array<{ label: string; avg: number }> = [];
-          for (const cached of examMarksCache) {
-            const studentPastMarks = cached.marks.filter(m => m.studentId === studentObj.id && m.percentage !== null && m.percentage !== undefined);
-            if (studentPastMarks.length === 0) continue;
-            const sum = studentPastMarks.reduce((a, m) => a + parseFloat(m.percentage), 0);
-            const avg = Math.round(sum / studentPastMarks.length);
-            const termLabel = cached.exam.termId ? `T${cached.exam.termId}` : '';
-            const label = termLabel ? `${termLabel} - ${cached.exam.examName}` : cached.exam.examName;
+          for (const historicalExam of chronoExams) {
+            const studentPastMarks = (canonicalMarksByExam.get(Number(historicalExam.id)) || [])
+              .filter((mark: any) => Number(mark.studentId) === Number(studentObj.id))
+              .map((mark: any) => parseFinitePercentage(mark.percentage))
+              .filter((value): value is number => value !== null);
+            if (!studentPastMarks.length) continue;
+            const avg = Math.round(studentPastMarks.reduce((sum, value) => sum + value, 0) / studentPastMarks.length);
+            const termLabel = historicalExam.termId ? `T${historicalExam.termId}` : "";
+            const label = termLabel ? `${termLabel} - ${historicalExam.examName}` : historicalExam.examName;
             studentOvertime.push({ label, avg });
           }
           overtimeMap[studentObj.id] = studentOvertime;
         }
-      } catch (e) {}
+      } catch (error) {
+        console.warn("[academic-reports] unable to bulk-load historical report data:", error);
+      }
 
       markTiming("historical-data");
-      const uniqueStreamIds: number[] = Array.from(new Set<number>(
+      const uniqueStreamIds = new Set(
         reportStudents.map((student) => Number(student.streamId)).filter((id) => Number.isInteger(id) && id > 0),
-      ));
-      const studentStreams = new Map<number, any>();
-      await Promise.all(uniqueStreamIds.map(async (streamId) => {
-        studentStreams.set(streamId, await storage.getStream(streamId));
-      }));
+      );
+      const allStreamRows = uniqueStreamIds.size ? await storage.getAllStreams() : [];
+      const studentStreams = new Map(
+        allStreamRows.filter((streamRow: any) => uniqueStreamIds.has(Number(streamRow.id)))
+          .map((streamRow: any) => [Number(streamRow.id), streamRow]),
+      );
 
-      const reportCards = await Promise.all(reportStudents.map(async (student) => {
+      const ecdSectionsByStudent = await loadEcdSectionsForStudentsExam({
+        studentIds: reportStudents.map((student) => Number(student.id)),
+        examId,
+        isEndOfTermExam: assessmentType?.name === "End-of-Term Exam",
+        classStreamName: classStream?.name || null,
+        studentStreamNames: new Map(reportStudents.map((student) => [
+          Number(student.id),
+          student.streamId ? studentStreams.get(Number(student.streamId))?.name || null : null,
+        ])),
+      });
+
+      const reportCards = reportStudents.map((student) => {
         const rows = studentSubjectRows[student.id] || {};
         const subjectResults: Array<{
           assessmentId?: number;
@@ -13411,6 +13897,10 @@ ${schoolName}`;
           commentPool?: string;
           teacher: string;
           gradePoints: number;
+          gradeStatus: "PASS" | "FAIL" | "UNRESOLVED";
+          rankOrder: number | null;
+          profileKey: string | null;
+          strictGradingExcluded: boolean;
         }> = [];
 
         const sortedSubjects = Object.values(rows).sort((a, b) =>
@@ -13419,6 +13909,8 @@ ${schoolName}`;
 
         let sumMarks = 0;
         let passed = 0;
+        let failed = 0;
+        let unresolved = 0;
         let points = 0;
         let nSubjects = 0;
 
@@ -13429,10 +13921,12 @@ ${schoolName}`;
         for (const row of sortedSubjects) {
           const pct = row.percentage;
           const hasNumericMark = pct !== null && Number.isFinite(pct);
-          if (hasNumericMark) {
+          if (hasNumericMark && !row.strictGradingExcluded) {
             sumMarks += pct as number;
             nSubjects++;
-            if ((pct as number) >= 60) passed++;
+            if (row.gradeStatus === "PASS") passed++;
+            else if (row.gradeStatus === "FAIL") failed++;
+            else unresolved++;
             points += Number.isFinite(row.gradePoints) ? row.gradePoints : 0;
           }
 
@@ -13471,9 +13965,13 @@ ${schoolName}`;
             commentPool: row.commentPool,
             teacher: row.teacher,
             gradePoints: row.gradePoints,
+            gradeStatus: row.gradeStatus,
+            rankOrder: row.rankOrder,
+            profileKey: row.profileKey,
+            strictGradingExcluded: row.strictGradingExcluded,
           });
 
-          if (hasNumericMark) {
+          if (hasNumericMark && !row.strictGradingExcluded) {
             chartSubjectLabels.push(row.subjectName);
             chartStudentMarks.push(parseFloat((pct as number).toFixed(1)));
             chartClassAvgs.push(avgVal !== undefined ? parseFloat(avgVal.toFixed(1)) : null);
@@ -13487,8 +13985,7 @@ ${schoolName}`;
 
         const chartOvertimeLabels = (overtimeMap[student.id] || []).map(o => o.label);
         const chartOvertimeAvgs = (overtimeMap[student.id] || []).map(o => o.avg);
-        const studentStream = student.streamId ? studentStreams.get(Number(student.streamId)) : null;
-        const ecdSections = await loadEcdSectionsForStudentExam(student.id, examId, [studentStream?.name, classStream?.name]);
+        const ecdSections = ecdSectionsByStudent.get(Number(student.id)) || [];
 
         return {
           student: {
@@ -13504,7 +14001,9 @@ ${schoolName}`;
             totalMark,
             avgMark: avgMarkStr,
             subjectsPassed,
-            points: nSubjects > 0 ? points.toString() : '',
+            subjectsFailed: nSubjects > 0 ? failed : 0,
+            subjectsUnresolved: nSubjects > 0 ? unresolved : 0,
+            points: nSubjects > 0 && unresolved === 0 ? points.toString() : '',
             classPosition: '',
             overallPosition: '',
             classSize: 0,
@@ -13518,20 +14017,19 @@ ${schoolName}`;
           chartOvertimeAvgs,
           ecdSections,
         };
-      }));
+      });
 
       const allReportComments = await storage.getReportComments(schoolId);
       const allGrades = (await storage.getAllGrades()).filter((grade) => grade.schoolId === schoolId);
 
       for (const rc of reportCards) {
         const avg = rc.summary.averagePercentage;
-        const streamId = classInfo?.streamId ?? null;
-        const stream = streamId ? await storage.getStream(streamId) : null;
-        const profileKey = resolveGradeProfileKey({
-          schoolType: school?.schoolType,
-          examinationBoard: school?.examinationBoard,
-          streamName: stream?.name,
-        });
+        const resultProfileKeys = Array.from(new Set(
+          rc.subjects.map((subject: any) => String(subject.profileKey || "")).filter(Boolean),
+        ));
+        const profileKey = resultProfileKeys.length === 1
+          ? resultProfileKeys[0] as GradeProfileKey
+          : null;
         const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
         const configuredGrade = resolveReportCommentGradeForAverage(applicableGrades, avg);
         const principalPoolComment = findReportCommentForConfiguredGrade({
@@ -13564,17 +14062,46 @@ ${schoolName}`;
         }
       }
 
-      const allStudentAverages = students.map((student) => {
-        const rows = Object.values(studentSubjectRows[student.id] || {});
-        const numericMarks = rows
-          .map((row) => row.percentage)
-          .filter((value): value is number => value !== null && Number.isFinite(value));
+      const expectedSubjectIds = Array.from(new Set(
+        subjects
+          .filter((subject: any) => !isTemporarilyExcludedFromStrictGrading(subject))
+          .map((subject: any) => Number(subject.id))
+          .filter(Number.isFinite),
+      ));
+      const profileKeys = Array.from(new Set(Array.from(gradeCandidatesBySubject.values()).map((context) => context.profileKey).filter(Boolean))) as string[];
+      const settingsRows = profileSettingsForCache;
+      const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
+      const rankingStudentIds = students.map((student) => Number(student.id));
+      const rankingSubjectAssignments = rankingStudentIds.length
+        ? await db.select({ studentId: studentSubjectsSchema.studentId, subjectId: studentSubjectsSchema.subjectId })
+          .from(studentSubjectsSchema)
+          .where(inArray(studentSubjectsSchema.studentId, rankingStudentIds))
+        : [];
+      const assignedSubjectsByStudent = new Map<number, Set<number>>();
+      for (const assignment of rankingSubjectAssignments) {
+        const assigned = assignedSubjectsByStudent.get(Number(assignment.studentId)) || new Set<number>();
+        assigned.add(Number(assignment.subjectId));
+        assignedSubjectsByStudent.set(Number(assignment.studentId), assigned);
+      }
+      const rankingCandidates: RankingCandidate[] = students.map((student) => {
+        const assigned = assignedSubjectsByStudent.get(Number(student.id));
+        const studentExpectedSubjectIds = assigned?.size
+          ? expectedSubjectIds.filter((subjectId) => assigned.has(Number(subjectId)))
+          : expectedSubjectIds;
         return {
-          id: Number(student.id),
-          value: numericMarks.length ? numericMarks.reduce((sum, value) => sum + value, 0) / numericMarks.length : null,
-        };
-      }).filter((row) => row.value !== null);
-      const classPositionMap = calculatePositionMap(allStudentAverages);
+        id: Number(student.id),
+        expectedSubjectIds: studentExpectedSubjectIds,
+        results: Object.values(studentSubjectRows[student.id] || {})
+          .filter((row) => !row.strictGradingExcluded && studentExpectedSubjectIds.includes(Number(row.subjectId)))
+          .map((row): RankingSubjectResult => ({
+          subjectId: Number(row.subjectId),
+          percentage: row.percentage,
+          grade: row.resolvedGrade,
+          profileKey: row.profileKey,
+        })),
+      };
+      });
+      const classPositionMap = calculateConfiguredPositionMap({ candidates: rankingCandidates, pointsDirection });
       const streamPositionMap = await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
       const classSize = classPositionMap.size;
 
@@ -13582,6 +14109,8 @@ ${schoolName}`;
         rc.summary.classSize = classSize;
         rc.summary.classPosition = classPositionMap.map.get(rc.student.id) || '';
         rc.summary.overallPosition = streamPositionMap.map.get(rc.student.id) || rc.summary.classPosition || '';
+        (rc.summary as any).positionStatus = classPositionMap.unresolved.has(rc.student.id) ? "UNRESOLVED" : "READY";
+        (rc.summary as any).positionIssues = classPositionMap.unresolved.get(rc.student.id) || [];
       }
 
       markTiming("assemble");
@@ -13620,6 +14149,24 @@ ${schoolName}`;
       res.setHeader("Server-Timing", serverTiming);
       if (req.query.pdfData === "1" || req.path.endsWith("/pdf-data")) {
         console.info(`[academic-pdf] report data exam=${examId} class=${classId} learners=${reportCards.length} totalMs=${totalDuration} ${serverTiming}`);
+      }
+      if (publication?.isPublished === true) {
+        const cachePath = reportDataCachePath({
+          schoolId,
+          examId,
+          classId,
+          publicationVersion: Number(publication.publicationVersion || 0),
+          gradingConfigurationFingerprint,
+          brandingFingerprint,
+          ...(requestedStudentIds.length ? { studentIds: requestedStudentIds } : {}),
+        });
+        await writeJsonCache(cachePath, payload).catch((error) => {
+          console.warn("[academic-report-cache] unable to persist report data:", error);
+        });
+        res.setHeader("X-Report-Data-Cache", "MISS");
+        queueAcademicReportCacheCleanup();
+      } else {
+        res.setHeader("X-Report-Data-Cache", "BYPASS");
       }
       res.json(payload);
     } catch (error) {
@@ -13711,26 +14258,35 @@ ${schoolName}`;
         let gradePoints = 0;
 
         {
-          const applicableGrades = getClassSubjectGradeCandidates({
+          const gradeContext = getClassSubjectGradeCandidates({
             allGrades: grades,
             school,
             classInfo,
             classStreamName: classStream?.name || null,
             subject,
-          }).grades;
-          const resolvedGrade = resolveStoredAssessmentGrade({
-            mark,
-            percentage,
-            applicableGrades,
-            allGrades: grades,
-            subjectType: subject.subjectType,
           });
+          const linkedGrade = mark.gradeId
+            ? grades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
+            : null;
+          const resolvedGrade = gradeContext.excluded
+            ? linkedGrade
+            : resolveStoredAssessmentGrade({
+                mark,
+                percentage,
+                applicableGrades: gradeContext.grades,
+                allGrades: grades,
+                expectedProfileKey: gradeContext.profileKey,
+                classId: Number(classInfo.id),
+                subjectType: subject.subjectType,
+              });
           if (resolvedGrade) {
             gradeName = resolvedGrade.gradeName;
-            gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
+            if (!gradeContext.excluded) {
+              gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
+            }
           }
 
-          if (percentage !== null) {
+          if (percentage !== null && !gradeContext.excluded) {
             totalPercentage += percentage;
             totalGradePoints += gradePoints;
             subjectCount++;
@@ -13866,29 +14422,38 @@ async function buildReportCardMessage(
       let gradeName = '';
       let gradePoints = 0;
 
-      const applicableGrades = studentClass
+      const gradeContext = studentClass
         ? getClassSubjectGradeCandidates({
             allGrades: grades,
             school: schoolInfo,
             classInfo: studentClass,
             classStreamName: classStream?.name || null,
             subject,
-          }).grades
-        : [];
-      const resolvedGrade = resolveStoredAssessmentGrade({
-        mark,
-        percentage: pctNum,
-        applicableGrades,
-        allGrades: grades,
-        subjectType: subject.subjectType,
-      });
+          })
+        : { profileKey: null, grades: [] as any[], excluded: false };
+      const linkedGrade = mark.gradeId
+        ? grades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
+        : null;
+      const resolvedGrade = gradeContext.excluded
+        ? linkedGrade
+        : resolveStoredAssessmentGrade({
+            mark,
+            percentage: pctNum,
+            applicableGrades: gradeContext.grades,
+            allGrades: grades,
+            expectedProfileKey: gradeContext.profileKey,
+            classId: Number(studentClass?.id || 0),
+            subjectType: subject.subjectType,
+          });
       if (resolvedGrade) {
         gradeName = resolvedGrade.gradeName;
-        gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
+        if (!gradeContext.excluded) {
+          gradePoints = resolvedGrade.gradePoints ? parseFloat(resolvedGrade.gradePoints as string) : 0;
+        }
       }
 
       lines.push({ subject: subject.name, pct: pctStr, grade: gradeName, statusComment });
-      if (pctNum !== null) {
+      if (pctNum !== null && !gradeContext.excluded) {
         totalPct += pctNum;
         totalGradePoints += gradePoints;
         subjectCount++;
@@ -13972,30 +14537,8 @@ async function buildReportCardMessage(
   }
 
 
-  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v2-selected-data";
-
-  function reportPdfCacheDirectory(): string {
-    const objectRoot = path.resolve(process.env.LOCAL_OBJECT_DIR?.trim() || path.join(process.cwd(), "object_storage"));
-    return path.join(objectRoot, "private", "academic-report-pdf-cache");
-  }
-
-  function reportPdfCacheKey(args: {
-    schoolId: number;
-    examId: number;
-    classId: number;
-    publicationVersion: number;
-    studentIds: number[];
-  }): string {
-    const selection = Array.from(new Set(args.studentIds)).sort((a, b) => a - b).join(",");
-    return crypto.createHash("sha256").update([
-      REPORT_PDF_TEMPLATE_VERSION,
-      args.schoolId,
-      args.examId,
-      args.classId,
-      args.publicationVersion,
-      selection,
-    ].join("|")).digest("hex");
-  }
+  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v4-exact-grading-raw-points-exclusions";
+  const reportPdfInFlight = new Map<string, Promise<{ buffer: Buffer; cacheStatus: "MISS" | "BYPASS" }>>();
 
   async function generateReportCardChromiumPdf(args: {
     req: Request;
@@ -14004,60 +14547,73 @@ async function buildReportCardMessage(
     classId: number;
     studentIds: number[];
   }): Promise<{ buffer: Buffer; cacheStatus: "HIT" | "MISS" | "BYPASS" }> {
-    const publication = await getClassExamPublication(args.examId, args.classId);
+    const [publication, school, settingsRows, gradeRows] = await Promise.all([
+      getClassExamPublication(args.examId, args.classId),
+      storage.getSchool(args.schoolId),
+      db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, args.schoolId)),
+      storage.getGradesBySchool(args.schoolId),
+    ]);
     const shouldCache = publication?.isPublished === true;
     const publicationVersion = Number(publication?.publicationVersion || 0);
-    const cacheKey = shouldCache ? reportPdfCacheKey({
+    const gradingConfigurationFingerprint = reportGradingConfigurationFingerprint(settingsRows, gradeRows);
+    const cacheKey = reportCacheKey({
+      templateVersion: REPORT_PDF_TEMPLATE_VERSION,
       schoolId: args.schoolId,
       examId: args.examId,
       classId: args.classId,
       publicationVersion,
+      gradingConfigurationFingerprint,
+      brandingFingerprint: reportBrandingFingerprint(school),
       studentIds: args.studentIds,
-    }) : null;
-    const cachePath = cacheKey ? path.join(reportPdfCacheDirectory(), `${cacheKey}.pdf`) : null;
+    });
+    const cachePath = shouldCache ? path.join(academicReportPdfCacheDirectory(), `${cacheKey}.pdf`) : null;
 
     if (cachePath) {
-      try {
-        const buffer = await fs.readFile(cachePath);
-        console.info(`[academic-pdf] cache hit exam=${args.examId} class=${args.classId} learners=${args.studentIds.length} bytes=${buffer.length}`);
-        return { buffer, cacheStatus: "HIT" };
-      } catch (error: any) {
-        if (error?.code !== "ENOENT") console.warn("Unable to read report PDF cache:", error);
+      const cached = await readBufferCache(cachePath);
+      if (cached) {
+        console.info(`[academic-pdf] cache hit exam=${args.examId} class=${args.classId} learners=${args.studentIds.length} bytes=${cached.length}`);
+        return { buffer: cached, cacheStatus: "HIT" };
       }
     }
 
-    const params = new URLSearchParams({
-      examId: String(args.examId),
-      classId: String(args.classId),
-      studentIds: args.studentIds.join(","),
-    });
-    const buffer = await renderAppRoutePdf({
-      req: args.req,
-      schoolId: args.schoolId,
-      route: `/pdf-render/report-cards?${params.toString()}`,
-      pdfOptions: {
-        format: "A4",
-        printBackground: true,
-        preferCSSPageSize: true,
-        margin: { top: "2mm", right: "2mm", bottom: "2mm", left: "2mm" },
-      },
-    });
+    const inFlightKey = cachePath || `bypass:${cacheKey}`;
+    const existing = reportPdfInFlight.get(inFlightKey);
+    if (existing) {
+      console.info(`[academic-pdf] joined in-flight render exam=${args.examId} class=${args.classId} learners=${args.studentIds.length}`);
+      return existing;
+    }
 
-    if (cachePath) {
-      try {
-        await fs.mkdir(path.dirname(cachePath), { recursive: true });
-        const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
-        await fs.writeFile(temporaryPath, buffer, { flag: "wx" });
-        await fs.rename(temporaryPath, cachePath).catch(async (error: any) => {
-          await fs.unlink(temporaryPath).catch(() => undefined);
-          if (error?.code !== "EEXIST") throw error;
+    const job = (async (): Promise<{ buffer: Buffer; cacheStatus: "MISS" | "BYPASS" }> => {
+      const params = new URLSearchParams({
+        examId: String(args.examId),
+        classId: String(args.classId),
+        studentIds: args.studentIds.join(","),
+      });
+      const buffer = await renderAppRoutePdf({
+        req: args.req,
+        schoolId: args.schoolId,
+        route: `/pdf-render/report-cards?${params.toString()}`,
+        pdfOptions: {
+          format: "A4",
+          printBackground: true,
+          preferCSSPageSize: true,
+          margin: { top: "2mm", right: "2mm", bottom: "2mm", left: "2mm" },
+        },
+      });
+      if (cachePath) {
+        await writeBufferCache(cachePath, buffer).catch((error) => {
+          console.warn("Unable to persist report PDF cache:", error);
         });
-      } catch (error) {
-        console.warn("Unable to persist report PDF cache:", error);
+        queueAcademicReportCacheCleanup();
       }
+      return { buffer, cacheStatus: shouldCache ? "MISS" : "BYPASS" };
+    })();
+    reportPdfInFlight.set(inFlightKey, job);
+    try {
+      return await job;
+    } finally {
+      if (reportPdfInFlight.get(inFlightKey) === job) reportPdfInFlight.delete(inFlightKey);
     }
-
-    return { buffer, cacheStatus: shouldCache ? "MISS" : "BYPASS" };
   }
 
   function queuePublishedReportPdfGeneration(args: {
@@ -14083,7 +14639,19 @@ async function buildReportCardMessage(
         const studentIds = learners.map((student) => Number(student.id)).filter((id) => Number.isInteger(id) && id > 0);
         if (!studentIds.length) return;
         await generateReportCardChromiumPdf({ ...args, req: backgroundRequest, studentIds });
-        console.info(`[academic-pdf] background cache ready exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
+        console.info(`[academic-pdf] background class cache ready exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
+        if (process.env.PDF_PREGENERATE_INDIVIDUALS_ON_PUBLISH !== "false") {
+          const concurrency = Math.max(1, Math.min(4, Number(process.env.PDF_RENDER_CONCURRENCY || 2)));
+          for (let index = 0; index < studentIds.length; index += concurrency) {
+            const batch = studentIds.slice(index, index + concurrency);
+            await Promise.all(batch.map((studentId) => generateReportCardChromiumPdf({
+              ...args,
+              req: backgroundRequest,
+              studentIds: [studentId],
+            })));
+          }
+          console.info(`[academic-pdf] background individual caches ready exam=${args.examId} class=${args.classId} learners=${studentIds.length}`);
+        }
       })().catch((error) => {
         console.warn(`[academic-pdf] background generation failed exam=${args.examId} class=${args.classId}:`, error);
       });
@@ -14490,6 +15058,133 @@ async function buildReportCardMessage(
     reason: z.string().trim().optional().nullable(),
   });
 
+  async function getClassPublicationGradingIssues(args: {
+    schoolId: number;
+    examId: number;
+    classId: number;
+  }) {
+    const rawAssessments = (await storage.getAssessmentsByExam(args.examId))
+      .filter((assessment: any) => Number(assessment.classId) === Number(args.classId));
+    const rawIds = rawAssessments.map((assessment: any) => Number(assessment.id));
+    const allMarks = rawIds.length ? await storage.getAssessmentMarksByAssessments(rawIds) : [];
+    const assessments = selectCanonicalAssessments(rawAssessments, allMarks).assessments;
+    const assessmentIds = new Set(assessments.map((assessment: any) => Number(assessment.id)));
+    const marks = allMarks.filter((mark: any) => assessmentIds.has(Number(mark.assessmentId)));
+    const subjectIds = Array.from(new Set(assessments.map((assessment: any) => Number(assessment.subjectId))));
+    const subjects = await storage.getSubjectsBySchool(args.schoolId);
+    const subjectMap = new Map(subjects.map((subject: any) => [Number(subject.id), subject]));
+    const strictSubjectIds = subjectIds.filter((subjectId) => {
+      const subject = subjectMap.get(subjectId);
+      return !!subject && !isTemporarilyExcludedFromStrictGrading(subject);
+    });
+    const configuration = await getClassGradingConfiguration({
+      classId: args.classId,
+      subjectIds: strictSubjectIds,
+      autoAttach: false,
+      expectedSchoolId: args.schoolId,
+    });
+    const issues: any[] = [];
+    if (!configuration.ready) {
+      issues.push({
+        code: "GRADE_CONFIGURATION_INVALID",
+        message: configuration.message,
+        profiles: configuration.profiles,
+      });
+    }
+
+    const [school, classInfo, grades] = await Promise.all([
+      storage.getSchool(args.schoolId),
+      storage.getClass(args.classId),
+      storage.getGradesBySchool(args.schoolId),
+    ]);
+    const stream = classInfo?.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+    const assessmentMap = new Map(assessments.map((assessment: any) => [Number(assessment.id), assessment]));
+    const contextMap = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+    for (const subjectId of subjectIds) {
+      const subject = subjectMap.get(subjectId);
+      if (!subject || !classInfo || isTemporarilyExcludedFromStrictGrading(subject)) continue;
+      contextMap.set(subjectId, getClassSubjectGradeCandidates({
+        allGrades: grades,
+        school,
+        classInfo,
+        classStreamName: stream?.name || null,
+        subject,
+      }));
+    }
+
+    for (const mark of marks) {
+      const percentage = parseFinitePercentage(mark.percentage);
+      if (percentage === null) continue;
+      const assessment: any = assessmentMap.get(Number(mark.assessmentId));
+      const subject: any = assessment ? subjectMap.get(Number(assessment.subjectId)) : null;
+      if (subject && isTemporarilyExcludedFromStrictGrading(subject)) continue;
+      const context = assessment ? contextMap.get(Number(assessment.subjectId)) : null;
+      const storedGrade = mark.gradeId
+        ? grades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
+        : null;
+      if (storedGrade && !storedGradeMatchesExactContext({
+        grade: storedGrade,
+        expectedProfileKey: context?.profileKey || null,
+        classId: args.classId,
+        percentage,
+        subjectType: subject?.subjectType || null,
+      })) {
+        issues.push({
+          code: "STORED_GRADE_PROFILE_MISMATCH",
+          studentId: Number(mark.studentId),
+          subjectId: Number(assessment?.subjectId || mark.subjectId),
+          assessmentId: Number(mark.assessmentId),
+          percentage,
+          expectedProfileKey: context?.profileKey || null,
+          storedGradeId: Number(mark.gradeId),
+          storedGradeProfileKey: storedGrade.gradeLevel || null,
+        });
+      }
+      const resolution = resolveExactConfiguredGrade({
+        percentage,
+        expectedProfileKey: context?.profileKey || null,
+        classId: args.classId,
+        subjectType: subject?.subjectType || null,
+        exactProfileGrades: context?.grades || [],
+        storedGrade,
+      });
+      if (!resolution.grade || resolution.passStatus === "UNRESOLVED" || resolution.issues.length) {
+        issues.push({
+          code: "GRADE_RESULT_UNRESOLVED",
+          studentId: Number(mark.studentId),
+          subjectId: Number(assessment?.subjectId || mark.subjectId),
+          assessmentId: Number(mark.assessmentId),
+          percentage,
+          expectedProfileKey: context?.profileKey || null,
+          issues: resolution.issues,
+        });
+      }
+    }
+
+    const ranking = await calculateClassPositionMap(args.examId, args.schoolId, args.classId);
+    const rankingConfigurationIssues = Array.from(ranking.unresolved.entries())
+      .map(([studentId, reasons]) => ({
+        studentId,
+        reasons: reasons.filter((reason) =>
+          !reason.startsWith("missing_result:") && reason !== "no_valid_results"
+        ),
+      }))
+      .filter((row) => row.reasons.length > 0);
+    if (rankingConfigurationIssues.length > 0) {
+      issues.push({
+        code: "POSITION_CONFIGURATION_UNRESOLVED",
+        message: "Class position cannot be calculated using the configured points policy.",
+        learners: rankingConfigurationIssues,
+      });
+    }
+
+    return {
+      ready: issues.length === 0,
+      issues,
+      configuration,
+    };
+  }
+
   async function setClassPublication(args: {
     schoolId: number;
     examId: number;
@@ -14643,6 +15338,16 @@ async function buildReportCardMessage(
 
       const progressContext = await loadExamProgressContext(schoolId, data.examId);
       const progress = buildClassExamProgress(progressContext, data.classId);
+      const gradingAudit = data.publish
+        ? await getClassPublicationGradingIssues({ schoolId, examId: data.examId, classId: data.classId })
+        : null;
+      if (data.publish && gradingAudit && !gradingAudit.ready) {
+        return res.status(422).json({
+          message: "Publication is blocked because one or more results cannot be resolved through the exact configured grading profile.",
+          code: "GRADING_INTEGRITY_BLOCKED",
+          gradingAudit,
+        });
+      }
       const result = await setClassPublication({
         schoolId,
         examId: data.examId,
@@ -14668,6 +15373,7 @@ async function buildReportCardMessage(
           summary: progress.totals,
           warningAcknowledged: data.publish && (progress.totals.partial + progress.totals.unrecorded > 0),
           snapshotRefresh: result.snapshotRefresh,
+          gradingAudit,
         },
       });
 
@@ -14683,6 +15389,7 @@ async function buildReportCardMessage(
         summary: progress.totals,
         warningAcknowledged: data.publish && (progress.totals.partial + progress.totals.unrecorded > 0),
         snapshotRefresh: result.snapshotRefresh,
+        gradingAudit,
       });
     } catch (error: any) {
       if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid publication request", errors: error.errors });
@@ -14709,6 +15416,22 @@ async function buildReportCardMessage(
       const classes = (await storage.getClassesBySchool(schoolId)).filter((classInfo: any) => Number(classInfo.streamId) === Number(data.streamId));
       if (!classes.length) return res.status(404).json({ message: "No classes found for the selected stream" });
       const progressContext = await loadExamProgressContext(schoolId, data.examId);
+      const gradingAudits: Array<{ classId: number; className: string; audit: any }> = [];
+      if (data.publish) {
+        for (const classInfo of classes) {
+          const current = progressContext.publicationByClass.get(Number(classInfo.id));
+          if (current?.isPublished) continue;
+          const audit = await getClassPublicationGradingIssues({ schoolId, examId: data.examId, classId: Number(classInfo.id) });
+          if (!audit.ready) gradingAudits.push({ classId: Number(classInfo.id), className: classInfo.className, audit });
+        }
+        if (gradingAudits.length > 0) {
+          return res.status(422).json({
+            message: "Stream publication is blocked because one or more classes contain unresolved exact-profile grading results.",
+            code: "GRADING_INTEGRITY_BLOCKED",
+            gradingAudits,
+          });
+        }
+      }
 
       const changedClasses: number[] = [];
       const summaries: any[] = [];
@@ -14768,6 +15491,7 @@ async function buildReportCardMessage(
           summaries,
           warningAcknowledged: data.publish && summaries.some((summary) => (Number(summary.partial || 0) + Number(summary.unrecorded || 0)) > 0),
           snapshotRefreshes,
+          gradingAudits,
         },
       });
 
@@ -14780,6 +15504,7 @@ async function buildReportCardMessage(
         summaries,
         warningAcknowledged: data.publish && summaries.some((summary) => (Number(summary.partial || 0) + Number(summary.unrecorded || 0)) > 0),
         snapshotRefreshes,
+        gradingAudits,
       });
     } catch (error: any) {
       if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid publication request", errors: error.errors });
@@ -15050,7 +15775,8 @@ async function buildReportCardMessage(
     }
   });
 
-  // Class merit list
+  // Class merit list. Position uses exact configured grade points, configured
+  // point direction, configured grade rank order, then average percentage.
   app.get("/api/report-hub/class-merit/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
@@ -15059,138 +15785,148 @@ async function buildReportCardMessage(
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
-      const [classInfo, exam, school] = await Promise.all([
+      const [classInfo, exam, school, allGrades, settingsRows, students, schoolSubjects] = await Promise.all([
         storage.getClass(classId),
         storage.getExam(examId),
         storage.getSchool(schoolId),
+        storage.getGradesBySchool(schoolId),
+        db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
+        storage.getStudentsByClass(classId),
+        storage.getSubjectsBySchool(schoolId),
       ]);
       if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
       if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
       const stream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
       const streamName = stream?.name || null;
-      const showPointsColumn = shouldShowMeritPointsColumn({ streamName, className: classInfo.className });
-      const allGrades = await storage.getGradesBySchool(schoolId);
+      const rawAssessments = (await storage.getAssessmentsByExam(examId))
+        .filter((assessment: any) => Number(assessment.classId) === classId);
+      const rawMarks = rawAssessments.length
+        ? await storage.getAssessmentMarksByAssessments(rawAssessments.map((assessment: any) => Number(assessment.id)))
+        : [];
+      const assessments = selectCanonicalAssessments(rawAssessments, rawMarks).assessments;
+      const canonicalAssessmentIds = new Set(assessments.map((assessment: any) => Number(assessment.id)));
+      const marks = rawMarks.filter((mark: any) => canonicalAssessmentIds.has(Number(mark.assessmentId)));
+      const assessedSubjectIds = Array.from(new Set(assessments.map((assessment: any) => Number(assessment.subjectId))));
+      const subjectIdSet = new Set(assessedSubjectIds);
+      const validSubjects = schoolSubjects.filter((subject: any) =>
+        subjectIdSet.has(Number(subject.id)) && !isTemporarilyExcludedFromStrictGrading(subject)
+      );
+      const subjectIds = validSubjects.map((subject: any) => Number(subject.id));
+      const subjectById = new Map(validSubjects.map((subject: any) => [Number(subject.id), subject]));
+      const assessmentBySubject = new Map(assessments.map((assessment: any) => [Number(assessment.subjectId), assessment]));
+      const marksMap = new Map(marks.map((mark: any) => [`${Number(mark.studentId)}-${Number(mark.assessmentId)}`, mark]));
 
-      const students = await storage.getStudentsByClass(classId);
-      const studentSubjectIdsByStudent = new Map<number, Set<number>>();
-      await Promise.all(students.map(async (student: any) => {
-        const rows = await storage.getStudentSubjects(student.id);
-        studentSubjectIdsByStudent.set(
-          student.id,
-          new Set(rows.map((row: any) => row.subjectId).filter((id: any) => id !== null && id !== undefined)),
-        );
-      }));
-
-      const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
-      const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
-
-      const subjectIds = [...new Set(classAssessments.map(a => a.subjectId))];
-      const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
-      const validSubjects = subjectsData.filter(Boolean);
-
-      const gradeCandidatesBySubject = new Map<number, any[]>();
-      const getSubjectGradeCandidates = (subject: any) => {
-        const existing = gradeCandidatesBySubject.get(Number(subject.id));
-        if (existing) return existing;
-        const profileKey = resolveGradeProfileKey({
-          schoolType: school?.schoolType,
-          examinationBoard: school?.examinationBoard,
-          streamName,
-          subjectType: subject.subjectType,
-        });
-        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
-        const candidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
-        gradeCandidatesBySubject.set(Number(subject.id), candidates);
-        return candidates;
-      };
-
-      const assessmentIds = classAssessments.map(a => a.id);
-      let classMarks: any[] = [];
-      if (assessmentIds.length > 0) {
-        classMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
+      const studentIds = students.map((student: any) => Number(student.id));
+      const assignmentRows = studentIds.length
+        ? await db.select({ studentId: studentSubjectsSchema.studentId, subjectId: studentSubjectsSchema.subjectId })
+          .from(studentSubjectsSchema)
+          .where(inArray(studentSubjectsSchema.studentId, studentIds))
+        : [];
+      const assignedByStudent = new Map<number, Set<number>>();
+      for (const row of assignmentRows) {
+        const assigned = assignedByStudent.get(Number(row.studentId)) || new Set<number>();
+        assigned.add(Number(row.subjectId));
+        assignedByStudent.set(Number(row.studentId), assigned);
       }
 
-      const rows = students.map(student => {
-        const eligibleSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
-        const studentMarks = classMarks.filter(m => m.studentId === student.id);
-        const cells: Record<number, number | null> = {};
-        const cellGrades: Record<number, string> = {};
-        const cellDisplays: Record<number, string> = {};
-        let sum = 0;
-        let eligibleCount = 0;
-        let have = 0;
-        let totalPoints = 0;
+      const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+      const profileKeys = new Set<string>();
+      for (const subject of validSubjects as any[]) {
+        const context = getClassSubjectGradeCandidates({
+          allGrades,
+          school,
+          classInfo,
+          classStreamName: streamName,
+          subject,
+        });
+        gradeContextBySubject.set(Number(subject.id), context);
+        if (context.profileKey) profileKeys.add(context.profileKey);
+      }
+      const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
 
-        for (const subject of validSubjects) {
-          if (!subject) continue;
-          const takesSubject = eligibleSubjectIds.has(subject.id);
-          if (!takesSubject) {
-            cells[subject.id] = null;
-            continue;
-          }
-
-          eligibleCount++;
-          const mark = studentMarks.find(m => m.subjectId === subject.id);
-          const pct = mark?.percentage !== null && mark?.percentage !== undefined ? parseFloat(mark.percentage) : null;
-          cells[subject.id] = pct;
-          if (pct !== null) {
-            sum += pct;
-            have++;
-            const gradeCandidates = getSubjectGradeCandidates(subject);
-            const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType, allGrades);
-            const gradeLabel = getGradeDisplayName(grade);
-            totalPoints += getMeritGradePoints(grade);
-            if (gradeLabel) cellGrades[subject.id] = gradeLabel;
-            cellDisplays[subject.id] = formatMeritMarkDisplay(pct, gradeLabel);
+      const candidateByStudent = new Map<number, RankingCandidate>();
+      const displayByStudent = new Map<number, { totalPercentage: number; displays: Record<number, string> }>();
+      for (const student of students as any[]) {
+        const assigned = assignedByStudent.get(Number(student.id));
+        const expectedSubjectIds = assigned?.size
+          ? subjectIds.filter((subjectId) => assigned.has(subjectId))
+          : subjectIds;
+        const results: RankingSubjectResult[] = [];
+        const displays: Record<number, string> = {};
+        let totalPercentage = 0;
+        for (const subjectId of expectedSubjectIds) {
+          const assessment: any = assessmentBySubject.get(subjectId);
+          const subject: any = subjectById.get(subjectId);
+          const context = gradeContextBySubject.get(subjectId);
+          const mark: any = assessment ? marksMap.get(`${Number(student.id)}-${Number(assessment.id)}`) : null;
+          const percentage = parseFinitePercentage(mark?.percentage);
+          const storedGrade = mark?.gradeId
+            ? allGrades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
+            : null;
+          const resolution = resolveExactConfiguredGrade({
+            percentage,
+            expectedProfileKey: context?.profileKey || null,
+            classId,
+            subjectType: subject?.subjectType || null,
+            exactProfileGrades: context?.grades || [],
+            storedGrade,
+          });
+          results.push({ subjectId, percentage, grade: resolution.grade, profileKey: context?.profileKey || null });
+          if (percentage !== null) {
+            totalPercentage += percentage;
+            displays[subjectId] = formatMeritMarkDisplay(percentage, getGradeDisplayName(resolution.grade));
           }
         }
+        candidateByStudent.set(Number(student.id), { id: Number(student.id), expectedSubjectIds, results });
+        displayByStudent.set(Number(student.id), { totalPercentage, displays });
+      }
 
-        const avg = eligibleCount > 0 ? sum / eligibleCount : 0;
-
+      const ranking = calculateConfiguredPositionMap({
+        candidates: Array.from(candidateByStudent.values()),
+        pointsDirection,
+      });
+      const rows = (students as any[]).map((student) => {
+        const candidate = candidateByStudent.get(Number(student.id))!;
+        const record = ranking.records.get(Number(student.id));
+        const display = displayByStudent.get(Number(student.id))!;
+        const position = ranking.map.get(Number(student.id)) || "";
         return {
           studentName: `${student.firstName} ${student.lastName}`,
           admissionNo: student.admissionNo,
-          cells,
-          cellGrades,
-          cellDisplays,
-          total: Math.round(sum),
-          totalDisplay: `${Math.round(sum)}/${eligibleCount * 100}`,
-          avg: Math.round(avg * 10) / 10,
-          avgDisplay: `${Math.round(avg)}%`,
-          points: totalPoints,
-          pointsDisplay: formatMeritPoints(totalPoints),
-          subjectsWithMarks: have,
-          eligibleSubjectCount: eligibleCount,
+          total: Math.round(display.totalPercentage),
+          totalDisplay: candidate.results.some((result) => result.percentage !== null)
+            ? `${Math.round(display.totalPercentage)}/${candidate.results.filter((result) => result.percentage !== null).length * 100}`
+            : "-",
+          avg: record?.averagePercentage === null || record?.averagePercentage === undefined ? null : Math.round(record.averagePercentage * 10) / 10,
+          avgDisplay: record?.averagePercentage === null || record?.averagePercentage === undefined ? "-" : `${Math.round(record.averagePercentage)}%`,
+          points: record?.totalPoints ?? null,
+          pointsDisplay: record?.totalPoints === null || record?.totalPoints === undefined ? "-" : formatMeritPoints(record.totalPoints),
+          subjectsWithMarks: candidate.results.filter((result) => result.percentage !== null).length,
+          eligibleSubjectCount: candidate.results.filter((result) => result.percentage !== null).length,
+          position,
+          positionStatus: position ? "READY" : "UNRESOLVED",
+          positionIssues: ranking.unresolved.get(Number(student.id)) || [],
+          subjectMarks: subjectIds.map((subjectId) => display.displays[subjectId] || "-"),
         };
-      }).filter(row => row.eligibleSubjectCount > 0);
-
-      rows.sort((a, b) => {
-        if (b.avg !== a.avg) return b.avg - a.avg;
-        if (b.total !== a.total) return b.total - a.total;
-        return a.studentName.localeCompare(b.studentName);
       });
-
-      let meritPos = 0;
-      let meritLastAvg: number | null = null;
-      const rankedRows = rows.map((row, index) => {
-        if (row.avg !== meritLastAvg) {
-          meritPos = index + 1;
-          meritLastAvg = row.avg;
-        }
-        return {
-          ...row,
-          position: `${meritPos}/${rows.length}`,
-        };
+      rows.sort((a, b) => {
+        const aPosition = a.position ? Number(a.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+        const bPosition = b.position ? Number(b.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+        if (aPosition !== bPosition) return aPosition - bPosition;
+        return a.studentName.localeCompare(b.studentName);
       });
 
       res.json({
         examName: exam?.examName || "",
         className: classInfo.className,
-        subjects: validSubjects.map(s => ({ id: s!.id, name: getReportSubjectLabel(s) })),
-        rows: rankedRows,
-        totalStudents: rows.length,
-        showPointsColumn,
+        subjects: validSubjects.map((subject: any) => ({ id: subject.id, name: getReportSubjectLabel(subject) })),
+        rows,
+        totalStudents: students.length,
+        rankedStudents: ranking.size,
+        showPointsColumn: true,
+        rankingPolicy: "CONFIGURED_GRADE_POINTS",
+        pointsDirection,
       });
     } catch (error) {
       next(error);
@@ -15414,24 +16150,22 @@ async function buildReportCardMessage(
     return resolution.ambiguous ? null : resolution.grade;
   }
 
-  function resolveAnalyticsGradeForMark(mark: any, pct: number, candidateGrades: any[], subjectType?: string | null, fallbackGrades: any[] = []) {
-    // Existing linked grades remain authoritative for historical records. Percentage
-    // fallback must only use profile/class candidates; using every school grade can
-    // silently assign a scale that does not apply to the assessment class.
-    const gradePool = uniqueGradesById([...candidateGrades, ...fallbackGrades]);
+  function resolveAnalyticsGradeForMark(mark: any, pct: number, candidateGrades: any[], subjectType?: string | null) {
+    const exactPool = uniqueGradesById(candidateGrades);
     const linkedGrade = mark?.gradeId
-      ? gradePool.find((grade) => Number(grade.id) === Number(mark.gradeId))
+      ? exactPool.find((grade) => Number(grade.id) === Number(mark.gradeId))
       : null;
-    if (linkedGrade) return linkedGrade;
-
-    return findGradeForPercentage(pct, candidateGrades, subjectType);
+    if (linkedGrade) {
+      const lower = Number(linkedGrade.lowerLimit);
+      const upper = Number(linkedGrade.upperLimit);
+      const typeMatches = !linkedGrade.gradeType || isSubjectTypeCompatibleWithGradeType(subjectType, linkedGrade.gradeType);
+      if (typeMatches && Number.isFinite(lower) && Number.isFinite(upper) && pct >= lower && pct <= upper) return linkedGrade;
+    }
+    return findGradeForPercentage(pct, exactPool, subjectType);
   }
 
-  function isPassingAnalyticsGrade(grade: any, pct: number, fallbackPassMark = 50) {
-    const status = String(grade?.gradeStatus || "").trim().toUpperCase();
-    if (status === "PASS") return true;
-    if (status === "FAIL") return false;
-    return pct >= fallbackPassMark;
+  function getAnalyticsPassStatus(grade: any): "PASS" | "FAIL" | "UNRESOLVED" {
+    return normalizeGradeStatus(grade?.gradeStatus);
   }
 
   // Class analytics
@@ -15451,7 +16185,6 @@ async function buildReportCardMessage(
       if (!classInfo || classInfo.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
       if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
-      const PASS_MARK = 50;
       const stream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
       const streamName = stream?.name || null;
       const students = await storage.getStudentsByClass(classId);
@@ -15468,19 +16201,23 @@ async function buildReportCardMessage(
       }));
 
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
-      const classAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
+      const rawClassAssessments = allAssessmentsRaw.filter(a => a.classId === classId);
+      const rawAssessmentIds = rawClassAssessments.map(a => a.id);
+      const rawClassMarks = rawAssessmentIds.length
+        ? await storage.getAssessmentMarksByAssessments(rawAssessmentIds)
+        : [];
+      const classAssessments = selectCanonicalAssessments(rawClassAssessments, rawClassMarks).assessments;
+      const canonicalAssessmentIds = new Set(classAssessments.map((assessment: any) => Number(assessment.id)));
+      const classMarks = rawClassMarks.filter((mark: any) => canonicalAssessmentIds.has(Number(mark.assessmentId)));
 
       const subjectIds = [...new Set(classAssessments.map(a => a.subjectId))];
-      const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
-      const validSubjects = subjectsData.filter(Boolean);
+      const schoolSubjectRows = await storage.getSubjectsBySchool(schoolId);
+      const subjectIdSet = new Set(subjectIds.map(Number));
+      const validSubjects = schoolSubjectRows.filter((subject: any) =>
+        subjectIdSet.has(Number(subject.id)) && !isTemporarilyExcludedFromStrictGrading(subject)
+      );
       const validSubjectIdSet = new Set(validSubjects.map((subject: any) => Number(subject.id)));
       const teacherMap = await resolveClassSubjectTeacherNames(schoolId, classId, subjectIds.map((id) => Number(id)));
-
-      const assessmentIds = classAssessments.map(a => a.id);
-      let classMarks: any[] = [];
-      if (assessmentIds.length > 0) {
-        classMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
-      }
 
       const gradeCounts: Record<string, number> = {};
       const gradeColumns: string[] = [];
@@ -15490,6 +16227,7 @@ async function buildReportCardMessage(
         expected: number;
         pass: number;
         fail: number;
+        unresolved: number;
         gradeCounts: Record<string, number>;
         gradeCandidates: any[];
         subjectType?: string | null;
@@ -15514,6 +16252,7 @@ async function buildReportCardMessage(
           expected,
           pass: 0,
           fail: 0,
+          unresolved: 0,
           gradeCounts: {},
           gradeCandidates,
           subjectType: subject.subjectType,
@@ -15552,15 +16291,17 @@ async function buildReportCardMessage(
         stats.sum += pct;
         stats.have++;
 
-        const grade = resolveAnalyticsGradeForMark(mark, pct, stats.gradeCandidates, stats.subjectType, allGrades);
+        const grade = resolveAnalyticsGradeForMark(mark, pct, stats.gradeCandidates, stats.subjectType);
         const gradeLabel = getGradeDisplayName(grade);
         if (gradeLabel) {
           gradeCounts[gradeLabel] = (gradeCounts[gradeLabel] || 0) + 1;
           stats.gradeCounts[gradeLabel] = (stats.gradeCounts[gradeLabel] || 0) + 1;
         }
 
-        if (isPassingAnalyticsGrade(grade, pct, PASS_MARK)) stats.pass++;
-        else stats.fail++;
+        const passStatus = getAnalyticsPassStatus(grade);
+        if (passStatus === "PASS") stats.pass++;
+        else if (passStatus === "FAIL") stats.fail++;
+        else stats.unresolved++;
       }
 
       const expectedCells = Object.values(subjectStats).reduce((sum, stats) => sum + stats.expected, 0);
@@ -15584,6 +16325,7 @@ async function buildReportCardMessage(
           completion: subCompletion,
           passed: stats.pass,
           failed: stats.fail,
+          unresolved: stats.unresolved,
           passRate,
           gradeCounts: stats.gradeCounts,
           totalStudents: stats.expected,
@@ -15601,7 +16343,8 @@ async function buildReportCardMessage(
         gradeCounts,
         subjectSummary,
         totalStudents,
-        passMark: PASS_MARK,
+        passMark: null,
+        passRule: "GRADE_STATUS",
       });
     } catch (error) {
       next(error);
@@ -15650,19 +16393,20 @@ async function buildReportCardMessage(
       }));
 
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
-      const streamAssessments = allAssessmentsRaw.filter(a => classIds.includes(a.classId));
-
-      const assessmentIds = streamAssessments.map(a => a.id);
-      let allMarks: any[] = [];
-      if (assessmentIds.length > 0) {
-        allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
-      }
+      const rawStreamAssessments = allAssessmentsRaw.filter(a => classIds.includes(a.classId));
+      const rawAssessmentIds = rawStreamAssessments.map(a => a.id);
+      const rawMarks = rawAssessmentIds.length
+        ? await storage.getAssessmentMarksByAssessments(rawAssessmentIds)
+        : [];
+      const streamAssessments = selectCanonicalAssessments(rawStreamAssessments, rawMarks).assessments;
+      const canonicalAssessmentIds = new Set(streamAssessments.map((assessment: any) => Number(assessment.id)));
+      const allMarks = rawMarks.filter((mark: any) => canonicalAssessmentIds.has(Number(mark.assessmentId)));
 
       const subjectIds = Array.from(new Set(streamAssessments.map((assessment: any) => Number(assessment.subjectId))));
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const subjectById = new Map<number, any>();
       for (const subject of subjectsData) {
-        if (subject) subjectById.set(Number(subject.id), subject);
+        if (subject && !isTemporarilyExcludedFromStrictGrading(subject)) subjectById.set(Number(subject.id), subject);
       }
       const validSubjectIds = subjectIds.filter((id) => subjectById.has(Number(id)));
 
@@ -15694,7 +16438,9 @@ async function buildReportCardMessage(
       }> = {};
       for (const student of allStudents) {
         const eligibleSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
-        const eligibleCount = validSubjectIds.filter((subjectId) => eligibleSubjectIds.has(Number(subjectId))).length;
+        const eligibleCount = eligibleSubjectIds.size > 0
+          ? validSubjectIds.filter((subjectId) => eligibleSubjectIds.has(Number(subjectId))).length
+          : validSubjectIds.length;
         perStudent[student.id] = { sum: 0, have: 0, eligibleCount, points: 0, displays: {}, raw: {}, pointRaw: {} };
       }
 
@@ -15723,7 +16469,7 @@ async function buildReportCardMessage(
 
         target.raw[subjectId] = pct;
         const gradeCandidates = getSubjectClassGradeCandidates(subject, mark.classId);
-        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType, allGrades);
+        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType);
         const gradeLabel = getGradeDisplayName(grade);
         const gradePoints = getMeritGradePoints(grade);
         if (target.pointRaw[subjectId] === undefined) {
@@ -15735,40 +16481,33 @@ async function buildReportCardMessage(
         target.displays[subjectId] = formatMeritMarkDisplay(pct, gradeLabel);
       }
 
-      const ranked = allStudents
-        .map(student => {
-          const data = perStudent[student.id];
-          if (!data || data.eligibleCount <= 0) return null;
-          const avg = data.sum / data.eligibleCount;
-          return { student, avg, total: data.sum, data };
-        })
-        .filter(Boolean) as Array<{ student: any; avg: number; total: number; data: { eligibleCount: number; points: number; displays: Record<number, string> } }>;
-
+      const streamRanking = await calculateStreamPositionMap(examId, schoolId, streamId);
+      const ranked = allStudents.map((student) => {
+        const data = perStudent[student.id];
+        const record = streamRanking.records.get(Number(student.id));
+        const position = streamRanking.map.get(Number(student.id)) || "";
+        return { student, data, record, position };
+      });
       ranked.sort((a, b) => {
-        if (b.avg !== a.avg) return b.avg - a.avg;
-        if (b.total !== a.total) return b.total - a.total;
+        const aPosition = a.position ? Number(a.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+        const bPosition = b.position ? Number(b.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+        if (aPosition !== bPosition) return aPosition - bPosition;
         const aName = `${a.student.firstName} ${a.student.lastName}`;
         const bName = `${b.student.firstName} ${b.student.lastName}`;
         return aName.localeCompare(bName);
       });
 
-      let strmPos = 0;
-      let strmLastAvg: number | null = null;
-      const rows = ranked.map((r, index) => {
-        if (r.avg !== strmLastAvg) {
-          strmPos = index + 1;
-          strmLastAvg = r.avg;
-        }
-        return {
-          studentName: `${r.student.firstName} ${r.student.lastName}`,
-          admissionNo: r.student.admissionNo,
-          total: `${Math.round(r.total)}/${r.data.eligibleCount * 100}`,
-          avg: `${Math.round(r.avg)}%`,
-          points: formatMeritPoints(r.data.points),
-          position: `${strmPos}/${ranked.length}`,
-          subjectMarks: validSubjectIds.map(sid => r.data.displays[sid] || "-"),
-        };
-      });
+      const rows = ranked.map(({ student, data, record, position }) => ({
+        studentName: `${student.firstName} ${student.lastName}`,
+        admissionNo: student.admissionNo,
+        total: data?.have ? `${Math.round(data.sum)}/${data.have * 100}` : "-",
+        avg: record?.averagePercentage === null || record?.averagePercentage === undefined ? "-" : `${Math.round(record.averagePercentage)}%`,
+        points: record?.totalPoints === null || record?.totalPoints === undefined ? "-" : formatMeritPoints(record.totalPoints),
+        position,
+        positionStatus: position ? "READY" : "UNRESOLVED",
+        positionIssues: streamRanking.unresolved.get(Number(student.id)) || [],
+        subjectMarks: validSubjectIds.map((subjectId) => data?.displays[subjectId] || "-"),
+      }));
 
       res.json({
         examName: exam?.examName || "",
@@ -15776,7 +16515,13 @@ async function buildReportCardMessage(
         subjects: validSubjectIds.map((subjectId) => getReportSubjectLabel(subjectById.get(Number(subjectId)))).filter(Boolean),
         rows,
         totalStudents: allStudents.length,
+        rankedStudents: streamRanking.size,
         showPointsColumn,
+        rankingPolicy: "CONFIGURED_GRADE_POINTS",
+        pointsDirection: resolveSharedPointsDirection(
+          Array.from(new Set(Array.from(gradeCandidatesBySubjectClass.values()).flat().map((grade: any) => String(grade.gradeLevel || "")).filter(Boolean))),
+          await db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
+        ),
       });
     } catch (error) {
       next(error);
@@ -15799,7 +16544,6 @@ async function buildReportCardMessage(
       ]);
       if (exam && exam.schoolId && exam.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
 
-      const PASS_MARK = 50;
       const allClasses = await storage.getAllClasses();
       const streamClasses = allClasses.filter(c => c.schoolId === schoolId && c.streamId === streamId);
       const classIds = streamClasses.map(c => c.id);
@@ -15827,19 +16571,20 @@ async function buildReportCardMessage(
       }));
 
       const allAssessmentsRaw = await storage.getAssessmentsByExam(examId);
-      const streamAssessments = allAssessmentsRaw.filter(a => classIds.includes(a.classId));
-
-      const assessmentIds = streamAssessments.map(a => a.id);
-      let allMarks: any[] = [];
-      if (assessmentIds.length > 0) {
-        allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
-      }
+      const rawStreamAssessments = allAssessmentsRaw.filter(a => classIds.includes(a.classId));
+      const rawAssessmentIds = rawStreamAssessments.map(a => a.id);
+      const rawMarks = rawAssessmentIds.length
+        ? await storage.getAssessmentMarksByAssessments(rawAssessmentIds)
+        : [];
+      const streamAssessments = selectCanonicalAssessments(rawStreamAssessments, rawMarks).assessments;
+      const canonicalAssessmentIds = new Set(streamAssessments.map((assessment: any) => Number(assessment.id)));
+      const allMarks = rawMarks.filter((mark: any) => canonicalAssessmentIds.has(Number(mark.assessmentId)));
 
       const subjectIds = [...new Set(streamAssessments.map((assessment: any) => Number(assessment.subjectId)))];
       const subjectsData = await Promise.all(subjectIds.map(id => storage.getSubject(id)));
       const subjectById = new Map<number, any>();
       for (const subject of subjectsData) {
-        if (subject) subjectById.set(Number(subject.id), subject);
+        if (subject && !isTemporarilyExcludedFromStrictGrading(subject)) subjectById.set(Number(subject.id), subject);
       }
       const teacherMap = await resolveStreamSubjectTeacherNames(schoolId, classIds, subjectIds.map((id) => Number(id)));
 
@@ -15872,6 +16617,7 @@ async function buildReportCardMessage(
         cnt: number;
         pass: number;
         fail: number;
+        unresolved: number;
         gradeCounts: Record<string, number>;
         subjectType?: string | null;
       }> = {};
@@ -15901,20 +16647,22 @@ async function buildReportCardMessage(
         const gradeCandidates = getSubjectClassGradeCandidates(subject, mark.classId);
 
         if (!bySubject[subId]) {
-          bySubject[subId] = { sum: 0, cnt: 0, pass: 0, fail: 0, gradeCounts: {}, subjectType: subject.subjectType };
+          bySubject[subId] = { sum: 0, cnt: 0, pass: 0, fail: 0, unresolved: 0, gradeCounts: {}, subjectType: subject.subjectType };
         }
 
         bySubject[subId].sum += pct;
         bySubject[subId].cnt++;
 
-        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType, allGrades);
+        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType);
         const gradeLabel = getGradeDisplayName(grade);
         if (gradeLabel) {
           bySubject[subId].gradeCounts[gradeLabel] = (bySubject[subId].gradeCounts[gradeLabel] || 0) + 1;
         }
 
-        if (isPassingAnalyticsGrade(grade, pct, PASS_MARK)) bySubject[subId].pass++;
-        else bySubject[subId].fail++;
+        const passStatus = getAnalyticsPassStatus(grade);
+        if (passStatus === "PASS") bySubject[subId].pass++;
+        else if (passStatus === "FAIL") bySubject[subId].fail++;
+        else bySubject[subId].unresolved++;
       }
 
       const rows = [];
@@ -15934,6 +16682,7 @@ async function buildReportCardMessage(
           avg,
           passed: stats.pass,
           failed: stats.fail,
+          unresolved: stats.unresolved,
           passRate,
           gradeCounts: stats.gradeCounts,
         });
@@ -15946,6 +16695,8 @@ async function buildReportCardMessage(
         streamName,
         gradeColumns,
         rows,
+        passMark: null,
+        passRule: "GRADE_STATUS",
       });
     } catch (error) {
       next(error);
@@ -17037,23 +17788,30 @@ async function buildReportCardMessage(
         assessment.assessmentTypeId ? storage.getAssessmentType(Number(assessment.assessmentTypeId)) : Promise.resolve(undefined),
       ]);
       const percentage = parseFinitePercentage(mark.percentage);
-      const applicableGrades = subject
+      const gradeContext = subject
         ? getClassSubjectGradeCandidates({
             allGrades,
             school,
             classInfo,
             classStreamName: classStream?.name || null,
             subject,
-          }).grades
-        : [];
-      const grade = subject
-        ? resolveStoredAssessmentGrade({
-            mark,
-            percentage,
-            applicableGrades,
-            allGrades,
-            subjectType: subject.subjectType,
           })
+        : { profileKey: null, grades: [] as any[], excluded: false };
+      const linkedGrade = mark.gradeId
+        ? allGrades.find((candidate: any) => Number(candidate.id) === Number(mark.gradeId))
+        : null;
+      const grade = subject
+        ? gradeContext.excluded
+          ? linkedGrade
+          : resolveStoredAssessmentGrade({
+              mark,
+              percentage,
+              applicableGrades: gradeContext.grades,
+              allGrades,
+              expectedProfileKey: gradeContext.profileKey,
+              classId: Number(classInfo.id),
+              subjectType: subject.subjectType,
+            })
         : null;
       const statusComment = markStatusLabel(mark.attStatus);
       if (percentage === null && !statusComment) continue;
@@ -17200,10 +17958,13 @@ async function buildReportCardMessage(
         const exam = allAvailableExams.find(e => e.id === examId);
         if (exam) {
           const examAssessments = await storage.getAssessmentsByExam(examId);
-          const classAssessments = examAssessments.filter(a => a.classId === student.classId);
-          if (classAssessments.length > 0) {
-            const assessmentIds = classAssessments.map(a => a.id);
-            const allMarks = await storage.getAssessmentMarksByAssessments(assessmentIds);
+          const classAssessmentsRaw = examAssessments.filter(a => a.classId === student.classId);
+          if (classAssessmentsRaw.length > 0) {
+            const assessmentIds = classAssessmentsRaw.map(a => a.id);
+            const allMarksRaw = await storage.getAssessmentMarksByAssessments(assessmentIds);
+            const classAssessments = selectCanonicalAssessments(classAssessmentsRaw, allMarksRaw).assessments;
+            const canonicalAssessmentIds = new Set(classAssessments.map((assessment: any) => Number(assessment.id)));
+            const allMarks = allMarksRaw.filter((mark: any) => canonicalAssessmentIds.has(Number(mark.assessmentId)));
             const grades = await storage.getGradesBySchool(schoolId);
             const classStreamForGrades = classInfo?.streamId ? streamMap.get(classInfo.streamId) : null;
 
@@ -17212,6 +17973,8 @@ async function buildReportCardMessage(
             let totalPct = 0;
             let subjectCount = 0;
             let subjectsPassed = 0;
+            let subjectsFailed = 0;
+            let subjectsUnresolved = 0;
             let totalPoints = 0;
 
             resultsData = classAssessments.map(assessment => {
@@ -17220,30 +17983,40 @@ async function buildReportCardMessage(
               if (!mark || !subject) return null;
 
               const pct = parseFinitePercentage(mark.percentage);
-              const applicableGrades = classInfo
+              const gradeContext = classInfo
                 ? getClassSubjectGradeCandidates({
                     allGrades: grades,
                     school,
                     classInfo,
                     classStreamName: classStreamForGrades?.name || null,
                     subject,
-                  }).grades
-                : [];
-              const grade = resolveStoredAssessmentGrade({
-                mark,
-                percentage: pct,
-                applicableGrades,
-                allGrades: grades,
-                subjectType: subject.subjectType,
-              });
+                  })
+                : { profileKey: null, grades: [] as any[], excluded: false };
+              const linkedGrade = mark.gradeId
+                ? grades.find((candidate: any) => Number(candidate.id) === Number(mark.gradeId))
+                : null;
+              const grade = gradeContext.excluded
+                ? linkedGrade
+                : resolveStoredAssessmentGrade({
+                    mark,
+                    percentage: pct,
+                    applicableGrades: gradeContext.grades,
+                    allGrades: grades,
+                    expectedProfileKey: gradeContext.profileKey,
+                    classId: Number(classInfo?.id || 0),
+                    subjectType: subject.subjectType,
+                  });
               const gradeName = grade?.gradeName || "";
-              const gradePoints = grade?.gradePoints ? parseFloat(grade.gradePoints as string) : 0;
+              const gradePoints = gradeContext.excluded ? 0 : parseGradePoints(grade?.gradePoints) ?? 0;
+              const passStatus = gradeContext.excluded ? "UNRESOLVED" : normalizeGradeStatus(grade?.gradeStatus);
 
-              if (pct !== null) {
+              if (pct !== null && !gradeContext.excluded) {
                 totalPct += pct;
                 subjectCount++;
                 totalPoints += gradePoints;
-                if (pct >= 50) subjectsPassed++;
+                if (passStatus === "PASS") subjectsPassed++;
+                else if (passStatus === "FAIL") subjectsFailed++;
+                else subjectsUnresolved++;
               }
 
               const comment = mark.customCommentText || mark.autoCommentSnapshot || "";
@@ -17272,67 +18045,27 @@ async function buildReportCardMessage(
               };
             }).filter(Boolean);
 
-            const allStudentTotals: { studentId: number; total: number }[] = [];
-            const classStudents = await storage.getStudentsByClass(student.classId!);
-            for (const cs of classStudents) {
-              let st = 0;
-              let sc = 0;
-              for (const assessment of classAssessments) {
-                const m = allMarks.find(mk => mk.studentId === cs.id && mk.assessmentId === assessment.id);
-                const markPercentage = parseFinitePercentage(m?.percentage);
-                if (markPercentage !== null) {
-                  st += markPercentage;
-                  sc++;
-                }
-              }
-              if (sc > 0) allStudentTotals.push({ studentId: cs.id, total: st });
-            }
-            allStudentTotals.sort((a, b) => b.total - a.total);
-            const studentTotal = allStudentTotals.find(t => t.studentId === studentId);
-            const classPosition = studentTotal ? allStudentTotals.filter(t => t.total > studentTotal.total).length + 1 : 0;
-
-            let streamPosition: number | null = null;
-            let totalInStream: number | null = null;
-            if (classInfo?.streamId) {
-              const streamClasses = allClasses.filter(c => c.streamId === classInfo.streamId);
-              const streamStudentTotals: { studentId: number; total: number }[] = [];
-              for (const sc of streamClasses) {
-                const scAssessments = examAssessments.filter(a => a.classId === sc.id);
-                const scAssessmentIds = scAssessments.map(a => a.id);
-                const scMarks = scAssessmentIds.length > 0 ? await storage.getAssessmentMarksByAssessments(scAssessmentIds) : [];
-                const scStudents = await storage.getStudentsByClass(sc.id);
-                for (const ss of scStudents) {
-                  let st = 0;
-                  let ssc = 0;
-                  for (const a of scAssessments) {
-                    const m = scMarks.find(mk => mk.studentId === ss.id && mk.assessmentId === a.id);
-                    const markPercentage = parseFinitePercentage(m?.percentage);
-                    if (markPercentage !== null) {
-                      st += markPercentage;
-                      ssc++;
-                    }
-                  }
-                  if (ssc > 0) streamStudentTotals.push({ studentId: ss.id, total: st });
-                }
-              }
-              streamStudentTotals.sort((a, b) => b.total - a.total);
-              const studentStreamTotal = streamStudentTotals.find(t => t.studentId === studentId);
-              if (studentStreamTotal) {
-                streamPosition = streamStudentTotals.filter(t => t.total > studentStreamTotal.total).length + 1;
-                totalInStream = streamStudentTotals.length;
-              }
-            }
+            const classPositions = await calculateClassPositionMap(examId, schoolId, Number(student.classId));
+            const streamPositions = await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
+            const classPositionText = classPositions.map.get(studentId) || "";
+            const streamPositionText = streamPositions.map.get(studentId) || "";
+            const [classPositionValue, classPositionTotal] = classPositionText.split("/").map(Number);
+            const [streamPositionValue, streamPositionTotal] = streamPositionText.split("/").map(Number);
 
             const totalMarks = subjectCount * 100;
             summaryStats = {
               totalMarks: `${Math.round(totalPct)}/${totalMarks}`,
               averageMark: subjectCount > 0 ? Math.round(totalPct / subjectCount) : 0,
               subjectsPassed: `${subjectsPassed}/${subjectCount}`,
-              points: totalPoints,
-              classPosition: classPosition > 0 ? classPosition : null,
-              totalInClass: allStudentTotals.length,
-              streamPosition: streamPosition && streamPosition > 0 ? streamPosition : null,
-              totalInStream,
+              subjectsFailed,
+              subjectsUnresolved,
+              points: subjectsUnresolved === 0 ? totalPoints : null,
+              classPosition: Number.isFinite(classPositionValue) && classPositionValue > 0 ? classPositionValue : null,
+              totalInClass: Number.isFinite(classPositionTotal) && classPositionTotal > 0 ? classPositionTotal : null,
+              streamPosition: Number.isFinite(streamPositionValue) && streamPositionValue > 0 ? streamPositionValue : null,
+              totalInStream: Number.isFinite(streamPositionTotal) && streamPositionTotal > 0 ? streamPositionTotal : null,
+              positionStatus: classPositions.unresolved.has(studentId) ? "UNRESOLVED" : "READY",
+              positionIssues: classPositions.unresolved.get(studentId) || [],
             };
           }
         }
