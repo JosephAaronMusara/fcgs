@@ -18,6 +18,10 @@ export function academicReportDataCacheDirectory(): string {
   return path.join(objectRoot(), "private", "academic-report-data-cache");
 }
 
+export function academicReportPreparationDirectory(): string {
+  return path.join(objectRoot(), "private", "academic-report-preparation");
+}
+
 export function reportBrandingFingerprint(school: any): string {
   return crypto.createHash("sha256").update(JSON.stringify({
     name: school?.name || null,
@@ -147,7 +151,12 @@ async function writeAtomic(filePath: string, value: Buffer): Promise<void> {
   try {
     await fs.writeFile(temporaryPath, value, { flag: "wx" });
     await fs.rename(temporaryPath, filePath).catch(async (error: any) => {
-      if (error?.code !== "EEXIST") throw error;
+      // POSIX rename replaces the destination atomically. Windows can instead
+      // report EEXIST/EPERM when the destination already exists, which matters
+      // for preparation status files that are updated repeatedly.
+      if (error?.code !== "EEXIST" && error?.code !== "EPERM") throw error;
+      await fs.rm(filePath, { force: true });
+      await fs.rename(temporaryPath, filePath);
     });
   } finally {
     await fs.unlink(temporaryPath).catch(() => undefined);
@@ -180,11 +189,14 @@ export function queueAcademicReportCacheCleanup(): void {
   cleanupState.running = (async () => {
     const days = Math.max(1, Number(process.env.ACADEMIC_REPORT_CACHE_DAYS || 30));
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const [pdfRemoved, dataRemoved] = await Promise.all([
+    const [pdfRemoved, dataRemoved, preparationRemoved] = await Promise.all([
       cleanDirectory(academicReportPdfCacheDirectory(), cutoff),
       cleanDirectory(academicReportDataCacheDirectory(), cutoff),
+      cleanDirectory(academicReportPreparationDirectory(), cutoff),
     ]);
-    if (pdfRemoved || dataRemoved) console.info(`[academic-report-cache] removed pdf=${pdfRemoved} data=${dataRemoved}`);
+    if (pdfRemoved || dataRemoved || preparationRemoved) {
+      console.info(`[academic-report-cache] removed pdf=${pdfRemoved} data=${dataRemoved} preparation=${preparationRemoved}`);
+    }
   })().catch((error) => {
     console.warn("[academic-report-cache] cleanup failed:", error);
   }).finally(() => {

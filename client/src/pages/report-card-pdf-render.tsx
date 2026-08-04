@@ -50,7 +50,7 @@ function parseIds(value: string | null): number[] {
 async function waitForAssets(): Promise<void> {
   if ("fonts" in document) await document.fonts.ready;
 
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 6_000;
   while (Date.now() < deadline) {
     const reports = Array.from(document.querySelectorAll<HTMLElement>(".report-slip"));
     const qrReady = reports.length > 0 && reports.every((report) => report.dataset.reportQrReady === "true");
@@ -59,6 +59,14 @@ async function waitForAssets(): Promise<void> {
     await new Promise((resolve) => window.setTimeout(resolve, 50));
   }
 
+  await Promise.all(Array.from(document.images).map(async (image) => {
+    if (typeof image.decode !== "function") return;
+    try {
+      await image.decode();
+    } catch {
+      // Broken/unsupported images already fall back in ReportAssetImage.
+    }
+  }));
   await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 }
 
