@@ -70,7 +70,6 @@ import {
   MessageSquare,
   Lock,
   Unlock,
-  CheckCircle2,
   X,
 } from "lucide-react";
 import type {
@@ -93,22 +92,6 @@ interface PublicationState {
   status: "Published" | "Republished" | "Unpublished";
   publicationVersion?: number;
   publishedAt?: string | null;
-}
-
-interface ReportPdfPreparationStatus {
-  version: 1;
-  state: "idle" | "queued" | "running" | "ready" | "failed" | "interrupted";
-  schoolId: number;
-  examId: number;
-  classId: number;
-  publicationVersion: number;
-  total: number;
-  completed: number;
-  failed: number;
-  startedAt: string | null;
-  updatedAt: string;
-  finishedAt: string | null;
-  message: string | null;
 }
 
 interface StreamStat {
@@ -1824,7 +1807,6 @@ export default function AcademicReportsPage() {
   const schoolScopeId = currentSchoolId || user?.schoolId || null;
   const { toast } = useToast();
   const canSendClassReports = hasPermission("academic_reports.send.class");
-  const canPrepareReportPdfs = hasPermission("academic_reports.publish.class") || hasPermission("academic_reports.publish.stream");
 
   const [viewMode, setViewMode] = useState<ViewMode>("hub");
   const [selectedExamId, setSelectedExamId] = useState<string>("");
@@ -1907,51 +1889,6 @@ export default function AcademicReportsPage() {
       staleTime: 0,
       refetchOnMount: "always",
     });
-
-  const reportPdfStatusQueryKey = ["/api/report-cards", selectedExamId, "pdf-status", selectedClassId] as const;
-  const { data: reportPdfPreparationStatus } = useQuery<ReportPdfPreparationStatus>({
-    queryKey: reportPdfStatusQueryKey,
-    enabled:
-      viewMode === "report-cards" &&
-      !!selectedExamId &&
-      !!selectedClassId &&
-      reportCardData?.publication?.isPublished === true,
-    queryFn: async () => {
-      const params = new URLSearchParams({ classId: selectedClassId });
-      const response = await schoolFetch(`/api/report-cards/${selectedExamId}/pdf/status?${params.toString()}`);
-      if (!response.ok) {
-        const body = await response.json().catch(() => null);
-        throw new Error(body?.message || "Unable to load report preparation status");
-      }
-      return response.json();
-    },
-    refetchInterval: (query) => {
-      const state = (query.state.data as ReportPdfPreparationStatus | undefined)?.state;
-      return state === "queued" || state === "running" ? 2_000 : false;
-    },
-  });
-
-  const prepareReportPdfsMutation = useMutation({
-    mutationFn: async (force: boolean) => {
-      const response = await schoolFetch(`/api/report-cards/${selectedExamId}/pdf/prewarm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ classId: Number(selectedClassId), force }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => null);
-        throw new Error(body?.message || "Unable to prepare report cards");
-      }
-      return response.json() as Promise<ReportPdfPreparationStatus>;
-    },
-    onSuccess: (status) => {
-      queryClient.setQueryData(reportPdfStatusQueryKey, status);
-      toast({ title: "Report preparation queued", description: "Individual report cards are being prepared in the background." });
-    },
-    onError: (error: any) => {
-      toast({ title: "Unable to prepare report cards", description: error?.message || "Please try again.", variant: "destructive" });
-    },
-  });
 
   const filteredStudents = useMemo(() => {
     if (!reportCardData) return [];
@@ -2837,7 +2774,7 @@ export default function AcademicReportsPage() {
                       data-testid="button-download-reports"
                     >
                       {downloadingFiltered ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
-                      {downloadingFiltered ? (pdfStage === "saving" ? "Saving changes…" : "Generating PDF…") : (searchTerm.trim() ? `Download (${filteredStudents.length})` : "Download All")}
+                      {downloadingFiltered ? (pdfStage === "saving" ? "Saving changes…" : "Preparing download…") : (searchTerm.trim() ? `Download (${filteredStudents.length})` : "Download All")}
                     </Button>
                     {canSendClassReports && reportCardData.publication?.isPublished && (
                       <Button
@@ -2857,42 +2794,7 @@ export default function AcademicReportsPage() {
                   </div>
                 </div>
 
-                {reportCardData.publication?.isPublished && reportPdfPreparationStatus && (
-                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm" data-testid="report-pdf-preparation-status">
-                    <div className="flex min-w-0 items-center gap-2">
-                      {reportPdfPreparationStatus.state === "ready" ? (
-                        <CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" />
-                      ) : reportPdfPreparationStatus.state === "queued" || reportPdfPreparationStatus.state === "running" ? (
-                        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-600" />
-                      ) : (
-                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-                      )}
-                      <span>
-                        {reportPdfPreparationStatus.state === "ready"
-                          ? `Report cards ready (${reportPdfPreparationStatus.completed}/${reportPdfPreparationStatus.total})`
-                          : reportPdfPreparationStatus.state === "queued" || reportPdfPreparationStatus.state === "running"
-                            ? `Preparing report cards: ${reportPdfPreparationStatus.completed} of ${reportPdfPreparationStatus.total}`
-                            : reportPdfPreparationStatus.state === "failed"
-                              ? reportPdfPreparationStatus.message || "Some report cards could not be prepared."
-                              : reportPdfPreparationStatus.state === "interrupted"
-                                ? "Preparation was interrupted. Completed learner PDFs will be reused when retried."
-                                : "Published report PDFs have not been prepared yet."}
-                      </span>
-                    </div>
-                    {canPrepareReportPdfs && ["idle", "failed", "interrupted"].includes(reportPdfPreparationStatus.state) && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={prepareReportPdfsMutation.isPending}
-                        onClick={() => prepareReportPdfsMutation.mutate(reportPdfPreparationStatus.state !== "idle")}
-                      >
-                        {prepareReportPdfsMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                        {reportPdfPreparationStatus.state === "idle" ? "Prepare PDFs" : "Retry preparation"}
-                      </Button>
-                    )}
-                  </div>
-                )}
+
 
                 <div className="flex flex-wrap gap-4 text-xs mb-4 text-muted-foreground">
                   <span>
