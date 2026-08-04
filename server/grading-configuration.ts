@@ -1,7 +1,8 @@
 import {
   getGradeProfileLabel,
   isSubjectTypeCompatibleWithGradeType,
-  resolveGradeProfileKey,
+  resolveOperationalGradeProfile,
+  resolveOperationalGradeProfileKey,
   type GradeProfileKey,
 } from "@shared/academic-profiles";
 import {
@@ -146,8 +147,9 @@ export function resolveExpectedGradeProfile(args: {
   examinationBoard?: string | null;
   streamName?: string | null;
   subjectType?: string | null;
+  subjectName?: string | null;
 }): GradeProfileKey | null {
-  return resolveGradeProfileKey(args);
+  return resolveOperationalGradeProfileKey(args);
 }
 
 export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: {
@@ -157,10 +159,13 @@ export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: 
   examinationBoard?: string | null;
   streamName?: string | null;
   subjectType?: string | null;
+  subjectName?: string | null;
   subjectIds?: number[];
   profileSetting?: { pointsDirection?: "higher_is_better" | "lower_is_better" | null } | null;
 }): GradeConfigurationProfileStatus {
-  const profileKey = resolveExpectedGradeProfile(args);
+  const operationalProfile = resolveOperationalGradeProfile(args);
+  const profileKey = operationalProfile.profileKey;
+  const gradingSubjectType = operationalProfile.effectiveSubjectType;
   const profileLabel = getGradeProfileLabel(profileKey);
 
   if (!profileKey) {
@@ -208,9 +213,9 @@ export function assessClassSubjectGradeConfiguration<T extends GradeLike>(args: 
     };
   }
 
-  const coverage = evaluateCoverage(candidates, args.subjectType);
+  const coverage = evaluateCoverage(candidates, gradingSubjectType);
   const resolutionSource = summarizeResolutionSource(coverage.resolutionSources);
-  const relevantRows = profileRowsForSubject(candidates, args.subjectType);
+  const relevantRows = profileRowsForSubject(candidates, gradingSubjectType);
   const missingStatusGradeIds = uniqueNumbers(relevantRows
     .filter((grade: any) => !["PASS", "FAIL"].includes(String(grade.gradeStatus || "").trim().toUpperCase()))
     .map((grade) => grade.id));

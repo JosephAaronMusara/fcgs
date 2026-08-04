@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { pool } from "../server/db";
-import { resolveGradeProfileKey } from "../shared/academic-profiles";
+import { resolveOperationalGradeProfile } from "../shared/academic-profiles";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "../server/grade-resolution";
 import { isTemporarilyExcludedFromStrictGrading } from "../server/grading-exclusions";
 
@@ -72,11 +72,14 @@ async function main() {
       studentId: number;
       percentage: number;
       expectedProfile: string;
+      gradingProfileSource: string;
+      substitutionPolicy: string | null;
       oldGradeId: number | null;
       newGradeId: number;
       newGradeName: string;
     }> = [];
     const skippedCounts = new Map<string, number>();
+    const substitutionCounts = new Map<string, number>();
     const skippedExamples: AnyRow[] = [];
     let excludedResults = 0;
     let alreadyCorrect = 0;
@@ -106,15 +109,26 @@ async function main() {
         skip("invalid_percentage", row);
         continue;
       }
-      const expectedProfile = resolveGradeProfileKey({
+      const operationalProfile = resolveOperationalGradeProfile({
         schoolType: row.school_type,
         examinationBoard: row.examination_board,
         streamName: row.stream_name,
         subjectType: row.subject_type,
+        subjectName: row.subject_name,
       });
+      const expectedProfile = operationalProfile.profileKey;
       if (!expectedProfile) {
         skip("exact_profile_missing", row);
         continue;
+      }
+      if (operationalProfile.substitutionPolicy) {
+        const key = [
+          operationalProfile.substitutionPolicy,
+          Number(row.school_id),
+          row.school_name,
+          expectedProfile,
+        ].join("|");
+        substitutionCounts.set(key, (substitutionCounts.get(key) || 0) + 1);
       }
       const schoolGrades = gradesBySchool.get(Number(row.school_id)) || [];
       const candidates = getProfileAwareGradeCandidates(
@@ -122,7 +136,11 @@ async function main() {
         expectedProfile,
         Number(row.class_id),
       );
-      const resolution = resolveGradeForPercentage(percentage, candidates, row.subject_type);
+      const resolution = resolveGradeForPercentage(
+        percentage,
+        candidates,
+        operationalProfile.effectiveSubjectType,
+      );
       if (resolution.ambiguous) {
         skip("grade_resolution_ambiguous", row, { expectedProfile });
         continue;
@@ -149,6 +167,8 @@ async function main() {
         studentId: Number(row.student_id),
         percentage,
         expectedProfile,
+        gradingProfileSource: operationalProfile.source,
+        substitutionPolicy: operationalProfile.substitutionPolicy,
         oldGradeId: currentGradeId,
         newGradeId: Number(grade.id),
         newGradeName: String(grade.gradeName || ""),
@@ -165,6 +185,12 @@ async function main() {
       return { schoolId: Number(schoolId), school, expectedProfile, count };
     }).sort((a, b) => a.schoolId - b.schoolId || a.expectedProfile.localeCompare(b.expectedProfile));
 
+
+    const intentionalSubstitutions = Array.from(substitutionCounts.entries()).map(([key, count]) => {
+      const [policy, schoolId, school, expectedProfile] = key.split("|");
+      return { policy, schoolId: Number(schoolId), school, expectedProfile, count };
+    }).sort((a, b) => a.schoolId - b.schoolId || a.policy.localeCompare(b.policy));
+
     const preview = {
       mode: APPLY ? "APPLY" : "PREVIEW",
       summary: {
@@ -172,9 +198,12 @@ async function main() {
         temporarilyExcludedResults: excludedResults,
         alreadyCorrect,
         safelyRepairable: repairs.length,
+        intentionalSubstitutionResults: Array.from(substitutionCounts.values()).reduce((sum, value) => sum + value, 0),
+        intentionalSubstitutionGroups: intentionalSubstitutions.length,
         skipped: Array.from(skippedCounts.values()).reduce((sum, value) => sum + value, 0),
       },
       repairsBySchoolProfile: groupedRepairs,
+      intentionalGradingSubstitutions: intentionalSubstitutions,
       repairExamples: repairs.slice(0, EXAMPLE_LIMIT),
       skippedByReason: Object.fromEntries(Array.from(skippedCounts.entries()).sort(([a], [b]) => a.localeCompare(b))),
       skippedExamples,

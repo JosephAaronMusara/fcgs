@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { pool } from "../server/db";
-import { GRADE_PROFILE_KEYS, resolveGradeProfileKey } from "../shared/academic-profiles";
+import { GRADE_PROFILE_KEYS, OPERATIONAL_GRADING_POLICY_VERSION, resolveOperationalGradeProfile } from "../shared/academic-profiles";
 import { resolveExactConfiguredGrade } from "../server/grading-engine";
 import { getTemporaryStrictGradingExclusions, isTemporarilyExcludedFromStrictGrading } from "../server/grading-exclusions";
 
@@ -123,6 +123,17 @@ async function main() {
     const requiredProfileKeys = new Set<string>();
     const unresolvedResults: AnyRow[] = [];
     const wrongStoredGrades: AnyRow[] = [];
+    const intentionalSubstitutionMap = new Map<string, {
+      policy: string;
+      schoolId: number;
+      school: string;
+      expectedProfile: string;
+      resultCount: number;
+      classIds: Set<number>;
+      classes: Set<string>;
+      subjectIds: Set<number>;
+      subjects: Set<string>;
+    }>();
     let passCount = 0;
     let failCount = 0;
     let unresolvedCount = 0;
@@ -130,13 +141,35 @@ async function main() {
     let old60PassCount = 0;
 
     for (const mark of marks) {
-      const expectedProfileKey = resolveGradeProfileKey({
+      const operationalProfile = resolveOperationalGradeProfile({
         schoolType: mark.school_type,
         examinationBoard: mark.examination_board,
         streamName: mark.stream_name,
         subjectType: mark.subject_type,
+        subjectName: mark.subject_name,
       });
+      const expectedProfileKey = operationalProfile.profileKey;
       if (expectedProfileKey) requiredProfileKeys.add(`${Number(mark.school_id)}|${expectedProfileKey}`);
+      if (operationalProfile.substitutionPolicy && expectedProfileKey) {
+        const key = `${operationalProfile.substitutionPolicy}|${Number(mark.school_id)}|${expectedProfileKey}`;
+        const current = intentionalSubstitutionMap.get(key) || {
+          policy: operationalProfile.substitutionPolicy,
+          schoolId: Number(mark.school_id),
+          school: String(mark.school_name || ""),
+          expectedProfile: expectedProfileKey,
+          resultCount: 0,
+          classIds: new Set<number>(),
+          classes: new Set<string>(),
+          subjectIds: new Set<number>(),
+          subjects: new Set<string>(),
+        };
+        current.resultCount += 1;
+        current.classIds.add(Number(mark.class_id));
+        current.classes.add(String(mark.class_name || ""));
+        current.subjectIds.add(Number(mark.subject_id));
+        current.subjects.add(String(mark.subject_name || ""));
+        intentionalSubstitutionMap.set(key, current);
+      }
       const percentage = Number(mark.percentage);
       if (percentage >= 50) old50PassCount++;
       if (percentage >= 60) old60PassCount++;
@@ -146,7 +179,7 @@ async function main() {
         percentage: Number.isFinite(percentage) ? percentage : null,
         expectedProfileKey,
         classId: Number(mark.class_id),
-        subjectType: mark.subject_type,
+        subjectType: operationalProfile.effectiveSubjectType,
         exactProfileGrades: exactGrades.map((grade) => ({
           ...grade,
           gradeLevel: grade.grade_level,
@@ -187,6 +220,8 @@ async function main() {
           markId: Number(mark.mark_id), studentId: Number(mark.student_id), school: mark.school_name,
           class: mark.class_name, subject: mark.subject_name, percentage,
           expectedProfile: expectedProfileKey, storedGradeId: mark.grade_id ? Number(mark.grade_id) : null,
+          profileSource: operationalProfile.source,
+          substitutionPolicy: operationalProfile.substitutionPolicy,
           issues: resolution.issues,
         });
       }
@@ -214,12 +249,14 @@ async function main() {
       const profileKeys = new Set<string>();
       const unresolvedSubjects: AnyRow[] = [];
       for (const row of rows) {
-        const profileKey = resolveGradeProfileKey({
+        const operationalProfile = resolveOperationalGradeProfile({
           schoolType: row.school_type,
           examinationBoard: row.examination_board,
           streamName: row.stream_name,
           subjectType: row.subject_type,
+          subjectName: row.subject_name,
         });
+        const profileKey = operationalProfile.profileKey;
         if (profileKey) profileKeys.add(profileKey);
         else unresolvedSubjects.push({ subjectId: Number(row.subject_id), subjectName: row.subject_name, subjectType: row.subject_type });
       }
@@ -245,6 +282,22 @@ async function main() {
       }
     }
 
+    const intentionalGradingSubstitutions = Array.from(intentionalSubstitutionMap.values())
+      .map((row) => ({
+        policy: row.policy,
+        schoolId: row.schoolId,
+        school: row.school,
+        expectedProfile: row.expectedProfile,
+        resultCount: row.resultCount,
+        classIds: Array.from(row.classIds).sort((a, b) => a - b),
+        classes: Array.from(row.classes).filter(Boolean).sort((a, b) => a.localeCompare(b)),
+        subjectIds: Array.from(row.subjectIds).sort((a, b) => a - b),
+        subjects: Array.from(row.subjects).filter(Boolean).sort((a, b) => a.localeCompare(b)),
+      }))
+      .sort((a, b) => a.schoolId - b.schoolId || a.policy.localeCompare(b.policy));
+    const intentionalSubstitutionResults = intentionalGradingSubstitutions
+      .reduce((sum, row) => sum + row.resultCount, 0);
+
     // Legacy grade rows are allowed to remain physically present as dormant history.
     // They are not operationally consumed once stored grade links are repaired.
     const blockingIssueCount = missingStatus.length + missingPoints.length + missingRankOrder.length + duplicateRankOrders.length + profileCoverage.length + missingSettings.length + unresolvedCount + wrongStoredGrades.length;
@@ -266,6 +319,9 @@ async function main() {
         missingProfileSettings: missingSettings.length,
         wrongStoredGradeLinks: wrongStoredGrades.length,
         unresolvedResults: unresolvedCount,
+        intentionalGradingSubstitutionResults: intentionalSubstitutionResults,
+        intentionalGradingSubstitutionGroups: intentionalGradingSubstitutions.length,
+        operationalGradingPolicyVersion: OPERATIONAL_GRADING_POLICY_VERSION,
         resolvedPasses: passCount,
         resolvedFails: failCount,
         oldHardcoded50Passes: old50PassCount,
@@ -286,9 +342,10 @@ async function main() {
         missingProfileSettings: missingSettings.slice(0, EXAMPLE_LIMIT),
         wrongStoredGrades: wrongStoredGrades.slice(0, EXAMPLE_LIMIT),
         unresolvedResults,
+        intentionalGradingSubstitutions: intentionalGradingSubstitutions.slice(0, EXAMPLE_LIMIT),
         rankingConfigurationWarnings: rankingConfigurationWarnings.slice(0, EXAMPLE_LIMIT),
       },
-      note: "No rows were changed. Dormant legacy profile rows are informational and do not block readiness. Temporarily excluded subjects are omitted from strict grading. Do not run the constraint-enforcement command until readyForConstraints is true, and do not deploy strict publication/ranking behavior until readyForDeployment is true.",
+      note: "No rows were changed. Dormant legacy profile rows are informational and do not block readiness. Temporarily excluded subjects are omitted from strict grading. Confirmed intentional grading substitutions are resolved explicitly and reported separately. Do not run the constraint-enforcement command until readyForConstraints is true, and do not deploy strict publication/ranking behavior until readyForDeployment is true.",
     };
     console.log(JSON.stringify(report, null, 2));
     if (process.argv.includes("--fail-on-issues") && blockingIssueCount > 0) process.exitCode = 2;

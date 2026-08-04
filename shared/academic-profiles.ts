@@ -296,6 +296,115 @@ export function resolveGradeProfileKey(args: {
   return null;
 }
 
+export const OPERATIONAL_GRADING_POLICY_VERSION = "2026-08-04-intentional-substitutions-v1";
+
+export type OperationalGradeProfileSource =
+  | "exact"
+  | "intentional_substitution"
+  | "none";
+
+export type IntentionalGradingSubstitutionPolicy =
+  | "zimsec_advanced_class_uses_ordinary_subject_record"
+  | "cambridge_advanced_language_uses_igcse_grading";
+
+export type OperationalGradeProfileResolution = {
+  profileKey: GradeProfileKey | null;
+  effectiveSubjectType: string | null;
+  source: OperationalGradeProfileSource;
+  substitutionPolicy: IntentionalGradingSubstitutionPolicy | null;
+};
+
+function normalizeOperationalSubjectName(value?: string | null): string {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[–—−]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Resolves the grading profile actually used by the portal. The normal exact
+ * resolver remains strict. These two substitutions are explicit temporary
+ * operational policies confirmed by the organisation:
+ *
+ * 1. ZIMSEC Advanced Level classes may temporarily use Ordinary Level subject
+ *    records, while grading with the configured SEC_ZIM_A profile.
+ * 2. Cambridge Advanced Level Chinese and French may intentionally use the
+ *    configured IGCSE grading profile.
+ *
+ * No other profile fallback is permitted.
+ */
+export function resolveOperationalGradeProfile(args: {
+  schoolType?: string | null;
+  examinationBoard?: string | null;
+  streamName?: string | null;
+  subjectType?: string | null;
+  subjectName?: string | null;
+}): OperationalGradeProfileResolution {
+  const exactProfile = resolveGradeProfileKey(args);
+  if (exactProfile) {
+    return {
+      profileKey: exactProfile,
+      effectiveSubjectType: args.subjectType || null,
+      source: "exact",
+      substitutionPolicy: null,
+    };
+  }
+
+  const schoolType = String(args.schoolType || "").trim().toLowerCase();
+  const board = String(args.examinationBoard || "").trim().toLowerCase();
+  const grouping = resolveSecondaryGroupingFromStream(args.streamName);
+  const subjectType = String(args.subjectType || "").trim();
+
+  if (
+    (schoolType === "secondary" || schoolType === "secondary school")
+    && board === "zimsec"
+    && grouping === "ADVANCED"
+    && subjectType === "ZIMSEC Ordinary Level"
+  ) {
+    return {
+      profileKey: "SEC_ZIM_A",
+      effectiveSubjectType: "ZIMSEC Advanced Level",
+      source: "intentional_substitution",
+      substitutionPolicy: "zimsec_advanced_class_uses_ordinary_subject_record",
+    };
+  }
+
+  const subjectName = normalizeOperationalSubjectName(args.subjectName);
+  if (
+    (schoolType === "secondary" || schoolType === "secondary school")
+    && board === "cambridge"
+    && grouping === "ADVANCED"
+    && subjectType === "Cambridge IGCSE"
+    && (subjectName === "chinese" || subjectName === "french")
+  ) {
+    return {
+      profileKey: "SEC_CAM_IGCSE",
+      effectiveSubjectType: "Cambridge IGCSE",
+      source: "intentional_substitution",
+      substitutionPolicy: "cambridge_advanced_language_uses_igcse_grading",
+    };
+  }
+
+  return {
+    profileKey: null,
+    effectiveSubjectType: args.subjectType || null,
+    source: "none",
+    substitutionPolicy: null,
+  };
+}
+
+export function resolveOperationalGradeProfileKey(args: {
+  schoolType?: string | null;
+  examinationBoard?: string | null;
+  streamName?: string | null;
+  subjectType?: string | null;
+  subjectName?: string | null;
+}): GradeProfileKey | null {
+  return resolveOperationalGradeProfile(args).profileKey;
+}
+
 export function profileMatchesSchool(
   profileKey: string | null | undefined,
   schoolType?: string | null,

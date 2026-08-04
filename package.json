@@ -39,7 +39,9 @@
     "grades:integrity:backfill": "tsx script/backfill-grading-ranking-configuration.ts",
     "grades:integrity:backfill:apply": "tsx script/backfill-grading-ranking-configuration.ts --apply",
     "grades:links:repair": "tsx script/repair-assessment-grade-links.ts",
-    "grades:links:repair:apply": "tsx script/repair-assessment-grade-links.ts --apply"
+    "grades:links:repair:apply": "tsx script/repair-assessment-grade-links.ts --apply",
+    "grades:history:retire": "tsx script/retire-grade-4-vacation-results.ts",
+    "grades:history:retire:apply": "tsx script/retire-grade-4-vacation-results.ts --apply"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

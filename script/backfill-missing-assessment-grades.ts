@@ -11,7 +11,7 @@ import {
   streams,
   subjects,
 } from "../shared/schema";
-import { resolveGradeProfileKey } from "../shared/academic-profiles";
+import { resolveOperationalGradeProfile } from "../shared/academic-profiles";
 import { isTemporarilyExcludedFromStrictGrading } from "../server/grading-exclusions";
 
 type CliOptions = {
@@ -146,12 +146,14 @@ async function main() {
     }
 
     const schoolId = Number(row.schoolId);
-    const profileKey = resolveGradeProfileKey({
+    const operationalProfile = resolveOperationalGradeProfile({
       schoolType: row.schoolType,
       examinationBoard: row.examinationBoard,
       streamName: row.streamName,
       subjectType: row.subjectType,
+      subjectName: row.subjectName,
     });
+    const profileKey = operationalProfile.profileKey;
     if (!profileKey) {
       summary.unresolvedProfile++;
       unresolved.push({
@@ -173,7 +175,11 @@ async function main() {
       profileKey,
       Number(row.classId),
     );
-    const resolution = resolveGradeForPercentage(percentage, applicableGrades, row.subjectType);
+    const resolution = resolveGradeForPercentage(
+      percentage,
+      applicableGrades,
+      operationalProfile.effectiveSubjectType,
+    );
 
     if (!resolution.grade) {
       summary.noMatchingGrade++;

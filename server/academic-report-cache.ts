@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import path from "path";
 import fs from "fs/promises";
+import { OPERATIONAL_GRADING_POLICY_VERSION } from "@shared/academic-profiles";
 import { getTemporaryStrictGradingExclusions } from "./grading-exclusions";
 
 const cleanupState = { lastRunAt: 0, running: null as Promise<void> | null };
@@ -60,6 +61,7 @@ export function reportGradingConfigurationFingerprint(settingsRows: any[], grade
     settings,
     grades,
     temporaryStrictGradingExclusions,
+    operationalGradingPolicyVersion: OPERATIONAL_GRADING_POLICY_VERSION,
   })).digest("hex").slice(0, 20);
 }
 

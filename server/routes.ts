@@ -45,7 +45,7 @@ import {
   insertPermissionSchema, insertAccessGroupSchema,
   type User, type AccessGroup, type Staff, type InsertStudent, type InsertActivityLog, type InsertStaffAttendanceLog
 } from "@shared/schema";
-import { ECD_DOMAIN_SEEDS, GRADE_PROFILE_KEYS, filterItemsByGradeProfileKey, getGradingProfilesForSchool, getGradeProfileLabel, getGradeTypeOptionsForProfile, getStrictGradeProfileKeys, getSubjectTypeOptionsForSchool, gradeProfileMatchesStrict, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveGradeProfileKey, resolveSecondaryGroupingFromStream, subjectMatchesGradeProfile, type GradeProfileKey } from "@shared/academic-profiles";
+import { ECD_DOMAIN_SEEDS, GRADE_PROFILE_KEYS, filterItemsByGradeProfileKey, getGradingProfilesForSchool, getGradeProfileLabel, getGradeTypeOptionsForProfile, getStrictGradeProfileKeys, getSubjectTypeOptionsForSchool, gradeProfileMatchesStrict, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveOperationalGradeProfile, resolveSecondaryGroupingFromStream, subjectMatchesGradeProfile, type GradeProfileKey } from "@shared/academic-profiles";
 
 function requestText(value: unknown): string {
   if (Array.isArray(value)) return requestText(value[0]);
@@ -98,6 +98,8 @@ async function resolveGradeProfileContext(args: {
   subjectId: number;
 }): Promise<{
   profileKey: GradeProfileKey | null;
+  gradingSubjectType: string | null;
+  substitutionPolicy: string | null;
   school: any;
   classInfo: any;
   subject: any;
@@ -111,15 +113,25 @@ async function resolveGradeProfileContext(args: {
   const streamId = classInfo?.streamId ?? null;
   const stream = streamId ? await storage.getStream(streamId) : undefined;
   const streamName = stream?.name || null;
-  const profileKey = isTemporarilyExcludedFromStrictGrading(subject)
-    ? null
-    : resolveGradeProfileKey({
+  const excluded = isTemporarilyExcludedFromStrictGrading(subject);
+  const operationalProfile = excluded
+    ? { profileKey: null, effectiveSubjectType: null, substitutionPolicy: null }
+    : resolveOperationalGradeProfile({
         schoolType: school?.schoolType,
         examinationBoard: school?.examinationBoard,
         streamName,
         subjectType: subject?.subjectType,
+        subjectName: subject?.name,
       });
-  return { profileKey, school, classInfo, subject, streamName };
+  return {
+    profileKey: operationalProfile.profileKey,
+    gradingSubjectType: operationalProfile.effectiveSubjectType,
+    substitutionPolicy: operationalProfile.substitutionPolicy,
+    school,
+    classInfo,
+    subject,
+    streamName,
+  };
 }
 
 function isSubjectAvailableForClass(subject: any, classInfo: any): boolean {
@@ -145,19 +157,28 @@ function getClassSubjectGradeCandidates(args: {
 }) {
   const excluded = isTemporarilyExcludedFromStrictGrading(args.subject);
   if (excluded) {
-    return { profileKey: null, grades: [] as any[], excluded: true };
+    return {
+      profileKey: null,
+      gradingSubjectType: null,
+      substitutionPolicy: null,
+      grades: [] as any[],
+      excluded: true,
+    };
   }
-  const profileKey = resolveGradeProfileKey({
+  const operationalProfile = resolveOperationalGradeProfile({
     schoolType: args.school?.schoolType,
     examinationBoard: args.school?.examinationBoard,
     streamName: args.classStreamName || null,
     subjectType: args.subject?.subjectType,
+    subjectName: args.subject?.name,
   });
   return {
-    profileKey,
-    grades: profileKey
+    profileKey: operationalProfile.profileKey,
+    gradingSubjectType: operationalProfile.effectiveSubjectType,
+    substitutionPolicy: operationalProfile.substitutionPolicy,
+    grades: operationalProfile.profileKey
       ? getApplicableGradesForContext(args.allGrades, {
-          profileKey,
+          profileKey: operationalProfile.profileKey,
           classId: Number(args.classInfo?.id || 0),
         })
       : [],
@@ -322,25 +343,27 @@ async function getClassGradingConfiguration(args: {
   const contexts = selectedSubjects.length > 0
     ? selectedSubjects.map((subject) => ({
         subjectType: subject.subjectType || null,
+        subjectName: subject.name || null,
         subjectIds: [subject.id],
       }))
-    : [{ subjectType: null, subjectIds: [] as number[] }];
+    : [{ subjectType: null, subjectName: null, subjectIds: [] as number[] }];
 
   let autoAttachedGradeRows = 0;
   if (args.autoAttach) {
     const rowsToAttach = new Set<number>();
     for (const context of contexts) {
-      const profileKey = resolveExpectedGradeProfile({
+      const operationalProfile = resolveOperationalGradeProfile({
         schoolType: school?.schoolType,
         examinationBoard: school?.examinationBoard,
         streamName: stream?.name || null,
         subjectType: context.subjectType,
+        subjectName: context.subjectName,
       });
       const plan = planExactProfileClassAttachment({
         grades: schoolGrades,
-        profileKey,
+        profileKey: operationalProfile.profileKey,
         classId: classInfo.id,
-        subjectType: context.subjectType,
+        subjectType: operationalProfile.effectiveSubjectType,
       });
       if (plan.safe) {
         plan.rowsToAttach.forEach((gradeId) => rowsToAttach.add(gradeId));
@@ -367,6 +390,7 @@ async function getClassGradingConfiguration(args: {
       examinationBoard: school?.examinationBoard,
       streamName: stream?.name || null,
       subjectType: context.subjectType,
+      subjectName: context.subjectName,
     });
     const profileSetting = profileSettingsRows.find((row: any) => String(row.gradeLevel) === String(profileKey || "")) || null;
     return assessClassSubjectGradeConfiguration({
@@ -376,6 +400,7 @@ async function getClassGradingConfiguration(args: {
       examinationBoard: school?.examinationBoard,
       streamName: stream?.name || null,
       subjectType: context.subjectType,
+      subjectName: context.subjectName,
       subjectIds: context.subjectIds,
       profileSetting,
     });
@@ -542,7 +567,7 @@ async function calculateClassPositionMap(examId: number, schoolId: number, class
       return !!subject && !isTemporarilyExcludedFromStrictGrading(subject);
     });
   const assessmentBySubject = new Map(assessments.map((assessment: any) => [Number(assessment.subjectId), assessment]));
-  const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+  const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; gradingSubjectType: string | null; grades: any[] }>();
   const profileKeys = new Set<string>();
   for (const subjectId of expectedSubjectIds) {
     const subject = subjectMap.get(subjectId);
@@ -588,7 +613,7 @@ async function calculateClassPositionMap(examId: number, schoolId: number, class
         percentage,
         expectedProfileKey: context?.profileKey || null,
         classId,
-        subjectType: subject?.subjectType || null,
+        subjectType: context?.gradingSubjectType || subject?.subjectType || null,
         exactProfileGrades: context?.grades || [],
         storedGrade,
       });
@@ -651,7 +676,7 @@ async function calculateStreamPositionMap(examId: number, schoolId: number, stre
         return !!subject && !isTemporarilyExcludedFromStrictGrading(subject);
       });
     const assessmentBySubject = new Map(classAssessments.map((assessment: any) => [Number(assessment.subjectId), assessment]));
-    const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+    const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; gradingSubjectType: string | null; grades: any[] }>();
     for (const subjectId of expectedSubjectIds) {
       const subject = subjectMap.get(subjectId);
       if (!subject) continue;
@@ -684,7 +709,7 @@ async function calculateStreamPositionMap(examId: number, schoolId: number, stre
           percentage,
           expectedProfileKey: context?.profileKey || null,
           classId: Number(classInfo.id),
-          subjectType: subject?.subjectType || null,
+          subjectType: context?.gradingSubjectType || subject?.subjectType || null,
           exactProfileGrades: context?.grades || [],
           storedGrade: linkedGrade,
         });
@@ -13093,7 +13118,7 @@ ${schoolName}`;
       const subject = await storage.getSubject(subjectId);
       const strictGradingExcluded = isTemporarilyExcludedFromStrictGrading(subject);
       const profileContext = strictGradingExcluded
-        ? { profileKey: null as string | null }
+        ? { profileKey: null as string | null, gradingSubjectType: null as string | null }
         : await resolveGradeProfileContext({ schoolId, classId, subjectId });
       const profileKey = profileContext.profileKey;
       const grades = profileKey
@@ -13110,7 +13135,7 @@ ${schoolName}`;
         ? allGrades.find((grade: any) => Number(grade.id) === Number(existingMark?.gradeId))
         : null;
       const gradeResolution = percentage !== null && !strictGradingExcluded
-        ? calculateGrade(percentage, grades, subject?.subjectType)
+        ? calculateGrade(percentage, grades, profileContext.gradingSubjectType || subject?.subjectType)
         : {
             gradeId: existingExcludedGrade ? Number(existingExcludedGrade.id) : null,
             gradeName: existingExcludedGrade?.gradeName || "",
@@ -13584,7 +13609,7 @@ ${schoolName}`;
 
       const grades = gradesForCache;
       const classStream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
-      const gradeCandidatesBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[]; excluded: boolean }>();
+      const gradeCandidatesBySubject = new Map<number, { profileKey: GradeProfileKey | null; gradingSubjectType: string | null; substitutionPolicy: string | null; grades: any[]; excluded: boolean }>();
       for (const subject of subjects) {
         if (!subject) continue;
         gradeCandidatesBySubject.set(
@@ -13709,7 +13734,7 @@ ${schoolName}`;
                 allGrades: grades,
                 expectedProfileKey: gradeContext?.profileKey || null,
                 classId,
-                subjectType: subject.subjectType,
+                subjectType: gradeContext?.gradingSubjectType || subject.subjectType,
               });
           if (resolvedGrade) {
             gradeName = resolvedGrade.gradeName;
@@ -14277,7 +14302,7 @@ ${schoolName}`;
                 allGrades: grades,
                 expectedProfileKey: gradeContext.profileKey,
                 classId: Number(classInfo.id),
-                subjectType: subject.subjectType,
+                subjectType: gradeContext.gradingSubjectType || subject.subjectType,
               });
           if (resolvedGrade) {
             gradeName = resolvedGrade.gradeName;
@@ -14430,7 +14455,7 @@ async function buildReportCardMessage(
             classStreamName: classStream?.name || null,
             subject,
           })
-        : { profileKey: null, grades: [] as any[], excluded: false };
+        : { profileKey: null, gradingSubjectType: null, substitutionPolicy: null, grades: [] as any[], excluded: false };
       const linkedGrade = mark.gradeId
         ? grades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
         : null;
@@ -14443,7 +14468,7 @@ async function buildReportCardMessage(
             allGrades: grades,
             expectedProfileKey: gradeContext.profileKey,
             classId: Number(studentClass?.id || 0),
-            subjectType: subject.subjectType,
+            subjectType: gradeContext.gradingSubjectType || subject.subjectType,
           });
       if (resolvedGrade) {
         gradeName = resolvedGrade.gradeName;
@@ -15099,7 +15124,7 @@ async function buildReportCardMessage(
     ]);
     const stream = classInfo?.streamId ? await storage.getStream(classInfo.streamId) : undefined;
     const assessmentMap = new Map(assessments.map((assessment: any) => [Number(assessment.id), assessment]));
-    const contextMap = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+    const contextMap = new Map<number, { profileKey: GradeProfileKey | null; gradingSubjectType: string | null; grades: any[] }>();
     for (const subjectId of subjectIds) {
       const subject = subjectMap.get(subjectId);
       if (!subject || !classInfo || isTemporarilyExcludedFromStrictGrading(subject)) continue;
@@ -15127,7 +15152,7 @@ async function buildReportCardMessage(
         expectedProfileKey: context?.profileKey || null,
         classId: args.classId,
         percentage,
-        subjectType: subject?.subjectType || null,
+        subjectType: context?.gradingSubjectType || subject?.subjectType || null,
       })) {
         issues.push({
           code: "STORED_GRADE_PROFILE_MISMATCH",
@@ -15144,7 +15169,7 @@ async function buildReportCardMessage(
         percentage,
         expectedProfileKey: context?.profileKey || null,
         classId: args.classId,
-        subjectType: subject?.subjectType || null,
+        subjectType: context?.gradingSubjectType || subject?.subjectType || null,
         exactProfileGrades: context?.grades || [],
         storedGrade,
       });
@@ -15830,7 +15855,7 @@ async function buildReportCardMessage(
         assignedByStudent.set(Number(row.studentId), assigned);
       }
 
-      const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; grades: any[] }>();
+      const gradeContextBySubject = new Map<number, { profileKey: GradeProfileKey | null; gradingSubjectType: string | null; grades: any[] }>();
       const profileKeys = new Set<string>();
       for (const subject of validSubjects as any[]) {
         const context = getClassSubjectGradeCandidates({
@@ -15868,7 +15893,7 @@ async function buildReportCardMessage(
             percentage,
             expectedProfileKey: context?.profileKey || null,
             classId,
-            subjectType: subject?.subjectType || null,
+            subjectType: context?.gradingSubjectType || subject?.subjectType || null,
             exactProfileGrades: context?.grades || [],
             storedGrade,
           });
@@ -16235,14 +16260,21 @@ async function buildReportCardMessage(
 
       for (const subject of validSubjects) {
         if (!subject) continue;
-        const profileKey = resolveGradeProfileKey({
+        const operationalProfile = resolveOperationalGradeProfile({
           schoolType: school?.schoolType,
           examinationBoard: school?.examinationBoard,
           streamName,
           subjectType: subject.subjectType,
+          subjectName: subject.name,
         });
-        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
-        const gradeCandidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
+        const applicableGrades = getApplicableGradesForContext(allGrades, {
+          profileKey: operationalProfile.profileKey,
+          classId,
+        });
+        const gradeCandidates = getAnalyticsGradeCandidates(
+          applicableGrades,
+          operationalProfile.effectiveSubjectType,
+        );
         addAnalyticsGradeColumns(gradeColumns, gradeCandidates);
 
         const expected = students.filter((student: any) => studentSubjectIdsByStudent.get(student.id)?.has(subject.id)).length;
@@ -16255,7 +16287,7 @@ async function buildReportCardMessage(
           unresolved: 0,
           gradeCounts: {},
           gradeCandidates,
-          subjectType: subject.subjectType,
+          subjectType: operationalProfile.effectiveSubjectType,
         };
       }
 
@@ -16411,19 +16443,28 @@ async function buildReportCardMessage(
       const validSubjectIds = subjectIds.filter((id) => subjectById.has(Number(id)));
 
       const gradeCandidatesBySubjectClass = new Map<string, any[]>();
+      const gradingSubjectTypeBySubjectClass = new Map<string, string | null>();
       const getSubjectClassGradeCandidates = (subject: any, classId: number) => {
         const key = `${subject.id}-${classId}`;
         const existing = gradeCandidatesBySubjectClass.get(key);
         if (existing) return existing;
-        const profileKey = resolveGradeProfileKey({
+        const operationalProfile = resolveOperationalGradeProfile({
           schoolType: school?.schoolType,
           examinationBoard: school?.examinationBoard,
           streamName,
           subjectType: subject.subjectType,
+          subjectName: subject.name,
         });
-        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
-        const candidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
+        const applicableGrades = getApplicableGradesForContext(allGrades, {
+          profileKey: operationalProfile.profileKey,
+          classId,
+        });
+        const candidates = getAnalyticsGradeCandidates(
+          applicableGrades,
+          operationalProfile.effectiveSubjectType,
+        );
         gradeCandidatesBySubjectClass.set(key, candidates);
+        gradingSubjectTypeBySubjectClass.set(key, operationalProfile.effectiveSubjectType);
         return candidates;
       };
 
@@ -16469,7 +16510,8 @@ async function buildReportCardMessage(
 
         target.raw[subjectId] = pct;
         const gradeCandidates = getSubjectClassGradeCandidates(subject, mark.classId);
-        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType);
+        const gradingSubjectType = gradingSubjectTypeBySubjectClass.get(`${subject.id}-${mark.classId}`) || subject.subjectType;
+        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, gradingSubjectType);
         const gradeLabel = getGradeDisplayName(grade);
         const gradePoints = getMeritGradePoints(grade);
         if (target.pointRaw[subjectId] === undefined) {
@@ -16590,19 +16632,28 @@ async function buildReportCardMessage(
 
       const gradeColumns: string[] = [];
       const gradeCandidatesBySubjectClass = new Map<string, any[]>();
+      const gradingSubjectTypeBySubjectClass = new Map<string, string | null>();
       const getSubjectClassGradeCandidates = (subject: any, classId: number) => {
         const key = `${subject.id}-${classId}`;
         const existing = gradeCandidatesBySubjectClass.get(key);
         if (existing) return existing;
-        const profileKey = resolveGradeProfileKey({
+        const operationalProfile = resolveOperationalGradeProfile({
           schoolType: school?.schoolType,
           examinationBoard: school?.examinationBoard,
           streamName,
           subjectType: subject.subjectType,
+          subjectName: subject.name,
         });
-        const applicableGrades = getApplicableGradesForContext(allGrades, { profileKey, classId });
-        const candidates = getAnalyticsGradeCandidates(applicableGrades, subject.subjectType);
+        const applicableGrades = getApplicableGradesForContext(allGrades, {
+          profileKey: operationalProfile.profileKey,
+          classId,
+        });
+        const candidates = getAnalyticsGradeCandidates(
+          applicableGrades,
+          operationalProfile.effectiveSubjectType,
+        );
         gradeCandidatesBySubjectClass.set(key, candidates);
+        gradingSubjectTypeBySubjectClass.set(key, operationalProfile.effectiveSubjectType);
         addAnalyticsGradeColumns(gradeColumns, candidates);
         return candidates;
       };
@@ -16645,15 +16696,16 @@ async function buildReportCardMessage(
         if (!subject) continue;
 
         const gradeCandidates = getSubjectClassGradeCandidates(subject, mark.classId);
+        const gradingSubjectType = gradingSubjectTypeBySubjectClass.get(`${subject.id}-${mark.classId}`) || subject.subjectType;
 
         if (!bySubject[subId]) {
-          bySubject[subId] = { sum: 0, cnt: 0, pass: 0, fail: 0, unresolved: 0, gradeCounts: {}, subjectType: subject.subjectType };
+          bySubject[subId] = { sum: 0, cnt: 0, pass: 0, fail: 0, unresolved: 0, gradeCounts: {}, subjectType: gradingSubjectType };
         }
 
         bySubject[subId].sum += pct;
         bySubject[subId].cnt++;
 
-        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, subject.subjectType);
+        const grade = resolveAnalyticsGradeForMark(mark, pct, gradeCandidates, gradingSubjectType);
         const gradeLabel = getGradeDisplayName(grade);
         if (gradeLabel) {
           bySubject[subId].gradeCounts[gradeLabel] = (bySubject[subId].gradeCounts[gradeLabel] || 0) + 1;
@@ -17796,7 +17848,7 @@ async function buildReportCardMessage(
             classStreamName: classStream?.name || null,
             subject,
           })
-        : { profileKey: null, grades: [] as any[], excluded: false };
+        : { profileKey: null, gradingSubjectType: null, substitutionPolicy: null, grades: [] as any[], excluded: false };
       const linkedGrade = mark.gradeId
         ? allGrades.find((candidate: any) => Number(candidate.id) === Number(mark.gradeId))
         : null;
@@ -17810,7 +17862,7 @@ async function buildReportCardMessage(
               allGrades,
               expectedProfileKey: gradeContext.profileKey,
               classId: Number(classInfo.id),
-              subjectType: subject.subjectType,
+              subjectType: gradeContext.gradingSubjectType || subject.subjectType,
             })
         : null;
       const statusComment = markStatusLabel(mark.attStatus);
@@ -17991,7 +18043,7 @@ async function buildReportCardMessage(
                     classStreamName: classStreamForGrades?.name || null,
                     subject,
                   })
-                : { profileKey: null, grades: [] as any[], excluded: false };
+                : { profileKey: null, gradingSubjectType: null, substitutionPolicy: null, grades: [] as any[], excluded: false };
               const linkedGrade = mark.gradeId
                 ? grades.find((candidate: any) => Number(candidate.id) === Number(mark.gradeId))
                 : null;
@@ -18004,7 +18056,7 @@ async function buildReportCardMessage(
                     allGrades: grades,
                     expectedProfileKey: gradeContext.profileKey,
                     classId: Number(classInfo?.id || 0),
-                    subjectType: subject.subjectType,
+                    subjectType: gradeContext.gradingSubjectType || subject.subjectType,
                   });
               const gradeName = grade?.gradeName || "";
               const gradePoints = gradeContext.excluded ? 0 : parseGradePoints(grade?.gradePoints) ?? 0;

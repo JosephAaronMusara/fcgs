@@ -13,7 +13,7 @@ import {
   subjects,
 } from "@shared/schema";
 import { getProfileAwareGradeCandidates, resolveGradeForPercentage } from "./grade-resolution";
-import { resolveGradeProfileKey } from "@shared/academic-profiles";
+import { resolveOperationalGradeProfile } from "@shared/academic-profiles";
 import { isTemporarilyExcludedFromStrictGrading } from "./grading-exclusions";
 import { calculateWeightedAssessmentResult } from "./assessment-paper-calculation";
 import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
@@ -155,18 +155,29 @@ async function loadGradingContext(
     ? await tx.select().from(streams).where(eq(streams.id, classInfo.streamId)).limit(1)
     : [];
   const excluded = isTemporarilyExcludedFromStrictGrading(subject);
-  const profileKey = excluded ? null : resolveGradeProfileKey({
-    schoolType: school.schoolType,
-    examinationBoard: school.examinationBoard,
-    streamName: stream?.name || null,
-    subjectType: subject.subjectType,
-  });
-  const applicableGrades = profileKey
-    ? getProfileAwareGradeCandidates(allGrades, profileKey, args.classId)
+  const operationalProfile = excluded
+    ? { profileKey: null, effectiveSubjectType: null, substitutionPolicy: null }
+    : resolveOperationalGradeProfile({
+        schoolType: school.schoolType,
+        examinationBoard: school.examinationBoard,
+        streamName: stream?.name || null,
+        subjectType: subject.subjectType,
+        subjectName: subject.name,
+      });
+  const applicableGrades = operationalProfile.profileKey
+    ? getProfileAwareGradeCandidates(allGrades, operationalProfile.profileKey, args.classId)
     : [];
   const commentByGradeId = new Map(comments.map((comment: any) => [Number(comment.gradeId), comment]));
 
-  return { profileKey, subject, applicableGrades, commentByGradeId, excluded };
+  return {
+    profileKey: operationalProfile.profileKey,
+    gradingSubjectType: operationalProfile.effectiveSubjectType,
+    substitutionPolicy: operationalProfile.substitutionPolicy,
+    subject,
+    applicableGrades,
+    commentByGradeId,
+    excluded,
+  };
 }
 
 export async function reconcileAssessmentPapersAndMarks(args: {
@@ -412,7 +423,7 @@ export async function reconcileAssessmentPapersAndMarks(args: {
           const gradeResolution = resolveGradeForPercentage(
             effectivePercentage,
             gradingContext.applicableGrades,
-            gradingContext.subject.subjectType,
+            gradingContext.gradingSubjectType || gradingContext.subject.subjectType,
           );
           if (!gradeResolution.grade || gradeResolution.ambiguous) {
             throw new AssessmentPaperReconciliationError(
