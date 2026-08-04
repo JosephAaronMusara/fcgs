@@ -25,6 +25,8 @@
     "transport:preflight:post-schema": "tsx script/preflight-transport-upgrade.ts --post-schema",
     "recruitment:preflight": "tsx script/preflight-recruitment.ts",
     "academic-pdf:preflight": "tsx script/preflight-academic-pdf.ts",
+    "reports:comments:integrity": "tsx script/repair-report-comment-integrity.ts",
+    "reports:comments:integrity:apply": "tsx script/repair-report-comment-integrity.ts --apply",
     "recruitment:logic-test": "tsx script/test-recruitment-screening.ts",
     "grades:paper-recalc-test": "tsx script/test-assessment-paper-recalculation.ts",
     "grades:paper-recalc:preflight": "tsx script/recalculate-assessment-paper-results.ts",
@@ -39,7 +41,9 @@
     "grades:integrity:backfill": "tsx script/backfill-grading-ranking-configuration.ts",
     "grades:integrity:backfill:apply": "tsx script/backfill-grading-ranking-configuration.ts --apply",
     "grades:links:repair": "tsx script/repair-assessment-grade-links.ts",
-    "grades:links:repair:apply": "tsx script/repair-assessment-grade-links.ts --apply"
+    "grades:links:repair:apply": "tsx script/repair-assessment-grade-links.ts --apply",
+    "grades:history:retire": "tsx script/retire-grade-4-vacation-results.ts",
+    "grades:history:retire:apply": "tsx script/retire-grade-4-vacation-results.ts --apply"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

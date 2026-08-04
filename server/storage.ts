@@ -3692,7 +3692,7 @@ export class DatabaseStorage implements IStorage {
       notLike(reportComments.commentGrade, "__REPORT_CARD_OVERRIDE__:%"),
     ];
     if (commentType) conditions.push(eq(reportComments.commentType, commentType as any));
-    return db.select().from(reportComments).where(and(...conditions));
+    return db.select().from(reportComments).where(and(...conditions)).orderBy(desc(reportComments.id));
   }
 
   async getEcdAssessmentDomains(): Promise<EcdAssessmentDomain[]> {

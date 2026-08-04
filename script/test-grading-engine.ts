@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { calculateConfiguredPositionMap, normalizeGradeStatus, resolveExactConfiguredGrade, type RankingCandidate } from "../server/grading-engine";
-import { resolveGradeProfileKey } from "../shared/academic-profiles";
+import { resolveGradeProfileKey, resolveOperationalGradeProfile } from "../shared/academic-profiles";
 import { isTemporarilyExcludedFromStrictGrading } from "../server/grading-exclusions";
 
 const grade = (id: number, name: string, points: number, rankOrder: number, lower: number, upper: number, status: "PASS" | "FAIL" = "PASS") => ({
@@ -147,6 +147,67 @@ assert.equal(resolveGradeProfileKey({
   subjectType: "ZIMSEC Ordinary Level",
 }), null, "missing school board configuration must remain unresolved");
 
+assert.equal(resolveGradeProfileKey({
+  schoolType: "secondary",
+  examinationBoard: "ZIMSEC",
+  streamName: "Lower 6",
+  subjectType: "ZIMSEC Ordinary Level",
+}), null, "the strict resolver must not silently reinterpret an Ordinary Level subject as Advanced Level");
+
+const zimsecEmergencyProfile = resolveOperationalGradeProfile({
+  schoolType: "secondary",
+  examinationBoard: "ZIMSEC",
+  streamName: "Lower 6",
+  subjectType: "ZIMSEC Ordinary Level",
+  subjectName: "Computer Science",
+});
+assert.equal(zimsecEmergencyProfile.profileKey, "SEC_ZIM_A");
+assert.equal(zimsecEmergencyProfile.effectiveSubjectType, "ZIMSEC Advanced Level");
+assert.equal(zimsecEmergencyProfile.substitutionPolicy, "zimsec_advanced_class_uses_ordinary_subject_record");
+
+const chineseEmergencyProfile = resolveOperationalGradeProfile({
+  schoolType: "secondary",
+  examinationBoard: "Cambridge",
+  streamName: "Lower 6",
+  subjectType: "Cambridge IGCSE",
+  subjectName: "Chinese",
+});
+assert.equal(chineseEmergencyProfile.profileKey, "SEC_CAM_IGCSE");
+assert.equal(chineseEmergencyProfile.substitutionPolicy, "cambridge_advanced_language_uses_igcse_grading");
+
+const frenchEmergencyProfile = resolveOperationalGradeProfile({
+  schoolType: "secondary",
+  examinationBoard: "Cambridge",
+  streamName: "Upper 6",
+  subjectType: "Cambridge IGCSE",
+  subjectName: "French",
+});
+assert.equal(frenchEmergencyProfile.profileKey, "SEC_CAM_IGCSE");
+
+assert.equal(resolveOperationalGradeProfile({
+  schoolType: "secondary",
+  examinationBoard: "Cambridge",
+  streamName: "Lower 6",
+  subjectType: "Cambridge IGCSE",
+  subjectName: "Business Studies",
+}).profileKey, null, "only the confirmed Cambridge Chinese/French substitution may use IGCSE in an Advanced Level class");
+
+const zimStoredGrade = {
+  ...a,
+  id: 88,
+  gradeLevel: "SEC_ZIM_A",
+  gradeType: "ZIMSEC Advanced Level",
+};
+const zimStoredResolution = resolveExactConfiguredGrade({
+  percentage: 85,
+  expectedProfileKey: zimsecEmergencyProfile.profileKey,
+  classId: 1,
+  subjectType: zimsecEmergencyProfile.effectiveSubjectType,
+  exactProfileGrades: [zimStoredGrade],
+  storedGrade: zimStoredGrade,
+});
+assert.equal(zimStoredResolution.usedStoredGrade, true, "the explicit ZIMSEC substitution must accept a matching Advanced Level stored grade");
+
 assert.equal(
   isTemporarilyExcludedFromStrictGrading("Computing – Lower Secondary"),
   true,
@@ -158,4 +219,4 @@ assert.equal(
   "unrelated subjects must remain inside strict grading",
 );
 
-console.log(JSON.stringify({ passed: true, tests: 15 }, null, 2));
+console.log(JSON.stringify({ passed: true, tests: 21 }, null, 2));

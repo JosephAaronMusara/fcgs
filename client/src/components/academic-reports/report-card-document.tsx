@@ -392,23 +392,15 @@ export function ReportCardSlip({
     school.email ? `Email: ${school.email}` : null,
   ].filter((value): value is string => Boolean(value));
 
-  const totalCommentCharacters = (
-    `${displayedClassTeacherComment} ${displayedPrincipalComment}`.trim().length
-  );
-  const layoutPressure =
-    Math.max(subjects.length - 6, 0) * 7 +
-    Math.max(Math.ceil(totalCommentCharacters / 140) - 1, 0) * 6 +
-    Math.max(principalInfoItems.length - 4, 0) * 4;
-
-  const graphPlotHeight = Math.max(70, 92 - layoutPressure);
-  // Graph labels are protected from adaptive compression so they remain legible.
+  // PDF pagination now moves complete sections to the next A4 page, so the
+  // header and charts no longer need to be compressed when a report is long.
+  const graphPlotHeight = 92;
   const graphLabelHeight = 55;
-  const headerCompression = Math.min(16, Math.floor(layoutPressure / 3));
-  const headerSideWidth = Math.max(96, 112 - headerCompression);
-  const headerImageSize = Math.max(76, 91 - headerCompression);
-  const headerGap = Math.max(4, 8 - Math.floor(headerCompression / 3));
-  const headerSchoolNameSize = Math.max(12, 14 - Math.floor(headerCompression / 5));
-  const headerInfoSize = Math.max(9, 11 - Math.floor(headerCompression / 6));
+  const headerSideWidth = 112;
+  const headerImageSize = 91;
+  const headerGap = 8;
+  const headerSchoolNameSize = 14;
+  const headerInfoSize = 11;
   const footerBlockHeight = Math.max(88, 34 + principalInfoItems.length * 18);
   const stampImageMaxHeight = Math.max(64, footerBlockHeight - 16);
   const qrCodeSize = Math.max(78, footerBlockHeight - 18);
@@ -436,18 +428,18 @@ export function ReportCardSlip({
 
   return (
     <div
-      className={documentMode ? "w-full" : "w-full max-w-full overflow-x-auto overscroll-x-contain pb-2"}
+      className={`${documentMode ? "w-full" : "w-full max-w-full overflow-x-auto overscroll-x-contain pb-2"} report-card-student-document`}
       style={documentMode ? undefined : { WebkitOverflowScrolling: "touch", touchAction: "pan-x pan-y" }}
       data-testid={`scroll-report-card-${student.id}`}
     >
       <div className={documentMode ? "w-full" : "min-w-[780px]"}>
         <div
           className="report-slip bg-white dark:bg-gray-900 rounded-lg mb-8 shadow-lg p-2 print:shadow-none print:rounded-none print:mb-0 print:p-0"
-          style={{ pageBreakInside: "avoid", pageBreakAfter: "always" }}
+          style={documentMode ? undefined : { pageBreakInside: "avoid", pageBreakAfter: "always" }}
           data-report-qr-ready={qrReady ? "true" : "false"}
         >
       <div
-        className="report-slip-inner report-slip-page report-slip-page--main border border-gray-300 dark:border-gray-600 py-2.5 px-1.5 relative overflow-hidden flex flex-col"
+        className="report-slip-inner report-slip-page report-slip-page--main border border-gray-300 dark:border-gray-600 py-2.5 px-1.5 relative report-slip-page-flow"
         style={{ fontSize: "12px", minHeight: "calc(293mm - 2px)" }}
       >
         {school.logo && (
@@ -459,7 +451,8 @@ export function ReportCardSlip({
           />
         )}
 
-        <div className="relative z-10 h-full flex flex-col">
+        <div className="relative z-10 report-content-flow">
+          <div className="report-primary-section">
           <div className="grid items-center" style={{ gridTemplateColumns: `${headerSideWidth}px 1fr ${headerSideWidth}px`, gap: `${headerGap}px` }}>
             <div className="text-left">
               <ReportAssetImage
@@ -631,10 +624,10 @@ export function ReportCardSlip({
           )}
 
           <table
-            className="w-full table-fixed border-collapse mt-1 text-[10px]"
+            className="report-subject-table w-full table-fixed border-collapse mt-1 text-[10px]"
             data-testid={`table-subjects-${student.id}`}
           >
-            <thead>
+            <thead className="report-subject-table-head">
               <tr>
                 <th className="w-[22%] border-b border-gray-400 dark:border-gray-500 px-1.5 py-1 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-left text-[10px]">
                   Subject
@@ -674,7 +667,7 @@ export function ReportCardSlip({
                 </tr>
               ) : (
                 subjects.map((subj) => (
-                  <tr key={subj.subjectId}>
+                  <tr key={subj.subjectId} className="report-subject-row">
                     <td className="border border-gray-300 dark:border-gray-600 px-1.5 py-1 text-left break-words">
                       {subj.subjectName}
                     </td>
@@ -719,8 +712,9 @@ export function ReportCardSlip({
               )}
             </tbody>
           </table>
+          </div>
 
-          <div className="mt-auto">
+          <div className="report-section report-section--graphs mt-1">
             <div className="mt-1 text-[10.5px] flex flex-wrap gap-3 justify-center leading-tight">
               <span className="text-green-600 dark:text-green-400">
                 <TrendingUp className="w-3 h-3 inline" /> Positive Performance
@@ -1092,8 +1086,8 @@ export function ReportCardSlip({
             </div>
           </div>
 
-          <div className="mt-1.5 text-[9px] space-y-1.5 leading-snug">
-            <div>
+          <div className="mt-1.5 text-[9px] space-y-1.5 leading-snug report-comments-stack">
+            <div className="report-section report-section--class-comment">
               {editableComments ? (
                 <>
                   <div className="font-semibold mb-0.5">Class Teacher's Comment:</div>
@@ -1115,7 +1109,7 @@ export function ReportCardSlip({
                 </p>
               )}
             </div>
-            <div>
+            <div className="report-section report-section--principal-comment">
               {editableComments ? (
                 <>
                   <div className="font-semibold mb-0.5">Head/Principal's Comment:</div>
@@ -1139,7 +1133,7 @@ export function ReportCardSlip({
             </div>
           </div>
 
-            <div className="grid grid-cols-[0.9fr_1.55fr_0.95fr] gap-3 pt-2 text-[11px] items-stretch report-footer-row">
+            <div className="report-section report-section--footer grid grid-cols-[0.9fr_1.55fr_0.95fr] gap-3 pt-2 text-[11px] items-stretch report-footer-row">
             <div className="flex">
               <div
                 className="border border-gray-300 dark:border-gray-600 p-2 h-full w-full flex items-center justify-center report-footer-box"

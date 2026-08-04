@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import path from "path";
 import fs from "fs/promises";
+import { OPERATIONAL_GRADING_POLICY_VERSION } from "@shared/academic-profiles";
 import { getTemporaryStrictGradingExclusions } from "./grading-exclusions";
 
 const cleanupState = { lastRunAt: 0, running: null as Promise<void> | null };
@@ -60,7 +61,31 @@ export function reportGradingConfigurationFingerprint(settingsRows: any[], grade
     settings,
     grades,
     temporaryStrictGradingExclusions,
+    operationalGradingPolicyVersion: OPERATIONAL_GRADING_POLICY_VERSION,
   })).digest("hex").slice(0, 20);
+}
+
+
+export function reportCommentsFingerprint(rows: any[]): string {
+  const comments = [...(rows || [])]
+    .map((row: any) => ({
+      id: Number(row?.id || 0),
+      schoolId: Number(row?.schoolId ?? row?.school_id ?? 0),
+      gradeId: row?.gradeId ?? row?.grade_id ?? null,
+      commentGrade: String(row?.commentGrade ?? row?.comment_grade ?? ""),
+      gradeLevel: row?.gradeLevel ?? row?.grade_level ?? null,
+      subjectId: row?.subjectId ?? row?.subject_id ?? null,
+      classId: row?.classId ?? row?.class_id ?? null,
+      commentText: String(row?.commentText ?? row?.comment_text ?? ""),
+      commentType: String(row?.commentType ?? row?.comment_type ?? ""),
+      createdAt: row?.createdAt ?? row?.created_at ?? null,
+    }))
+    .sort((a, b) => a.id - b.id);
+
+  return crypto.createHash("sha256")
+    .update(JSON.stringify(comments))
+    .digest("hex")
+    .slice(0, 20);
 }
 
 export function reportCacheKey(args: {
@@ -71,6 +96,7 @@ export function reportCacheKey(args: {
   publicationVersion: number;
   gradingConfigurationFingerprint: string;
   brandingFingerprint: string;
+  reportCommentsFingerprint: string;
   studentIds?: number[];
 }): string {
   const selection = args.studentIds
@@ -84,6 +110,7 @@ export function reportCacheKey(args: {
     args.publicationVersion,
     args.gradingConfigurationFingerprint,
     args.brandingFingerprint,
+    args.reportCommentsFingerprint,
     selection,
   ].join("|")).digest("hex");
 }

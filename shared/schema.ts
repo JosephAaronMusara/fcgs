@@ -343,7 +343,10 @@ export const internalTransfers = pgTable("internal_transfers", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const gradeLevelEnum = pgEnum("grade_level", ["SEC_ZIM_A", "SEC_ZIM_O", "SEC_CAM_A", "SEC_CAM_O", "SEC_CAM_IGCSE", "PRI_ZIM_ECD", "PRI_ZIM_G12", "PRI_ZIM_G37", "PRI_CAM_ECD", "PRI_CAM_G12", "PRI_CAM_G37"]);
+// The first three values are dormant legacy labels retained because historical
+// rows still use them. Active grading logic is restricted to the exact profile
+// keys by the grading integrity constraints and shared/academic-profiles.ts.
+export const gradeLevelEnum = pgEnum("grade_level", ["A_Level", "O_Level", "IGCSE", "SEC_ZIM_A", "SEC_ZIM_O", "SEC_CAM_A", "SEC_CAM_O", "SEC_CAM_IGCSE", "PRI_ZIM_ECD", "PRI_ZIM_G12", "PRI_ZIM_G37", "PRI_CAM_ECD", "PRI_CAM_G12", "PRI_CAM_G37"]);
 export const gradePointsDirectionEnum = pgEnum("grade_points_direction", ["higher_is_better", "lower_is_better"]);
 
 export const gradeProfileSettings = pgTable("grade_profile_settings", {
@@ -2118,6 +2121,7 @@ export const assessmentPublications = pgTable("assessment_publications", {
   unpublishedByUserId: integer("unpublished_by_user_id").references(() => users.id),
   unpublishedAt: timestamp("unpublished_at"),
   unpublishReason: text("unpublish_reason"),
+  overallCommentRowsSnapshot: jsonb("overall_comment_rows_snapshot").$type<any[]>(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
@@ -2498,7 +2502,29 @@ export const reportComments = pgTable("report_comments", {
   commentText: text("comment_text").notNull(),
   commentType: reportCommentTypeEnum("comment_type").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  principalPoolUnique: uniqueIndex("report_comments_principal_pool_uidx")
+    .on(table.schoolId, table.gradeId)
+    .where(sql`${table.commentType} = 'principal' AND ${table.gradeId} IS NOT NULL AND ${table.classId} IS NULL AND ${table.commentGrade} NOT LIKE '__REPORT_CARD_OVERRIDE__:%'`),
+  classTeacherPoolUnique: uniqueIndex("report_comments_class_teacher_pool_uidx")
+    .on(table.schoolId, table.classId, table.gradeId)
+    .where(sql`${table.commentType} = 'class_teacher' AND ${table.gradeId} IS NOT NULL AND ${table.classId} IS NOT NULL AND ${table.commentGrade} NOT LIKE '__REPORT_CARD_OVERRIDE__:%'`),
+  principalLegacyPoolUnique: uniqueIndex("report_comments_principal_legacy_pool_uidx")
+    .on(table.schoolId, table.commentGrade, table.gradeLevel)
+    .where(sql`${table.commentType} = 'principal' AND ${table.gradeId} IS NULL AND ${table.classId} IS NULL AND ${table.gradeLevel} IS NOT NULL AND ${table.commentGrade} NOT LIKE '__REPORT_CARD_OVERRIDE__:%'`),
+  principalLegacyPoolNullGradeLevelUnique: uniqueIndex("report_comments_principal_legacy_pool_null_grade_level_uidx")
+    .on(table.schoolId, table.commentGrade)
+    .where(sql`${table.commentType} = 'principal' AND ${table.gradeId} IS NULL AND ${table.classId} IS NULL AND ${table.gradeLevel} IS NULL AND ${table.commentGrade} NOT LIKE '__REPORT_CARD_OVERRIDE__:%'`),
+  classTeacherLegacyPoolUnique: uniqueIndex("report_comments_class_teacher_legacy_pool_uidx")
+    .on(table.schoolId, table.classId, table.commentGrade, table.gradeLevel)
+    .where(sql`${table.commentType} = 'class_teacher' AND ${table.gradeId} IS NULL AND ${table.classId} IS NOT NULL AND ${table.gradeLevel} IS NOT NULL AND ${table.commentGrade} NOT LIKE '__REPORT_CARD_OVERRIDE__:%'`),
+  classTeacherLegacyPoolNullGradeLevelUnique: uniqueIndex("report_comments_class_teacher_legacy_pool_null_grade_level_uidx")
+    .on(table.schoolId, table.classId, table.commentGrade)
+    .where(sql`${table.commentType} = 'class_teacher' AND ${table.gradeId} IS NULL AND ${table.classId} IS NOT NULL AND ${table.gradeLevel} IS NULL AND ${table.commentGrade} NOT LIKE '__REPORT_CARD_OVERRIDE__:%'`),
+  reportCardOverrideUnique: uniqueIndex("report_comments_override_uidx")
+    .on(table.schoolId, table.commentType, table.commentGrade)
+    .where(sql`${table.commentGrade} LIKE '__REPORT_CARD_OVERRIDE__:%'`),
+}));
 
 export const insertReportCommentSchema = omitInsertFields(createInsertSchema(reportComments), { id: true, createdAt: true });
 export type InsertReportComment = z.infer<typeof insertReportCommentSchema>;
