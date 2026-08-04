@@ -163,7 +163,7 @@ async function writeAtomic(filePath: string, value: Buffer): Promise<void> {
   }
 }
 
-async function cleanDirectory(directory: string, cutoffMs: number): Promise<number> {
+async function cleanDirectory(directory: string, cutoffMs: number, maxSingleFileBytes?: number): Promise<number> {
   let removed = 0;
   const entries = await fs.readdir(directory, { withFileTypes: true }).catch((error: any) => {
     if (error?.code === "ENOENT") return [];
@@ -173,12 +173,40 @@ async function cleanDirectory(directory: string, cutoffMs: number): Promise<numb
     if (!entry.isFile() || entry.name.endsWith(".tmp")) return;
     const filePath = path.join(directory, entry.name);
     const stat = await fs.stat(filePath).catch(() => null);
-    if (stat && stat.mtimeMs < cutoffMs) {
+    if (stat && (stat.mtimeMs < cutoffMs || (maxSingleFileBytes && stat.size > maxSingleFileBytes))) {
       await fs.unlink(filePath).catch(() => undefined);
       removed++;
     }
   }));
   return removed;
+}
+
+async function trimDirectoryToMaxBytes(directory: string, maxBytes: number): Promise<{ removed: number; bytesRemoved: number }> {
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch((error: any) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  const files = (await Promise.all(entries
+    .filter((entry) => entry.isFile() && !entry.name.endsWith(".tmp"))
+    .map(async (entry) => {
+      const filePath = path.join(directory, entry.name);
+      const stat = await fs.stat(filePath).catch(() => null);
+      return stat ? { filePath, size: stat.size, mtimeMs: stat.mtimeMs } : null;
+    })))
+    .filter((entry): entry is { filePath: string; size: number; mtimeMs: number } => Boolean(entry));
+  let totalBytes = files.reduce((total, file) => total + file.size, 0);
+  if (totalBytes <= maxBytes) return { removed: 0, bytesRemoved: 0 };
+
+  let removed = 0;
+  let bytesRemoved = 0;
+  for (const file of files.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
+    await fs.unlink(file.filePath).catch(() => undefined);
+    totalBytes -= file.size;
+    bytesRemoved += file.size;
+    removed++;
+    if (totalBytes <= maxBytes) break;
+  }
+  return { removed, bytesRemoved };
 }
 
 export function queueAcademicReportCacheCleanup(): void {
@@ -189,13 +217,24 @@ export function queueAcademicReportCacheCleanup(): void {
   cleanupState.running = (async () => {
     const days = Math.max(1, Number(process.env.ACADEMIC_REPORT_CACHE_DAYS || 30));
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const maxSinglePdfBytes = Math.max(10, Number(process.env.ACADEMIC_REPORT_SINGLE_PDF_CACHE_MAX_MB || 80)) * 1024 * 1024;
     const [pdfRemoved, dataRemoved, preparationRemoved] = await Promise.all([
-      cleanDirectory(academicReportPdfCacheDirectory(), cutoff),
+      cleanDirectory(academicReportPdfCacheDirectory(), cutoff, maxSinglePdfBytes),
       cleanDirectory(academicReportDataCacheDirectory(), cutoff),
       cleanDirectory(academicReportPreparationDirectory(), cutoff),
     ]);
-    if (pdfRemoved || dataRemoved || preparationRemoved) {
-      console.info(`[academic-report-cache] removed pdf=${pdfRemoved} data=${dataRemoved} preparation=${preparationRemoved}`);
+    const pdfTrim = await trimDirectoryToMaxBytes(
+      academicReportPdfCacheDirectory(),
+      Math.max(128, Number(process.env.ACADEMIC_REPORT_PDF_CACHE_MAX_MB || 2048)) * 1024 * 1024,
+    );
+    const dataTrim = await trimDirectoryToMaxBytes(
+      academicReportDataCacheDirectory(),
+      Math.max(64, Number(process.env.ACADEMIC_REPORT_DATA_CACHE_MAX_MB || 512)) * 1024 * 1024,
+    );
+    if (pdfRemoved || dataRemoved || preparationRemoved || pdfTrim.removed || dataTrim.removed) {
+      console.info(
+        `[academic-report-cache] removed pdf=${pdfRemoved + pdfTrim.removed} data=${dataRemoved + dataTrim.removed} preparation=${preparationRemoved} trimmedBytes=${pdfTrim.bytesRemoved + dataTrim.bytesRemoved}`,
+      );
     }
   })().catch((error) => {
     console.warn("[academic-report-cache] cleanup failed:", error);

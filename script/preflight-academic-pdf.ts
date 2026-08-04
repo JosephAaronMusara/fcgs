@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { constants as fsConstants } from "node:fs";
 import { chromium } from "playwright";
@@ -10,8 +10,7 @@ const requiredSourceFiles = [
   "client/src/components/academic-reports/report-card-document.tsx",
   "client/src/pages/report-card-pdf-render.tsx",
   "server/pdf-renderer.ts",
-  "server/pdf-merge.ts",
-  "script/test-academic-pdf-merge.ts",
+  "server/academic-report-cache.ts",
   "server/routes.ts",
 ];
 
@@ -52,20 +51,31 @@ async function main() {
     }
   }
 
-  let pdfMergeReady = false;
-  let pdfMergeError: string | null = null;
-  try {
-    const module = await import("pdf-lib");
-    pdfMergeReady = typeof module.PDFDocument?.create === "function";
-  } catch (error) {
-    pdfMergeError = error instanceof Error ? error.message : String(error);
-  }
+  const routesSource = await readFile(path.resolve(process.cwd(), "server/routes.ts"), "utf8").catch(() => "");
+  const reportDocumentSource = await readFile(
+    path.resolve(process.cwd(), "client/src/components/academic-reports/report-card-document.tsx"),
+    "utf8",
+  ).catch(() => "");
+  const academicReportsPageSource = await readFile(
+    path.resolve(process.cwd(), "client/src/pages/academic-reports.tsx"),
+    "utf8",
+  ).catch(() => "");
+  const singlePassClassRenderingReady =
+    routesSource.includes("page.pdf() call") &&
+    routesSource.includes("renderReportPdfRoute({") &&
+    !routesSource.includes("mergePdfBuffers(individualResults");
+  const reportImageOptimizationReady =
+    reportDocumentSource.includes("optimizeReportAssetSource") &&
+    reportDocumentSource.includes('canvas.toDataURL("image/jpeg"');
+  const prepareButtonRemoved =
+    !academicReportsPageSource.includes("Prepare PDFs") &&
+    !academicReportsPageSource.includes("/pdf/prewarm");
 
   let chromiumReady = false;
   let chromiumExecutable = "";
   let chromiumError: string | null = null;
   try {
-    chromiumExecutable = chromium.executablePath();
+    chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath();
     await access(chromiumExecutable, fsConstants.X_OK);
     chromiumReady = true;
   } catch (error) {
@@ -94,15 +104,16 @@ async function main() {
     cacheDirectories,
     cacheWritable,
     cacheErrors,
-    pdfMergeReady,
-    pdfMergeError,
+    singlePassClassRenderingReady,
+    reportImageOptimizationReady,
+    prepareButtonRemoved,
     chromiumReady,
     chromiumExecutable,
     chromiumError,
     databaseChecked: Boolean(process.env.DATABASE_URL),
     publicationTableReady: process.env.DATABASE_URL ? publicationTableReady : null,
     publicationColumnsMissing,
-    status: missingSourceFiles.length || !cacheWritable || !pdfMergeReady || !chromiumReady || (process.env.DATABASE_URL && (!publicationTableReady || publicationColumnsMissing.length))
+    status: missingSourceFiles.length || !cacheWritable || !singlePassClassRenderingReady || !reportImageOptimizationReady || !prepareButtonRemoved || !chromiumReady || (process.env.DATABASE_URL && (!publicationTableReady || publicationColumnsMissing.length))
       ? "BLOCKED"
       : "READY",
   };

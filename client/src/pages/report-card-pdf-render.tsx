@@ -50,12 +50,13 @@ function parseIds(value: string | null): number[] {
 async function waitForAssets(): Promise<void> {
   if ("fonts" in document) await document.fonts.ready;
 
-  const deadline = Date.now() + 6_000;
+  const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     const reports = Array.from(document.querySelectorAll<HTMLElement>(".report-slip"));
     const qrReady = reports.length > 0 && reports.every((report) => report.dataset.reportQrReady === "true");
     const imagesReady = Array.from(document.images).every((image) => image.complete);
-    if (qrReady && imagesReady) break;
+    const optimizedAssetsReady = !document.querySelector('[data-pdf-asset-pending="true"]');
+    if (qrReady && imagesReady && optimizedAssetsReady) break;
     await new Promise((resolve) => window.setTimeout(resolve, 50));
   }
 

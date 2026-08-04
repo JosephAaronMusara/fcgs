@@ -7,6 +7,81 @@ import type { Exam, Class, Subject } from "@shared/schema";
 
 let sharedReportQrPromise: Promise<string> | null = null;
 
+type ReportPdfAssetKind = "logo" | "photo" | "stamp";
+
+const reportPdfAssetPromiseCache = new Map<string, Promise<string>>();
+
+function loadReportImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const timeout = window.setTimeout(() => {
+      image.src = "";
+      reject(new Error(`Timed out loading report asset: ${src}`));
+    }, 15_000);
+    image.decoding = "async";
+    image.onload = () => {
+      window.clearTimeout(timeout);
+      resolve(image);
+    };
+    image.onerror = () => {
+      window.clearTimeout(timeout);
+      reject(new Error(`Unable to load report asset: ${src}`));
+    };
+    image.src = src;
+  });
+}
+
+async function optimizeReportAssetSource(src: string, kind: ReportPdfAssetKind): Promise<string> {
+  const cacheKey = `${kind}|${src}`;
+  const existing = reportPdfAssetPromiseCache.get(cacheKey);
+  if (existing) return existing;
+
+  const job = (async () => {
+    const image = await loadReportImage(src);
+    const sourceWidth = Math.max(1, image.naturalWidth || image.width);
+    const sourceHeight = Math.max(1, image.naturalHeight || image.height);
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return src;
+
+    if (kind === "photo") {
+      const targetSize = 256;
+      canvas.width = targetSize;
+      canvas.height = targetSize;
+      const sourceRatio = sourceWidth / sourceHeight;
+      const targetRatio = 1;
+      let cropWidth = sourceWidth;
+      let cropHeight = sourceHeight;
+      let cropX = 0;
+      let cropY = 0;
+      if (sourceRatio > targetRatio) {
+        cropWidth = sourceHeight;
+        cropX = (sourceWidth - cropWidth) / 2;
+      } else if (sourceRatio < targetRatio) {
+        cropHeight = sourceWidth;
+        cropY = (sourceHeight - cropHeight) / 2;
+      }
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, targetSize, targetSize);
+      context.drawImage(image, cropX, cropY, cropWidth, cropHeight, 0, 0, targetSize, targetSize);
+      return canvas.toDataURL("image/jpeg", 0.78);
+    }
+
+    const maxWidth = kind === "logo" ? 600 : 500;
+    const maxHeight = kind === "logo" ? 600 : 320;
+    const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", kind === "logo" ? 0.8 : 0.82);
+  })().catch(() => src);
+
+  reportPdfAssetPromiseCache.set(cacheKey, job);
+  return job;
+}
+
 function getSharedReportQrDataUrl(): Promise<string> {
   if (!sharedReportQrPromise) {
     sharedReportQrPromise = QRCode.toDataURL("https://www.firstchoicegroup.co.zw", {
@@ -258,6 +333,8 @@ function ReportAssetImage({
   style,
   fallback,
   testId,
+  optimizeForPdf = false,
+  pdfAssetKind,
 }: {
   src?: string | null;
   alt: string;
@@ -265,8 +342,12 @@ function ReportAssetImage({
   style?: CSSProperties;
   fallback: ReactNode;
   testId?: string;
+  optimizeForPdf?: boolean;
+  pdfAssetKind?: ReportPdfAssetKind;
 }) {
   const [failed, setFailed] = useState(false);
+  const [resolvedSrc, setResolvedSrc] = useState<string | null>(src || null);
+  const [optimizing, setOptimizing] = useState(false);
   const assetTimeoutRef = useRef<number | null>(null);
 
   const clearAssetTimeout = () => {
@@ -277,20 +358,58 @@ function ReportAssetImage({
   };
 
   useEffect(() => {
+    let cancelled = false;
     clearAssetTimeout();
     setFailed(false);
-    if (!src) return;
+
+    if (!src) {
+      setResolvedSrc(null);
+      setOptimizing(false);
+      return () => { cancelled = true; };
+    }
+
+    if (!optimizeForPdf || !pdfAssetKind) {
+      setResolvedSrc(src);
+      setOptimizing(false);
+      return () => { cancelled = true; };
+    }
+
+    setResolvedSrc(null);
+    setOptimizing(true);
+    void optimizeReportAssetSource(src, pdfAssetKind).then((optimizedSrc) => {
+      if (!cancelled) setResolvedSrc(optimizedSrc);
+    }).finally(() => {
+      if (!cancelled) setOptimizing(false);
+    });
+
+    return () => {
+      cancelled = true;
+      clearAssetTimeout();
+    };
+  }, [src, optimizeForPdf, pdfAssetKind]);
+
+  useEffect(() => {
+    clearAssetTimeout();
+    if (!resolvedSrc) return;
     assetTimeoutRef.current = window.setTimeout(() => {
       assetTimeoutRef.current = null;
       setFailed(true);
-    }, 5_000);
+    }, optimizeForPdf ? 15_000 : 5_000);
     return clearAssetTimeout;
-  }, [src]);
+  }, [resolvedSrc, optimizeForPdf]);
 
-  if (!src || failed) return <>{fallback}</>;
+  if (optimizing) {
+    return (
+      <>
+        {fallback}
+        <span data-pdf-asset-pending="true" className="hidden" aria-hidden="true" />
+      </>
+    );
+  }
+  if (!resolvedSrc || failed) return <>{fallback}</>;
   return (
     <img
-      src={src}
+      src={resolvedSrc}
       alt={alt}
       className={className}
       style={style}
@@ -450,6 +569,8 @@ export function ReportCardSlip({
             alt=""
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] opacity-[0.08] pointer-events-none z-0"
             fallback={null}
+            optimizeForPdf={documentMode}
+            pdfAssetKind="logo"
           />
         )}
 
@@ -463,6 +584,8 @@ export function ReportCardSlip({
                 className="object-contain"
                 style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}
                 testId="img-school-logo"
+                optimizeForPdf={documentMode}
+                pdfAssetKind="logo"
                 fallback={(
                   <div className="border border-gray-400 rounded-lg flex items-center justify-center" style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}>
                     <School className="w-10 h-10 text-gray-400" />
@@ -503,6 +626,8 @@ export function ReportCardSlip({
                 className="rounded-lg border border-gray-400 object-cover inline-block"
                 style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}
                 testId={`img-student-photo-${student.id}`}
+                optimizeForPdf={documentMode}
+                pdfAssetKind="photo"
                 fallback={(
                   <div className="rounded-lg border border-gray-400 inline-flex items-center justify-center text-[10px] text-gray-500" style={{ width: `${headerImageSize}px`, height: `${headerImageSize}px` }}>
                     PHOTO
@@ -1147,6 +1272,8 @@ export function ReportCardSlip({
                   className="max-w-[168px] w-auto h-auto block"
                   style={{ maxHeight: `${stampImageMaxHeight}px` }}
                   testId="img-stamp"
+                  optimizeForPdf={documentMode}
+                  pdfAssetKind="stamp"
                   fallback={<div className="text-[10px] text-gray-500 text-center">Stamp/Signature not set in School Settings.</div>}
                 />
               </div>
