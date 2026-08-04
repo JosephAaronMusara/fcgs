@@ -29,6 +29,14 @@ interface Stream {
   sortOrder: number | null;
 }
 
+interface GradeProfileSetting {
+  id: number;
+  schoolId: number;
+  gradeLevel: GradeProfileKey;
+  pointsDirection: "higher_is_better" | "lower_is_better";
+  configurationVersion: number;
+}
+
 interface GradesResponse {
   items: Grade[];
   total: number;
@@ -118,6 +126,29 @@ export default function GradesPage() {
     },
   });
 
+  const { data: profileSettings = [] } = useQuery<GradeProfileSetting[]>({
+    queryKey: ["/api/grade-profile-settings", currentSchoolId],
+    enabled: !!currentSchoolId,
+    queryFn: async () => {
+      const res = await schoolFetch("/api/grade-profile-settings");
+      if (!res.ok) throw new Error("Failed to fetch ranking settings");
+      return res.json();
+    },
+  });
+  const activeProfileSetting = profileSettings.find((setting) => setting.gradeLevel === activeTab) || null;
+  const updateProfileSettingMutation = useMutation({
+    mutationFn: async (pointsDirection: "higher_is_better" | "lower_is_better") => {
+      const res = await apiRequest("PUT", `/api/grade-profile-settings/${activeTab}`, { pointsDirection });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/grade-profile-settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
+      toast({ title: "Success", description: "Ranking settings updated" });
+    },
+    onError: (error: Error) => toast({ title: "Error", description: error.message, variant: "destructive" }),
+  });
+
   const createMutation = useMutation({
     mutationFn: async (gradeData: Partial<Grade>) => {
       const res = await apiRequest("POST", "/api/grades", gradeData);
@@ -125,6 +156,7 @@ export default function GradesPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/grades"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
       setIsAddOpen(false);
       toast({ title: "Success", description: "Grade added successfully" });
     },
@@ -140,6 +172,7 @@ export default function GradesPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/grades"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
       setEditingGrade(null);
       toast({ title: "Success", description: "Grade updated successfully" });
     },
@@ -154,6 +187,7 @@ export default function GradesPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/grades"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/report-cards"] });
       toast({ title: "Success", description: "Grade deleted successfully" });
     },
     onError: (error: Error) => {
@@ -168,8 +202,9 @@ export default function GradesPage() {
     appliesAll: boolean;
     lowerLimit: number;
     upperLimit: number;
-    gradePoints?: string;
-    gradeStatus?: string;
+    gradePoints: string;
+    gradeStatus: "PASS" | "FAIL";
+    rankOrder: number;
     gradeType?: string;
   }) => {
     const allowedGradeTypes = getGradeTypeOptionsForProfile(formData.gradeLevel, schoolType, examinationBoard);
@@ -178,8 +213,9 @@ export default function GradesPage() {
       : undefined;
     const gradeData: Partial<Grade> = {
       ...formData,
-      gradePoints: formData.gradePoints || undefined,
-      gradeStatus: formData.gradeStatus || undefined,
+      gradePoints: formData.gradePoints,
+      gradeStatus: formData.gradeStatus,
+      rankOrder: formData.rankOrder,
       gradeType,
     };
 
@@ -246,6 +282,35 @@ export default function GradesPage() {
             </TabsList>
 
             <TabsContent value={activeTab}>
+              <div className="mb-5 rounded-lg border p-4 space-y-3" data-testid="grade-ranking-settings">
+                <div>
+                  <h3 className="font-semibold">Ranking Settings</h3>
+                  <p className="text-sm text-muted-foreground">Choose how total configured grade points are compared for this exact profile.</p>
+                </div>
+                <div className="max-w-md space-y-2">
+                  <Label>Better performance has</Label>
+                  <Select
+                    value={activeProfileSetting?.pointsDirection || "unconfigured"}
+                    onValueChange={(value) => {
+                      if (value === "higher_is_better" || value === "lower_is_better") {
+                        updateProfileSettingMutation.mutate(value);
+                      }
+                    }}
+                  >
+                    <SelectTrigger data-testid="select-points-direction">
+                      <SelectValue placeholder="Configure points direction" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="unconfigured" disabled>Configure points direction</SelectItem>
+                      <SelectItem value="higher_is_better">Higher total points</SelectItem>
+                      <SelectItem value="lower_is_better">Lower total points</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {!activeProfileSetting && (
+                    <p className="text-sm text-amber-700">Positions remain unresolved until this setting is configured.</p>
+                  )}
+                </div>
+              </div>
               {isLoading ? (
                 <div className="space-y-3">
                   {[1, 2, 3].map((i) => (
@@ -259,6 +324,7 @@ export default function GradesPage() {
                       <TableRow>
                         <SortableTableHead sortKey="grade" sortConfig={sortConfig} onSort={requestSort}>Grade</SortableTableHead>
                         <SortableTableHead sortKey="points" sortConfig={sortConfig} onSort={requestSort}>Points</SortableTableHead>
+                        <SortableTableHead sortKey="rankOrder" sortConfig={sortConfig} onSort={requestSort}>Rank</SortableTableHead>
                         <SortableTableHead sortKey="status" sortConfig={sortConfig} onSort={requestSort}>Status</SortableTableHead>
                         <SortableTableHead sortKey="gradeType" sortConfig={sortConfig} onSort={requestSort}>Type</SortableTableHead>
                         <SortableTableHead sortKey="minPercentage" sortConfig={sortConfig} onSort={requestSort}>Range</SortableTableHead>
@@ -276,7 +342,8 @@ export default function GradesPage() {
                               )}
                             </div>
                           </TableCell>
-                          <TableCell>{g.gradePoints || "-"}</TableCell>
+                          <TableCell>{g.gradePoints ?? "-"}</TableCell>
+                          <TableCell>{g.rankOrder ?? "-"}</TableCell>
                           <TableCell>
                             {g.gradeStatus && (
                               <Badge
@@ -321,7 +388,7 @@ export default function GradesPage() {
                       ))}
                       {grades.length === 0 && (
                         <TableRow>
-                          <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                          <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
                             No grades found for {tabLabels[activeTab as keyof typeof tabLabels]}
                           </TableCell>
                         </TableRow>
@@ -421,8 +488,9 @@ function GradeDialog({
     appliesAll: boolean;
     lowerLimit: number;
     upperLimit: number;
-    gradePoints?: string;
-    gradeStatus?: string;
+    gradePoints: string;
+    gradeStatus: "PASS" | "FAIL";
+    rankOrder: number;
     gradeType?: string;
   }) => void;
   isLoading: boolean;
@@ -444,6 +512,7 @@ function GradeDialog({
     upperLimit: defaultValues?.upperLimit?.toString() || "",
     gradePoints: defaultValues?.gradePoints || "",
     gradeStatus: defaultValues?.gradeStatus || "",
+    rankOrder: defaultValues?.rankOrder?.toString() || "",
     gradeType: defaultValues?.gradeType || "",
   });
 
@@ -458,6 +527,7 @@ function GradeDialog({
         upperLimit: defaultValues?.upperLimit?.toString() || "",
         gradePoints: defaultValues?.gradePoints || "",
         gradeStatus: defaultValues?.gradeStatus || "",
+        rankOrder: defaultValues?.rankOrder?.toString() || "",
         gradeType: defaultValues?.gradeType || "",
       });
     }
@@ -472,13 +542,10 @@ function GradeDialog({
       switch (formData.gradeLevel) {
         case "SEC_ZIM_A":
         case "SEC_CAM_A":
-        case "A_Level":
           return resolveSecondaryGroupingFromStream(streamName) === "ADVANCED";
         case "SEC_ZIM_O":
         case "SEC_CAM_O":
         case "SEC_CAM_IGCSE":
-        case "O_Level":
-        case "IGCSE":
           return resolveSecondaryGroupingFromStream(streamName) === "LOWER";
         case "PRI_ZIM_ECD":
         case "PRI_CAM_ECD":
@@ -519,8 +586,9 @@ function GradeDialog({
       appliesAll: formData.appliesAll,
       lowerLimit: Number(formData.lowerLimit),
       upperLimit: Number(formData.upperLimit),
-      gradePoints: formData.gradePoints || undefined,
-      gradeStatus: formData.gradeStatus || undefined,
+      gradePoints: formData.gradePoints,
+      gradeStatus: formData.gradeStatus as "PASS" | "FAIL",
+      rankOrder: Number(formData.rankOrder),
       gradeType: formData.gradeType || undefined,
     });
   };
@@ -583,8 +651,8 @@ function GradeDialog({
                     {selectedClasses.map(c => (
                       <Badge key={c.id} variant="secondary" className="gap-1">
                         {c.className}
-                        <X 
-                          className="w-3 h-3 cursor-pointer" 
+                        <X
+                          className="w-3 h-3 cursor-pointer"
                           onClick={() => removeClassId(c.id)}
                         />
                       </Badge>
@@ -615,7 +683,7 @@ function GradeDialog({
                 type="number"
                 min="0"
                 max="100"
-                step="0.1"
+                step="1"
                 value={formData.lowerLimit}
                 onChange={(e) => setFormData(p => ({ ...p, lowerLimit: e.target.value }))}
                 placeholder="e.g., 70"
@@ -630,7 +698,7 @@ function GradeDialog({
                 type="number"
                 min="0"
                 max="100"
-                step="0.1"
+                step="1"
                 value={formData.upperLimit}
                 onChange={(e) => setFormData(p => ({ ...p, upperLimit: e.target.value }))}
                 placeholder="e.g., 100"
@@ -640,31 +708,45 @@ function GradeDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="space-y-2">
               <Label htmlFor="gradePoints">Grade Points</Label>
               <Input
                 id="gradePoints"
                 type="number"
-                min="0"
-                step="1"
+                step="0.01"
                 value={formData.gradePoints}
                 onChange={(e) => setFormData(p => ({ ...p, gradePoints: e.target.value }))}
                 placeholder="e.g., 5"
+                required
                 data-testid="input-grade-points"
               />
             </div>
             <div className="space-y-2">
+              <Label htmlFor="rankOrder">Rank Order</Label>
+              <Input
+                id="rankOrder"
+                type="number"
+                min="1"
+                step="1"
+                value={formData.rankOrder}
+                onChange={(e) => setFormData(p => ({ ...p, rankOrder: e.target.value }))}
+                placeholder="1 = highest grade"
+                required
+                data-testid="input-rank-order"
+              />
+            </div>
+            <div className="space-y-2">
               <Label htmlFor="gradeStatus">Grade Status</Label>
-              <Select 
-                value={formData.gradeStatus || "none"} 
-                onValueChange={(v) => setFormData(p => ({ ...p, gradeStatus: v === "none" ? "" : v }))}
+              <Select
+                value={formData.gradeStatus}
+                onValueChange={(v) => setFormData(p => ({ ...p, gradeStatus: v }))}
+                required
               >
                 <SelectTrigger data-testid="select-grade-status">
-                  <SelectValue placeholder="Select..." />
+                  <SelectValue placeholder="Select PASS or FAIL" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">Select...</SelectItem>
                   <SelectItem value="PASS">PASS</SelectItem>
                   <SelectItem value="FAIL">FAIL</SelectItem>
                 </SelectContent>
@@ -674,8 +756,8 @@ function GradeDialog({
 
           <div className="space-y-2">
             <Label htmlFor="gradeType">Grade Type (Optional)</Label>
-            <Select 
-              value={formData.gradeType || "none"} 
+            <Select
+              value={formData.gradeType || "none"}
               onValueChange={(v) => setFormData(p => ({ ...p, gradeType: v === "none" ? "" : v }))}
             >
               <SelectTrigger data-testid="select-grade-type">
@@ -694,7 +776,7 @@ function GradeDialog({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={isLoading} data-testid="button-save-grade">
+            <Button type="submit" disabled={isLoading || !formData.gradePoints || !formData.rankOrder || !formData.gradeStatus} data-testid="button-save-grade">
               {isLoading ? "Saving..." : defaultValues ? "Update" : "Submit"}
             </Button>
           </DialogFooter>

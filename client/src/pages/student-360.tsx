@@ -464,6 +464,11 @@ export default function Student360Page() {
                     {results.length === 0 && selectedExamId && (
                       <p className="text-sm text-muted-foreground text-center py-4">No results found for this exam</p>
                     )}
+                  {Number(summaryStats.subjectsUnresolved || 0) > 0 && (
+                    <div className="col-span-3 sm:col-span-6 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-left text-xs text-amber-800">
+                      {summaryStats.subjectsUnresolved} subject result{Number(summaryStats.subjectsUnresolved) === 1 ? " is" : "s are"} unresolved. Pass counts and positions remain provisional until the exact grading configuration is complete.
+                    </div>
+                  )}
                   </div>
                 </div>
               )}

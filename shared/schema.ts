@@ -343,7 +343,21 @@ export const internalTransfers = pgTable("internal_transfers", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const gradeLevelEnum = pgEnum("grade_level", ["A_Level", "O_Level", "IGCSE", "SEC_ZIM_A", "SEC_ZIM_O", "SEC_CAM_A", "SEC_CAM_O", "SEC_CAM_IGCSE", "PRI_ZIM_ECD", "PRI_ZIM_G12", "PRI_ZIM_G37", "PRI_CAM_ECD", "PRI_CAM_G12", "PRI_CAM_G37"]);
+export const gradeLevelEnum = pgEnum("grade_level", ["SEC_ZIM_A", "SEC_ZIM_O", "SEC_CAM_A", "SEC_CAM_O", "SEC_CAM_IGCSE", "PRI_ZIM_ECD", "PRI_ZIM_G12", "PRI_ZIM_G37", "PRI_CAM_ECD", "PRI_CAM_G12", "PRI_CAM_G37"]);
+export const gradePointsDirectionEnum = pgEnum("grade_points_direction", ["higher_is_better", "lower_is_better"]);
+
+export const gradeProfileSettings = pgTable("grade_profile_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  gradeLevel: gradeLevelEnum("grade_level").notNull(),
+  pointsDirection: gradePointsDirectionEnum("points_direction").notNull(),
+  configurationVersion: integer("configuration_version").notNull().default(1),
+  updatedByUserId: integer("updated_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolProfileUnique: uniqueIndex("grade_profile_settings_school_profile_uidx").on(table.schoolId, table.gradeLevel),
+}));
 
 export const grades = pgTable("grades", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -354,8 +368,9 @@ export const grades = pgTable("grades", {
   appliesAll: boolean("applies_all").default(false),
   lowerLimit: integer("lower_limit").notNull(),
   upperLimit: integer("upper_limit").notNull(),
-  gradePoints: decimal("grade_points", { precision: 3, scale: 1 }),
+  gradePoints: decimal("grade_points", { precision: 6, scale: 2 }),
   gradeStatus: text("grade_status"),
+  rankOrder: integer("rank_order"),
   gradeType: subjectTypeEnum("grade_type"),
 });
 
@@ -1809,6 +1824,7 @@ export const insertStudentSubjectSchema = omitInsertFields(createInsertSchema(st
 export const insertInternalTransferSchema = omitInsertFields(createInsertSchema(internalTransfers), { id: true, createdAt: true, completedAt: true });
 export const insertClassSubjectSchema = omitInsertFields(createInsertSchema(classSubjects), { id: true });
 export const insertGradeSchema = omitInsertFields(createInsertSchema(grades), { id: true });
+export const insertGradeProfileSettingSchema = omitInsertFields(createInsertSchema(gradeProfileSettings), { id: true, createdAt: true, updatedAt: true });
 export const insertAssessmentSchema = omitInsertFields(createInsertSchema(assessments), { id: true, createdAt: true });
 export const insertMarkSchema = omitInsertFields(createInsertSchema(marks), { id: true, markedAt: true });
 export const insertAttendanceRecordSchema = omitInsertFields(createInsertSchema(attendanceRecords), { id: true, createdAt: true });
@@ -1922,6 +1938,8 @@ export type InsertClassSubject = z.infer<typeof insertClassSubjectSchema>;
 export type ClassSubject = typeof classSubjects.$inferSelect;
 export type InsertGrade = z.infer<typeof insertGradeSchema>;
 export type Grade = typeof grades.$inferSelect;
+export type InsertGradeProfileSetting = z.infer<typeof insertGradeProfileSettingSchema>;
+export type GradeProfileSetting = typeof gradeProfileSettings.$inferSelect;
 export type InsertAssessment = z.infer<typeof insertAssessmentSchema>;
 export type Assessment = typeof assessments.$inferSelect;
 export type InsertMark = z.infer<typeof insertMarkSchema>;

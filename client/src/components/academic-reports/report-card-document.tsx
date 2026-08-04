@@ -60,12 +60,16 @@ export interface ReportStudent {
     totalMark: string;
     avgMark: string;
     subjectsPassed: string;
+    subjectsFailed?: number;
+    subjectsUnresolved?: number;
     points: string;
     classPosition?: string;
     overallPosition: string;
     classSize: number;
     averagePercentage: number | null;
     totalSubjects: number;
+    positionStatus?: "READY" | "UNRESOLVED";
+    positionIssues?: string[];
   };
   chartSubjectLabels: string[];
   chartStudentMarks: number[];
@@ -588,6 +592,11 @@ export function ReportCardSlip({
                       data-testid="text-subjects-passed"
                     >
                       {summary.subjectsPassed}
+                      {Number(summary.subjectsUnresolved || 0) > 0 && (
+                        <div className="text-[8px] font-medium text-amber-700 dark:text-amber-300">
+                          Unresolved: {summary.subjectsUnresolved}
+                        </div>
+                      )}
                     </td>
                     <td
                       className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
@@ -614,6 +623,12 @@ export function ReportCardSlip({
               </table>
             </div>
           </div>
+
+          {summary.positionStatus === "UNRESOLVED" && (
+            <div className="mt-1 text-center text-[8px] font-semibold text-amber-700 dark:text-amber-300">
+              Position pending: complete and resolve all configured grading results.
+            </div>
+          )}
 
           <table
             className="w-full table-fixed border-collapse mt-1 text-[10px]"

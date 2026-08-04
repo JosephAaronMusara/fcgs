@@ -281,12 +281,16 @@ export interface ReportStudent {
     totalMark: string;
     avgMark: string;
     subjectsPassed: string;
+    subjectsFailed?: number;
+    subjectsUnresolved?: number;
     points: string;
     classPosition?: string;
     overallPosition: string;
     classSize: number;
     averagePercentage: number | null;
     totalSubjects: number;
+    positionStatus?: "READY" | "UNRESOLVED";
+    positionIssues?: string[];
   };
   chartSubjectLabels: string[];
   chartStudentMarks: number[];

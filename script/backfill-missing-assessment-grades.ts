@@ -12,6 +12,7 @@ import {
   subjects,
 } from "../shared/schema";
 import { resolveGradeProfileKey } from "../shared/academic-profiles";
+import { isTemporarilyExcludedFromStrictGrading } from "../server/grading-exclusions";
 
 type CliOptions = {
   apply: boolean;
@@ -106,12 +107,16 @@ async function main() {
     ambiguous: 0,
     inconsistentSchool: 0,
     exactProfileRepairs: 0,
-    compatibleProfileRepairs: 0,
+    temporarilyExcluded: 0,
   };
   const unresolved: Array<Record<string, unknown>> = [];
   const repairs: Array<{ markId: number; gradeId: number }> = [];
 
   for (const row of rows) {
+    if (isTemporarilyExcludedFromStrictGrading(row.subjectName)) {
+      summary.temporarilyExcluded++;
+      continue;
+    }
     const percentage = parseFinitePercentage(row.percentage);
     if (percentage === null) {
       summary.invalidPercentage++;
@@ -204,11 +209,7 @@ async function main() {
     }
 
     summary.repairable++;
-    if (resolution.profileSource === "compatible") {
-      summary.compatibleProfileRepairs++;
-    } else {
-      summary.exactProfileRepairs++;
-    }
+    summary.exactProfileRepairs++;
     repairs.push({ markId: Number(row.markId), gradeId: Number(resolution.grade.id) });
   }
 

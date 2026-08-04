@@ -14,12 +14,7 @@ export const SECONDARY_SUBJECT_TYPES = [
 
 export type SecondarySubjectType = (typeof SECONDARY_SUBJECT_TYPES)[number];
 
-export const LEGACY_SUBJECT_TYPES = ["ZIMSEC", "Cambridge", "HEXCO", "DELF", "HSK"] as const;
-
 export const GRADE_PROFILE_KEYS = [
-  "A_Level",
-  "O_Level",
-  "IGCSE",
   "SEC_ZIM_A",
   "SEC_ZIM_O",
   "SEC_CAM_A",
@@ -58,55 +53,16 @@ export const GRADING_PROFILES: GradingProfileDefinition[] = [
 ];
 
 
-const PROFILE_KEY_COMPATIBILITY: Partial<Record<GradeProfileKey, GradeProfileKey[]>> = {
-  SEC_ZIM_A: ["A_Level", "SEC_CAM_A"],
-  SEC_CAM_A: ["A_Level", "SEC_ZIM_A"],
-  SEC_ZIM_O: ["O_Level", "SEC_CAM_O", "SEC_CAM_IGCSE"],
-  SEC_CAM_O: ["O_Level", "SEC_ZIM_O"],
-  SEC_CAM_IGCSE: ["IGCSE", "SEC_CAM_O", "SEC_ZIM_O"],
-  PRI_ZIM_ECD: ["PRI_CAM_ECD"],
-  PRI_CAM_ECD: ["PRI_ZIM_ECD"],
-  PRI_ZIM_G12: ["PRI_CAM_G12"],
-  PRI_CAM_G12: ["PRI_ZIM_G12"],
-  PRI_ZIM_G37: ["PRI_CAM_G37"],
-  PRI_CAM_G37: ["PRI_ZIM_G37"],
-};
-
-export function getCompatibleGradeProfileKeys(profileKey?: string | null): string[] {
-  if (!profileKey) return [];
-  const key = profileKey as GradeProfileKey;
-  return Array.from(new Set([profileKey, ...(PROFILE_KEY_COMPATIBILITY[key] || [])]));
-}
-
 export function filterItemsByGradeProfileKey<T extends { gradeLevel?: string | null }>(
   items: T[],
   profileKey?: string | null,
 ): T[] {
   if (!profileKey) return items;
-  const exact = items.filter((item) => (item.gradeLevel || null) === profileKey);
-  if (exact.length > 0) return exact;
-  const compatibleKeys = new Set(getCompatibleGradeProfileKeys(profileKey).filter((key) => key !== profileKey));
-  if (compatibleKeys.size === 0) return exact;
-  return items.filter((item) => !!item.gradeLevel && compatibleKeys.has(item.gradeLevel));
+  return items.filter((item) => (item.gradeLevel || null) === profileKey);
 }
 
-const STRICT_PROFILE_LEGACY_ALIASES: Partial<Record<GradeProfileKey, GradeProfileKey[]>> = {
-  SEC_ZIM_A: ["A_Level"],
-  SEC_CAM_A: ["A_Level"],
-  SEC_ZIM_O: ["O_Level"],
-  SEC_CAM_O: ["O_Level"],
-  SEC_CAM_IGCSE: ["IGCSE"],
-};
-
-/**
- * Returns only the selected profile and its direct legacy alias.
- * Unlike getCompatibleGradeProfileKeys(), this deliberately does not treat
- * current Ordinary Level and IGCSE profiles as interchangeable.
- */
 export function getStrictGradeProfileKeys(profileKey?: string | null): string[] {
-  if (!profileKey) return [];
-  const key = profileKey as GradeProfileKey;
-  return Array.from(new Set([profileKey, ...(STRICT_PROFILE_LEGACY_ALIASES[key] || [])]));
+  return profileKey ? [profileKey] : [];
 }
 
 export function gradeProfileMatchesStrict(
@@ -114,25 +70,17 @@ export function gradeProfileMatchesStrict(
   selectedProfileKey?: string | null,
 ): boolean {
   if (!selectedProfileKey) return true;
-  if (!candidateProfileKey) return false;
-  return getStrictGradeProfileKeys(selectedProfileKey).includes(candidateProfileKey);
+  return !!candidateProfileKey && candidateProfileKey === selectedProfileKey;
 }
 
-/**
- * Prefer exact rows for a UI tab. Only fall back to the tab's direct legacy
- * alias when the database has no exact rows for that profile.
- */
 export function filterItemsByStrictGradeProfileKey<T extends { gradeLevel?: string | null }>(
   items: T[],
   profileKey?: string | null,
 ): T[] {
-  if (!profileKey) return items;
-  const exact = items.filter((item) => (item.gradeLevel || null) === profileKey);
-  if (exact.length > 0) return exact;
-  const legacyAliases = new Set(getStrictGradeProfileKeys(profileKey).filter((key) => key !== profileKey));
-  if (legacyAliases.size === 0) return exact;
-  return items.filter((item) => !!item.gradeLevel && legacyAliases.has(item.gradeLevel));
+  return filterItemsByGradeProfileKey(items, profileKey);
 }
+
+export type PointsDirection = "higher_is_better" | "lower_is_better";
 
 export const ECD_RATINGS = ["YES", "NO", "ALMOST"] as const;
 export type EcdRating = (typeof ECD_RATINGS)[number];
@@ -262,9 +210,6 @@ export function getGradingProfilesForSchool(
 export function getGradeProfileLabel(key?: string | null): string {
   const direct = GRADING_PROFILES.find((profile) => profile.key === key);
   if (direct) return direct.label;
-  if (key === "A_Level") return "Advanced Level";
-  if (key === "O_Level") return "Ordinary Level";
-  if (key === "IGCSE") return "IGCSE";
   return key || "Unknown";
 }
 
@@ -300,8 +245,21 @@ export function resolveGradeProfileKey(args: {
   streamName?: string | null;
   subjectType?: string | null;
 }): GradeProfileKey | null {
-  const schoolType = normalizeSchoolType(args.schoolType);
-  const board = normalizeExamBoard(args.examinationBoard);
+  const rawSchoolType = String(args.schoolType || "").trim().toLowerCase();
+  const schoolType: SupportedSchoolType | null =
+    rawSchoolType === "primary" || rawSchoolType === "primary school"
+      ? "primary"
+      : rawSchoolType === "secondary" || rawSchoolType === "secondary school"
+        ? "secondary"
+        : null;
+  const rawBoard = String(args.examinationBoard || "").trim().toLowerCase();
+  const board: SupportedExamBoard | null =
+    rawBoard === "cambridge"
+      ? "Cambridge"
+      : rawBoard === "zimsec"
+        ? "ZIMSEC"
+        : null;
+  if (!schoolType || !board) return null;
   const subjectType = args.subjectType || null;
 
   if (schoolType === "primary") {
@@ -321,25 +279,21 @@ export function resolveGradeProfileKey(args: {
   if (!secondaryGrouping) return null;
 
   if (secondaryGrouping === "ADVANCED") {
-    if (
-      subjectType === "Cambridge Advanced Level" ||
-      subjectType === "DELF" ||
-      subjectType === "HEXCO" ||
-      subjectType === "HSK"
-    ) {
-      return "SEC_CAM_A";
+    if (board === "Cambridge" && subjectType === "Cambridge Advanced Level") return "SEC_CAM_A";
+    if (board === "ZIMSEC" && subjectType === "ZIMSEC Advanced Level") return "SEC_ZIM_A";
+    if (subjectType === "DELF" || subjectType === "HEXCO" || subjectType === "HSK") {
+      return board === "Cambridge" ? "SEC_CAM_A" : "SEC_ZIM_A";
     }
-    if (subjectType === "ZIMSEC Advanced Level") {
-      return "SEC_ZIM_A";
-    }
-    return board === "Cambridge" ? "SEC_CAM_A" : "SEC_ZIM_A";
+    return null;
   }
 
-  if (subjectType === "Cambridge IGCSE") return "SEC_CAM_IGCSE";
-  if (subjectType === "Cambridge Ordinary Level") return "SEC_CAM_O";
-  if (subjectType === "ZIMSEC Ordinary Level") return "SEC_ZIM_O";
-  if (subjectType === "DELF" || subjectType === "HEXCO" || subjectType === "HSK") return "SEC_CAM_O";
-  return board === "Cambridge" ? "SEC_CAM_O" : "SEC_ZIM_O";
+  if (board === "Cambridge" && subjectType === "Cambridge IGCSE") return "SEC_CAM_IGCSE";
+  if (board === "Cambridge" && subjectType === "Cambridge Ordinary Level") return "SEC_CAM_O";
+  if (board === "ZIMSEC" && subjectType === "ZIMSEC Ordinary Level") return "SEC_ZIM_O";
+  if (subjectType === "DELF" || subjectType === "HEXCO" || subjectType === "HSK") {
+    return board === "Cambridge" ? "SEC_CAM_O" : "SEC_ZIM_O";
+  }
+  return null;
 }
 
 export function profileMatchesSchool(
@@ -376,17 +330,14 @@ export function getGradeTypeOptionsForProfile(profileKey: string, schoolType?: s
 
   switch (profileKey) {
     case "SEC_ZIM_A":
-    case "A_Level":
       return ["ZIMSEC Advanced Level", ...universal];
     case "SEC_ZIM_O":
-    case "O_Level":
       return ["ZIMSEC Ordinary Level", ...universal];
     case "SEC_CAM_A":
       return ["Cambridge Advanced Level", ...universal];
     case "SEC_CAM_O":
       return ["Cambridge Ordinary Level", ...universal];
     case "SEC_CAM_IGCSE":
-    case "IGCSE":
       return ["Cambridge IGCSE"];
     default:
       return resolvedBoard === "Cambridge"
@@ -408,19 +359,16 @@ export function subjectMatchesGradeProfile(args: {
   const schoolType = normalizeSchoolType(args.schoolType);
   const universalSecondaryTypes = new Set(["DELF", "HEXCO", "HSK"]);
   if (schoolType === "secondary" && universalSecondaryTypes.has(args.subjectType)) {
-    if (args.profileKey === "IGCSE" || args.profileKey.endsWith("_IGCSE")) return false;
+    if (args.profileKey.endsWith("_IGCSE")) return false;
     if (!args.streamName) {
-      return args.profileKey === "A_Level" ||
-        args.profileKey === "O_Level" ||
-        args.profileKey.endsWith("_A") ||
-        args.profileKey.endsWith("_O");
+      return args.profileKey.endsWith("_A") || args.profileKey.endsWith("_O");
     }
     const grouping = resolveSecondaryGroupingFromStream(args.streamName);
     if (grouping === "ADVANCED") {
-      return args.profileKey === "A_Level" || args.profileKey.endsWith("_A");
+      return args.profileKey.endsWith("_A");
     }
     if (grouping === "LOWER") {
-      return args.profileKey === "O_Level" || args.profileKey.endsWith("_O");
+      return args.profileKey.endsWith("_O");
     }
     return false;
   }
@@ -444,17 +392,8 @@ export function subjectMatchesGradeProfile(args: {
 
 export function isSubjectTypeCompatibleWithGradeType(subjectType?: string | null, gradeType?: string | null): boolean {
   if (!gradeType) return true;
-  if (!subjectType) return true;
-  if (subjectType === gradeType) return true;
-
-  const universal = new Set(["DELF", "HEXCO", "HSK"]);
-  if (universal.has(subjectType) && universal.has(gradeType)) return true;
-  if (universal.has(subjectType)) {
-    if (gradeType === "Cambridge Advanced Level") return true;
-    if (gradeType === "Cambridge Ordinary Level") return true;
-    if (gradeType === "Cambridge") return true;
-  }
-  return false;
+  if (!subjectType) return false;
+  return subjectType === gradeType;
 }
 
 export function profileMatchesStreamName(profileKey: string, streamName?: string | null): boolean {
@@ -470,7 +409,7 @@ export function profileMatchesStreamName(profileKey: string, streamName?: string
 
   const grouping = resolveSecondaryGroupingFromStream(streamName);
   if (!grouping) return false;
-  if (profileKey.endsWith("_A") || profileKey === "A_Level") return grouping === "ADVANCED";
-  if (profileKey.endsWith("_O") || profileKey === "O_Level" || profileKey === "IGCSE" || profileKey.endsWith("_IGCSE")) return grouping === "LOWER";
+  if (profileKey.endsWith("_A")) return grouping === "ADVANCED";
+  if (profileKey.endsWith("_O") || profileKey.endsWith("_IGCSE")) return grouping === "LOWER";
   return false;
 }
