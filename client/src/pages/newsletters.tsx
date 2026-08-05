@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { queryClient, apiRequest } from "@/lib/queryClient";
+import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -24,58 +24,204 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SearchableMultiSelect, type SearchableSelectOption } from "@/components/ui/searchable-select";
 import { Newspaper, Plus, Calendar, Send, Eye, Trash2, Mail, MessageSquare, Bell, CheckCircle2, AlertCircle, FileText } from "lucide-react";
-import type { Newsletter } from "@shared/schema";
+import type { Class, Newsletter, School, Staff, Stream, Student } from "@shared/schema";
+
+type NewsletterAudience = "all" | "parents" | "students" | "staff";
+type NewsletterScope = "all" | "streams" | "classes" | "individuals";
+type RecipientPreview = { total: number; email: number; sms: number; inApp: number };
+type PaginatedResponse<T> = { items: T[]; total: number; page: number; pageSize: number; totalPages: number };
+
+function fullName(item: { firstName?: string | null; lastName?: string | null }) {
+  return `${item.firstName || ""} ${item.lastName || ""}`.trim();
+}
+
+function classLabel(cls: Class) {
+  return cls.shortCode?.trim() || cls.className;
+}
+
+function audienceLabel(audience?: string | null) {
+  if (audience === "parents") return "Parents Only";
+  if (audience === "students") return "Students Only";
+  if (audience === "staff") return "Staff Only";
+  return "Everyone";
+}
+
+function scopeLabel(newsletter: Newsletter) {
+  const scope = newsletter.targetScope || "all";
+  if (scope === "streams") return `${newsletter.targetStreamIds?.length || 0} stream(s)`;
+  if (scope === "classes") return `${newsletter.targetClassIds?.length || 0} class(es)`;
+  if (scope === "individuals") {
+    const count = newsletter.targetAudience === "staff"
+      ? newsletter.targetStaffIds?.length || 0
+      : newsletter.targetStudentIds?.length || 0;
+    return `${count} selected individual(s)`;
+  }
+  return "All";
+}
 
 export default function NewslettersPage() {
   const { toast } = useToast();
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [viewNewsletter, setViewNewsletter] = useState<Newsletter | null>(null);
   const [selectedChannels, setSelectedChannels] = useState<string[]>(["email"]);
-  const [selectedAudience, setSelectedAudience] = useState("all");
+  const [selectedAudience, setSelectedAudience] = useState<NewsletterAudience>("all");
+  const [selectedScope, setSelectedScope] = useState<NewsletterScope>("all");
+  const [selectedStreamIds, setSelectedStreamIds] = useState<string[]>([]);
+  const [selectedClassIds, setSelectedClassIds] = useState<string[]>([]);
+  const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
+  const [selectedStaffIds, setSelectedStaffIds] = useState<string[]>([]);
+
+  const resetTargeting = () => {
+    setSelectedChannels(["email"]);
+    setSelectedAudience("all");
+    setSelectedScope("all");
+    setSelectedStreamIds([]);
+    setSelectedClassIds([]);
+    setSelectedStudentIds([]);
+    setSelectedStaffIds([]);
+  };
 
   const { data: newsletters = [], isLoading } = useQuery<Newsletter[]>({
     queryKey: ["/api/newsletters"],
   });
 
-  const { data: recipientCounts } = useQuery<{ email: number; sms: number; inApp: number }>({
-    queryKey: ["/api/newsletters/recipient-counts", selectedAudience],
+  const { data: school } = useQuery<School>({
+    queryKey: ["/api/schools/current", "newsletter-targeting"],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/newsletters/recipient-counts?audience=${selectedAudience}`);
+      const res = await schoolFetch("/api/schools/current");
+      if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
+    enabled: isAddOpen,
+  });
+
+  const { data: classes = [] } = useQuery<Class[]>({
+    queryKey: ["/api/classes", "newsletter-targeting"],
+    queryFn: async () => {
+      const res = await schoolFetch("/api/classes");
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    enabled: isAddOpen,
+  });
+
+  const { data: streams = [] } = useQuery<Stream[]>({
+    queryKey: ["/api/streams", school?.schoolType || "all", "newsletter-targeting"],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (school?.schoolType) params.set("schoolType", school.schoolType);
+      const res = await schoolFetch(`/api/streams${params.toString() ? `?${params.toString()}` : ""}`);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    enabled: isAddOpen,
+  });
+
+  const shouldLoadStudents = isAddOpen
+    && selectedScope === "individuals"
+    && (selectedAudience === "parents" || selectedAudience === "students");
+  const { data: students = [] } = useQuery<Student[]>({
+    queryKey: ["/api/students", "newsletter-targeting"],
+    queryFn: async () => {
+      const params = new URLSearchParams({ paginated: "true", page: "1", pageSize: "100000", status: "active" });
+      const res = await schoolFetch(`/api/students?${params.toString()}`);
+      if (!res.ok) throw new Error(await res.text());
+      const page = (await res.json()) as PaginatedResponse<Student>;
+      return page.items || [];
+    },
+    enabled: shouldLoadStudents,
+  });
+
+  const shouldLoadStaff = isAddOpen && selectedAudience === "staff" && selectedScope === "individuals";
+  const { data: staff = [] } = useQuery<Staff[]>({
+    queryKey: ["/api/staff", "newsletter-targeting"],
+    queryFn: async () => {
+      const params = new URLSearchParams({ paginated: "true", page: "1", pageSize: "100000" });
+      const res = await schoolFetch(`/api/staff?${params.toString()}`);
+      if (!res.ok) throw new Error(await res.text());
+      const page = (await res.json()) as PaginatedResponse<Staff>;
+      return page.items || [];
+    },
+    enabled: shouldLoadStaff,
+  });
+
+  const classOptions: SearchableSelectOption[] = useMemo(() => classes.map((cls) => ({
+    value: String(cls.id),
+    label: classLabel(cls),
+    searchText: cls.className,
+  })), [classes]);
+
+  const streamOptions: SearchableSelectOption[] = useMemo(() => {
+    const usedStreamIds = new Set(classes.map((cls) => cls.streamId).filter((id): id is number => typeof id === "number"));
+    return streams.filter((stream) => usedStreamIds.has(stream.id)).map((stream) => ({
+      value: String(stream.id),
+      label: stream.name,
+      searchText: stream.description || "",
+    }));
+  }, [classes, streams]);
+
+  const studentOptions: SearchableSelectOption[] = useMemo(() => students.map((student) => ({
+    value: String(student.id),
+    label: `${fullName(student)}${student.admissionNo ? ` (${student.admissionNo})` : ""}`,
+    searchText: `${student.admissionNo || ""} ${student.phone || ""} ${student.email || ""}`,
+  })), [students]);
+
+  const staffOptions: SearchableSelectOption[] = useMemo(() => staff.map((member) => ({
+    value: String(member.id),
+    label: fullName(member),
+    searchText: `${member.staffNo || ""} ${member.role || ""} ${member.phone || ""} ${member.email || ""}`,
+  })), [staff]);
+
+  const targetPayload = useMemo(() => ({
+    targetAudience: selectedAudience,
+    targetScope: selectedAudience === "all" ? "all" : selectedScope,
+    targetStreamIds: selectedStreamIds.map(Number),
+    targetClassIds: selectedClassIds.map(Number),
+    targetStudentIds: selectedStudentIds.map(Number),
+    targetStaffIds: selectedStaffIds.map(Number),
+  }), [selectedAudience, selectedScope, selectedStreamIds, selectedClassIds, selectedStudentIds, selectedStaffIds]);
+
+  const hasValidTarget = selectedAudience === "all"
+    || selectedScope === "all"
+    || (selectedScope === "streams" && selectedStreamIds.length > 0)
+    || (selectedScope === "classes" && selectedClassIds.length > 0)
+    || (selectedScope === "individuals" && (selectedAudience === "staff" ? selectedStaffIds.length > 0 : selectedStudentIds.length > 0));
+
+  const { data: recipientCounts, isFetching: isPreviewLoading } = useQuery<RecipientPreview>({
+    queryKey: ["/api/newsletters/recipient-preview", targetPayload],
+    queryFn: async () => {
+      const res = await apiRequest("POST", "/api/newsletters/recipient-preview", targetPayload);
+      return res.json();
+    },
+    enabled: isAddOpen && hasValidTarget,
   });
 
   const createNewsletter = useMutation({
-    mutationFn: async (data: Partial<Newsletter>) => {
-      return apiRequest("POST", "/api/newsletters", data);
-    },
+    mutationFn: async (data: Partial<Newsletter>) => apiRequest("POST", "/api/newsletters", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/newsletters"] });
       setIsAddOpen(false);
-      setSelectedChannels(["email"]);
-      setSelectedAudience("all");
+      resetTargeting();
       toast({ title: "Newsletter created" });
     },
-    onError: () => {
-      toast({ title: "Failed to create newsletter", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to create newsletter", description: error.message, variant: "destructive" });
     },
   });
 
   const updateNewsletter = useMutation({
-    mutationFn: async ({ id, isPublished }: { id: number; isPublished: boolean }) => {
-      return apiRequest("PUT", `/api/newsletters/${id}`, { isPublished });
-    },
+    mutationFn: async ({ id, isPublished }: { id: number; isPublished: boolean }) => apiRequest("PUT", `/api/newsletters/${id}`, { isPublished }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/newsletters"] });
       toast({ title: "Newsletter updated" });
     },
+    onError: (error: Error) => toast({ title: "Failed to publish newsletter", description: error.message, variant: "destructive" }),
   });
 
   const deleteNewsletter = useMutation({
-    mutationFn: async (id: number) => {
-      return apiRequest("DELETE", `/api/newsletters/${id}`);
-    },
+    mutationFn: async (id: number) => apiRequest("DELETE", `/api/newsletters/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/newsletters"] });
       toast({ title: "Newsletter deleted" });
@@ -83,24 +229,38 @@ export default function NewslettersPage() {
   });
 
   const toggleChannel = (channel: string) => {
-    setSelectedChannels(prev =>
-      prev.includes(channel)
-        ? prev.filter(c => c !== channel)
-        : [...prev, channel]
-    );
+    setSelectedChannels((previous) => previous.includes(channel)
+      ? previous.filter((item) => item !== channel)
+      : [...previous, channel]);
   };
 
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (selectedChannels.length === 0) {
-      toast({ title: "Please select at least one channel", variant: "destructive" });
-      return;
-    }
-    const formData = new FormData(e.currentTarget);
+  const handleAudienceChange = (value: NewsletterAudience) => {
+    setSelectedAudience(value);
+    setSelectedScope("all");
+    setSelectedStreamIds([]);
+    setSelectedClassIds([]);
+    setSelectedStudentIds([]);
+    setSelectedStaffIds([]);
+  };
+
+  const handleScopeChange = (value: NewsletterScope) => {
+    setSelectedScope(value);
+    setSelectedStreamIds([]);
+    setSelectedClassIds([]);
+    setSelectedStudentIds([]);
+    setSelectedStaffIds([]);
+  };
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (selectedChannels.length === 0) return toast({ title: "Please select at least one channel", variant: "destructive" });
+    if (!hasValidTarget) return toast({ title: "Please complete the target audience selection", variant: "destructive" });
+    if (!recipientCounts || recipientCounts.total === 0) return toast({ title: "The selected audience has no recipients", variant: "destructive" });
+    const formData = new FormData(event.currentTarget);
     createNewsletter.mutate({
       title: formData.get("title") as string,
       content: formData.get("content") as string,
-      targetAudience: selectedAudience,
+      ...targetPayload,
       channels: selectedChannels,
       isPublished: false,
       publishDate: null,
@@ -109,23 +269,14 @@ export default function NewslettersPage() {
 
   const formatDate = (date: Date | string | null) => {
     if (!date) return "Not published";
-    return new Date(date).toLocaleDateString("en-GB", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-    });
+    return new Date(date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
   };
 
-  const getStatusLabel = (newsletter: Newsletter) => newsletter.isPublished ? "Published" : "Draft";
-  const getStatusColor = (newsletter: Newsletter): "default" | "outline" => newsletter.isPublished ? "default" : "outline";
-
   if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
-      </div>
-    );
+    return <div className="flex items-center justify-center min-h-[400px]"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>;
   }
+
+  const previewText = isPreviewLoading ? "Checking recipients..." : `${recipientCounts?.total || 0} matching recipients`;
 
   return (
     <div className="space-y-6">
@@ -137,204 +288,111 @@ export default function NewslettersPage() {
             <p className="text-muted-foreground">School announcements and communications</p>
           </div>
         </div>
-        <Dialog open={isAddOpen} onOpenChange={(open) => {
-          setIsAddOpen(open);
-          if (!open) {
-            setSelectedChannels(["email"]);
-            setSelectedAudience("all");
-          }
-        }}>
-          <DialogTrigger asChild>
-            <Button data-testid="button-create-newsletter">
-              <Plus className="h-4 w-4 mr-2" />
-              New Newsletter
-            </Button>
-          </DialogTrigger>
+        <Dialog open={isAddOpen} onOpenChange={(open) => { setIsAddOpen(open); if (!open) resetTargeting(); }}>
+          <DialogTrigger asChild><Button data-testid="button-create-newsletter"><Plus className="h-4 w-4 mr-2" />New Newsletter</Button></DialogTrigger>
           <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
             <DialogHeader>
               <DialogTitle>Create Newsletter</DialogTitle>
-              <DialogDescription>Compose a new newsletter for parents and students</DialogDescription>
+              <DialogDescription>Compose a newsletter and select its exact audience.</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="title">Title</Label>
-                <Input id="title" name="title" required data-testid="input-newsletter-title" />
+              <div className="space-y-2"><Label htmlFor="title">Title</Label><Input id="title" name="title" required data-testid="input-newsletter-title" /></div>
+
+              <div className="space-y-3 rounded-lg border p-3">
+                <div className="space-y-2">
+                  <Label>Recipient Group</Label>
+                  <Select value={selectedAudience} onValueChange={(value) => handleAudienceChange(value as NewsletterAudience)}>
+                    <SelectTrigger data-testid="select-audience"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Everyone</SelectItem>
+                      <SelectItem value="parents">Parents Only</SelectItem>
+                      <SelectItem value="students">Students Only</SelectItem>
+                      <SelectItem value="staff">Staff Only</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {selectedAudience === "all" ? (
+                  <p className="text-sm text-muted-foreground">All parents, students and staff in this school will be included.</p>
+                ) : (
+                  <div className="space-y-2">
+                    <Label>Target Scope</Label>
+                    <Select value={selectedScope} onValueChange={(value) => handleScopeChange(value as NewsletterScope)}>
+                      <SelectTrigger data-testid="select-newsletter-target-scope"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All {selectedAudience === "parents" ? "Parents" : selectedAudience === "students" ? "Students" : "Staff"}</SelectItem>
+                        {selectedAudience !== "staff" && <SelectItem value="streams">Streams</SelectItem>}
+                        {selectedAudience !== "staff" && <SelectItem value="classes">Classes</SelectItem>}
+                        <SelectItem value="individuals">Individuals</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
+                {selectedScope === "streams" && selectedAudience !== "all" && selectedAudience !== "staff" && (
+                  <div className="space-y-2"><Label>Select Streams</Label><SearchableMultiSelect values={selectedStreamIds} onValuesChange={setSelectedStreamIds} options={streamOptions} placeholder="Search and select streams" emptyText="No streams found for this school" data-testid="multiselect-newsletter-streams" /></div>
+                )}
+                {selectedScope === "classes" && selectedAudience !== "all" && selectedAudience !== "staff" && (
+                  <div className="space-y-2"><Label>Select Classes</Label><SearchableMultiSelect values={selectedClassIds} onValuesChange={setSelectedClassIds} options={classOptions} placeholder="Search and select classes" emptyText="No classes found for this school" data-testid="multiselect-newsletter-classes" /></div>
+                )}
+                {selectedScope === "individuals" && selectedAudience === "staff" && (
+                  <div className="space-y-2"><Label>Select Staff Members</Label><SearchableMultiSelect values={selectedStaffIds} onValuesChange={setSelectedStaffIds} options={staffOptions} placeholder="Search by staff name, number, role, phone or email" emptyText="No staff found for this school" data-testid="multiselect-newsletter-staff" /></div>
+                )}
+                {selectedScope === "individuals" && (selectedAudience === "parents" || selectedAudience === "students") && (
+                  <div className="space-y-2">
+                    <Label>{selectedAudience === "parents" ? "Search Students Linked to Parents" : "Select Students"}</Label>
+                    <SearchableMultiSelect values={selectedStudentIds} onValuesChange={setSelectedStudentIds} options={studentOptions} placeholder="Search by student name or admission number" emptyText="No students found for this school" data-testid="multiselect-newsletter-students" />
+                    {selectedAudience === "parents" && <p className="text-xs text-muted-foreground">Parents linked to the selected students will receive the newsletter.</p>}
+                  </div>
+                )}
+
+                <div className="rounded-md bg-muted/50 px-3 py-2 text-sm" aria-live="polite">
+                  <span className="font-medium">Recipient Preview:</span> {previewText}
+                </div>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="targetAudience">Target Audience</Label>
-                <Select value={selectedAudience} onValueChange={setSelectedAudience}>
-                  <SelectTrigger data-testid="select-audience">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Everyone</SelectItem>
-                    <SelectItem value="parents">Parents Only</SelectItem>
-                    <SelectItem value="students">Students Only</SelectItem>
-                    <SelectItem value="staff">Staff Only</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="content">Content</Label>
-                <Textarea
-                  id="content"
-                  name="content"
-                  rows={8}
-                  required
-                  placeholder="Write your newsletter content here..."
-                  data-testid="input-newsletter-content"
-                />
-              </div>
+
+              <div className="space-y-2"><Label htmlFor="content">Content</Label><Textarea id="content" name="content" rows={8} required placeholder="Write your newsletter content here..." data-testid="input-newsletter-content" /></div>
 
               <div className="space-y-3">
                 <Label>Select Channels</Label>
                 <div className="space-y-2">
-                  <Card
-                    className={`cursor-pointer transition-colors ${selectedChannels.includes("email") ? "border-primary/50 bg-primary/5" : ""}`}
-                    onClick={() => toggleChannel("email")}
-                    data-testid="channel-email"
-                  >
-                    <CardContent className="flex items-center gap-3 p-3">
-                      <Checkbox
-                        checked={selectedChannels.includes("email")}
-                        onClick={(e) => e.stopPropagation()}
-                        onCheckedChange={() => toggleChannel("email")}
-                        data-testid="checkbox-email"
-                      />
-                      <Mail className="h-5 w-5 text-muted-foreground" />
-                      <span className="font-medium flex-1">Email</span>
-                      <span className="text-sm text-muted-foreground">
-                        ({recipientCounts?.email ?? 0} recipients)
-                      </span>
-                      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                    </CardContent>
-                  </Card>
-
-                  <Card
-                    className={`cursor-pointer transition-colors ${selectedChannels.includes("sms") ? "border-primary/50 bg-primary/5" : ""}`}
-                    onClick={() => toggleChannel("sms")}
-                    data-testid="channel-sms"
-                  >
-                    <CardContent className="flex items-center gap-3 p-3">
-                      <Checkbox
-                        checked={selectedChannels.includes("sms")}
-                        onClick={(e) => e.stopPropagation()}
-                        onCheckedChange={() => toggleChannel("sms")}
-                        data-testid="checkbox-sms"
-                      />
-                      <MessageSquare className="h-5 w-5 text-muted-foreground" />
-                      <span className="font-medium flex-1">SMS</span>
-                      <span className="text-sm text-muted-foreground">
-                        ({recipientCounts?.sms ?? 0} recipients)
-                      </span>
-                      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                    </CardContent>
-                  </Card>
-
-                  <Card
-                    className={`cursor-pointer transition-colors ${selectedChannels.includes("in_app") ? "border-primary/50 bg-primary/5" : ""}`}
-                    onClick={() => toggleChannel("in_app")}
-                    data-testid="channel-in-app"
-                  >
-                    <CardContent className="flex items-center gap-3 p-3">
-                      <Checkbox
-                        checked={selectedChannels.includes("in_app")}
-                        onClick={(e) => e.stopPropagation()}
-                        onCheckedChange={() => toggleChannel("in_app")}
-                        data-testid="checkbox-in-app"
-                      />
-                      <Bell className="h-5 w-5 text-muted-foreground" />
-                      <span className="font-medium flex-1">In-App</span>
-                      <span className="text-sm text-muted-foreground">
-                        ({recipientCounts?.inApp ?? 0} recipients)
-                      </span>
-                      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                    </CardContent>
-                  </Card>
-
-                  <Card className="opacity-60 cursor-not-allowed" data-testid="channel-whatsapp">
-                    <CardContent className="flex items-center gap-3 p-3">
-                      <Checkbox disabled data-testid="checkbox-whatsapp" />
-                      <MessageSquare className="h-5 w-5 text-muted-foreground" />
-                      <span className="font-medium flex-1">WhatsApp</span>
-                      <div className="flex items-center gap-1.5 text-amber-500">
-                        <AlertCircle className="h-4 w-4" />
-                        <span className="text-sm font-medium">Coming Soon</span>
-                      </div>
-                    </CardContent>
-                  </Card>
+                  {[
+                    { key: "email", label: "Email", icon: Mail, count: recipientCounts?.email || 0 },
+                    { key: "sms", label: "SMS", icon: MessageSquare, count: recipientCounts?.sms || 0 },
+                    { key: "in_app", label: "In-App", icon: Bell, count: recipientCounts?.inApp || 0 },
+                  ].map(({ key, label, icon: Icon, count }) => (
+                    <Card key={key} className={`cursor-pointer transition-colors ${selectedChannels.includes(key) ? "border-primary/50 bg-primary/5" : ""}`} onClick={() => toggleChannel(key)} data-testid={`channel-${key}`}>
+                      <CardContent className="flex items-center gap-3 p-3">
+                        <Checkbox checked={selectedChannels.includes(key)} onClick={(e) => e.stopPropagation()} onCheckedChange={() => toggleChannel(key)} data-testid={`checkbox-${key}`} />
+                        <Icon className="h-5 w-5 text-muted-foreground" /><span className="font-medium flex-1">{label}</span><span className="text-sm text-muted-foreground">({isPreviewLoading ? "checking..." : `${count} recipients`})</span><CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                      </CardContent>
+                    </Card>
+                  ))}
+                  <Card className="opacity-60 cursor-not-allowed" data-testid="channel-whatsapp"><CardContent className="flex items-center gap-3 p-3"><Checkbox disabled data-testid="checkbox-whatsapp" /><MessageSquare className="h-5 w-5 text-muted-foreground" /><span className="font-medium flex-1">WhatsApp</span><div className="flex items-center gap-1.5 text-amber-500"><AlertCircle className="h-4 w-4" /><span className="text-sm font-medium">Coming Soon</span></div></CardContent></Card>
                 </div>
               </div>
 
-              <Button type="submit" className="w-full" disabled={createNewsletter.isPending || selectedChannels.length === 0} data-testid="button-submit-newsletter">
-                Save as Draft
-              </Button>
+              <Button type="submit" className="w-full" disabled={createNewsletter.isPending || selectedChannels.length === 0 || !hasValidTarget || !recipientCounts?.total} data-testid="button-submit-newsletter">Save as Draft</Button>
             </form>
           </DialogContent>
         </Dialog>
       </div>
 
       {newsletters.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <Newspaper className="h-12 w-12 text-muted-foreground mb-4" />
-            <h3 className="text-lg font-semibold mb-2">No Newsletters Yet</h3>
-            <p className="text-muted-foreground">Create your first newsletter to communicate with parents and students</p>
-          </CardContent>
-        </Card>
+        <Card><CardContent className="flex flex-col items-center justify-center py-12"><Newspaper className="h-12 w-12 text-muted-foreground mb-4" /><h3 className="text-lg font-semibold mb-2">No Newsletters Yet</h3><p className="text-muted-foreground">Create your first newsletter to communicate with the school community</p></CardContent></Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {newsletters.map((newsletter) => (
             <Card key={newsletter.id} className="hover-elevate" data-testid={`card-newsletter-${newsletter.id}`}>
               <CardHeader className="pb-3">
-                <div className="flex items-start justify-between gap-2">
-                  <Badge variant={getStatusColor(newsletter)}>{getStatusLabel(newsletter)}</Badge>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => deleteNewsletter.mutate(newsletter.id)}
-                    data-testid={`button-delete-newsletter-${newsletter.id}`}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
+                <div className="flex items-start justify-between gap-2"><Badge variant={newsletter.isPublished ? "default" : "outline"}>{newsletter.isPublished ? "Published" : "Draft"}</Badge><Button variant="ghost" size="icon" onClick={() => deleteNewsletter.mutate(newsletter.id)} data-testid={`button-delete-newsletter-${newsletter.id}`}><Trash2 className="h-4 w-4" /></Button></div>
                 <CardTitle className="text-lg mt-2">{newsletter.title}</CardTitle>
-                <CardDescription className="flex items-center gap-1">
-                  <Calendar className="h-4 w-4" />
-                  {formatDate(newsletter.publishDate)}
-                </CardDescription>
+                <CardDescription className="flex items-center gap-1"><Calendar className="h-4 w-4" />{formatDate(newsletter.publishDate)}</CardDescription>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground line-clamp-3 mb-4">
-                  {newsletter.content}
-                </p>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Badge variant="outline">{newsletter.targetAudience || "All"}</Badge>
-                  {newsletter.channels?.map((ch) => (
-                    <Badge key={ch} variant="secondary">{ch === "in_app" ? "In-App" : ch.toUpperCase()}</Badge>
-                  ))}
-                </div>
-                <div className="flex gap-2 mt-4">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setViewNewsletter(newsletter)}
-                    data-testid={`button-view-${newsletter.id}`}
-                  >
-                    <Eye className="h-4 w-4 mr-1" />
-                    View
-                  </Button>
-                  {!newsletter.isPublished && (
-                    <Button
-                      size="sm"
-                      onClick={() => updateNewsletter.mutate({ id: newsletter.id, isPublished: true })}
-                      data-testid={`button-publish-${newsletter.id}`}
-                    >
-                      <Send className="h-4 w-4 mr-1" />
-                      Publish
-                    </Button>
-                  )}
-                </div>
+                <p className="text-sm text-muted-foreground line-clamp-3 mb-4">{newsletter.content}</p>
+                <div className="flex items-center gap-2 flex-wrap"><Badge variant="outline">{audienceLabel(newsletter.targetAudience)}</Badge><Badge variant="outline">{scopeLabel(newsletter)}</Badge>{newsletter.channels?.map((channel) => <Badge key={channel} variant="secondary">{channel === "in_app" ? "In-App" : channel.toUpperCase()}</Badge>)}</div>
+                <div className="flex gap-2 mt-4"><Button variant="outline" size="sm" onClick={() => setViewNewsletter(newsletter)} data-testid={`button-view-${newsletter.id}`}><Eye className="h-4 w-4 mr-1" />View</Button>{!newsletter.isPublished && <Button size="sm" onClick={() => updateNewsletter.mutate({ id: newsletter.id, isPublished: true })} data-testid={`button-publish-${newsletter.id}`}><Send className="h-4 w-4 mr-1" />Publish</Button>}</div>
               </CardContent>
             </Card>
           ))}
@@ -343,15 +401,8 @@ export default function NewslettersPage() {
 
       <Dialog open={!!viewNewsletter} onOpenChange={() => setViewNewsletter(null)}>
         <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
-          <DialogHeader>
-            <DialogTitle>{viewNewsletter?.title}</DialogTitle>
-            <DialogDescription>
-              Published: {formatDate(viewNewsletter?.publishDate ?? null)}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="prose prose-sm max-w-none">
-            <p className="whitespace-pre-wrap">{viewNewsletter?.content}</p>
-          </div>
+          <DialogHeader><DialogTitle>{viewNewsletter?.title}</DialogTitle><DialogDescription>Published: {formatDate(viewNewsletter?.publishDate ?? null)} · {viewNewsletter ? audienceLabel(viewNewsletter.targetAudience) : ""} · {viewNewsletter ? scopeLabel(viewNewsletter) : ""}</DialogDescription></DialogHeader>
+          <div className="prose prose-sm max-w-none"><p className="whitespace-pre-wrap">{viewNewsletter?.content}</p></div>
         </DialogContent>
       </Dialog>
     </div>

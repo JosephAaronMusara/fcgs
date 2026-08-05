@@ -239,6 +239,32 @@ export function resolveSecondaryGroupingFromStream(streamName?: string | null): 
   return null;
 }
 
+export type AcademicPositionRankingMode = "none" | "average_percentage" | "average_grade_points";
+
+export function resolveSecondaryFormNumberFromStream(streamName?: string | null): 1 | 2 | 3 | 4 | 5 | 6 | null {
+  const value = normalizeStreamName(streamName);
+  if (!value) return null;
+  if (/^(lower\s*(?:6|six|sixth)|l6)(?:\b|\s|-)/.test(value)) return 5;
+  if (/^(upper\s*(?:6|six|sixth)|u6)(?:\b|\s|-)/.test(value)) return 6;
+  const match = value.match(/^form\s*([1-6])(?:\b|\s|-)/);
+  if (!match) return null;
+  return Number(match[1]) as 1 | 2 | 3 | 4 | 5 | 6;
+}
+
+export function resolveAcademicPositionRankingMode(args: {
+  schoolType?: string | null;
+  streamName?: string | null;
+}): AcademicPositionRankingMode | null {
+  const schoolType = normalizeSchoolType(args.schoolType);
+  if (schoolType === "primary") {
+    return isEcdStream(args.streamName) ? "none" : "average_percentage";
+  }
+
+  const form = resolveSecondaryFormNumberFromStream(args.streamName);
+  if (!form) return null;
+  return form <= 2 ? "average_percentage" : "average_grade_points";
+}
+
 export function resolveGradeProfileKey(args: {
   schoolType?: string | null;
   examinationBoard?: string | null;

@@ -15,7 +15,7 @@ import { registerTransportDocumentRoutes } from "./transport-document-routes";
 import { registerAssetsInventoryRoutes } from "./assets-inventory-routes";
 import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { registerRecruitmentRoutes } from "./recruitment-routes";
-import { communicationService, createBroadcastNotifications } from "./communication";
+import { communicationService, createInAppNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, academicReportPreparationDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportCommentsFingerprint, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
 import { getProfileAwareGradeCandidates, parseFinitePercentage, resolveGradeForPercentage } from "./grade-resolution";
@@ -23,7 +23,7 @@ import { AssessmentPaperReconciliationError, reconcileAssessmentPapersAndMarks }
 import { acquireAssessmentMutationLock } from "./assessment-mutation-lock";
 import { ASSESSMENT_CARDINALITY, inferAssessmentTypePolicy, isSinglePerExamAssessmentType, selectCanonicalAssessments } from "./assessment-policy";
 import { assessClassSubjectGradeConfiguration, planExactProfileClassAttachment, resolveExpectedGradeProfile, type GradeConfigurationProfileStatus } from "./grading-configuration";
-import { calculateConfiguredPositionMap, normalizeGradeStatus, parseGradePoints, resolveExactConfiguredGrade, storedGradeMatchesExactContext, type RankingCandidate, type RankingSubjectResult } from "./grading-engine";
+import { calculateConfiguredPositionMap, normalizeGradeStatus, parseGradePoints, resolveExactConfiguredGrade, storedGradeMatchesExactContext, type PositionRankingMode, type RankingCandidate, type RankingSubjectResult } from "./grading-engine";
 import { isTemporarilyExcludedFromStrictGrading } from "./grading-exclusions";
 import { z } from "zod";
 import bcrypt from "bcrypt";
@@ -45,7 +45,7 @@ import {
   insertPermissionSchema, insertAccessGroupSchema,
   type User, type AccessGroup, type Staff, type InsertStudent, type InsertActivityLog, type InsertStaffAttendanceLog
 } from "@shared/schema";
-import { ECD_DOMAIN_SEEDS, GRADE_PROFILE_KEYS, filterItemsByGradeProfileKey, getGradingProfilesForSchool, getGradeProfileLabel, getGradeTypeOptionsForProfile, getStrictGradeProfileKeys, getSubjectTypeOptionsForSchool, gradeProfileMatchesStrict, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveOperationalGradeProfile, resolveSecondaryGroupingFromStream, subjectMatchesGradeProfile, type GradeProfileKey } from "@shared/academic-profiles";
+import { ECD_DOMAIN_SEEDS, GRADE_PROFILE_KEYS, filterItemsByGradeProfileKey, getGradingProfilesForSchool, getGradeProfileLabel, getGradeTypeOptionsForProfile, getStrictGradeProfileKeys, getSubjectTypeOptionsForSchool, gradeProfileMatchesStrict, isEcdStream, isSubjectTypeCompatibleWithGradeType, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, resolveAcademicPositionRankingMode, resolveOperationalGradeProfile, resolveSecondaryGroupingFromStream, subjectMatchesGradeProfile, type AcademicPositionRankingMode, type GradeProfileKey } from "@shared/academic-profiles";
 
 function requestText(value: unknown): string {
   if (Array.isArray(value)) return requestText(value[0]);
@@ -541,6 +541,28 @@ function resolveSharedPointsDirection(profileKeys: Iterable<string>, settingsRow
   return direction === "higher_is_better" || direction === "lower_is_better" ? direction : null;
 }
 
+function emptyAcademicPositionMap(rankingMode: AcademicPositionRankingMode | null = null) {
+  return {
+    size: 0,
+    map: new Map<number, string>(),
+    records: new Map(),
+    unresolved: new Map<number, string[]>(),
+    rankingMode,
+  };
+}
+
+function unresolvedAcademicPositionMap(studentIds: number[], reason: string) {
+  return {
+    ...emptyAcademicPositionMap(null),
+    unresolved: new Map(studentIds.map((studentId) => [studentId, [reason]])),
+  };
+}
+
+function parsePositionNumber(value?: string | null): number | null {
+  const position = Number(String(value || "").split("/")[0]);
+  return Number.isInteger(position) && position > 0 ? position : null;
+}
+
 async function calculateClassPositionMap(examId: number, schoolId: number, classId: number) {
   const [school, classInfo, allAssessments, allGrades, schoolSubjects, settingsRows, students] = await Promise.all([
     storage.getSchool(schoolId),
@@ -551,10 +573,18 @@ async function calculateClassPositionMap(examId: number, schoolId: number, class
     db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
     storage.getStudentsByClass(classId),
   ]);
-  if (!classInfo) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  if (!classInfo) return emptyAcademicPositionMap();
   const stream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
+  const academicRankingMode = resolveAcademicPositionRankingMode({
+    schoolType: school?.schoolType,
+    streamName: stream?.name || null,
+  });
+  if (academicRankingMode === "none") return emptyAcademicPositionMap("none");
+  if (!academicRankingMode) {
+    return unresolvedAcademicPositionMap(students.map((student: any) => Number(student.id)), "position_stream_unrecognized");
+  }
   const rawAssessments = allAssessments.filter((assessment: any) => Number(assessment.classId) === Number(classId));
-  if (!rawAssessments.length) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  if (!rawAssessments.length) return emptyAcademicPositionMap(academicRankingMode);
   const allMarks = await storage.getAssessmentMarksByAssessments(rawAssessments.map((assessment: any) => Number(assessment.id)));
   const assessments = selectCanonicalAssessments(rawAssessments, allMarks).assessments;
   const assessmentIds = new Set(assessments.map((assessment: any) => Number(assessment.id)));
@@ -621,12 +651,18 @@ async function calculateClassPositionMap(examId: number, schoolId: number, class
     }),
   };
   });
-  const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
-  return calculateConfiguredPositionMap({ candidates, pointsDirection });
+  const rankingMode: PositionRankingMode = academicRankingMode;
+  const pointsDirection = rankingMode === "average_grade_points"
+    ? resolveSharedPointsDirection(profileKeys, settingsRows)
+    : null;
+  return {
+    ...calculateConfiguredPositionMap({ candidates, pointsDirection, rankingMode }),
+    rankingMode: academicRankingMode,
+  };
 }
 
 async function calculateStreamPositionMap(examId: number, schoolId: number, streamId?: number | null) {
-  if (!streamId) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  if (!streamId) return emptyAcademicPositionMap();
   const [school, stream, allClasses, allAssessments, allGrades, schoolSubjects, settingsRows] = await Promise.all([
     storage.getSchool(schoolId),
     storage.getStream(streamId),
@@ -637,10 +673,15 @@ async function calculateStreamPositionMap(examId: number, schoolId: number, stre
     db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
   ]);
   const classes = allClasses.filter((classInfo: any) => Number(classInfo.streamId) === Number(streamId));
-  if (!classes.length) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  if (!classes.length) return emptyAcademicPositionMap();
+  const academicRankingMode = resolveAcademicPositionRankingMode({
+    schoolType: school?.schoolType,
+    streamName: stream?.name || null,
+  });
+  if (academicRankingMode === "none") return emptyAcademicPositionMap("none");
   const classIds = new Set(classes.map((classInfo: any) => Number(classInfo.id)));
   const rawAssessments = allAssessments.filter((assessment: any) => classIds.has(Number(assessment.classId)));
-  if (!rawAssessments.length) return { size: 0, map: new Map<number, string>(), unresolved: new Map<number, string[]>() };
+  if (!rawAssessments.length) return emptyAcademicPositionMap(academicRankingMode);
   const allMarks = await storage.getAssessmentMarksByAssessments(rawAssessments.map((assessment: any) => Number(assessment.id)));
   const canonicalAssessments = selectCanonicalAssessments(rawAssessments, allMarks).assessments;
   const canonicalIds = new Set(canonicalAssessments.map((assessment: any) => Number(assessment.id)));
@@ -654,6 +695,9 @@ async function calculateStreamPositionMap(examId: number, schoolId: number, stre
 
   const allStreamStudents = Array.from(studentsByClass.values()).flat();
   const streamStudentIds = allStreamStudents.map((student: any) => Number(student.id));
+  if (!academicRankingMode) {
+    return unresolvedAcademicPositionMap(streamStudentIds, "position_stream_unrecognized");
+  }
   const streamStudentSubjectRows = streamStudentIds.length
     ? await db.select({ studentId: studentSubjectsSchema.studentId, subjectId: studentSubjectsSchema.subjectId })
       .from(studentSubjectsSchema)
@@ -724,8 +768,14 @@ async function calculateStreamPositionMap(examId: number, schoolId: number, stre
     }
   }
 
-  const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
-  return calculateConfiguredPositionMap({ candidates, pointsDirection });
+  const rankingMode: PositionRankingMode = academicRankingMode;
+  const pointsDirection = rankingMode === "average_grade_points"
+    ? resolveSharedPointsDirection(profileKeys, settingsRows)
+    : null;
+  return {
+    ...calculateConfiguredPositionMap({ candidates, pointsDirection, rankingMode }),
+    rankingMode: academicRankingMode,
+  };
 }
 
 async function validateSubjectPayloadForSchool(schoolId: number, payload: any, res: Response, existingSubject?: any) {
@@ -9621,6 +9671,111 @@ ${schoolName}`;
     }
   });
 
+  const newsletterTargetSelectionSchema = z.object({
+    targetAudience: z.enum(["all", "parents", "students", "staff"]).default("all"),
+    targetScope: z.enum(["all", "streams", "classes", "individuals"]).default("all"),
+    targetStreamIds: z.array(z.coerce.number().int().positive()).max(500).default([]),
+    targetClassIds: z.array(z.coerce.number().int().positive()).max(1000).default([]),
+    targetStudentIds: z.array(z.coerce.number().int().positive()).max(10000).default([]),
+    targetStaffIds: z.array(z.coerce.number().int().positive()).max(5000).default([]),
+  }).superRefine((value, ctx) => {
+    if (value.targetAudience === "all" && value.targetScope !== "all") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["targetScope"], message: "Everyone can only use the All scope" });
+    }
+    if (value.targetAudience === "staff" && !["all", "individuals"].includes(value.targetScope)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["targetScope"], message: "Staff can be targeted as All Staff or selected staff members" });
+    }
+    if (value.targetScope === "streams" && value.targetStreamIds.length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["targetStreamIds"], message: "Select at least one stream" });
+    }
+    if (value.targetScope === "classes" && value.targetClassIds.length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["targetClassIds"], message: "Select at least one class" });
+    }
+    if (value.targetScope === "individuals") {
+      const ids = value.targetAudience === "staff" ? value.targetStaffIds : value.targetStudentIds;
+      if (ids.length === 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [value.targetAudience === "staff" ? "targetStaffIds" : "targetStudentIds"], message: "Select at least one individual" });
+      }
+    }
+  });
+
+  type NewsletterTargetSelection = z.infer<typeof newsletterTargetSelectionSchema>;
+  type NewsletterRecipientGroup = {
+    recipientType: "parent" | "student" | "staff";
+    recipients: Array<{ id: number; userId?: number | null; email?: string | null; phone?: string | null; name: string }>;
+  };
+
+  function uniquePositiveIds(values: unknown): number[] {
+    return Array.from(new Set((Array.isArray(values) ? values : []).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+  }
+
+  function normalizeNewsletterTargetSelection(value: NewsletterTargetSelection): NewsletterTargetSelection {
+    const normalized: NewsletterTargetSelection = {
+      targetAudience: value.targetAudience,
+      targetScope: value.targetScope,
+      targetStreamIds: uniquePositiveIds(value.targetStreamIds),
+      targetClassIds: uniquePositiveIds(value.targetClassIds),
+      targetStudentIds: uniquePositiveIds(value.targetStudentIds),
+      targetStaffIds: uniquePositiveIds(value.targetStaffIds),
+    };
+    if (normalized.targetAudience === "all") normalized.targetScope = "all";
+    if (normalized.targetScope !== "streams") normalized.targetStreamIds = [];
+    if (normalized.targetScope !== "classes") normalized.targetClassIds = [];
+    if (normalized.targetScope !== "individuals" || normalized.targetAudience === "staff") normalized.targetStudentIds = [];
+    if (normalized.targetScope !== "individuals" || normalized.targetAudience !== "staff") normalized.targetStaffIds = [];
+    return normalized;
+  }
+
+  function newsletterTargetFromRecord(record: any): NewsletterTargetSelection {
+    return normalizeNewsletterTargetSelection(newsletterTargetSelectionSchema.parse({
+      targetAudience: record?.targetAudience || "all",
+      targetScope: record?.targetScope || "all",
+      targetStreamIds: record?.targetStreamIds || [],
+      targetClassIds: record?.targetClassIds || [],
+      targetStudentIds: record?.targetStudentIds || [],
+      targetStaffIds: record?.targetStaffIds || [],
+    }));
+  }
+
+  async function resolveNewsletterRecipientGroups(
+    currentUser: User,
+    req: Request,
+    schoolId: number,
+    target: NewsletterTargetSelection,
+  ): Promise<NewsletterRecipientGroup[]> {
+    const recipientTypes: NewsletterRecipientGroup["recipientType"][] = target.targetAudience === "all"
+      ? ["parent", "student", "staff"]
+      : [target.targetAudience === "parents" ? "parent" : target.targetAudience === "students" ? "student" : "staff"];
+
+    const groups: NewsletterRecipientGroup[] = [];
+    for (const recipientType of recipientTypes) {
+      const targetAudience = target.targetAudience === "all" ? "all" : target.targetScope;
+      const { recipients } = await resolveCommunicationRecipients(currentUser, req, {
+        recipientType,
+        recipientIds: [],
+        targetAudience,
+        streamIds: target.targetStreamIds,
+        classIds: target.targetClassIds,
+        studentIds: target.targetStudentIds,
+        staffIds: target.targetStaffIds,
+        schoolId,
+      } as any);
+      const deduplicated = Array.from(new Map(recipients.map((recipient) => [recipient.id, recipient])).values());
+      groups.push({ recipientType, recipients: deduplicated });
+    }
+    return groups;
+  }
+
+  function newsletterRecipientCounts(groups: NewsletterRecipientGroup[]) {
+    const allRecipients = groups.flatMap((group) => group.recipients);
+    return {
+      total: allRecipients.length,
+      email: allRecipients.filter((recipient) => !!recipient.email).length,
+      sms: allRecipients.filter((recipient) => !!recipient.phone).length,
+      inApp: new Set(allRecipients.map((recipient) => Number(recipient.userId)).filter((id) => Number.isInteger(id) && id > 0)).size,
+    };
+  }
+
   // Newsletter routes
   app.get("/api/newsletters", requireAuth, async (req, res, next) => {
     try {
@@ -9667,12 +9822,33 @@ ${schoolName}`;
     }
   });
 
+  app.post("/api/newsletters/recipient-preview", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = await requireSchoolScope(req, res);
+      if (!schoolId) return;
+      const target = normalizeNewsletterTargetSelection(newsletterTargetSelectionSchema.parse(req.body || {}));
+      const groups = await resolveNewsletterRecipientGroups(currentUser, req, schoolId, target);
+      res.json(newsletterRecipientCounts(groups));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/newsletters", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
-      const { schoolId: _ignoredSchoolId, status: _ignoredStatus, ...body } = (req.body || {}) as Record<string, unknown>;
-      const data = insertNewsletterSchema.parse({ ...body, schoolId, isPublished: false, publishDate: null });
+      const { schoolId: _ignoredSchoolId, status: _ignoredStatus, publishedRecipientUserIds: _ignoredRecipientSnapshot, ...body } = (req.body || {}) as Record<string, unknown>;
+      const target = normalizeNewsletterTargetSelection(newsletterTargetSelectionSchema.parse(body));
+      const data = insertNewsletterSchema.parse({
+        ...body,
+        ...target,
+        schoolId,
+        isPublished: false,
+        publishDate: null,
+        publishedRecipientUserIds: [],
+      });
       const newNewsletter = await storage.createNewsletter(data);
       res.status(201).json(newNewsletter);
     } catch (error) {
@@ -9690,11 +9866,19 @@ ${schoolName}`;
       if (!existing) return res.status(404).json({ message: "Newsletter not found" });
       if (existing.schoolId !== schoolId) return res.status(403).json({ message: "Newsletter not in school context" });
 
-      const { schoolId: _ignoredSchoolId, createdBy: _ignoredCreatedBy, status, ...body } = (req.body || {}) as Record<string, unknown>;
+      const { schoolId: _ignoredSchoolId, createdBy: _ignoredCreatedBy, publishedRecipientUserIds: _ignoredRecipientSnapshot, status, ...body } = (req.body || {}) as Record<string, unknown>;
+      const target = normalizeNewsletterTargetSelection(newsletterTargetSelectionSchema.parse({
+        targetAudience: body.targetAudience ?? existing.targetAudience ?? "all",
+        targetScope: body.targetScope ?? existing.targetScope ?? "all",
+        targetStreamIds: body.targetStreamIds ?? existing.targetStreamIds ?? [],
+        targetClassIds: body.targetClassIds ?? existing.targetClassIds ?? [],
+        targetStudentIds: body.targetStudentIds ?? existing.targetStudentIds ?? [],
+        targetStaffIds: body.targetStaffIds ?? existing.targetStaffIds ?? [],
+      }));
       const legacyStatus = requestText(status).toLowerCase();
       const publishRequested = body.isPublished === true || legacyStatus === "published";
       const unpublishRequested = body.isPublished === false || legacyStatus === "draft";
-      const normalizedBody: Record<string, unknown> = { ...body };
+      const normalizedBody: Record<string, unknown> = { ...body, ...target };
       if (publishRequested) {
         normalizedBody.isPublished = true;
         normalizedBody.publishDate = existing.publishDate || new Date();
@@ -9704,9 +9888,25 @@ ${schoolName}`;
       } else if (body.publishDate) {
         normalizedBody.publishDate = new Date(requestText(body.publishDate));
       }
+      let resolvedPublishGroups: NewsletterRecipientGroup[] | null = null;
+      if (publishRequested) {
+        resolvedPublishGroups = await resolveNewsletterRecipientGroups(currentUser, req, schoolId, target);
+        const counts = newsletterRecipientCounts(resolvedPublishGroups);
+        if (counts.total === 0) {
+          return res.status(400).json({ message: "The selected newsletter audience has no recipients" });
+        }
+        normalizedBody.publishedRecipientUserIds = Array.from(new Set(
+          resolvedPublishGroups.flatMap((group) => group.recipients)
+            .map((recipient) => Number(recipient.userId))
+            .filter((userId) => Number.isInteger(userId) && userId > 0),
+        ));
+      } else if (unpublishRequested) {
+        normalizedBody.publishedRecipientUserIds = [];
+      }
       const updateData = insertNewsletterSchema.partial().parse(normalizedBody);
-      const updated = await storage.updateNewsletter(newsletterId, updateData);
-      if (!updated) return res.status(404).json({ message: "Newsletter not found" });
+      const updatedNewsletter = await storage.updateNewsletter(newsletterId, updateData);
+      if (!updatedNewsletter) return res.status(404).json({ message: "Newsletter not found" });
+      const updated = updatedNewsletter;
 
       const isNewlyPublished = publishRequested && !existing.isPublished && updated.schoolId;
       let communicationJobId: number | null = null;
@@ -9715,106 +9915,108 @@ ${schoolName}`;
         const channels: string[] = updated.channels || [];
         const publishSchoolId = updated.schoolId!;
         const audience = updated.targetAudience || "all";
+        const targetScope = updated.targetScope || "all";
         const plainText = updated.content.replace(/<[^>]*>/g, '');
+        const publishGroups = resolvedPublishGroups || await resolveNewsletterRecipientGroups(
+          currentUser,
+          req,
+          publishSchoolId,
+          newsletterTargetFromRecord(updated),
+        );
+        const shouldSendInApp = channels.includes("in_app") || channels.length === 0;
+        const counts = newsletterRecipientCounts(publishGroups);
+        const totalCount = (channels.includes("email") ? counts.email : 0)
+          + (channels.includes("sms") ? counts.sms : 0)
+          + (shouldSendInApp ? counts.inApp : 0);
 
         const job = await queueCommunicationBackgroundJob({
           schoolId: publishSchoolId,
           requestedBy: currentUser.id,
           jobType: "newsletter_publish",
           title: `Publish newsletter - ${updated.title}`,
-          totalCount: 0,
-          metadata: { newsletterId: updated.id, channels, audience, title: updated.title },
+          totalCount,
+          metadata: { newsletterId: updated.id, channels, audience, targetScope, title: updated.title },
         }, async (jobId) => {
           let processed = 0;
           let sent = 0;
           let failed = 0;
           const errors: string[] = [];
-          const shouldSendInApp = channels.includes("in_app") || channels.length === 0;
 
-          if (shouldSendInApp) {
-            try {
-              await createBroadcastNotifications({
-                schoolId: publishSchoolId,
-                targetAudience: audience,
-                title: updated.title,
-                message: updated.content,
-                channel: "newsletter",
-                actorUserId: currentUser.id,
-                link: `/newsletters`,
-              });
-              sent++;
-            } catch (err) {
-              failed++;
-              errors.push(`In-app: ${err instanceof Error ? err.message : 'unknown error'}`);
+          for (const group of publishGroups) {
+            if (shouldSendInApp) {
+              const inAppRecipients = group.recipients.filter((recipient) => !!recipient.userId);
+              if (inAppRecipients.length > 0) {
+                try {
+                  await createInAppNotifications({
+                    recipientType: group.recipientType,
+                    recipientIds: inAppRecipients.map((recipient) => recipient.id),
+                    title: updated.title,
+                    message: updated.content,
+                    channel: "newsletter",
+                    schoolId: publishSchoolId,
+                    actorUserId: currentUser.id,
+                    link: "/my-newsletters",
+                  });
+                  sent += inAppRecipients.length;
+                } catch (err) {
+                  failed += inAppRecipients.length;
+                  errors.push(`In-app ${group.recipientType}: ${err instanceof Error ? err.message : 'unknown error'}`);
+                }
+                processed += inAppRecipients.length;
+                await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed });
+              }
             }
-            processed++;
-            await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed });
-          }
 
-          if (channels.includes("email")) {
-            try {
-              let allRecipients: Array<{ email: string; id: number; name: string }> = [];
-              if (audience === "all" || audience === "parents") {
-                const parents = await storage.getParentsBySchool(publishSchoolId);
-                allRecipients.push(...parents.filter(p => p.email).map(p => ({ email: p.email!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
+            if (channels.includes("email")) {
+              const emailRecipients = group.recipients
+                .filter((recipient) => !!recipient.email)
+                .map((recipient) => ({ email: recipient.email!, id: recipient.id, name: recipient.name }));
+              if (emailRecipients.length > 0) {
+                try {
+                  const result = await communicationService.sendBulkEmail(emailRecipients, updated.title, updated.content, {
+                    schoolId: publishSchoolId,
+                    recipientType: group.recipientType,
+                    sentBy: currentUser.id,
+                    category: "newsletter",
+                  });
+                  sent += result.sent;
+                  failed += result.failed;
+                  if (result.errors) errors.push(...result.errors);
+                } catch (err) {
+                  failed += emailRecipients.length;
+                  errors.push(`Email ${group.recipientType}: ${err instanceof Error ? err.message : 'unknown error'}`);
+                }
+                processed += emailRecipients.length;
+                await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed });
               }
-              if (audience === "all" || audience === "staff") {
-                const staffMembers = await storage.getStaffBySchool(publishSchoolId);
-                allRecipients.push(...staffMembers.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-              }
-              if (audience === "all" || audience === "students") {
-                const studentsList = await storage.getStudentsBySchool(publishSchoolId);
-                allRecipients.push(...studentsList.filter(s => s.email).map(s => ({ email: s.email!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-              }
-              if (allRecipients.length > 0) {
-                const result = await communicationService.sendBulkEmail(allRecipients, updated.title, updated.content, {
-                  schoolId: publishSchoolId,
-                  recipientType: "staff",
-                  sentBy: currentUser.id,
-                  category: "newsletter",
-                });
-                sent += result.sent;
-                failed += result.failed;
-                processed += allRecipients.length;
-                if (result.errors) errors.push(...result.errors);
-              }
-            } catch (err) {
-              failed++;
-              errors.push(`Email: ${err instanceof Error ? err.message : 'unknown error'}`);
             }
-            await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed });
-          }
 
-          if (channels.includes("sms")) {
-            try {
-              let allRecipients: Array<{ phone: string; id: number; name: string }> = [];
-              if (audience === "all" || audience === "parents") {
-                const parents = await storage.getParentsBySchool(publishSchoolId);
-                allRecipients.push(...parents.filter(p => p.phone).map(p => ({ phone: p.phone!, id: p.id, name: `${p.firstName} ${p.lastName}` })));
+            if (channels.includes("sms")) {
+              const smsRecipients = group.recipients
+                .filter((recipient) => !!recipient.phone)
+                .map((recipient) => ({ phone: recipient.phone!, id: recipient.id, name: recipient.name }));
+              if (smsRecipients.length > 0) {
+                try {
+                  const result = await communicationService.sendBulkSms(
+                    smsRecipients,
+                    plainText.length > 160 ? `${plainText.substring(0, 157)}...` : plainText,
+                    {
+                      schoolId: publishSchoolId,
+                      recipientType: group.recipientType,
+                      sentBy: currentUser.id,
+                      category: "newsletter",
+                    },
+                  );
+                  sent += result.sent;
+                  failed += result.failed;
+                  if (result.errors) errors.push(...result.errors);
+                } catch (err) {
+                  failed += smsRecipients.length;
+                  errors.push(`SMS ${group.recipientType}: ${err instanceof Error ? err.message : 'unknown error'}`);
+                }
+                processed += smsRecipients.length;
+                await updateCommunicationJobProgress(jobId, { processedCount: processed, successCount: sent, failedCount: failed });
               }
-              if (audience === "all" || audience === "staff") {
-                const staffMembers = await storage.getStaffBySchool(publishSchoolId);
-                allRecipients.push(...staffMembers.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-              }
-              if (audience === "all" || audience === "students") {
-                const studentsList = await storage.getStudentsBySchool(publishSchoolId);
-                allRecipients.push(...studentsList.filter(s => s.phone).map(s => ({ phone: s.phone!, id: s.id, name: `${s.firstName} ${s.lastName}` })));
-              }
-              if (allRecipients.length > 0) {
-                const result = await communicationService.sendBulkSms(allRecipients, plainText.length > 160 ? plainText.substring(0, 157) + "..." : plainText, {
-                  schoolId: publishSchoolId,
-                  recipientType: "staff",
-                  sentBy: currentUser.id,
-                  category: "newsletter",
-                });
-                sent += result.sent;
-                failed += result.failed;
-                processed += allRecipients.length;
-                if (result.errors) errors.push(...result.errors);
-              }
-            } catch (err) {
-              failed++;
-              errors.push(`SMS: ${err instanceof Error ? err.message : 'unknown error'}`);
             }
           }
 
@@ -9822,9 +10024,9 @@ ${schoolName}`;
             processedCount: processed,
             successCount: sent,
             failedCount: failed,
-            skippedCount: 0,
+            skippedCount: Math.max(0, totalCount - processed),
             errorSummary: errors.length ? errors.slice(0, 20).join("; ") : null,
-            metadata: { sent, failed, errors: errors.slice(0, 10) },
+            metadata: { sent, failed, errors: errors.slice(0, 10), audience, targetScope },
           };
         });
         communicationJobId = job.id;
@@ -9836,7 +10038,7 @@ ${schoolName}`;
           targetType: "communication_job",
           targetId: job.id,
           schoolId: publishSchoolId,
-          metadata: { jobType: "newsletter_publish", newsletterId: updated.id, channels, audience },
+          metadata: { jobType: "newsletter_publish", newsletterId: updated.id, channels, audience, targetScope },
         });
       }
 
@@ -10847,7 +11049,7 @@ ${schoolName}`;
     schoolId: z.number().optional(),
   });
 
-  type NotifyRecipientForSend = { id: number; email?: string | null; phone?: string | null; name: string };
+  type NotifyRecipientForSend = { id: number; userId?: number | null; email?: string | null; phone?: string | null; name: string };
 
   async function resolveCommunicationRecipients(currentUser: User, req: Request, data: z.infer<typeof sendNotificationSchema>): Promise<{ schoolId: number; recipients: NotifyRecipientForSend[] }> {
     const targetSchoolId = data.schoolId || getSchoolContext(req) || currentUser.schoolId || 0;
@@ -10872,7 +11074,7 @@ ${schoolName}`;
       } else {
         selectedStaff = staffList.filter(s => matchesSearch([s.firstName, s.lastName, s.staffNo, s.role, s.phone, s.email], data.search));
       }
-      recipients = selectedStaff.map(s => ({ id: s.id, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
+      recipients = selectedStaff.map(s => ({ id: s.id, userId: s.userId, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
     } else if (data.recipientType === "student") {
       const studentList = await storage.getStudentsBySchool(targetSchoolId);
       let selectedStudents = studentList;
@@ -10902,7 +11104,7 @@ ${schoolName}`;
           return classOk && statusOk && searchOk;
         });
       }
-      recipients = selectedStudents.map(s => ({ id: s.id, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
+      recipients = selectedStudents.map(s => ({ id: s.id, userId: (s as any).userId, email: s.email, phone: s.phone, name: `${s.firstName} ${s.lastName}` }));
     } else if (data.recipientType === "parent") {
       const parentList = await storage.getParentsBySchool(targetSchoolId);
       let selectedParents = parentList;
@@ -10933,7 +11135,7 @@ ${schoolName}`;
       } else {
         selectedParents = parentList.filter(p => matchesSearch([p.firstName, p.lastName, p.phone, p.email, p.relationship], data.search));
       }
-      recipients = selectedParents.map(p => ({ id: p.id, email: p.email, phone: p.phone, name: `${p.firstName} ${p.lastName}` }));
+      recipients = selectedParents.map(p => ({ id: p.id, userId: p.userId, email: p.email, phone: p.phone, name: `${p.firstName} ${p.lastName}` }));
     }
 
     return { schoolId: targetSchoolId, recipients };
@@ -13572,7 +13774,7 @@ ${schoolName}`;
 
   // ==================== ACADEMIC REPORTS / REPORT CARDS ====================
 
-  const REPORT_DATA_TEMPLATE_VERSION = "report-data-v5-canonical-full-class-cache";
+  const REPORT_DATA_TEMPLATE_VERSION = "report-data-v6-position-policy-and-order";
   const reportDataBuildInFlight = new Map<string, Promise<void>>();
 
   function reportDataCachePath(args: {
@@ -14292,7 +14494,13 @@ ${schoolName}`;
       ));
       const profileKeys = Array.from(new Set(Array.from(gradeCandidatesBySubject.values()).map((context) => context.profileKey).filter(Boolean))) as string[];
       const settingsRows = profileSettingsForCache;
-      const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
+      const academicRankingMode = resolveAcademicPositionRankingMode({
+        schoolType: school?.schoolType,
+        streamName: classStream?.name || null,
+      });
+      const pointsDirection = academicRankingMode === "average_grade_points"
+        ? resolveSharedPointsDirection(profileKeys, settingsRows)
+        : null;
       const rankingStudentIds = students.map((student) => Number(student.id));
       const rankingSubjectAssignments = rankingStudentIds.length
         ? await db.select({ studentId: studentSubjectsSchema.studentId, subjectId: studentSubjectsSchema.subjectId })
@@ -14323,20 +14531,47 @@ ${schoolName}`;
         })),
       };
       });
-      const classPositionMap = calculateConfiguredPositionMap({ candidates: rankingCandidates, pointsDirection });
-      const streamPositionMap = await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
+      const classPositionMap = academicRankingMode === "none"
+        ? emptyAcademicPositionMap("none")
+        : academicRankingMode
+          ? {
+              ...calculateConfiguredPositionMap({
+                candidates: rankingCandidates,
+                pointsDirection,
+                rankingMode: academicRankingMode,
+              }),
+              rankingMode: academicRankingMode,
+            }
+          : unresolvedAcademicPositionMap(rankingStudentIds, "position_stream_unrecognized");
+      const streamPositionMap = academicRankingMode === "none"
+        ? emptyAcademicPositionMap("none")
+        : await calculateStreamPositionMap(examId, schoolId, classInfo?.streamId || null);
       const classSize = classPositionMap.size;
 
       for (const rc of reportCards) {
         rc.summary.classSize = classSize;
-        rc.summary.classPosition = classPositionMap.map.get(rc.student.id) || '';
-        rc.summary.overallPosition = streamPositionMap.map.get(rc.student.id) || rc.summary.classPosition || '';
+        rc.summary.classPosition = academicRankingMode === "none" ? '' : classPositionMap.map.get(rc.student.id) || '';
+        rc.summary.overallPosition = academicRankingMode === "none"
+          ? ''
+          : streamPositionMap.map.get(rc.student.id) || rc.summary.classPosition || '';
         (rc.summary as any).positionStatus = classPositionMap.unresolved.has(rc.student.id) ? "UNRESOLVED" : "READY";
         (rc.summary as any).positionIssues = classPositionMap.unresolved.get(rc.student.id) || [];
       }
 
+      reportCards.sort((left, right) => {
+        const leftPosition = parsePositionNumber(left.summary.classPosition);
+        const rightPosition = parsePositionNumber(right.summary.classPosition);
+        if (leftPosition !== null && rightPosition !== null && leftPosition !== rightPosition) {
+          return leftPosition - rightPosition;
+        }
+        if (leftPosition !== null && rightPosition === null) return -1;
+        if (leftPosition === null && rightPosition !== null) return 1;
+        return compareStudentsByFirstName(left.student, right.student);
+      });
+
       markTiming("assemble");
       const payload = {
+        positionRankingMode: academicRankingMode,
         school: {
           id: school?.id,
           name: school?.name,
@@ -14770,8 +15005,8 @@ async function buildReportCardMessage(
   }
 
 
-  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v7-single-pass-optimized-assets";
-  const REPORT_PDF_PREPARATION_VERSION = "report-card-preparation-v2-single-pass";
+  const REPORT_PDF_TEMPLATE_VERSION = "report-card-v8-position-policy-ecd-layout";
+  const REPORT_PDF_PREPARATION_VERSION = "report-card-preparation-v3-position-policy";
   type ReportPdfCacheStatus = "HIT" | "MISS" | "BYPASS";
   type ReportPdfPriority = "interactive" | "background";
   type ReportPdfContext = {
@@ -18522,17 +18757,25 @@ async function buildReportCardMessage(
     } catch (error) { next(error); }
   });
 
-  // Newsletters for student/parent read-only access
+  // Read-only newsletter feed for the exact audience captured at publication.
   app.get("/api/me/newsletters", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
-      if (currentUser.role !== "student" && currentUser.role !== "parent") {
-        return res.status(403).json({ message: "Students and parents only" });
-      }
-      const schoolId = currentUser.schoolId;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
       if (!schoolId) return res.json([]);
       const newsletters = await storage.getNewsletters(schoolId);
-      const published = newsletters.filter((n: any) => n.status === "published");
+      const roleAudience = currentUser.role === "student"
+        ? "students"
+        : currentUser.role === "parent"
+          ? "parents"
+          : "staff";
+      const published = newsletters.filter((newsletter: any) => {
+        if (newsletter.isPublished !== true) return false;
+        const recipientSnapshot = uniquePositiveIds(newsletter.publishedRecipientUserIds || []);
+        if (recipientSnapshot.length > 0) return recipientSnapshot.includes(currentUser.id);
+        const legacyAudience = String(newsletter.targetAudience || "all");
+        return legacyAudience === "all" || legacyAudience === roleAudience;
+      });
       res.json(published);
     } catch (error) { next(error); }
   });

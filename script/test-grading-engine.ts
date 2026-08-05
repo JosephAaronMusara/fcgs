@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { calculateConfiguredPositionMap, normalizeGradeStatus, resolveExactConfiguredGrade, type RankingCandidate } from "../server/grading-engine";
-import { resolveGradeProfileKey, resolveOperationalGradeProfile } from "../shared/academic-profiles";
+import { resolveAcademicPositionRankingMode, resolveGradeProfileKey, resolveOperationalGradeProfile } from "../shared/academic-profiles";
 import { isTemporarilyExcludedFromStrictGrading } from "../server/grading-exclusions";
 
 const grade = (id: number, name: string, points: number, rankOrder: number, lower: number, upper: number, status: "PASS" | "FAIL" = "PASS") => ({
@@ -50,7 +50,7 @@ const lowerIsBetter = calculateConfiguredPositionMap({
     candidate(2, [[1, 85, { ...a, gradePoints: 2 }], [2, 82, { ...a, gradePoints: 2 }]]),
   ],
 });
-assert.equal(lowerIsBetter.map.get(1), "1/2", "lower total points must rank first when configured");
+assert.equal(lowerIsBetter.map.get(1), "1/2", "lower average grade points must rank first when configured");
 
 const averageTieBreak = calculateConfiguredPositionMap({
   pointsDirection: "higher_is_better",
@@ -106,8 +106,34 @@ const mixedSubjectSets = calculateConfiguredPositionMap({
   ],
 });
 assert.equal(mixedSubjectSets.size, 2, "different subject sets must share one ranking pool");
-assert.equal(mixedSubjectSets.map.get(2), "1/2", "raw total points must decide position despite subject-count differences");
-assert.equal(mixedSubjectSets.map.get(1), "2/2");
+assert.equal(mixedSubjectSets.map.get(1), "1/2", "average grade points must remove subject-count advantage");
+assert.equal(mixedSubjectSets.map.get(2), "2/2");
+
+const lowerDirectionMixedSubjectSets = calculateConfiguredPositionMap({
+  pointsDirection: "lower_is_better",
+  candidates: [
+    candidate(1, [[1, 95, { ...aStar, gradePoints: 1 }], [2, 85, { ...a, gradePoints: 2 }]]),
+    candidate(2, [[1, 95, { ...aStar, gradePoints: 1 }], [2, 85, { ...a, gradePoints: 2 }], [3, 75, { ...b, gradePoints: 3 }]]),
+  ],
+});
+assert.equal(lowerDirectionMixedSubjectSets.map.get(1), "1/2", "lower-is-better rankings must compare grade-point averages rather than raw totals");
+assert.equal(lowerDirectionMixedSubjectSets.map.get(2), "2/2");
+
+const percentageRanking = calculateConfiguredPositionMap({
+  rankingMode: "average_percentage",
+  candidates: [
+    candidate(1, [[1, 80, null], [2, 70, null]]),
+    candidate(2, [[1, 90, null], [2, 70, null]]),
+  ],
+});
+assert.equal(percentageRanking.map.get(2), "1/2", "percentage ranking must not depend on grade configuration");
+assert.equal(percentageRanking.map.get(1), "2/2");
+
+assert.equal(resolveAcademicPositionRankingMode({ schoolType: "primary", streamName: "Grade 4" }), "average_percentage");
+assert.equal(resolveAcademicPositionRankingMode({ schoolType: "primary", streamName: "ECD A" }), "none");
+assert.equal(resolveAcademicPositionRankingMode({ schoolType: "secondary", streamName: "Form 2" }), "average_percentage");
+assert.equal(resolveAcademicPositionRankingMode({ schoolType: "secondary", streamName: "Form 3" }), "average_grade_points");
+assert.equal(resolveAcademicPositionRankingMode({ schoolType: "secondary", streamName: "Lower 6" }), "average_grade_points");
 
 const noResults = calculateConfiguredPositionMap({
   pointsDirection: "lower_is_better",
@@ -219,4 +245,4 @@ assert.equal(
   "unrelated subjects must remain inside strict grading",
 );
 
-console.log(JSON.stringify({ passed: true, tests: 21 }, null, 2));
+console.log(JSON.stringify({ passed: true, tests: 30 }, null, 2));

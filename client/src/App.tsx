@@ -138,7 +138,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/my-grades$/, allowRoles: ["student"] },
   { pattern: /^\/my-profile$/, allowRoles: ["student", "parent"] },
   { pattern: /^\/my-notifications$/, allowRoles: ["student", "parent"] },
-  { pattern: /^\/my-newsletters$/, allowRoles: ["student", "parent"] },
+  { pattern: /^\/my-newsletters$/, allowRoles: ["student", "parent", "teacher", "assistant_teacher", "quality_control_officer", "librarian", "school_admin", "org_admin"] },
   { pattern: /^\/children$/, allowRoles: ["parent"] },
   { pattern: /^\/children-attendance$/, allowRoles: ["parent"] },
   { pattern: /^\/children-reports$/, allowRoles: ["parent"] },
