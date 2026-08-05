@@ -165,6 +165,7 @@ type ReportCardSubjectCommentDraftMap = Record<string, string>;
 type ReportCardCommentStatus = "idle" | "saving" | "saved" | "error";
 
 export interface ReportCardData {
+  positionRankingMode?: "none" | "average_percentage" | "average_grade_points" | null;
   school: {
     id: number;
     name: string;
@@ -467,6 +468,7 @@ export function ReportCardSlip({
 }) {
   const { student, subjects, summary } = studentReport;
   const { school } = data;
+  const showPositionColumns = data.positionRankingMode !== "none";
   const name = `${student.firstName} ${student.lastName}`;
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [qrReady, setQrReady] = useState(false);
@@ -666,7 +668,7 @@ export function ReportCardSlip({
                 <strong>Exam:</strong> {data.exam.examName}
               </div>
               <table
-                className="w-full border-collapse text-[10px] mt-0.5"
+                className={`w-full border-collapse text-[10px] mt-0.5 ${showPositionColumns ? "" : "table-fixed"}`}
                 data-testid="table-summary"
               >
                 <thead>
@@ -683,14 +685,16 @@ export function ReportCardSlip({
                     <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] leading-tight">
                       Points
                     </th>
-                    {data.school.showClassPositionOnReports && (
+                    {showPositionColumns && data.school.showClassPositionOnReports && (
                       <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] leading-tight">
                         Class Position
                       </th>
                     )}
-                    <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] leading-tight">
-                      Overall Position
-                    </th>
+                    {showPositionColumns && (
+                      <th className="border-b border-gray-400 dark:border-gray-500 px-2.5 py-0.5 bg-gray-500 dark:bg-gray-700 text-white font-semibold text-center text-[10px] leading-tight">
+                        Overall Position
+                      </th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -724,7 +728,7 @@ export function ReportCardSlip({
                     >
                       {summary.points}
                     </td>
-                    {data.school.showClassPositionOnReports && (
+                    {showPositionColumns && data.school.showClassPositionOnReports && (
                       <td
                         className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
                         data-testid="text-class-position"
@@ -732,19 +736,21 @@ export function ReportCardSlip({
                         {summary.classPosition || "–"}
                       </td>
                     )}
-                    <td
-                      className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
-                      data-testid="text-position"
-                    >
-                      {summary.overallPosition || "–"}
-                    </td>
+                    {showPositionColumns && (
+                      <td
+                        className="px-2.5 py-1 text-center text-gray-700 dark:text-gray-300 font-bold text-[10px] leading-tight"
+                        data-testid="text-position"
+                      >
+                        {summary.overallPosition || "–"}
+                      </td>
+                    )}
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
 
-          {summary.positionStatus === "UNRESOLVED" && (
+          {showPositionColumns && summary.positionStatus === "UNRESOLVED" && (
             <div className="mt-1 text-center text-[8px] font-semibold text-amber-700 dark:text-amber-300">
               Position pending: complete and resolve all configured grading results.
             </div>

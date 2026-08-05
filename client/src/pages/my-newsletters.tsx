@@ -10,8 +10,9 @@ interface Newsletter {
   id: number;
   title: string;
   content: string;
-  audience: string;
-  status: string;
+  targetAudience: string;
+  targetScope?: string | null;
+  isPublished: boolean;
   createdAt: string;
 }
 
@@ -55,7 +56,7 @@ export default function MyNewslettersPage() {
                     <div className="min-w-0">
                       <CardTitle className="text-lg">{newsletter.title}</CardTitle>
                       <div className="flex items-center gap-2 mt-1 flex-wrap">
-                        <Badge variant="outline" className="text-xs capitalize">{newsletter.audience}</Badge>
+                        <Badge variant="outline" className="text-xs capitalize">{newsletter.targetAudience === "all" ? "Everyone" : `${newsletter.targetAudience} only`}</Badge>
                         <span className="text-xs text-muted-foreground flex items-center gap-1">
                           <Calendar className="w-3 h-3" />
                           {new Date(newsletter.createdAt).toLocaleDateString("en-US", {

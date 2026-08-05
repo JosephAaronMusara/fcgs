@@ -309,6 +309,7 @@ type ReportCardSubjectCommentDraftMap = Record<string, string>;
 type ReportCardCommentStatus = "idle" | "saving" | "saved" | "error";
 
 export interface ReportCardData {
+  positionRankingMode?: "none" | "average_percentage" | "average_grade_points" | null;
   school: {
     id: number;
     name: string;
