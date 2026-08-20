@@ -554,8 +554,8 @@ export function setupAuth(app: Express): void {
       });
       const updatedUser = await storage.getUser(req.user.id);
       if (updatedUser) {
-        const { password: _, ...userWithoutPassword } = updatedUser;
-        return res.json({ message: "Password reset successfully", user: userWithoutPassword });
+        const responseUser = await buildAuthenticatedUserResponse(updatedUser, req.headers["x-school-id"]);
+        return res.json({ message: "Password reset successfully", user: responseUser });
       }
       res.json({ message: "Password reset successfully" });
     } catch (error) {

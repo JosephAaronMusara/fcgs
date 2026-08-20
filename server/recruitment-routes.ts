@@ -5,7 +5,15 @@ import { z } from "zod";
 import { db } from "./db";
 import { requireAuth, requireAnyPermission, requirePermission } from "./auth";
 import { deletePrivateFile, savePrivateBuffer, streamPrivateFile } from "./private-files";
-import { evaluateRecruitmentRequirement } from "./recruitment-screening";
+import { evaluateHighSchoolEligibility, evaluateRecruitmentRequirement, publicHighSchoolEligibilityPolicy } from "./recruitment-screening";
+import {
+  RECRUITMENT_CATEGORY_LABELS,
+  RECRUITMENT_CATEGORIES,
+  coreRecruitmentDocumentRequirements,
+  isSupportedRecruitmentCategory,
+  isHighSchoolCoreRequirementDefinition,
+  recruitmentCategoryCode,
+} from "@shared/recruitment";
 import {
   organizations,
   recruitmentApplicationAnswers,
@@ -40,7 +48,7 @@ const vacancyInput = z.object({
   schoolId: nullablePositiveInt,
   code: z.string().trim().min(2).max(30).transform((value) => value.toUpperCase()),
   title: z.string().trim().min(2),
-  employmentCategory: z.string().trim().min(1),
+  employmentCategory: z.enum(RECRUITMENT_CATEGORY_LABELS),
   description: z.string().trim().min(1),
   locationText: optionalText,
   positionsAvailable: z.coerce.number().int().min(1).default(1),
@@ -51,7 +59,7 @@ const vacancyInput = z.object({
 
 const requirementInput = z.object({
   vacancyId: nullablePositiveInt,
-  employmentCategory: optionalText,
+  employmentCategory: z.enum(RECRUITMENT_CATEGORY_LABELS).optional().nullable(),
   code: z.string().trim().min(1).transform((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, "_")),
   label: z.string().trim().min(1),
   helpText: optionalText,
@@ -69,7 +77,7 @@ const requirementInput = z.object({
 
 const documentCategoryInput = z.object({
   vacancyId: nullablePositiveInt,
-  employmentCategory: optionalText,
+  employmentCategory: z.enum(RECRUITMENT_CATEGORY_LABELS).optional().nullable(),
   code: z.string().trim().min(1).transform((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, "_")),
   label: z.string().trim().min(1),
   isRequired: z.boolean().default(false),
@@ -82,7 +90,7 @@ const publicApplicationInput = z.object({
   organizationId: z.coerce.number().int().positive(),
   vacancyId: nullablePositiveInt,
   applicationType: z.enum(["vacancy", "general"]),
-  employmentCategory: z.string().trim().min(1),
+  employmentCategory: z.enum(RECRUITMENT_CATEGORY_LABELS),
   firstName: z.string().trim().min(1),
   lastName: z.string().trim().min(1),
   email: z.string().trim().email(),
@@ -96,6 +104,8 @@ const publicApplicationInput = z.object({
   yearsExperience: z.coerce.number().min(0).default(0),
   currentEmployer: optionalText,
   coverLetter: optionalText,
+  holdsTeachingQualification: z.boolean().optional().default(false),
+  aLevelResults: z.array(z.object({ subject: z.string().trim().min(1).max(120), grade: z.string().trim().min(1).max(2) })).max(20).optional().default([]),
   answers: z.record(z.string(), z.unknown()).optional().default({}),
   documentCategories: z.array(z.string()).optional().default([]),
 });
@@ -106,8 +116,15 @@ const settingsInput = z.object({
   attachmentSizeLimitMB: z.coerce.number().int().min(1).max(50),
   careersPageTitle: z.string().trim().min(1),
   careersPageMessage: z.string().trim().min(1),
-  generalApplicationCategories: z.array(z.string().trim().min(1).max(100)).min(1).max(50)
-    .transform((values) => Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))),
+  generalApplicationCategories: z.array(z.string().trim().min(1).max(100)).optional().default(RECRUITMENT_CATEGORIES.map((category) => category.label)),
+  highSchoolMaxAge: z.coerce.number().int().min(18).max(80),
+  highSchoolMinimumALevelPoints: z.coerce.number().int().min(0).max(30),
+  highSchoolTeachingQualifiedMinimumALevelPoints: z.coerce.number().int().min(0).max(30),
+  highSchoolTeachingQualificationExceptionEnabled: z.boolean(),
+}).superRefine((value, ctx) => {
+  if (value.highSchoolTeachingQualifiedMinimumALevelPoints > value.highSchoolMinimumALevelPoints) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["highSchoolTeachingQualifiedMinimumALevelPoints"], message: "The teaching-qualified minimum cannot exceed the standard A-Level minimum." });
+  }
 });
 
 const upload = multer({
@@ -208,6 +225,7 @@ async function publicContext(organizationId?: number | null) {
     eq(recruitmentVacancies.status, "published"),
   )).orderBy(asc(recruitmentVacancies.title));
   const openVacancies = vacancies.filter((vacancy) => {
+    if (!isSupportedRecruitmentCategory(vacancy.employmentCategory)) return false;
     if (vacancy.opensAt && new Date(vacancy.opensAt) > now) return false;
     if (vacancy.closesAt && new Date(vacancy.closesAt) < now) return false;
     return true;
@@ -241,10 +259,14 @@ function publicRecruitmentContextResponse(context: Awaited<ReturnType<typeof pub
       attachmentSizeLimitMB: context.settings.attachmentSizeLimitMB,
       careersPageTitle: context.settings.careersPageTitle,
       careersPageMessage: context.settings.careersPageMessage,
-      generalApplicationCategories: Array.isArray(context.settings.generalApplicationCategories)
-        ? context.settings.generalApplicationCategories
-        : [],
     },
+    applicationCategories: RECRUITMENT_CATEGORIES,
+    highSchoolEligibility: publicHighSchoolEligibilityPolicy({
+      maxAge: context.settings.highSchoolMaxAge,
+      minimumALevelPoints: context.settings.highSchoolMinimumALevelPoints,
+      teachingQualifiedMinimumALevelPoints: context.settings.highSchoolTeachingQualifiedMinimumALevelPoints,
+      teachingQualificationExceptionEnabled: context.settings.highSchoolTeachingQualificationExceptionEnabled,
+    }),
     requirements: context.requirements.map(({ alternativePassKeywords: _keywords, alternativePassNote: _note, ...requirement }) => requirement),
   };
 }
@@ -270,26 +292,23 @@ export function registerRecruitmentRoutes(app: Express): void {
       const vacancy = input.vacancyId ? context.vacancies.find((row) => row.id === input.vacancyId) : null;
       if (input.vacancyId && !vacancy) return res.status(400).json({ message: "The selected vacancy is not open for applications." });
       if (vacancy && vacancy.employmentCategory !== input.employmentCategory) return res.status(400).json({ message: "The employment category does not match the selected vacancy." });
-      if (input.applicationType === "general") {
-        const configuredCategories = new Set<string>([
-          ...(Array.isArray(context.settings.generalApplicationCategories) ? context.settings.generalApplicationCategories.map(String) : []),
-          ...context.vacancies.map((row) => row.employmentCategory),
-          ...context.requirements.map((row) => row.employmentCategory).filter((value): value is string => Boolean(value)),
-        ].map((value) => value.trim()).filter(Boolean));
-        if (configuredCategories.size === 0) configuredCategories.add("Other");
-        if (!configuredCategories.has(input.employmentCategory)) {
-          return res.status(400).json({ message: "Select a valid employment category." });
-        }
+      if (input.applicationType === "general" && !isSupportedRecruitmentCategory(input.employmentCategory)) {
+        return res.status(400).json({ message: "Select a valid employment category." });
       }
 
       const normalizedEmail = normalizeEmail(input.email);
       const normalizedPhone = normalizePhone(input.phone);
       const normalizedNationalId = normalizeNationalId(input.nationalId);
-      const applicableRequirements = context.requirements.filter((requirement) => (
-        requirement.vacancyId === input.vacancyId
-        || (!requirement.vacancyId && requirement.employmentCategory === input.employmentCategory)
-        || (!requirement.vacancyId && !requirement.employmentCategory)
-      ));
+      const isHighSchoolApplication = recruitmentCategoryCode(input.employmentCategory) === "high_school_teaching";
+      const applicableRequirements = context.requirements.filter((requirement) => {
+        const inScope = requirement.vacancyId === input.vacancyId
+          || (!requirement.vacancyId && requirement.employmentCategory === input.employmentCategory)
+          || (!requirement.vacancyId && !requirement.employmentCategory);
+        if (!inScope) return false;
+        // Age, A-Level points and teaching-qualification eligibility are server-managed for High School.
+        // Legacy generic rows for those rules are intentionally ignored to avoid double-screening.
+        return !isHighSchoolApplication || !isHighSchoolCoreRequirementDefinition(requirement);
+      });
       const applicableCategories = context.documentCategories.filter((category) => (
         category.vacancyId === input.vacancyId
         || (!category.vacancyId && category.employmentCategory === input.employmentCategory)
@@ -301,7 +320,29 @@ export function registerRecruitmentRoutes(app: Express): void {
       if (files.some((file) => file.size > context.settings.attachmentSizeLimitMB * 1024 * 1024)) {
         return res.status(413).json({ message: `Each attachment must be ${context.settings.attachmentSizeLimitMB} MB or smaller.` });
       }
+
+      const categoryCode = recruitmentCategoryCode(input.employmentCategory);
+      if (!categoryCode) return res.status(400).json({ message: "Select a valid employment category." });
+      const coreDocuments = coreRecruitmentDocumentRequirements(categoryCode, input.holdsTeachingQualification);
+      const coreDocumentCodes = new Set(coreDocuments.map((document) => document.code));
+      const missingCoreDocuments = coreDocuments.filter((document) => document.isRequired && !submittedCategoryCodes.includes(document.code));
       const missingRequiredDocuments = applicableCategories.filter((category) => category.isRequired && !submittedCategoryCodes.includes(category.code));
+
+      const highSchoolEligibility = categoryCode === "high_school_teaching"
+        ? evaluateHighSchoolEligibility({
+            dateOfBirth: input.dateOfBirth,
+            aLevelResults: input.aLevelResults,
+            holdsTeachingQualification: input.holdsTeachingQualification,
+            teachingCertificateUploaded: submittedCategoryCodes.includes("teaching_certificate"),
+            policy: {
+              maxAge: context.settings.highSchoolMaxAge,
+              minimumALevelPoints: context.settings.highSchoolMinimumALevelPoints,
+              teachingQualifiedMinimumALevelPoints: context.settings.highSchoolTeachingQualifiedMinimumALevelPoints,
+              teachingQualificationExceptionEnabled: context.settings.highSchoolTeachingQualificationExceptionEnabled,
+            },
+          })
+        : null;
+
       const evaluated: Array<{
         requirement: typeof recruitmentRequirements.$inferSelect;
         answer: unknown;
@@ -315,7 +356,10 @@ export function registerRecruitmentRoutes(app: Express): void {
       });
       const failedAutoReject = evaluated.filter(({ requirement, passed }) => requirement.isMandatory && requirement.autoRejectOnFail && !passed);
       const failedCodes = failedAutoReject.map(({ requirement }) => requirement.code);
+      const preferredSchoolIds = input.preferredSchoolIds.filter((id) => context.schools.some((school) => school.id === id));
       if (missingRequiredDocuments.length) failedCodes.push(...missingRequiredDocuments.map((category) => `document:${category.code}`));
+      if (missingCoreDocuments.length) failedCodes.push(...missingCoreDocuments.map((document) => document.reasonCode));
+      if (highSchoolEligibility && !highSchoolEligibility.passed) failedCodes.push(...highSchoolEligibility.failedCodes);
 
       const lockKey = `${input.organizationId}|${normalizedEmail}|${normalizedPhone}|${normalizedNationalId}`;
       const result = await db.transaction(async (tx) => {
@@ -342,6 +386,7 @@ export function registerRecruitmentRoutes(app: Express): void {
             reasonCode: "duplicate",
             failedRequirementCodes: [],
             duplicateApplicationId: duplicate.id,
+            screeningDetails: { categoryCode, duplicateMatched: true, preferredSchoolIds },
           });
           return { rejected: true as const, reason: "duplicate" as const };
         }
@@ -358,11 +403,17 @@ export function registerRecruitmentRoutes(app: Express): void {
             normalizedNationalId,
             reasonCode: "criteria_failed",
             failedRequirementCodes: Array.from(new Set(failedCodes)),
+            screeningDetails: {
+              categoryCode,
+              age: highSchoolEligibility?.age ?? null,
+              aLevelPoints: highSchoolEligibility?.aLevelPoints ?? null,
+              holdsTeachingQualification: input.holdsTeachingQualification,
+              preferredSchoolIds,
+            },
           });
           return { rejected: true as const, reason: "criteria_failed" as const };
         }
 
-        const preferredSchoolIds = input.preferredSchoolIds.filter((id) => context.schools.some((school) => school.id === id));
         const [application] = await tx.insert(recruitmentApplications).values({
           organizationId: input.organizationId,
           schoolId: vacancy?.schoolId || (preferredSchoolIds.length === 1 ? preferredSchoolIds[0] : null),
@@ -382,6 +433,11 @@ export function registerRecruitmentRoutes(app: Express): void {
           yearsExperience: String(input.yearsExperience),
           currentEmployer: input.currentEmployer || null,
           coverLetter: input.coverLetter || null,
+          ageAtSubmission: highSchoolEligibility?.age ?? null,
+          aLevelResults: input.aLevelResults,
+          aLevelPoints: highSchoolEligibility?.aLevelPoints ?? null,
+          holdsTeachingQualification: input.holdsTeachingQualification,
+          eligibilityRoute: highSchoolEligibility?.route || "configured_requirements",
           normalizedEmail,
           normalizedPhone,
           normalizedNationalId,
@@ -412,7 +468,9 @@ export function registerRecruitmentRoutes(app: Express): void {
           const file = files[index];
           const categoryCode = submittedCategoryCodes[index];
           const category = applicableCategories.find((row) => row.code === categoryCode);
-          if (!category && categoryCode !== "other") throw Object.assign(new Error(`Unknown document category: ${categoryCode}`), { status: 400 });
+          if (!category && !coreDocumentCodes.has(categoryCode) && categoryCode !== "other") {
+            throw Object.assign(new Error(`Unknown document category: ${categoryCode}`), { status: 400 });
+          }
           const saved = await savePrivateBuffer({
             namespace: "recruitment",
             scopeId: application.id,

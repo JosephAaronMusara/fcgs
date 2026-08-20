@@ -661,7 +661,12 @@ async function calculateClassPositionMap(examId: number, schoolId: number, class
   };
 }
 
-async function calculateStreamPositionMap(examId: number, schoolId: number, streamId?: number | null) {
+async function calculateStreamPositionMap(
+  examId: number,
+  schoolId: number,
+  streamId?: number | null,
+  options: { missingMarksAsZero?: boolean } = {},
+) {
   if (!streamId) return emptyAcademicPositionMap();
   const [school, stream, allClasses, allAssessments, allGrades, schoolSubjects, settingsRows] = await Promise.all([
     storage.getSchool(schoolId),
@@ -745,7 +750,8 @@ async function calculateStreamPositionMap(examId: number, schoolId: number, stre
         const subject: any = subjectMap.get(subjectId);
         const context = gradeContextBySubject.get(subjectId);
         const mark: any = assessment ? marksMap.get(`${Number(student.id)}-${Number(assessment.id)}`) : null;
-        const percentage = parseFinitePercentage(mark?.percentage);
+        const recordedPercentage = parseFinitePercentage(mark?.percentage);
+        const percentage = recordedPercentage ?? (options.missingMarksAsZero ? 0 : null);
         const linkedGrade = mark?.gradeId
           ? allGrades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
           : null;
@@ -4669,9 +4675,10 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/parents/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.put("/api/parents/:id", requireAuth, requirePermission("parents.edit"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
       const parentId = parseIdParam(req.params.id);
       const parent = await storage.getParent(parentId);
       if (!parent) {
@@ -5224,14 +5231,20 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/students/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.put("/api/students/:id", requireAuth, requirePermission("students.edit"), async (req, res, next) => {
     try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
       const studentId = parseIdParam(req.params.id);
       const existing = await storage.getStudent(studentId);
       if (!existing) {
         return res.status(404).json({ message: "Student not found" });
       }
-      const normalizedData: any = { ...req.body };
+      if (schoolId && existing.schoolId !== schoolId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      const { schoolId: _bodySchoolId, ...studentUpdateBody } = (req.body || {}) as Record<string, unknown>;
+      const normalizedData: any = { ...studentUpdateBody };
       if (typeof normalizedData.admissionNo === "string") normalizedData.admissionNo = normalizedData.admissionNo.toUpperCase();
       if (typeof normalizedData.nationalIdNumber === "string") normalizedData.nationalIdNumber = normalizedData.nationalIdNumber.trim() || null;
       if (typeof normalizedData.passportNumber === "string") normalizedData.passportNumber = normalizedData.passportNumber.trim() || null;
@@ -9777,7 +9790,7 @@ ${schoolName}`;
   }
 
   // Newsletter routes
-  app.get("/api/newsletters", requireAuth, async (req, res, next) => {
+  app.get("/api/newsletters", requireAuth, requirePermission("newsletters.view"), async (req, res, next) => {
     try {
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
@@ -9788,41 +9801,35 @@ ${schoolName}`;
     }
   });
 
-  app.get("/api/newsletters/recipient-counts", requireAuth, async (req, res, next) => {
+  app.get("/api/newsletters/recipient-counts", requireAuth, requireAnyPermission("newsletters.view", "newsletters.create", "newsletters.edit"), async (req, res, next) => {
     try {
+      const currentUser = req.user as User;
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
-      const audience = (req.query.audience as string) || "all";
-      let emailCount = 0;
-      let smsCount = 0;
-      let inAppCount = 0;
-
-      if (audience === "all" || audience === "parents") {
-        const parents = schoolId ? await storage.getParentsBySchool(schoolId) : [];
-        emailCount += parents.filter(p => p.email).length;
-        smsCount += parents.filter(p => p.phone).length;
-        inAppCount += parents.filter(p => p.userId).length;
-      }
-      if (audience === "all" || audience === "staff") {
-        const staffMembers = schoolId ? await storage.getStaffBySchool(schoolId) : [];
-        emailCount += staffMembers.filter(s => s.email).length;
-        smsCount += staffMembers.filter(s => s.phone).length;
-        inAppCount += staffMembers.filter(s => s.userId).length;
-      }
-      if (audience === "all" || audience === "students") {
-        const studentsList = schoolId ? await storage.getStudentsBySchool(schoolId) : [];
-        emailCount += studentsList.filter(s => s.email).length;
-        smsCount += studentsList.filter(s => s.phone).length;
-        inAppCount += studentsList.filter(s => (s as any).userId).length;
-      }
-
-      res.json({ email: emailCount, sms: smsCount, inApp: inAppCount });
+      const requestedAudience = String(req.query.audience || "all").toLowerCase();
+      const targetAudience: NewsletterTargetSelection["targetAudience"] = requestedAudience === "parents"
+        ? "parents"
+        : requestedAudience === "students"
+          ? "students"
+          : requestedAudience === "staff"
+            ? "staff"
+            : "all";
+      const target = normalizeNewsletterTargetSelection({
+        targetAudience,
+        targetScope: "all",
+        targetStreamIds: [],
+        targetClassIds: [],
+        targetStudentIds: [],
+        targetStaffIds: [],
+      });
+      const groups = await resolveNewsletterRecipientGroups(currentUser, req, schoolId, target);
+      res.json(newsletterRecipientCounts(groups));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post("/api/newsletters/recipient-preview", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/newsletters/recipient-preview", requireAuth, requireAnyPermission("newsletters.create", "newsletters.edit"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = await requireSchoolScope(req, res);
@@ -9835,7 +9842,7 @@ ${schoolName}`;
     }
   });
 
-  app.post("/api/newsletters", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/newsletters", requireAuth, requirePermission("newsletters.create"), async (req, res, next) => {
     try {
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
@@ -9856,7 +9863,7 @@ ${schoolName}`;
     }
   });
 
-  app.put("/api/newsletters/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.put("/api/newsletters/:id", requireAuth, requirePermission("newsletters.edit"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = await requireSchoolScope(req, res);
@@ -10049,7 +10056,7 @@ ${schoolName}`;
     }
   });
 
-  app.delete("/api/newsletters/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.delete("/api/newsletters/:id", requireAuth, requirePermission("newsletters.delete"), async (req, res, next) => {
     try {
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
@@ -16612,8 +16619,9 @@ async function buildReportCardMessage(
     }
   });
 
-  // Class merit list. Position uses exact configured grade points, configured
-  // point direction, configured grade rank order, then average percentage.
+  // Class merit list. Primary and Secondary Forms 1-2 rank by average percentage.
+  // Secondary Forms 3-6 use configured grade points/direction/distribution, then percentage.
+  // ECD is intentionally not ranked. Missing expected marks count as 0 for merit calculations.
   app.get("/api/report-hub/class-merit/:examId/:classId", requireAuth, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
@@ -16636,6 +16644,10 @@ async function buildReportCardMessage(
 
       const stream = classInfo.streamId ? await storage.getStream(classInfo.streamId) : undefined;
       const streamName = stream?.name || null;
+      const academicRankingMode = resolveAcademicPositionRankingMode({
+        schoolType: school?.schoolType,
+        streamName,
+      });
       const rawAssessments = (await storage.getAssessmentsByExam(examId))
         .filter((assessment: any) => Number(assessment.classId) === classId);
       const rawMarks = rawAssessments.length
@@ -16680,10 +16692,12 @@ async function buildReportCardMessage(
         gradeContextBySubject.set(Number(subject.id), context);
         if (context.profileKey) profileKeys.add(context.profileKey);
       }
-      const pointsDirection = resolveSharedPointsDirection(profileKeys, settingsRows);
+      const pointsDirection = academicRankingMode === "average_grade_points"
+        ? resolveSharedPointsDirection(profileKeys, settingsRows)
+        : null;
 
       const candidateByStudent = new Map<number, RankingCandidate>();
-      const displayByStudent = new Map<number, { totalPercentage: number; displays: Record<number, string> }>();
+      const displayByStudent = new Map<number, { totalPercentage: number; recordedCount: number; displays: Record<number, string> }>();
       for (const student of students as any[]) {
         const assigned = assignedByStudent.get(Number(student.id));
         const expectedSubjectIds = assigned?.size
@@ -16692,12 +16706,14 @@ async function buildReportCardMessage(
         const results: RankingSubjectResult[] = [];
         const displays: Record<number, string> = {};
         let totalPercentage = 0;
+        let recordedCount = 0;
         for (const subjectId of expectedSubjectIds) {
           const assessment: any = assessmentBySubject.get(subjectId);
           const subject: any = subjectById.get(subjectId);
           const context = gradeContextBySubject.get(subjectId);
           const mark: any = assessment ? marksMap.get(`${Number(student.id)}-${Number(assessment.id)}`) : null;
-          const percentage = parseFinitePercentage(mark?.percentage);
+          const recordedPercentage = parseFinitePercentage(mark?.percentage);
+          const percentage = recordedPercentage ?? 0;
           const storedGrade = mark?.gradeId
             ? allGrades.find((grade: any) => Number(grade.id) === Number(mark.gradeId))
             : null;
@@ -16710,47 +16726,63 @@ async function buildReportCardMessage(
             storedGrade,
           });
           results.push({ subjectId, percentage, grade: resolution.grade, profileKey: context?.profileKey || null });
-          if (percentage !== null) {
-            totalPercentage += percentage;
-            displays[subjectId] = formatMeritMarkDisplay(percentage, getGradeDisplayName(resolution.grade));
+          totalPercentage += percentage;
+          if (recordedPercentage !== null) {
+            recordedCount += 1;
+            displays[subjectId] = formatMeritMarkDisplay(recordedPercentage, getGradeDisplayName(resolution.grade));
           }
         }
         candidateByStudent.set(Number(student.id), { id: Number(student.id), expectedSubjectIds, results });
-        displayByStudent.set(Number(student.id), { totalPercentage, displays });
+        displayByStudent.set(Number(student.id), { totalPercentage, recordedCount, displays });
       }
 
-      const ranking = calculateConfiguredPositionMap({
-        candidates: Array.from(candidateByStudent.values()),
-        pointsDirection,
-      });
+      const candidates = Array.from(candidateByStudent.values());
+      const ranking = academicRankingMode === "none"
+        ? emptyAcademicPositionMap("none")
+        : academicRankingMode
+          ? calculateConfiguredPositionMap({
+            candidates,
+            pointsDirection,
+            rankingMode: academicRankingMode,
+          })
+          : unresolvedAcademicPositionMap(studentIds, "position_stream_unrecognized");
+      const showPointsColumn = academicRankingMode === "average_grade_points";
+      const showPositionColumn = academicRankingMode !== "none";
       const rows = (students as any[]).map((student) => {
         const candidate = candidateByStudent.get(Number(student.id))!;
         const record = ranking.records.get(Number(student.id));
         const display = displayByStudent.get(Number(student.id))!;
+        const expectedCount = candidate.results.length;
+        const calculatedAverage = expectedCount > 0 ? display.totalPercentage / expectedCount : null;
+        const averagePercentage = record?.averagePercentage ?? calculatedAverage;
         const position = ranking.map.get(Number(student.id)) || "";
         return {
           studentName: `${student.firstName} ${student.lastName}`,
           admissionNo: student.admissionNo,
+          cells: Object.fromEntries(candidate.results.map((result) => [result.subjectId, result.percentage])),
+          cellDisplays: display.displays,
           total: Math.round(display.totalPercentage),
-          totalDisplay: candidate.results.some((result) => result.percentage !== null)
-            ? `${Math.round(display.totalPercentage)}/${candidate.results.filter((result) => result.percentage !== null).length * 100}`
-            : "-",
-          avg: record?.averagePercentage === null || record?.averagePercentage === undefined ? null : Math.round(record.averagePercentage * 10) / 10,
-          avgDisplay: record?.averagePercentage === null || record?.averagePercentage === undefined ? "-" : `${Math.round(record.averagePercentage)}%`,
-          points: record?.totalPoints ?? null,
-          pointsDisplay: record?.totalPoints === null || record?.totalPoints === undefined ? "-" : formatMeritPoints(record.totalPoints),
-          subjectsWithMarks: candidate.results.filter((result) => result.percentage !== null).length,
-          eligibleSubjectCount: candidate.results.filter((result) => result.percentage !== null).length,
+          totalDisplay: expectedCount ? `${Math.round(display.totalPercentage)}/${expectedCount * 100}` : "-",
+          avg: averagePercentage === null || averagePercentage === undefined ? null : Math.round(averagePercentage * 10) / 10,
+          avgDisplay: averagePercentage === null || averagePercentage === undefined ? "-" : `${Math.round(averagePercentage)}%`,
+          points: showPointsColumn ? record?.totalPoints ?? null : null,
+          pointsDisplay: showPointsColumn && record?.totalPoints !== null && record?.totalPoints !== undefined ? formatMeritPoints(record.totalPoints) : "-",
+          subjectsWithMarks: display.recordedCount,
+          eligibleSubjectCount: expectedCount,
           position,
-          positionStatus: position ? "READY" : "UNRESOLVED",
+          positionStatus: !showPositionColumn ? "NOT_RANKED" : position ? "READY" : "UNRESOLVED",
           positionIssues: ranking.unresolved.get(Number(student.id)) || [],
-          subjectMarks: subjectIds.map((subjectId) => display.displays[subjectId] || "-"),
         };
       });
       rows.sort((a, b) => {
-        const aPosition = a.position ? Number(a.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
-        const bPosition = b.position ? Number(b.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
-        if (aPosition !== bPosition) return aPosition - bPosition;
+        if (showPositionColumn) {
+          const aPosition = a.position ? Number(a.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+          const bPosition = b.position ? Number(b.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+          if (aPosition !== bPosition) return aPosition - bPosition;
+        } else {
+          const averageDiff = Number(b.avg || 0) - Number(a.avg || 0);
+          if (Math.abs(averageDiff) > 1e-9) return averageDiff;
+        }
         return a.studentName.localeCompare(b.studentName);
       });
 
@@ -16761,9 +16793,18 @@ async function buildReportCardMessage(
         rows,
         totalStudents: students.length,
         rankedStudents: ranking.size,
-        showPointsColumn: true,
-        rankingPolicy: "CONFIGURED_GRADE_POINTS",
+        showPointsColumn,
+        showPositionColumn,
+        rankingMode: academicRankingMode,
+        rankingPolicy: academicRankingMode === "average_grade_points"
+          ? "CONFIGURED_GRADE_POINTS"
+          : academicRankingMode === "average_percentage"
+            ? "AVERAGE_PERCENTAGE"
+            : academicRankingMode === "none"
+              ? "NONE"
+              : "UNRESOLVED",
         pointsDirection,
+        missingMarksPolicy: "ZERO",
       });
     } catch (error) {
       next(error);
@@ -16792,8 +16833,11 @@ async function buildReportCardMessage(
     return Number.isInteger(points) ? String(points) : String(Number(points.toFixed(1)));
   }
 
-  function shouldShowMeritPointsColumn(_context?: { streamName?: string | null; className?: string | null }) {
-    return true;
+  function shouldShowMeritPointsColumn(context?: { schoolType?: string | null; streamName?: string | null; className?: string | null }) {
+    return resolveAcademicPositionRankingMode({
+      schoolType: context?.schoolType,
+      streamName: context?.streamName || context?.className || null,
+    }) === "average_grade_points";
   }
 
   function getReportSubjectLabel(subject: any) {
@@ -17214,9 +17258,23 @@ async function buildReportCardMessage(
       const allClasses = await storage.getAllClasses();
       const streamClasses = allClasses.filter(c => c.schoolId === schoolId && c.streamId === streamId);
       const streamName = stream?.name || streamClasses[0]?.className || "";
-      const showPointsColumn = shouldShowMeritPointsColumn({ streamName });
+      const streamRankingMode = resolveAcademicPositionRankingMode({ schoolType: school?.schoolType, streamName });
+      const showPointsColumn = shouldShowMeritPointsColumn({ schoolType: school?.schoolType, streamName });
+      const showPositionColumn = streamRankingMode !== "none";
       const classIds = streamClasses.map(c => c.id);
-      if (classIds.length === 0) return res.json({ examName: exam?.examName || "", streamName, subjects: [], rows: [], totalStudents: 0, showPointsColumn });
+      if (classIds.length === 0) return res.json({
+        examName: exam?.examName || "",
+        streamName,
+        subjects: [],
+        rows: [],
+        totalStudents: 0,
+        rankedStudents: 0,
+        showPointsColumn,
+        showPositionColumn,
+        rankingMode: streamRankingMode,
+        rankingPolicy: streamRankingMode === "average_grade_points" ? "CONFIGURED_GRADE_POINTS" : streamRankingMode === "average_percentage" ? "AVERAGE_PERCENTAGE" : streamRankingMode === "none" ? "NONE" : "UNRESOLVED",
+        missingMarksPolicy: "ZERO",
+      });
 
       const allGrades = await storage.getGradesBySchool(schoolId);
 
@@ -17225,7 +17283,19 @@ async function buildReportCardMessage(
         const classStudents = await storage.getStudentsByClass(cls.id);
         allStudents = allStudents.concat(classStudents);
       }
-      if (allStudents.length === 0) return res.json({ examName: exam?.examName || "", streamName, subjects: [], rows: [], totalStudents: 0, showPointsColumn });
+      if (allStudents.length === 0) return res.json({
+        examName: exam?.examName || "",
+        streamName,
+        subjects: [],
+        rows: [],
+        totalStudents: 0,
+        rankedStudents: 0,
+        showPointsColumn,
+        showPositionColumn,
+        rankingMode: streamRankingMode,
+        rankingPolicy: streamRankingMode === "average_grade_points" ? "CONFIGURED_GRADE_POINTS" : streamRankingMode === "average_percentage" ? "AVERAGE_PERCENTAGE" : streamRankingMode === "none" ? "NONE" : "UNRESOLVED",
+        missingMarksPolicy: "ZERO",
+      });
 
       const studentSubjectIdsByStudent = new Map<number, Set<number>>();
       await Promise.all(allStudents.map(async (student: any) => {
@@ -17253,6 +17323,18 @@ async function buildReportCardMessage(
         if (subject && !isTemporarilyExcludedFromStrictGrading(subject)) subjectById.set(Number(subject.id), subject);
       }
       const validSubjectIds = subjectIds.filter((id) => subjectById.has(Number(id)));
+      const validSubjectIdsByClass = new Map<number, number[]>();
+      for (const classInfo of streamClasses) {
+        validSubjectIdsByClass.set(
+          Number(classInfo.id),
+          Array.from(new Set(
+            streamAssessments
+              .filter((assessment: any) => Number(assessment.classId) === Number(classInfo.id))
+              .map((assessment: any) => Number(assessment.subjectId))
+              .filter((subjectId: number) => subjectById.has(subjectId)),
+          )),
+        );
+      }
 
       const gradeCandidatesBySubjectClass = new Map<string, any[]>();
       const gradingSubjectTypeBySubjectClass = new Map<string, string | null>();
@@ -17290,10 +17372,11 @@ async function buildReportCardMessage(
         pointRaw: Record<number, number>;
       }> = {};
       for (const student of allStudents) {
-        const eligibleSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
-        const eligibleCount = eligibleSubjectIds.size > 0
-          ? validSubjectIds.filter((subjectId) => eligibleSubjectIds.has(Number(subjectId))).length
-          : validSubjectIds.length;
+        const assignedSubjectIds = studentSubjectIdsByStudent.get(student.id) || new Set<number>();
+        const classExpectedSubjectIds = validSubjectIdsByClass.get(Number(student.classId)) || [];
+        const eligibleCount = assignedSubjectIds.size > 0
+          ? classExpectedSubjectIds.filter((subjectId) => assignedSubjectIds.has(Number(subjectId))).length
+          : classExpectedSubjectIds.length;
         perStudent[student.id] = { sum: 0, have: 0, eligibleCount, points: 0, displays: {}, raw: {}, pointRaw: {} };
       }
 
@@ -17335,7 +17418,7 @@ async function buildReportCardMessage(
         target.displays[subjectId] = formatMeritMarkDisplay(pct, gradeLabel);
       }
 
-      const streamRanking = await calculateStreamPositionMap(examId, schoolId, streamId);
+      const streamRanking = await calculateStreamPositionMap(examId, schoolId, streamId, { missingMarksAsZero: true });
       const ranked = allStudents.map((student) => {
         const data = perStudent[student.id];
         const record = streamRanking.records.get(Number(student.id));
@@ -17343,9 +17426,15 @@ async function buildReportCardMessage(
         return { student, data, record, position };
       });
       ranked.sort((a, b) => {
-        const aPosition = a.position ? Number(a.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
-        const bPosition = b.position ? Number(b.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
-        if (aPosition !== bPosition) return aPosition - bPosition;
+        if (showPositionColumn) {
+          const aPosition = a.position ? Number(a.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+          const bPosition = b.position ? Number(b.position.split("/")[0]) : Number.MAX_SAFE_INTEGER;
+          if (aPosition !== bPosition) return aPosition - bPosition;
+        } else {
+          const aAverage = a.record?.averagePercentage ?? (a.data?.eligibleCount ? a.data.sum / a.data.eligibleCount : 0);
+          const bAverage = b.record?.averagePercentage ?? (b.data?.eligibleCount ? b.data.sum / b.data.eligibleCount : 0);
+          if (Math.abs(bAverage - aAverage) > 1e-9) return bAverage - aAverage;
+        }
         const aName = `${a.student.firstName} ${a.student.lastName}`;
         const bName = `${b.student.firstName} ${b.student.lastName}`;
         return aName.localeCompare(bName);
@@ -17354,11 +17443,14 @@ async function buildReportCardMessage(
       const rows = ranked.map(({ student, data, record, position }) => ({
         studentName: `${student.firstName} ${student.lastName}`,
         admissionNo: student.admissionNo,
-        total: data?.have ? `${Math.round(data.sum)}/${data.have * 100}` : "-",
-        avg: record?.averagePercentage === null || record?.averagePercentage === undefined ? "-" : `${Math.round(record.averagePercentage)}%`,
-        points: record?.totalPoints === null || record?.totalPoints === undefined ? "-" : formatMeritPoints(record.totalPoints),
+        total: data?.eligibleCount ? `${Math.round(data.sum)}/${data.eligibleCount * 100}` : "-",
+        avg: (() => {
+          const average = record?.averagePercentage ?? (data?.eligibleCount ? data.sum / data.eligibleCount : null);
+          return average === null || average === undefined ? "-" : `${Math.round(average)}%`;
+        })(),
+        points: showPointsColumn && record?.totalPoints !== null && record?.totalPoints !== undefined ? formatMeritPoints(record.totalPoints) : "-",
         position,
-        positionStatus: position ? "READY" : "UNRESOLVED",
+        positionStatus: !showPositionColumn ? "NOT_RANKED" : position ? "READY" : "UNRESOLVED",
         positionIssues: streamRanking.unresolved.get(Number(student.id)) || [],
         subjectMarks: validSubjectIds.map((subjectId) => data?.displays[subjectId] || "-"),
       }));
@@ -17371,11 +17463,20 @@ async function buildReportCardMessage(
         totalStudents: allStudents.length,
         rankedStudents: streamRanking.size,
         showPointsColumn,
-        rankingPolicy: "CONFIGURED_GRADE_POINTS",
-        pointsDirection: resolveSharedPointsDirection(
+        showPositionColumn,
+        rankingMode: streamRankingMode,
+        rankingPolicy: streamRankingMode === "average_grade_points"
+          ? "CONFIGURED_GRADE_POINTS"
+          : streamRankingMode === "average_percentage"
+            ? "AVERAGE_PERCENTAGE"
+            : streamRankingMode === "none"
+              ? "NONE"
+              : "UNRESOLVED",
+        missingMarksPolicy: "ZERO",
+        pointsDirection: streamRankingMode === "average_grade_points" ? resolveSharedPointsDirection(
           Array.from(new Set(Array.from(gradeCandidatesBySubjectClass.values()).flat().map((grade: any) => String(grade.gradeLevel || "")).filter(Boolean))),
           await db.select().from(gradeProfileSettings).where(eq(gradeProfileSettings.schoolId, schoolId)),
-        ),
+        ) : null,
       });
     } catch (error) {
       next(error);

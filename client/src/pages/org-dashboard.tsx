@@ -5,6 +5,7 @@ import CalendarPage from "@/pages/calendar";
 import InternalTransfersPage from "@/pages/internal-transfers";
 import AssetsInventoryPage from "@/pages/assets-inventory";
 import OrgTransportOversightPage from "@/pages/org-transport-oversight";
+import RecruitmentPage from "@/pages/recruitment";
 import { RecordPhotoActions } from "@/components/record-photo-actions";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -67,6 +68,7 @@ import {
   LayoutDashboard,
   PackageSearch,
   BusFront,
+  BriefcaseBusiness,
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
@@ -199,6 +201,7 @@ export default function OrgDashboard() {
   const [isInternalTransfersOpen, setIsInternalTransfersOpen] = useState(false);
   const [isTransportOversightOpen, setIsTransportOversightOpen] = useState(false);
   const [isAssetsInventoryOpen, setIsAssetsInventoryOpen] = useState(false);
+  const [isRecruitmentOpen, setIsRecruitmentOpen] = useState(false);
   const [isHqNavOpen, setIsHqNavOpen] = useState(false);
   const currentYear = new Date().getFullYear();
   const [orgAcademicYear, setOrgAcademicYear] = useState<number>(currentYear);
@@ -902,6 +905,7 @@ export default function OrgDashboard() {
           <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsInternalTransfersOpen(true); if (mobile) setIsHqNavOpen(false); }}><ArrowRightLeft className="mr-2 h-4 w-4" />Internal Transfers</Button>
           {(hasPermission("transport.organization.view") || hasPermission("transport.organization.reports") || hasPermission("transport.organization.manage")) && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsTransportOversightOpen(true); if (mobile) setIsHqNavOpen(false); }}><BusFront className="mr-2 h-4 w-4" />Transport</Button>}
           {(hasPermission("assets.view") || hasPermission("inventory.view")) && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsAssetsInventoryOpen(true); if (mobile) setIsHqNavOpen(false); }}><PackageSearch className="mr-2 h-4 w-4" />Assets & Inventory</Button>}
+          {hasPermission("recruitment.view") && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsRecruitmentOpen(true); if (mobile) setIsHqNavOpen(false); }}><BriefcaseBusiness className="mr-2 h-4 w-4" />Recruitment</Button>}
         </div>
       </div>
       <div>
@@ -2036,6 +2040,18 @@ export default function OrgDashboard() {
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 pb-6 pt-4">
             <CalendarPage />
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isRecruitmentOpen} onOpenChange={setIsRecruitmentOpen}>
+        <DialogContent className="flex h-[96dvh] w-[99vw] max-w-[99vw] flex-col gap-0 p-0">
+          <DialogHeader className="border-b px-6 pb-4 pt-6">
+            <DialogTitle className="flex items-center gap-2"><BriefcaseBusiness className="h-5 w-5" />Recruitment</DialogTitle>
+            <DialogDescription>Organization recruitment workspace with school-by-school separation.</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <RecruitmentPage />
           </div>
         </DialogContent>
       </Dialog>

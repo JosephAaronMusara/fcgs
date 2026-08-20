@@ -25,7 +25,7 @@ const passwordRules: PasswordRule[] = [
 
 export default function ForceResetPassword() {
   const { toast } = useToast();
-  const { user } = useAuth();
+  const { user, currentSchoolId } = useAuth();
   const [, setLocation] = useLocation();
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -43,14 +43,14 @@ export default function ForceResetPassword() {
       }
       return res.json();
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       if (data.user) {
         queryClient.setQueryData(["/api/auth/user"], data.user);
-      } else {
-        queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
       }
+      await queryClient.refetchQueries({ queryKey: ["/api/auth/user"], type: "active" });
+      const refreshedUser = queryClient.getQueryData<any>(["/api/auth/user"]) || data.user;
       toast({ title: "Password Updated", description: "Your password has been reset successfully." });
-      setLocation("/dashboard");
+      setLocation(refreshedUser?.role === "org_admin" && currentSchoolId === null ? "/org" : "/dashboard");
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });

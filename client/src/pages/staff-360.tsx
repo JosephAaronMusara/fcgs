@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search, ArrowLeft, Mail, Phone, Calendar, Clock, BookOpen, Users, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip } from "recharts";
+import { useLocation } from "wouter";
 
 interface StaffSearchResult {
   id: number;
@@ -53,6 +54,7 @@ export default function Staff360Page() {
   const [showSearch, setShowSearch] = useState(!urlStaffId);
   const [subjectPage, setSubjectPage] = useState(0);
   const subjectsPerPage = 2;
+  const [, setLocation] = useLocation();
 
   const { data: searchResults = [] } = useQuery<StaffSearchResult[]>({
     queryKey: ["/api/staff/search", searchQuery],
@@ -83,11 +85,7 @@ export default function Staff360Page() {
   };
 
   const goBack = () => {
-    setSelectedStaffId(null);
-    setShowSearch(true);
-    setSearchQuery("");
-    setSubjectPage(0);
-    window.history.replaceState(null, "", "/staff-360");
+    setLocation("/dashboard");
   };
 
   const staffMember = profile?.staff;

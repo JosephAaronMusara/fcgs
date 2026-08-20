@@ -19,6 +19,10 @@ const requiredTables = [
 const requiredColumns: Array<[string, string]> = [
   ["recruitment_settings", "attachment_size_limit_mb"],
   ["recruitment_settings", "general_application_categories"],
+  ["recruitment_settings", "high_school_max_age"],
+  ["recruitment_settings", "high_school_minimum_a_level_points"],
+  ["recruitment_settings", "high_school_teaching_qualified_minimum_a_level_points"],
+  ["recruitment_settings", "high_school_teaching_qualification_exception_enabled"],
   ["recruitment_vacancies", "organization_id"],
   ["recruitment_vacancies", "status"],
   ["recruitment_requirements", "scope_key"],
@@ -30,6 +34,11 @@ const requiredColumns: Array<[string, string]> = [
   ["recruitment_applications", "normalized_phone"],
   ["recruitment_applications", "normalized_national_id"],
   ["recruitment_applications", "eligibility_status"],
+  ["recruitment_applications", "age_at_submission"],
+  ["recruitment_applications", "a_level_results"],
+  ["recruitment_applications", "a_level_points"],
+  ["recruitment_applications", "holds_teaching_qualification"],
+  ["recruitment_applications", "eligibility_route"],
   ["recruitment_application_answers", "alternative_accepted"],
   ["recruitment_application_answers", "evaluation_note"],
   ["recruitment_application_documents", "is_active"],
@@ -37,6 +46,7 @@ const requiredColumns: Array<[string, string]> = [
   ["recruitment_application_status_history", "actor_type"],
   ["recruitment_application_status_history", "actor_label"],
   ["recruitment_rejection_attempts", "reason_code"],
+  ["recruitment_rejection_attempts", "screening_details"],
   ["recruitment_interviews", "outcome"],
 ];
 
@@ -146,6 +156,16 @@ async function main() {
           from recruitment_application_documents
           where is_active = true
             and (storage_key is null or trim(storage_key) = '')
+        `)
+      : 0,
+    invalidHighSchoolPolicies: presentColumns.has("recruitment_settings.high_school_max_age")
+      ? await count(sql`
+          select count(*)
+          from recruitment_settings
+          where high_school_max_age < 18
+             or high_school_minimum_a_level_points < 0
+             or high_school_teaching_qualified_minimum_a_level_points < 0
+             or high_school_teaching_qualified_minimum_a_level_points > high_school_minimum_a_level_points
         `)
       : 0,
   };
