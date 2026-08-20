@@ -206,7 +206,6 @@ export default function StaffPage() {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const data = {
-      staffNo: formData.get("staffNo") as string,
       firstName: formData.get("firstName") as string,
       lastName: formData.get("lastName") as string,
       nationalIdNumber: formData.get("nationalIdNumber") as string,
@@ -1049,11 +1048,15 @@ function StaffForm({
           <Label htmlFor="staffNo">Staff No</Label>
           <Input
             id="staffNo"
-            name="staffNo"
-            defaultValue={defaultValues?.staffNo || defaultStaffNo}
-            required
+            value={defaultValues?.staffNo || defaultStaffNo || "Assigned automatically when saved"}
+            readOnly
+            aria-readonly="true"
+            className="bg-muted font-mono"
             data-testid="input-staff-no"
           />
+          <p className="text-xs text-muted-foreground">
+            {defaultValues ? "Permanent identifier — it cannot be edited." : "Preview only. The server assigns the final number when you save."}
+          </p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="role">Role</Label>

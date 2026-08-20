@@ -2,7 +2,7 @@ import { db } from "./db";
 import { compareStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { eq, ne, desc, asc, and, or, sql, count as drizzleCount, like, gte, lte, lt, isNull, inArray, notLike } from "drizzle-orm";
 import {
-  users, staff, streams, classes, classTeacherAssignments, parents, students, subjects,
+  users, staff, streams, classes, classTeacherAssignments, parents, students, personNumberSequences, subjects,
   staffSubjects, studentSubjects, classSubjects, grades, assessments, marks, attendanceRecords,
   disciplineRecords, clinicRecords, feesPayments, organizations, schools, libraryResources, libraryCategories, libraryShelves, libraryBooks, libraryBookCopies, libraryLoans, libraryFines, libraryReservations, libraryPolicies,
   timetableSlots, logbookEntries, posItems, posSales, posSaleItems,
@@ -76,6 +76,7 @@ import {
   qcReports,
   type ActivityLog, type InsertActivityLog, type InternalTransfer, type InsertInternalTransfer,
 } from "@shared/schema";
+import { buildPersonNumber, normalizeIssuanceDate, personNumberPattern, requirePositiveSchoolId, type PersonNumberKind } from "./person-numbering";
 
 
 export class PosSaleProcessingError extends Error {
@@ -109,11 +110,11 @@ export interface IStorage {
   createStaff(staffData: InsertStaff): Promise<Staff>;
   updateStaff(id: number, staffData: Partial<InsertStaff>): Promise<Staff | undefined>;
   deleteStaff(id: number): Promise<boolean>;
-  getNextStaffNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string>;
+  getNextStaffNo(options: { schoolId: number; referenceDate?: string | Date | null }): Promise<string>;
 
   getInternalTransfers(filters?: { organizationId?: number | null; schoolId?: number | null; personType?: string | null }): Promise<InternalTransfer[]>;
   createInternalTransfer(data: InsertInternalTransfer): Promise<InternalTransfer>;
-  transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; admissionNo?: string | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }>;
+  transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }>;
   transferStaffWithinOrganization(args: { staffId: number; destinationSchoolId: number; destinationRole: string; destinationAccessGroupId?: number | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ staff: Staff; transfer: InternalTransfer }>;
 
   getAllStreams(): Promise<Stream[]>;
@@ -156,7 +157,7 @@ export interface IStorage {
   createStudent(student: InsertStudent): Promise<Student>;
   updateStudent(id: number, student: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(id: number): Promise<boolean>;
-  getNextAdmissionNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string>;
+  getNextAdmissionNo(options: { schoolId: number; referenceDate?: string | Date | null }): Promise<string>;
 
   getAllSubjects(): Promise<Subject[]>;
   getSubjectsBySchool(schoolId: number): Promise<Subject[]>;
@@ -799,12 +800,19 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createStaff(staffData: InsertStaff): Promise<Staff> {
-    const [newStaff] = await db.insert(staff).values(staffData).returning();
-    return newStaff;
+    const { staffNo: _blockedStaffNo, ...safeStaffData } = staffData as InsertStaff & { staffNo?: unknown };
+    const schoolId = requirePositiveSchoolId(safeStaffData.schoolId);
+    const issuedAt = new Date();
+    return db.transaction(async (tx) => {
+      const staffNo = await this.allocateNextPersonNumber(tx, "staff", schoolId, issuedAt);
+      const [newStaff] = await tx.insert(staff).values({ ...safeStaffData, schoolId, staffNo, createdAt: issuedAt }).returning();
+      return newStaff;
+    });
   }
 
   async updateStaff(id: number, staffData: Partial<InsertStaff>): Promise<Staff | undefined> {
-    const [updated] = await db.update(staff).set(staffData).where(eq(staff.id, id)).returning();
+    const { staffNo: _blockedStaffNo, schoolId: _blockedSchoolId, ...safeStaffData } = staffData as Partial<InsertStaff> & { staffNo?: unknown; schoolId?: unknown };
+    const [updated] = await db.update(staff).set(safeStaffData).where(eq(staff.id, id)).returning();
     return updated;
   }
 
@@ -830,7 +838,7 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
-  async transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; admissionNo?: string | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }> {
+  async transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }> {
     return db.transaction(async (tx) => {
       const [existing] = await tx.select().from(students).where(eq(students.id, args.studentId));
       if (!existing || existing.archivedAt) throw new Error("Student not found");
@@ -845,13 +853,9 @@ export class DatabaseStorage implements IStorage {
       const [destinationClass] = await tx.select().from(classes).where(and(eq(classes.id, args.destinationClassId), isNull(classes.archivedAt)));
       if (!destinationClass || destinationClass.schoolId !== args.destinationSchoolId) throw new Error("Destination class does not belong to the destination school");
 
-      const nextAdmissionNo = (args.admissionNo && args.admissionNo.trim())
-        ? args.admissionNo.trim().toUpperCase()
-        : existing.admissionNo;
-      if (nextAdmissionNo !== existing.admissionNo) {
-        const [duplicate] = await tx.select({ id: students.id }).from(students).where(and(eq(students.admissionNo, nextAdmissionNo), ne(students.id, existing.id)));
-        if (duplicate) throw new Error("Admission number already exists");
-      }
+      // Admission numbers are permanent person identifiers. Internal transfers move the
+      // record but never issue or accept a replacement number.
+      const nextAdmissionNo = existing.admissionNo;
 
       await tx.delete(studentSubjects).where(eq(studentSubjects.studentId, existing.id));
 
@@ -1028,69 +1032,117 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
-  private getSchoolSequenceCode(schoolId?: number | null): string {
-    const value = Number(schoolId || 0);
-    if (!Number.isFinite(value) || value <= 0) return "A";
-    let remaining = Math.floor(value);
-    let result = "";
-    while (remaining > 0) {
-      const offset = (remaining - 1) % 26;
-      result = String.fromCharCode(65 + offset) + result;
-      remaining = Math.floor((remaining - 1) / 26);
+  private async maxConsumedPersonSequence(
+    executor: any,
+    kind: PersonNumberKind,
+    schoolId: number,
+    issuanceDate?: string | Date | null,
+  ): Promise<number> {
+    const pattern = personNumberPattern(kind, schoolId, issuanceDate);
+    const [row] = kind === "student"
+      ? await executor
+          .select({
+            maxSequence: sql<number>`COALESCE(MAX((substring(upper(btrim(${students.admissionNo})) from ${pattern}))::bigint), 0)`,
+          })
+          .from(students)
+          .where(sql`upper(btrim(${students.admissionNo})) ~ ${pattern}`)
+      : await executor
+          .select({
+            maxSequence: sql<number>`COALESCE(MAX((substring(upper(btrim(${staff.staffNo})) from ${pattern}))::bigint), 0)`,
+          })
+          .from(staff)
+          .where(sql`upper(btrim(${staff.staffNo})) ~ ${pattern}`);
+    const value = Number(row?.maxSequence || 0);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error("Existing person number sequence is outside the supported range");
     }
-    return result;
+    return value;
   }
 
-  private normalizeReferenceDate(referenceDate?: string | Date | null): Date {
-    if (referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())) {
-      return referenceDate;
-    }
-    if (typeof referenceDate === "string" && referenceDate.trim()) {
-      const parsed = new Date(referenceDate);
-      if (!Number.isNaN(parsed.getTime())) {
-        return parsed;
-      }
-    }
-    return new Date();
+  private async readSequenceState(
+    executor: any,
+    kind: PersonNumberKind,
+    schoolId: number,
+    year: number,
+  ): Promise<number> {
+    const [row] = await executor
+      .select({ lastSequence: personNumberSequences.lastSequence })
+      .from(personNumberSequences)
+      .where(and(
+        eq(personNumberSequences.entityType, kind),
+        eq(personNumberSequences.year, year),
+        eq(personNumberSequences.schoolId, schoolId),
+      ));
+    return Number(row?.lastSequence || 0);
   }
 
-  private buildFormattedSequenceNumber(prefix: "S" | "E", schoolId?: number | null, referenceDate?: string | Date | null, sequence: number = 1): string {
-    const refDate = this.normalizeReferenceDate(referenceDate);
-    const year = String(refDate.getFullYear()).slice(-2);
-    const sequencePart = String(sequence).padStart(4, "0");
-    const schoolCode = this.getSchoolSequenceCode(schoolId);
-    return `FCGS${year}${prefix}${sequencePart}${schoolCode}`.toUpperCase();
+  private async allocateNextPersonNumber(
+    tx: any,
+    kind: PersonNumberKind,
+    rawSchoolId: number,
+    issuanceDate?: string | Date | null,
+  ): Promise<string> {
+    const schoolId = requirePositiveSchoolId(rawSchoolId);
+    const date = normalizeIssuanceDate(issuanceDate);
+    const year = date.getFullYear();
+    const lockKey = `fcgs-person-number:${kind}:${year}:${schoolId}`;
+
+    // Transaction-scoped advisory lock serializes allocations for one school/entity/year.
+    // The counter update and person INSERT are in the same transaction, so failures roll back
+    // both and concurrent requests can never receive the same final number.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
+
+    const storedSequence = await this.readSequenceState(tx, kind, schoolId, year);
+    const consumedSequence = await this.maxConsumedPersonSequence(tx, kind, schoolId, date);
+    const nextSequence = Math.max(storedSequence, consumedSequence) + 1;
+    if (!Number.isSafeInteger(nextSequence) || nextSequence <= 0) {
+      throw new Error("Unable to allocate the next person number safely");
+    }
+
+    const [existingState] = await tx
+      .select({ id: personNumberSequences.id })
+      .from(personNumberSequences)
+      .where(and(
+        eq(personNumberSequences.entityType, kind),
+        eq(personNumberSequences.year, year),
+        eq(personNumberSequences.schoolId, schoolId),
+      ));
+
+    if (existingState) {
+      await tx
+        .update(personNumberSequences)
+        .set({ lastSequence: nextSequence, updatedAt: new Date() })
+        .where(eq(personNumberSequences.id, existingState.id));
+    } else {
+      await tx.insert(personNumberSequences).values({
+        entityType: kind,
+        year,
+        schoolId,
+        lastSequence: nextSequence,
+        updatedAt: new Date(),
+      });
+    }
+
+    return buildPersonNumber(kind, schoolId, nextSequence, date);
   }
 
-  async getNextStaffNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string> {
-    const referenceDate = this.normalizeReferenceDate(options?.referenceDate);
-    const schoolId = options?.schoolId || null;
-    const year = referenceDate.getFullYear();
-    const start = new Date(year, 0, 1);
-    const end = new Date(year + 1, 0, 1);
+  private async peekNextPersonNumber(
+    kind: PersonNumberKind,
+    rawSchoolId: number,
+    issuanceDate?: string | Date | null,
+  ): Promise<string> {
+    const schoolId = requirePositiveSchoolId(rawSchoolId);
+    const date = normalizeIssuanceDate(issuanceDate);
+    const year = date.getFullYear();
+    const [storedSequence, consumedSequence] = await Promise.all([
+      this.readSequenceState(db, kind, schoolId, year),
+      this.maxConsumedPersonSequence(db, kind, schoolId, date),
+    ]);
+    return buildPersonNumber(kind, schoolId, Math.max(storedSequence, consumedSequence) + 1, date);
+  }
 
-    const conditions = [gte(staff.createdAt, start), lt(staff.createdAt, end)];
-    if (schoolId) {
-      conditions.push(eq(staff.schoolId, schoolId));
-    }
-
-    const rows = await db
-      .select({ staffNo: staff.staffNo })
-      .from(staff)
-      .where(and(...conditions));
-
-    let maxSequence = 0;
-    const pattern = new RegExp(`^FCGS${String(year).slice(-2)}E(\\d{4})${this.getSchoolSequenceCode(schoolId)}$`, "i");
-    for (const row of rows) {
-      const match = (row.staffNo || "").match(pattern);
-      if (!match) continue;
-      const sequence = Number(match[1]);
-      if (Number.isFinite(sequence) && sequence > maxSequence) {
-        maxSequence = sequence;
-      }
-    }
-
-    return this.buildFormattedSequenceNumber("E", schoolId, referenceDate, maxSequence + 1);
+  async getNextStaffNo(options: { schoolId: number; referenceDate?: string | Date | null }): Promise<string> {
+    return this.peekNextPersonNumber("staff", options.schoolId, options.referenceDate);
   }
 
   async getAllStreams(): Promise<Stream[]> {
@@ -1369,14 +1421,24 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createStudent(studentData: InsertStudent): Promise<Student> {
-    const [newStudent] = await db.insert(students).values(studentData).returning();
-    return newStudent;
+    const { admissionNo: _blockedAdmissionNo, ...safeStudentData } = studentData as InsertStudent & { admissionNo?: unknown };
+    const schoolId = requirePositiveSchoolId(safeStudentData.schoolId);
+    const issuedAt = new Date();
+    return db.transaction(async (tx) => {
+      // The encoded year is the year the FCGS identifier is issued, not a historical
+      // enrollment date that may have been backfilled from a legacy system. Persist the
+      // exact same timestamp so a year-boundary request cannot create an audit mismatch.
+      const admissionNo = await this.allocateNextPersonNumber(tx, "student", schoolId, issuedAt);
+      const [newStudent] = await tx.insert(students).values({ ...safeStudentData, schoolId, admissionNo, createdAt: issuedAt }).returning();
+      return newStudent;
+    });
   }
 
   async updateStudent(id: number, studentData: Partial<InsertStudent>): Promise<Student | undefined> {
+    const { admissionNo: _blockedAdmissionNo, schoolId: _blockedSchoolId, ...safeStudentData } = studentData as Partial<InsertStudent> & { admissionNo?: unknown; schoolId?: unknown };
     const [updated] = await db
       .update(students)
-      .set(studentData)
+      .set(safeStudentData)
       .where(and(eq(students.id, id), isNull(students.archivedAt)))
       .returning();
     return updated;
@@ -1408,38 +1470,8 @@ export class DatabaseStorage implements IStorage {
     return archived;
   }
 
-  async getNextAdmissionNo(options?: { schoolId?: number | null; referenceDate?: string | Date | null }): Promise<string> {
-    const referenceDate = this.normalizeReferenceDate(options?.referenceDate);
-    const schoolId = options?.schoolId || null;
-    const year = referenceDate.getFullYear();
-    const start = new Date(year, 0, 1);
-    const end = new Date(year + 1, 0, 1);
-
-    const conditions = [
-      gte(sql`COALESCE(${students.enrollmentDate}::timestamp, ${students.createdAt})`, start),
-      lt(sql`COALESCE(${students.enrollmentDate}::timestamp, ${students.createdAt})`, end),
-    ];
-    if (schoolId) {
-      conditions.push(eq(students.schoolId, schoolId));
-    }
-
-    const rows = await db
-      .select({ admissionNo: students.admissionNo })
-      .from(students)
-      .where(and(...conditions));
-
-    let maxSequence = 0;
-    const pattern = new RegExp(`^FCGS${String(year).slice(-2)}S(\\d{4})${this.getSchoolSequenceCode(schoolId)}$`, "i");
-    for (const row of rows) {
-      const match = (row.admissionNo || "").match(pattern);
-      if (!match) continue;
-      const sequence = Number(match[1]);
-      if (Number.isFinite(sequence) && sequence > maxSequence) {
-        maxSequence = sequence;
-      }
-    }
-
-    return this.buildFormattedSequenceNumber("S", schoolId, referenceDate, maxSequence + 1);
+  async getNextAdmissionNo(options: { schoolId: number; referenceDate?: string | Date | null }): Promise<string> {
+    return this.peekNextPersonNumber("student", options.schoolId, options.referenceDate);
   }
 
   async getSubjectsBySchool(schoolId: number): Promise<Subject[]> {

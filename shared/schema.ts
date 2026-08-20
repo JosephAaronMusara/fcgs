@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, json, jsonb, index, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, date, decimal, pgEnum, json, jsonb, index, uniqueIndex, check, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -197,7 +197,13 @@ export const staff = pgTable("staff", {
   mobileId: text("mobile_id"),
   accessGroupId: integer("access_group_id"),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  normalizedStaffNoUniqueIdx: uniqueIndex("staff_staff_no_normalized_uidx").on(sql`upper(btrim(${table.staffNo}))`),
+  canonicalStaffNoCheck: check(
+    "staff_staff_no_canonical_chk",
+    sql`${table.staffNo} = upper(btrim(${table.staffNo})) AND ${table.staffNo} ~ '^FCGS[0-9]{2}E[0-9]{4,}[A-Z]+$'`,
+  ),
+}));
 
 export const streams = pgTable("streams", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -285,7 +291,32 @@ export const students = pgTable("students", {
   feesStatus: text("fees_status").default("n/a"),
   archivedAt: timestamp("archived_at"),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  normalizedAdmissionNoUniqueIdx: uniqueIndex("students_admission_no_normalized_uidx").on(sql`upper(btrim(${table.admissionNo}))`),
+  canonicalAdmissionNoCheck: check(
+    "students_admission_no_canonical_chk",
+    sql`${table.admissionNo} = upper(btrim(${table.admissionNo})) AND ${table.admissionNo} ~ '^FCGS[0-9]{2}S[0-9]{4,}[A-Z]+$'`,
+  ),
+}));
+
+export const personNumberSequences = pgTable("person_number_sequences", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  entityType: text("entity_type").notNull(),
+  year: integer("year").notNull(),
+  schoolId: integer("school_id").notNull(),
+  lastSequence: integer("last_sequence").notNull().default(0),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (table) => ({
+  allocationKeyUniqueIdx: uniqueIndex("person_number_sequences_entity_year_school_uidx").on(
+    table.entityType,
+    table.year,
+    table.schoolId,
+  ),
+  entityTypeCheck: check("person_number_sequences_entity_type_chk", sql`${table.entityType} IN ('student', 'staff')`),
+  yearCheck: check("person_number_sequences_year_chk", sql`${table.year} BETWEEN 2000 AND 9999`),
+  schoolIdCheck: check("person_number_sequences_school_id_chk", sql`${table.schoolId} > 0`),
+  sequenceCheck: check("person_number_sequences_last_sequence_chk", sql`${table.lastSequence} >= 0`),
+}));
 
 export const subjects = pgTable("subjects", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -1831,12 +1862,12 @@ export const userSchoolAccess = pgTable("user_school_access", {
 export const insertOrganizationSchema = omitInsertFields(createInsertSchema(organizations), { id: true, createdAt: true });
 export const insertSchoolSchema = omitInsertFields(createInsertSchema(schools), { id: true, createdAt: true });
 export const insertUserSchema = omitInsertFields(createInsertSchema(users), { id: true, createdAt: true });
-export const insertStaffSchema = omitInsertFields(createInsertSchema(staff), { id: true, createdAt: true });
+export const insertStaffSchema = omitInsertFields(createInsertSchema(staff), { id: true, staffNo: true, createdAt: true });
 export const insertStreamSchema = omitInsertFields(createInsertSchema(streams), { id: true });
 export const insertClassSchema = omitInsertFields(createInsertSchema(classes), { id: true, archivedAt: true, createdAt: true });
 export const insertClassTeacherAssignmentSchema = omitInsertFields(createInsertSchema(classTeacherAssignments), { id: true, createdAt: true });
 export const insertParentSchema = omitInsertFields(createInsertSchema(parents), { id: true, createdAt: true });
-export const insertStudentSchema = omitInsertFields(createInsertSchema(students), { id: true, archivedAt: true, createdAt: true });
+export const insertStudentSchema = omitInsertFields(createInsertSchema(students), { id: true, admissionNo: true, archivedAt: true, createdAt: true });
 export const insertSubjectSchema = omitInsertFields(createInsertSchema(subjects), { id: true });
 export const insertStaffSubjectSchema = omitInsertFields(createInsertSchema(staffSubjects), { id: true });
 export const insertStudentSubjectSchema = omitInsertFields(createInsertSchema(studentSubjects), { id: true });

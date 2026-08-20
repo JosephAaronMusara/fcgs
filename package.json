@@ -44,7 +44,12 @@
     "grades:links:repair": "tsx script/repair-assessment-grade-links.ts",
     "grades:links:repair:apply": "tsx script/repair-assessment-grade-links.ts --apply",
     "grades:history:retire": "tsx script/retire-grade-4-vacation-results.ts",
-    "grades:history:retire:apply": "tsx script/retire-grade-4-vacation-results.ts --apply"
+    "grades:history:retire:apply": "tsx script/retire-grade-4-vacation-results.ts --apply",
+    "numbering:audit": "tsx script/audit-person-numbering.ts",
+    "numbering:logic-test": "tsx script/test-person-numbering.ts",
+    "numbering:preflight": "tsx script/preflight-person-numbering.ts",
+    "numbering:sync": "tsx script/sync-person-number-sequences.ts",
+    "numbering:source-check": "node script/validate-person-numbering-hardening.cjs"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

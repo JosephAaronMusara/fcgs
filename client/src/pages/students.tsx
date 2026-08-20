@@ -442,7 +442,6 @@ export default function StudentsPage() {
     }
 
     const data: Partial<Student> = {
-      admissionNo: formData.get("admissionNo") as string,
       firstName: formData.get("firstName") as string,
       lastName: formData.get("lastName") as string,
       nationalIdNumber: ((formData.get("nationalIdNumber") as string) || "").trim() || undefined,
@@ -541,7 +540,6 @@ export default function StudentsPage() {
         };
 
         const studentData = jsonData.map(row => ({
-          admissionNo: row["Reg No."] || row["Admission No"] || row["admission_no"] || row["RegNo"] || "",
           firstName: (row["First Name"] || row["first_name"] || row["FirstName"] || "").trim(),
           lastName: (row["Last Name"] || row["last_name"] || row["LastName"] || "").trim(),
           email: row["Student Email"] || row["student_email"] || row["Email"] || row["email"] || "",
@@ -1623,11 +1621,15 @@ function StudentForm({
           <Label htmlFor="admissionNo">Admission No</Label>
           <Input
             id="admissionNo"
-            name="admissionNo"
-            defaultValue={defaultValues?.admissionNo || defaultAdmissionNo}
-            required
+            value={defaultValues?.admissionNo || defaultAdmissionNo || "Assigned automatically when saved"}
+            readOnly
+            aria-readonly="true"
+            className="bg-muted font-mono"
             data-testid="input-admission-no"
           />
+          <p className="text-xs text-muted-foreground">
+            {defaultValues ? "Permanent identifier — it cannot be edited." : "Preview only. The server assigns the final number when you save."}
+          </p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="status">Status</Label>

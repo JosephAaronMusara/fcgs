@@ -3405,7 +3405,6 @@ export async function registerRoutes(
     studentId: z.coerce.number().int().positive(),
     destinationSchoolId: z.coerce.number().int().positive(),
     destinationClassId: z.coerce.number().int().positive(),
-    admissionNo: z.string().trim().optional().nullable(),
     effectiveDate: z.string().min(4),
     reason: z.string().trim().min(3),
     notes: z.string().trim().optional().nullable(),
@@ -3586,6 +3585,9 @@ export async function registerRoutes(
 
   app.post("/api/internal-transfers/students", requireAuth, requirePermission("internal_transfers.transfer.student"), async (req, res, next) => {
     try {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "admissionNo")) {
+        return res.status(400).json({ message: "Admission numbers are permanent and cannot be changed during a transfer" });
+      }
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const data = internalTransferStudentSchema.parse(req.body);
@@ -3679,11 +3681,11 @@ export async function registerRoutes(
 
   app.get("/api/staff/next-no", requireAuth, async (req, res, next) => {
     try {
-      const staffNo = await storage.getNextStaffNo({
-        schoolId: getSchoolContext(req),
-        referenceDate: new Date(),
-      });
-      res.json({ staffNo });
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "School context is required to preview a staff number" });
+      const staffNo = await storage.getNextStaffNo({ schoolId, referenceDate: new Date() });
+      res.json({ staffNo, previewOnly: true });
     } catch (error) {
       next(error);
     }
@@ -3750,17 +3752,26 @@ export async function registerRoutes(
 
   app.post("/api/staff", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
-      const schoolId = getSchoolContext(req);
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "staffNo")) {
+        return res.status(400).json({ message: "Staff numbers are assigned automatically by the server" });
+      }
+      const currentUser = req.user as User;
+      const contextSchoolId = getSchoolContext(req) || currentUser.schoolId || undefined;
       const data = insertStaffSchema.parse(req.body);
       if (!data.nationalIdNumber?.trim()) {
         return res.status(400).json({ message: "National ID Number is required" });
       }
-      const effectiveSchoolId = data.schoolId || schoolId || undefined;
-      const referenceDate = new Date();
-      const staffNo = (data.staffNo || (await storage.getNextStaffNo({ schoolId: effectiveSchoolId, referenceDate }))).toUpperCase();
+      if (currentUser.role !== "org_admin" && data.schoolId && data.schoolId !== contextSchoolId) {
+        return res.status(403).json({ message: "You cannot create staff in another school" });
+      }
+      const effectiveSchoolId = currentUser.role === "org_admin"
+        ? (data.schoolId || contextSchoolId)
+        : contextSchoolId;
+      if (!effectiveSchoolId) {
+        return res.status(400).json({ message: "School context is required before a staff number can be assigned" });
+      }
       const newStaff = await storage.createStaff({
         ...data,
-        staffNo,
         nationalIdNumber: data.nationalIdNumber.trim(),
         passportNumber: data.passportNumber?.trim() || null,
         schoolId: effectiveSchoolId,
@@ -3774,8 +3785,13 @@ export async function registerRoutes(
 
   app.put("/api/staff/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "staffNo")) {
+        return res.status(400).json({ message: "Staff numbers are permanent and cannot be edited" });
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "schoolId")) {
+        return res.status(400).json({ message: "Use Internal Transfers to move a staff member between schools" });
+      }
       const payload: any = { ...req.body };
-      if (typeof payload.staffNo === "string") payload.staffNo = payload.staffNo.toUpperCase();
       if (typeof payload.nationalIdNumber === "string") payload.nationalIdNumber = payload.nationalIdNumber.trim();
       if (typeof payload.passportNumber === "string") payload.passportNumber = payload.passportNumber.trim() || null;
       if (payload.accessGroupId !== undefined && payload.accessGroupId !== null) {
@@ -3818,16 +3834,19 @@ export async function registerRoutes(
       if (!Array.isArray(staffData)) {
         return res.status(400).json({ message: "Invalid staff data" });
       }
-      const schoolId = getSchoolContext(req);
+      const currentUser = req.user as User;
+      const effectiveSchoolId = getSchoolContext(req) || currentUser.schoolId || undefined;
+      if (!effectiveSchoolId) {
+        return res.status(400).json({ message: "School context is required before staff can be imported" });
+      }
       let imported = 0;
       const errors: string[] = [];
       for (const s of staffData) {
         try {
-          const nextNo = await storage.getNextStaffNo();
+          const { staffNo: _ignoredStaffNo, schoolId: _ignoredSchoolId, ...safeImportData } = s || {};
           const cleanedData = {
-            ...s,
-            staffNo: nextNo,
-            schoolId: schoolId || undefined,
+            ...safeImportData,
+            schoolId: effectiveSchoolId,
             gender: s.gender && s.gender.trim() !== "" ? s.gender.trim().toLowerCase() : null,
             email: s.email && s.email.trim() !== "" ? s.email.trim() : null,
             phone: s.phone && s.phone.trim() !== "" ? s.phone.trim() : null,
@@ -5117,11 +5136,11 @@ export async function registerRoutes(
 
   app.get("/api/students/next-admission-no", requireAuth, async (req, res, next) => {
     try {
-      const admissionNo = await storage.getNextAdmissionNo({
-        schoolId: getSchoolContext(req),
-        referenceDate: new Date(),
-      });
-      res.json({ admissionNo });
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "School context is required to preview an admission number" });
+      const admissionNo = await storage.getNextAdmissionNo({ schoolId, referenceDate: new Date() });
+      res.json({ admissionNo, previewOnly: true });
     } catch (error) {
       next(error);
     }
@@ -5193,14 +5212,23 @@ export async function registerRoutes(
 
   app.post("/api/students", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "admissionNo")) {
+        return res.status(400).json({ message: "Admission numbers are assigned automatically by the server" });
+      }
       const currentUser = req.user as User;
-      const schoolId = getSchoolContext(req);
+      const contextSchoolId = getSchoolContext(req) || currentUser.schoolId || undefined;
       const data = insertStudentSchema.parse(req.body);
-      const effectiveSchoolId = data.schoolId || schoolId || currentUser.schoolId || undefined;
-      const enrollmentReferenceDate = data.enrollmentDate || new Date();
+      if (currentUser.role !== "org_admin" && data.schoolId && data.schoolId !== contextSchoolId) {
+        return res.status(403).json({ message: "You cannot create students in another school" });
+      }
+      const effectiveSchoolId = currentUser.role === "org_admin"
+        ? (data.schoolId || contextSchoolId)
+        : contextSchoolId;
+      if (!effectiveSchoolId) {
+        return res.status(400).json({ message: "School context is required before an admission number can be assigned" });
+      }
       const normalizedData: any = {
         ...data,
-        admissionNo: (data.admissionNo || (await storage.getNextAdmissionNo({ schoolId: effectiveSchoolId, referenceDate: enrollmentReferenceDate }))).toUpperCase(),
         nationalIdNumber: data.nationalIdNumber?.trim() || null,
         passportNumber: data.passportNumber?.trim() || null,
         schoolId: effectiveSchoolId,
@@ -5233,6 +5261,12 @@ export async function registerRoutes(
 
   app.put("/api/students/:id", requireAuth, requirePermission("students.edit"), async (req, res, next) => {
     try {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "admissionNo")) {
+        return res.status(400).json({ message: "Admission numbers are permanent and cannot be edited" });
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "schoolId")) {
+        return res.status(400).json({ message: "Use Internal Transfers to move a student between schools" });
+      }
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req) || currentUser.schoolId;
       const studentId = parseIdParam(req.params.id);
@@ -5243,9 +5277,7 @@ export async function registerRoutes(
       if (schoolId && existing.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const { schoolId: _bodySchoolId, ...studentUpdateBody } = (req.body || {}) as Record<string, unknown>;
-      const normalizedData: any = { ...studentUpdateBody };
-      if (typeof normalizedData.admissionNo === "string") normalizedData.admissionNo = normalizedData.admissionNo.toUpperCase();
+      const normalizedData: any = { ...(req.body || {}) };
       if (typeof normalizedData.nationalIdNumber === "string") normalizedData.nationalIdNumber = normalizedData.nationalIdNumber.trim() || null;
       if (typeof normalizedData.passportNumber === "string") normalizedData.passportNumber = normalizedData.passportNumber.trim() || null;
       if (Object.prototype.hasOwnProperty.call(normalizedData, "isDayScholar")) {
@@ -5601,6 +5633,9 @@ export async function registerRoutes(
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const effectiveSchoolId = schoolId || currentUser.schoolId;
+      if (!effectiveSchoolId) {
+        return res.status(400).json({ message: "School context is required before students can be imported" });
+      }
 
       interface ImportStudentData {
         admissionNo?: string;
@@ -5632,8 +5667,6 @@ export async function registerRoutes(
       const schoolClasses = effectiveSchoolId ? allClasses.filter(c => c.schoolId === effectiveSchoolId) : allClasses;
       const allParents = await storage.getAllParents();
       const schoolParents = effectiveSchoolId ? allParents.filter(p => p.schoolId === effectiveSchoolId) : allParents;
-      const allStudents = await storage.getAllStudents();
-
       const classMap = new Map<string, number>();
       for (const c of schoolClasses) {
         classMap.set(c.className.toLowerCase().trim(), c.id);
@@ -5647,8 +5680,6 @@ export async function registerRoutes(
         }
       }
 
-      const existingAdmissionNos = new Set(allStudents.map(s => s.admissionNo?.toLowerCase()));
-
       let imported = 0;
       let skipped = 0;
       let parentsCreated = 0;
@@ -5660,21 +5691,6 @@ export async function registerRoutes(
           if (!student.firstName || !student.lastName) {
             skipped++;
             continue;
-          }
-
-          let admissionNo = student.admissionNo?.trim() || "";
-          if (admissionNo && existingAdmissionNos.has(admissionNo.toLowerCase())) {
-            skipped++;
-            continue;
-          }
-
-          if (!admissionNo) {
-            const existingNumbers = allStudents
-              .map(s => s.admissionNo)
-              .filter(n => n && n.startsWith("FCGSM"))
-              .map(n => parseInt(n.replace("FCGSM", "")) || 0);
-            const maxNo = existingNumbers.length > 0 ? Math.max(...existingNumbers) : 0;
-            admissionNo = `FCGSM${String(maxNo + 1 + imported).padStart(4, "0")}`;
           }
 
           let classId: number | undefined;
@@ -5722,7 +5738,6 @@ export async function registerRoutes(
           }
 
           await storage.createStudent({
-            admissionNo,
             firstName: student.firstName.trim(),
             lastName: student.lastName.trim(),
             email: student.email?.trim() || undefined,
@@ -5732,12 +5747,12 @@ export async function registerRoutes(
             address: student.address?.trim() || undefined,
             classId,
             parentId,
-            schoolId: effectiveSchoolId || undefined,
+            schoolId: effectiveSchoolId,
+            enrollmentDate: student.enrollmentDate?.trim() || undefined,
             status: (student.status as "active" | "inactive" | "transferred" | "graduated") || "active",
             isDayScholar: true,
           });
 
-          existingAdmissionNos.add(admissionNo.toLowerCase());
           imported++;
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -10471,10 +10486,8 @@ ${schoolName}`;
             relationship: updated.parentRelationship || "parent",
           });
 
-          const admissionNo = await storage.getNextAdmissionNo();
           await storage.createStudent({
             schoolId: updated.schoolId,
-            admissionNo,
             firstName: updated.firstName,
             lastName: updated.lastName,
             email: undefined,

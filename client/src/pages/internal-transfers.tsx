@@ -81,7 +81,6 @@ export default function InternalTransfersPage() {
     studentId: "",
     destinationSchoolId: "",
     destinationClassId: "",
-    admissionNo: "",
     effectiveDate: todayIso(),
     reason: "",
     notes: "",
@@ -170,7 +169,6 @@ export default function InternalTransfersPage() {
         studentId: Number(studentForm.studentId),
         destinationSchoolId: Number(studentForm.destinationSchoolId),
         destinationClassId: Number(studentForm.destinationClassId),
-        admissionNo: studentForm.admissionNo.trim() || null,
         notes: studentForm.notes.trim() || null,
       });
       return res.json();
@@ -178,7 +176,7 @@ export default function InternalTransfersPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/students"] });
       queryClient.invalidateQueries({ queryKey: ["/api/internal-transfers"] });
-      setStudentForm({ studentId: "", destinationSchoolId: "", destinationClassId: "", admissionNo: "", effectiveDate: todayIso(), reason: "", notes: "" });
+      setStudentForm({ studentId: "", destinationSchoolId: "", destinationClassId: "", effectiveDate: todayIso(), reason: "", notes: "" });
       toast({
         title: "Student transferred",
         description: data?.warnings?.length ? data.warnings.join(" ") : "The student has been moved to the destination school.",
@@ -296,7 +294,7 @@ export default function InternalTransfersPage() {
                         key={student.id}
                         type="button"
                         className={`w-full text-left p-3 hover:bg-muted/60 ${selected ? "bg-primary/10" : ""}`}
-                        onClick={() => setStudentForm((prev) => ({ ...prev, studentId: String(student.id), destinationSchoolId: "", destinationClassId: "", admissionNo: "" }))}
+                        onClick={() => setStudentForm((prev) => ({ ...prev, studentId: String(student.id), destinationSchoolId: "", destinationClassId: "" }))}
                       >
                         <div className="flex items-center justify-between gap-3">
                           <div>
@@ -368,8 +366,9 @@ export default function InternalTransfersPage() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>New admission number</Label>
-                    <Input placeholder="Leave blank to keep current" value={studentForm.admissionNo} onChange={(e) => setStudentForm((prev) => ({ ...prev, admissionNo: e.target.value }))} />
+                    <Label>Admission number</Label>
+                    <Input value={sourceStudent?.admissionNo || "Select a student"} readOnly aria-readonly="true" className="bg-muted font-mono" />
+                    <p className="text-xs text-muted-foreground">Permanent identifier — transfers keep the existing admission number.</p>
                   </div>
                   <div className="space-y-2">
                     <Label>Effective date</Label>
