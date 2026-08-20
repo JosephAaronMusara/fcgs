@@ -1590,8 +1590,12 @@ export const recruitmentSettings = pgTable("recruitment_settings", {
   attachmentSizeLimitMB: integer("attachment_size_limit_mb").notNull().default(15),
   careersPageTitle: text("careers_page_title").notNull().default("Careers at First Choice Group of Schools"),
   careersPageMessage: text("careers_page_message").notNull().default("Apply for an advertised vacancy or submit a general application for future opportunities."),
-  generalApplicationCategories: jsonb("general_application_categories").notNull().default(sql`'["Teaching","Administration","Finance","Quality Control","Information Technology","Transport","Assets & Inventory","Call Centre","Ancillary Staff","Other"]'::jsonb`),
+  generalApplicationCategories: jsonb("general_application_categories").notNull().default(sql`'["High School Teaching","Primary School Teaching","Non-Teaching / Support Staff"]'::jsonb`),
   duplicateMatchFields: jsonb("duplicate_match_fields").notNull().default(sql`'["email","phone","national_id"]'::jsonb`),
+  highSchoolMaxAge: integer("high_school_max_age").notNull().default(35),
+  highSchoolMinimumALevelPoints: integer("high_school_minimum_a_level_points").notNull().default(13),
+  highSchoolTeachingQualifiedMinimumALevelPoints: integer("high_school_teaching_qualified_minimum_a_level_points").notNull().default(10),
+  highSchoolTeachingQualificationExceptionEnabled: boolean("high_school_teaching_qualification_exception_enabled").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({ organizationUnique: uniqueIndex("recruitment_settings_org_uidx").on(table.organizationId) }));
@@ -1681,6 +1685,11 @@ export const recruitmentApplications = pgTable("recruitment_applications", {
   yearsExperience: decimal("years_experience", { precision: 6, scale: 2 }).notNull().default("0"),
   currentEmployer: text("current_employer"),
   coverLetter: text("cover_letter"),
+  ageAtSubmission: integer("age_at_submission"),
+  aLevelResults: jsonb("a_level_results").notNull().default(sql`'[]'::jsonb`),
+  aLevelPoints: integer("a_level_points"),
+  holdsTeachingQualification: boolean("holds_teaching_qualification").notNull().default(false),
+  eligibilityRoute: text("eligibility_route"),
   normalizedEmail: text("normalized_email").notNull(),
   normalizedPhone: text("normalized_phone").notNull(),
   normalizedNationalId: text("normalized_national_id").notNull(),
@@ -1751,6 +1760,7 @@ export const recruitmentRejectionAttempts = pgTable("recruitment_rejection_attem
   reasonCode: text("reason_code").notNull(),
   failedRequirementCodes: jsonb("failed_requirement_codes").notNull().default(sql`'[]'::jsonb`),
   duplicateApplicationId: integer("duplicate_application_id").references(() => recruitmentApplications.id),
+  screeningDetails: jsonb("screening_details").notNull().default(sql`'{}'::jsonb`),
   attemptedAt: timestamp("attempted_at").defaultNow(),
 }, (table) => ({ organizationReasonIdx: index("recruitment_rejection_attempts_org_reason_idx").on(table.organizationId, table.reasonCode, table.attemptedAt) }));
 

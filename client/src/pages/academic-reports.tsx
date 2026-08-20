@@ -171,7 +171,7 @@ interface MeritRow {
   cellGrades?: Record<number, string>;
   total: number;
   totalDisplay?: string;
-  avg: number;
+  avg: number | null;
   avgDisplay?: string;
   points?: number | string;
   pointsDisplay?: string;
@@ -186,6 +186,9 @@ interface MeritData {
   rows: MeritRow[];
   totalStudents: number;
   showPointsColumn?: boolean;
+  showPositionColumn?: boolean;
+  rankingMode?: "none" | "average_percentage" | "average_grade_points" | null;
+  missingMarksPolicy?: "ZERO";
 }
 
 interface AnalyticsData {
@@ -227,6 +230,9 @@ interface StreamMeritData {
   }[];
   totalStudents: number;
   showPointsColumn?: boolean;
+  showPositionColumn?: boolean;
+  rankingMode?: "none" | "average_percentage" | "average_grade_points" | null;
+  missingMarksPolicy?: "ZERO";
 }
 
 interface StreamAnalyticsData {
@@ -692,6 +698,7 @@ function downloadMeritWorkbook(args: {
   contextLabel: string;
   subjects: string[];
   showPointsColumn?: boolean;
+  showPositionColumn?: boolean;
   rows: Array<{
     studentName: string;
     admissionNo?: string | null;
@@ -708,7 +715,7 @@ function downloadMeritWorkbook(args: {
     "Total",
     "Average",
     ...(args.showPointsColumn ? ["Points"] : []),
-    "Pos",
+    ...(args.showPositionColumn !== false ? ["Pos"] : []),
   ];
   const body = args.rows.map((row) => [
     formatStudentNameWithAdmission(row.studentName, row.admissionNo),
@@ -716,7 +723,7 @@ function downloadMeritWorkbook(args: {
     row.total,
     row.avg,
     ...(args.showPointsColumn ? [row.points ?? ""] : []),
-    row.position,
+    ...(args.showPositionColumn !== false ? [row.position] : []),
   ]);
 
   const subjectColumnWidths = args.subjects.map((subject) =>
@@ -747,7 +754,7 @@ function downloadMeritWorkbook(args: {
       64,
       70,
       ...(args.showPointsColumn ? [58] : []),
-      48,
+      ...(args.showPositionColumn !== false ? [48] : []),
     ],
     freezeFirstColumn: true,
   });
@@ -917,6 +924,16 @@ function MissingMarksDialog({
   );
 }
 
+function getMeritRankingDescription(data?: { rankingMode?: "none" | "average_percentage" | "average_grade_points" | null }) {
+  if (data?.rankingMode === "average_grade_points") {
+    return "Ranked by configured grade points and grade distribution; missing marks count as 0";
+  }
+  if (data?.rankingMode === "none") {
+    return "ECD results summary; positions are not calculated (missing marks count as 0)";
+  }
+  return "Ranked by average percentage; missing marks count as 0";
+}
+
 function ClassMeritDialog({
   open,
   onOpenChange,
@@ -946,6 +963,7 @@ function ClassMeritDialog({
       contextLabel: effectiveClassName,
       subjects: data.subjects.map((subject) => subject.name),
       showPointsColumn: !!data.showPointsColumn,
+      showPositionColumn: data.showPositionColumn !== false,
       rows: data.rows.map((row) => ({
         studentName: row.studentName,
         admissionNo: row.admissionNo,
@@ -953,7 +971,7 @@ function ClassMeritDialog({
           return formatMeritCellForDisplay(row, subject.id);
         }),
         total: row.totalDisplay || row.total,
-        avg: row.avgDisplay || `${Math.round(row.avg)}%`,
+        avg: row.avgDisplay || (row.avg == null ? "-" : `${Math.round(row.avg)}%`),
         points: row.pointsDisplay ?? row.points ?? "",
         position: row.position,
       })),
@@ -967,7 +985,7 @@ function ClassMeritDialog({
           <div>
             <DialogTitle>{effectiveClassName} — Merit List</DialogTitle>
             <DialogDescription>
-              Sorted by average (missing marks count as 0)
+              {getMeritRankingDescription(data)}
             </DialogDescription>
           </div>
           <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-muted-foreground">
@@ -1017,7 +1035,9 @@ function ClassMeritDialog({
                   {data.showPointsColumn && (
                     <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Points</th>
                   )}
-                  <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
+                  {data.showPositionColumn !== false && (
+                    <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -1033,12 +1053,14 @@ function ClassMeritDialog({
                     ))}
                     <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.totalDisplay || row.total}</td>
                     <td className="text-center px-2 py-2 border-r font-semibold whitespace-nowrap">
-                      {row.avgDisplay || `${Math.round(row.avg)}%`}
+                      {row.avgDisplay || (row.avg == null ? "-" : `${Math.round(row.avg)}%`)}
                     </td>
                     {data.showPointsColumn && (
                       <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.pointsDisplay ?? row.points ?? "–"}</td>
                     )}
-                    <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
+                    {data.showPositionColumn !== false && (
+                      <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -1240,6 +1262,7 @@ function StreamMeritDialog({
       contextLabel: effectiveStreamName,
       subjects: data.subjects,
       showPointsColumn: !!data.showPointsColumn,
+      showPositionColumn: data.showPositionColumn !== false,
       rows: data.rows.map((row) => ({
         studentName: row.studentName,
         admissionNo: row.admissionNo,
@@ -1259,7 +1282,7 @@ function StreamMeritDialog({
           <div>
             <DialogTitle>{effectiveStreamName} — Stream Merit List</DialogTitle>
             <DialogDescription>
-              Top students across all classes in this stream
+              {getMeritRankingDescription(data)}
             </DialogDescription>
           </div>
           <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-muted-foreground">
@@ -1309,7 +1332,9 @@ function StreamMeritDialog({
                   {data.showPointsColumn && (
                     <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Points</th>
                   )}
-                  <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
+                  {data.showPositionColumn !== false && (
+                    <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -1328,7 +1353,9 @@ function StreamMeritDialog({
                     {data.showPointsColumn && (
                       <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.points ?? "–"}</td>
                     )}
-                    <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
+                    {data.showPositionColumn !== false && (
+                      <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
+                    )}
                   </tr>
                 ))}
               </tbody>

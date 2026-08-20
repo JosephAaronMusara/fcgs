@@ -189,13 +189,19 @@ export default function NewslettersPage() {
     || (selectedScope === "classes" && selectedClassIds.length > 0)
     || (selectedScope === "individuals" && (selectedAudience === "staff" ? selectedStaffIds.length > 0 : selectedStudentIds.length > 0));
 
-  const { data: recipientCounts, isFetching: isPreviewLoading } = useQuery<RecipientPreview>({
+  const {
+    data: recipientCounts,
+    isFetching: isPreviewLoading,
+    isError: isPreviewError,
+    error: recipientPreviewError,
+  } = useQuery<RecipientPreview>({
     queryKey: ["/api/newsletters/recipient-preview", targetPayload],
     queryFn: async () => {
       const res = await apiRequest("POST", "/api/newsletters/recipient-preview", targetPayload);
       return res.json();
     },
     enabled: isAddOpen && hasValidTarget,
+    retry: false,
   });
 
   const createNewsletter = useMutation({
@@ -255,6 +261,7 @@ export default function NewslettersPage() {
     event.preventDefault();
     if (selectedChannels.length === 0) return toast({ title: "Please select at least one channel", variant: "destructive" });
     if (!hasValidTarget) return toast({ title: "Please complete the target audience selection", variant: "destructive" });
+    if (isPreviewError) return toast({ title: "Unable to verify recipients", description: recipientPreviewError instanceof Error ? recipientPreviewError.message : "Recipient preview failed", variant: "destructive" });
     if (!recipientCounts || recipientCounts.total === 0) return toast({ title: "The selected audience has no recipients", variant: "destructive" });
     const formData = new FormData(event.currentTarget);
     createNewsletter.mutate({
@@ -276,7 +283,14 @@ export default function NewslettersPage() {
     return <div className="flex items-center justify-center min-h-[400px]"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>;
   }
 
-  const previewText = isPreviewLoading ? "Checking recipients..." : `${recipientCounts?.total || 0} matching recipients`;
+  const previewText = isPreviewLoading
+    ? "Checking recipients..."
+    : isPreviewError
+      ? "Unable to calculate recipients"
+      : `${recipientCounts?.total ?? 0} matching recipients`;
+  const previewErrorText = isPreviewError
+    ? (recipientPreviewError instanceof Error ? recipientPreviewError.message : "Recipient preview failed")
+    : null;
 
   return (
     <div className="space-y-6">
@@ -346,8 +360,9 @@ export default function NewslettersPage() {
                   </div>
                 )}
 
-                <div className="rounded-md bg-muted/50 px-3 py-2 text-sm" aria-live="polite">
+                <div className={`rounded-md px-3 py-2 text-sm ${isPreviewError ? "border border-destructive/40 bg-destructive/5 text-destructive" : "bg-muted/50"}`} aria-live="polite">
                   <span className="font-medium">Recipient Preview:</span> {previewText}
+                  {previewErrorText && <p className="mt-1 text-xs break-words">{previewErrorText}</p>}
                 </div>
               </div>
 
@@ -364,7 +379,7 @@ export default function NewslettersPage() {
                     <Card key={key} className={`cursor-pointer transition-colors ${selectedChannels.includes(key) ? "border-primary/50 bg-primary/5" : ""}`} onClick={() => toggleChannel(key)} data-testid={`channel-${key}`}>
                       <CardContent className="flex items-center gap-3 p-3">
                         <Checkbox checked={selectedChannels.includes(key)} onClick={(e) => e.stopPropagation()} onCheckedChange={() => toggleChannel(key)} data-testid={`checkbox-${key}`} />
-                        <Icon className="h-5 w-5 text-muted-foreground" /><span className="font-medium flex-1">{label}</span><span className="text-sm text-muted-foreground">({isPreviewLoading ? "checking..." : `${count} recipients`})</span><CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                        <Icon className="h-5 w-5 text-muted-foreground" /><span className="font-medium flex-1">{label}</span><span className="text-sm text-muted-foreground">({isPreviewLoading ? "checking..." : isPreviewError ? "unavailable" : `${count} recipients`})</span><CheckCircle2 className="h-5 w-5 text-emerald-500" />
                       </CardContent>
                     </Card>
                   ))}
@@ -372,7 +387,7 @@ export default function NewslettersPage() {
                 </div>
               </div>
 
-              <Button type="submit" className="w-full" disabled={createNewsletter.isPending || selectedChannels.length === 0 || !hasValidTarget || !recipientCounts?.total} data-testid="button-submit-newsletter">Save as Draft</Button>
+              <Button type="submit" className="w-full" disabled={createNewsletter.isPending || isPreviewLoading || isPreviewError || selectedChannels.length === 0 || !hasValidTarget || !recipientCounts?.total} data-testid="button-submit-newsletter">Save as Draft</Button>
             </form>
           </DialogContent>
         </Dialog>

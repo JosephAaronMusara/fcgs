@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { schoolFetch } from "@/lib/queryClient";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { apiRequest, queryClient, schoolFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -8,9 +8,14 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, ArrowLeft, Mail, Phone, MapPin, Calendar, User, BookOpen, AlertTriangle, DollarSign, FileText, AlertCircle, Clock, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, ArrowLeft, Mail, Phone, MapPin, Calendar, User, BookOpen, AlertTriangle, DollarSign, FileText, AlertCircle, Clock, ChevronLeft, ChevronRight, Pencil } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, Legend } from "recharts";
 import { useAuth } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { useLocation } from "wouter";
 
 interface SearchResult {
   id: number;
@@ -68,6 +73,17 @@ const STATUS_LETTERS: Record<string, string> = {
 
 const CHART_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"];
 
+function dateInputValue(value: unknown): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return raw.length >= 10 ? raw.slice(0, 10) : raw;
+}
+
+function nullableText(value: unknown): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
 export default function Student360Page() {
   const urlParams = new URLSearchParams(window.location.search);
   const urlStudentId = urlParams.get("id") ? parseInt(urlParams.get("id")!) : null;
@@ -77,7 +93,14 @@ export default function Student360Page() {
   const [selectedExamId, setSelectedExamId] = useState<string>("");
   const [showSearch, setShowSearch] = useState(!urlStudentId);
   const [libraryPage, setLibraryPage] = useState(1);
+  const [studentEditOpen, setStudentEditOpen] = useState(false);
+  const [parentEditOpen, setParentEditOpen] = useState(false);
+  const [studentDraft, setStudentDraft] = useState<Record<string, any>>({});
+  const [parentDraft, setParentDraft] = useState<Record<string, any>>({});
   const libraryPerPage = 5;
+  const { hasPermission } = useAuth();
+  const { toast } = useToast();
+  const [, setLocation] = useLocation();
 
   const { data: searchResults = [] } = useQuery<SearchResult[]>({
     queryKey: ["/api/students/search", searchQuery],
@@ -110,11 +133,7 @@ export default function Student360Page() {
   };
 
   const goBack = () => {
-    setSelectedStudentId(null);
-    setShowSearch(true);
-    setSelectedExamId("");
-    setSearchQuery("");
-    window.history.replaceState(null, "", "/student-360");
+    setLocation("/dashboard");
   };
 
   const student = profile?.student;
@@ -130,6 +149,116 @@ export default function Student360Page() {
   const attendanceCalendar = profile?.attendanceCalendar || [];
   const libraryBorrowings = profile?.libraryBorrowings || [];
   const disciplineRecords = profile?.disciplineRecords || [];
+
+  const updateStudentMutation = useMutation({
+    mutationFn: async (payload: Record<string, any>) => {
+      if (!selectedStudentId) throw new Error("No student selected");
+      const res = await apiRequest("PUT", `/api/students/${selectedStudentId}`, payload);
+      return res.json();
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/student-profile", selectedStudentId] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/students"] }),
+      ]);
+      setStudentEditOpen(false);
+      toast({ title: "Student updated", description: "Student information was updated successfully." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Unable to update student", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const updateParentMutation = useMutation({
+    mutationFn: async (payload: Record<string, any>) => {
+      if (!parent?.id) throw new Error("No parent selected");
+      const res = await apiRequest("PUT", `/api/parents/${parent.id}`, payload);
+      return res.json();
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/student-profile", selectedStudentId] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/parents"] }),
+      ]);
+      setParentEditOpen(false);
+      toast({ title: "Parent updated", description: "Parent information was updated successfully." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Unable to update parent", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const openStudentEditor = () => {
+    if (!student) return;
+    setStudentDraft({
+      firstName: student.firstName || "",
+      lastName: student.lastName || "",
+      gender: student.gender || "",
+      dateOfBirth: dateInputValue(student.dateOfBirth),
+      phone: student.phone || "",
+      email: student.email || "",
+      nationalIdNumber: student.nationalIdNumber || "",
+      passportNumber: student.passportNumber || "",
+      streetAddress: student.streetAddress || "",
+      residentialArea: student.residentialArea || "",
+      address: student.address || "",
+    });
+    setStudentEditOpen(true);
+  };
+
+  const openParentEditor = () => {
+    if (!parent) return;
+    setParentDraft({
+      firstName: parent.firstName || "",
+      lastName: parent.lastName || "",
+      phone: parent.phone || "",
+      email: parent.email || "",
+      relationship: parent.relationship || "parent",
+      occupation: parent.occupation || "",
+      streetAddress: parent.streetAddress || "",
+      residentialArea: parent.residentialArea || "",
+      address: parent.address || "",
+    });
+    setParentEditOpen(true);
+  };
+
+  const saveStudent = () => {
+    if (!String(studentDraft.firstName || "").trim() || !String(studentDraft.lastName || "").trim()) {
+      toast({ title: "Name required", description: "First name and last name are required.", variant: "destructive" });
+      return;
+    }
+    updateStudentMutation.mutate({
+      firstName: String(studentDraft.firstName).trim(),
+      lastName: String(studentDraft.lastName).trim(),
+      gender: studentDraft.gender || null,
+      dateOfBirth: studentDraft.dateOfBirth || null,
+      phone: nullableText(studentDraft.phone),
+      email: nullableText(studentDraft.email),
+      nationalIdNumber: nullableText(studentDraft.nationalIdNumber),
+      passportNumber: nullableText(studentDraft.passportNumber),
+      streetAddress: nullableText(studentDraft.streetAddress),
+      residentialArea: nullableText(studentDraft.residentialArea),
+      address: nullableText(studentDraft.address),
+    });
+  };
+
+  const saveParent = () => {
+    if (!String(parentDraft.firstName || "").trim() || !String(parentDraft.lastName || "").trim() || !String(parentDraft.phone || "").trim()) {
+      toast({ title: "Required details missing", description: "Parent first name, last name and phone number are required.", variant: "destructive" });
+      return;
+    }
+    updateParentMutation.mutate({
+      firstName: String(parentDraft.firstName).trim(),
+      lastName: String(parentDraft.lastName).trim(),
+      phone: String(parentDraft.phone).trim(),
+      email: nullableText(parentDraft.email),
+      relationship: nullableText(parentDraft.relationship) || "parent",
+      occupation: nullableText(parentDraft.occupation),
+      streetAddress: nullableText(parentDraft.streetAddress),
+      residentialArea: nullableText(parentDraft.residentialArea),
+      address: nullableText(parentDraft.address),
+    });
+  };
 
   const attendanceRate = useMemo(() => {
     if (!attendanceSummary || attendanceSummary.total === 0) return null;
@@ -271,7 +400,15 @@ export default function Student360Page() {
         {/* LEFT COLUMN */}
         <div className="lg:col-span-3 space-y-4">
           <Card>
-            <CardContent className="p-4 space-y-4">
+            <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2">
+              <CardTitle className="text-sm font-semibold">Student Information</CardTitle>
+              {hasPermission("students.edit") && (
+                <Button variant="outline" size="sm" onClick={openStudentEditor} data-testid="button-edit-student-360">
+                  <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+                </Button>
+              )}
+            </CardHeader>
+            <CardContent className="p-4 pt-0 space-y-4">
               <div className="flex flex-col items-center gap-3">
                 <Avatar className="h-24 w-24">
                   {student.photo && <AvatarImage src={student.photo} />}
@@ -332,8 +469,13 @@ export default function Student360Page() {
 
           {parent && (
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2">
                 <CardTitle className="text-sm font-semibold">Parent Information</CardTitle>
+                {hasPermission("parents.edit") && (
+                  <Button variant="outline" size="sm" onClick={openParentEditor} data-testid="button-edit-parent-360">
+                    <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+                  </Button>
+                )}
               </CardHeader>
               <CardContent className="p-4 pt-0 space-y-2 text-sm">
                 <div>
@@ -832,6 +974,55 @@ export default function Student360Page() {
           </CardContent>
         </Card>
       </div>
+      <Dialog open={studentEditOpen} onOpenChange={setStudentEditOpen}>
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
+          <DialogHeader>
+            <DialogTitle>Edit Student Information</DialogTitle>
+            <DialogDescription>Update the student's personal and contact details. Registration number is intentionally not editable here.</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-2">
+            <div className="space-y-1.5"><Label htmlFor="student360-first-name">First Name</Label><Input id="student360-first-name" value={studentDraft.firstName || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, firstName: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-last-name">Last Name</Label><Input id="student360-last-name" value={studentDraft.lastName || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, lastName: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label>Gender</Label><Select value={studentDraft.gender || ""} onValueChange={(value) => setStudentDraft((d) => ({ ...d, gender: value }))}><SelectTrigger><SelectValue placeholder="Select gender" /></SelectTrigger><SelectContent><SelectItem value="male">Male</SelectItem><SelectItem value="female">Female</SelectItem></SelectContent></Select></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-dob">Date of Birth</Label><Input id="student360-dob" type="date" value={studentDraft.dateOfBirth || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, dateOfBirth: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-phone">Phone</Label><Input id="student360-phone" value={studentDraft.phone || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, phone: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-email">Email</Label><Input id="student360-email" type="email" value={studentDraft.email || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, email: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-national-id">National ID</Label><Input id="student360-national-id" value={studentDraft.nationalIdNumber || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, nationalIdNumber: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-passport">Passport Number</Label><Input id="student360-passport" value={studentDraft.passportNumber || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, passportNumber: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-street">Street Address</Label><Input id="student360-street" value={studentDraft.streetAddress || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, streetAddress: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="student360-area">Residential Area</Label><Input id="student360-area" value={studentDraft.residentialArea || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, residentialArea: e.target.value }))} /></div>
+            <div className="space-y-1.5 sm:col-span-2"><Label htmlFor="student360-address">City / Address</Label><Textarea id="student360-address" value={studentDraft.address || ""} onChange={(e) => setStudentDraft((d) => ({ ...d, address: e.target.value }))} /></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStudentEditOpen(false)} disabled={updateStudentMutation.isPending}>Cancel</Button>
+            <Button onClick={saveStudent} disabled={updateStudentMutation.isPending}>{updateStudentMutation.isPending ? "Saving..." : "Save Student"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={parentEditOpen} onOpenChange={setParentEditOpen}>
+        <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
+          <DialogHeader>
+            <DialogTitle>Edit Parent Information</DialogTitle>
+            <DialogDescription>Update the linked parent's contact and address details.</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-2">
+            <div className="space-y-1.5"><Label htmlFor="parent360-first-name">First Name</Label><Input id="parent360-first-name" value={parentDraft.firstName || ""} onChange={(e) => setParentDraft((d) => ({ ...d, firstName: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="parent360-last-name">Last Name</Label><Input id="parent360-last-name" value={parentDraft.lastName || ""} onChange={(e) => setParentDraft((d) => ({ ...d, lastName: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="parent360-phone">Phone</Label><Input id="parent360-phone" value={parentDraft.phone || ""} onChange={(e) => setParentDraft((d) => ({ ...d, phone: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="parent360-email">Email</Label><Input id="parent360-email" type="email" value={parentDraft.email || ""} onChange={(e) => setParentDraft((d) => ({ ...d, email: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="parent360-relationship">Relationship</Label><Input id="parent360-relationship" value={parentDraft.relationship || ""} onChange={(e) => setParentDraft((d) => ({ ...d, relationship: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="parent360-occupation">Occupation</Label><Input id="parent360-occupation" value={parentDraft.occupation || ""} onChange={(e) => setParentDraft((d) => ({ ...d, occupation: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="parent360-street">Street Address</Label><Input id="parent360-street" value={parentDraft.streetAddress || ""} onChange={(e) => setParentDraft((d) => ({ ...d, streetAddress: e.target.value }))} /></div>
+            <div className="space-y-1.5"><Label htmlFor="parent360-area">Residential Area</Label><Input id="parent360-area" value={parentDraft.residentialArea || ""} onChange={(e) => setParentDraft((d) => ({ ...d, residentialArea: e.target.value }))} /></div>
+            <div className="space-y-1.5 sm:col-span-2"><Label htmlFor="parent360-address">City / Address</Label><Textarea id="parent360-address" value={parentDraft.address || ""} onChange={(e) => setParentDraft((d) => ({ ...d, address: e.target.value }))} /></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setParentEditOpen(false)} disabled={updateParentMutation.isPending}>Cancel</Button>
+            <Button onClick={saveParent} disabled={updateParentMutation.isPending}>{updateParentMutation.isPending ? "Saving..." : "Save Parent"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
