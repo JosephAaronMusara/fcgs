@@ -605,6 +605,7 @@ export const transportVehicles = pgTable("transport_vehicles", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
   registrationNumber: text("registration_number").notNull(),
+  registrationKey: text("registration_key"), // Uppercase alphanumeric key with spaces removed for organisation-wide duplicate detection.
   makeModel: text("make_model"),
   capacity: integer("capacity").notNull().default(1),
   ownershipType: text("ownership_type").notNull().default("school"),
@@ -619,6 +620,7 @@ export const transportVehicles = pgTable("transport_vehicles", {
   status: text("status").notNull().default("active"),
   isActive: boolean("is_active").notNull().default(true),
   notes: text("notes"),
+  routeNotes: text("route_notes"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({ schoolRegistrationUnique: uniqueIndex("transport_vehicles_school_registration_uidx").on(table.schoolId, table.registrationNumber) }));
@@ -652,6 +654,7 @@ export const transportSettings = pgTable("transport_settings", {
   fortnightAnchorDate: date("fortnight_anchor_date"),
   mapProvider: text("map_provider").notNull().default("openstreetmap"),
   defaultCheckpointRadiusMeters: integer("default_checkpoint_radius_meters").notNull().default(50),
+  savedPointSuggestionRadiusMeters: integer("saved_point_suggestion_radius_meters").notNull().default(50),
   attachmentSizeLimitMB: integer("attachment_size_limit_mb").notNull().default(25),
   complianceNotificationDays: jsonb("compliance_notification_days").notNull().default(sql`'[30,14,7,1,0]'::jsonb`),
   complianceNotificationRecipients: jsonb("compliance_notification_recipients").notNull().default(sql`'["transport_manager"]'::jsonb`),
@@ -664,7 +667,7 @@ export const transportSettings = pgTable("transport_settings", {
 export const transportServicePoints = pgTable("transport_service_points", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
-  studentId: integer("student_id").references(() => students.id).notNull(),
+  studentId: integer("student_id").references(() => students.id), // Optional provenance; saved points are reusable organisation-wide.
   pointType: text("point_type").notNull().default("both"),
   name: text("name").notNull(),
   latitude: decimal("latitude", { precision: 10, scale: 7 }).notNull(),
@@ -1244,6 +1247,165 @@ export const transportPayouts = pgTable("transport_payouts", {
   paidByUserId: integer("paid_by_user_id").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => ({ claimUnique: uniqueIndex("transport_payout_claim_uidx").on(table.claimId) }));
+
+// Vehicle-to-destination assignments. A Transport vehicle is organisation-visible, but
+// destinations remain school-owned operational records. This join lets the same physical
+// vehicle serve multiple destinations across multiple schools without duplicating the vehicle.
+export const transportVehicleDestinations = pgTable("transport_vehicle_destinations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  routeId: integer("route_id").references(() => transportRoutes.id).notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ vehicleRouteUnique: uniqueIndex("transport_vehicle_destination_uidx").on(table.vehicleId, table.routeId) }));
+
+// Monthly billing runs replace the old empty Charges tab with an auditable generation history.
+export const transportBillingRuns = pgTable("transport_billing_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  runNumber: text("run_number").notNull().unique(),
+  serviceYear: integer("service_year").notNull(),
+  serviceMonth: integer("service_month").notNull(),
+  status: text("status").notNull().default("completed"),
+  generatedCount: integer("generated_count").notNull().default(0),
+  skippedCount: integer("skipped_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  totalAmount: decimal("total_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  details: jsonb("details").notNull().default(sql`'{}'::jsonb`),
+  generatedByUserId: integer("generated_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Cash refunds are physical school cash outflows. Linking them to a cash-up makes net cash in
+// hand reconcilable without pretending a refund is a negative receipt.
+export const transportCashupRefunds = pgTable("transport_cashup_refunds", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  cashupId: integer("cashup_id").references(() => transportCashups.id).notNull(),
+  refundId: integer("refund_id").references(() => transportRefunds.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ refundUnique: uniqueIndex("transport_cashup_refund_uidx").on(table.refundId) }));
+
+// Organisation-level provider subscription policy. Historical rows are never rewritten after
+// settlement posting; replacing an open-month rule preserves the old row for audit.
+export const transportSubscriptionPolicies = pgTable("transport_subscription_policies", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id),
+  ruleType: text("rule_type").notNull().default("fixed"),
+  value: decimal("value", { precision: 12, scale: 2 }).notNull(),
+  minimumAmount: decimal("minimum_amount", { precision: 12, scale: 2 }),
+  maximumAmount: decimal("maximum_amount", { precision: 12, scale: 2 }),
+  startYear: integer("start_year").notNull(),
+  startMonth: integer("start_month").notNull(),
+  status: text("status").notNull().default("pending"),
+  notes: text("notes"),
+  supersededByPolicyId: integer("superseded_by_policy_id"),
+  replacedAt: timestamp("replaced_at"),
+  replacedByUserId: integer("replaced_by_user_id").references(() => users.id),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// HQ settlement layer. School claims remain the service evidence; HQ consolidates and pays them.
+export const transportHqClaims = pgTable("transport_hq_claims", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  claimNumber: text("claim_number").notNull().unique(),
+  serviceYear: integer("service_year").notNull(),
+  serviceMonth: integer("service_month").notNull(),
+  status: text("status").notNull().default("draft"),
+  grossAmount: decimal("gross_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  deductionAmount: decimal("deduction_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  netAmount: decimal("net_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  snapshot: jsonb("snapshot").notNull().default(sql`'{}'::jsonb`),
+  notes: text("notes"),
+  preparedByUserId: integer("prepared_by_user_id").references(() => users.id).notNull(),
+  reviewedByUserId: integer("reviewed_by_user_id").references(() => users.id),
+  reviewedAt: timestamp("reviewed_at"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ vehiclePeriodUnique: uniqueIndex("transport_hq_claim_vehicle_period_uidx").on(table.organizationId, table.vehicleId, table.serviceYear, table.serviceMonth) }));
+
+export const transportHqClaimItems = pgTable("transport_hq_claim_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  hqClaimId: integer("hq_claim_id").references(() => transportHqClaims.id).notNull(),
+  schoolClaimId: integer("school_claim_id").references(() => transportClaims.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  grossAmount: decimal("gross_amount", { precision: 12, scale: 2 }).notNull(),
+  deductionAmount: decimal("deduction_amount", { precision: 12, scale: 2 }).notNull(),
+  netAmount: decimal("net_amount", { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ schoolClaimUnique: uniqueIndex("transport_hq_claim_school_claim_uidx").on(table.schoolClaimId) }));
+
+export const transportHqPayouts = pgTable("transport_hq_payouts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  hqClaimId: integer("hq_claim_id").references(() => transportHqClaims.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  payoutNumber: text("payout_number").notNull().unique(),
+  status: text("status").notNull().default("not_paid"),
+  netAmount: decimal("net_amount", { precision: 12, scale: 2 }).notNull(),
+  amountPaid: decimal("amount_paid", { precision: 12, scale: 2 }).notNull().default("0"),
+  generatedByUserId: integer("generated_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ hqClaimUnique: uniqueIndex("transport_hq_payout_claim_uidx").on(table.hqClaimId) }));
+
+export const transportProviderPaymentRuns = pgTable("transport_provider_payment_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  ownerId: integer("owner_id").references(() => transportOwners.id),
+  runNumber: text("run_number").notNull().unique(),
+  serviceYear: integer("service_year"),
+  serviceMonth: integer("service_month"),
+  status: text("status").notNull().default("open"),
+  totalDue: decimal("total_due", { precision: 12, scale: 2 }).notNull().default("0"),
+  amountPaid: decimal("amount_paid", { precision: 12, scale: 2 }).notNull().default("0"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const transportProviderPaymentRunItems = pgTable("transport_provider_payment_run_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  runId: integer("run_id").references(() => transportProviderPaymentRuns.id).notNull(),
+  payoutId: integer("payout_id").references(() => transportHqPayouts.id).notNull(),
+  amountDue: decimal("amount_due", { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ payoutUnique: uniqueIndex("transport_provider_payment_run_payout_uidx").on(table.payoutId) }));
+
+export const transportProviderDisbursements = pgTable("transport_provider_disbursements", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  runId: integer("run_id").references(() => transportProviderPaymentRuns.id).notNull(),
+  disbursementNumber: text("disbursement_number").notNull().unique(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  paymentDate: date("payment_date").notNull(),
+  paymentMethod: text("payment_method").notNull().default("cash"),
+  paymentReference: text("payment_reference"),
+  collectorType: text("collector_type").notNull(),
+  collectorOwnerId: integer("collector_owner_id").references(() => transportOwners.id),
+  collectorDriverId: integer("collector_driver_id").references(() => transportDrivers.id),
+  collectorName: text("collector_name"),
+  collectorNationalId: text("collector_national_id"),
+  collectorPhone: text("collector_phone"),
+  collectorRole: text("collector_role"),
+  notes: text("notes"),
+  processedByUserId: integer("processed_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportProviderDisbursementAllocations = pgTable("transport_provider_disbursement_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  disbursementId: integer("disbursement_id").references(() => transportProviderDisbursements.id).notNull(),
+  runItemId: integer("run_item_id").references(() => transportProviderPaymentRunItems.id).notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ disbursementItemUnique: uniqueIndex("transport_provider_disbursement_item_uidx").on(table.disbursementId, table.runItemId) }));
 
 export const transportPeriodLocks = pgTable("transport_period_locks", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -2734,7 +2896,7 @@ export const assetRegister = pgTable("asset_register", {
   owningCentreId: integer("owning_centre_id").references(() => assetCentres.id),
   currentCentreId: integer("current_centre_id").references(() => assetCentres.id),
   assetNumber: text("asset_number").notNull(),
-  assetClass: text("asset_class").notNull().default("general"), // vehicle is reserved for future Fleet integration
+  assetClass: text("asset_class").notNull().default("general"), // vehicle assets are the identity source for Fleet Management
   name: text("name").notNull(),
   categoryId: integer("category_id").references(() => assetInventoryCategories.id),
   locationId: integer("location_id").references(() => assetInventoryLocations.id),
@@ -3181,6 +3343,335 @@ export const assetCentreTransferLines = pgTable("asset_centre_transfer_lines", {
   varianceNotes: text("variance_notes"),
   status: text("status").notNull().default("pending"),
 });
+
+
+// Fleet Management — operational extension of vehicle assets. Asset identity stays in asset_register/asset_vehicle_details.
+export const fleetVehicleProfiles = pgTable("fleet_vehicle_profiles", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  baseSchoolId: integer("base_school_id").references(() => schools.id),
+  assetId: integer("asset_id").notNull().references(() => assetRegister.id),
+  transportVehicleId: integer("transport_vehicle_id").references(() => transportVehicles.id),
+  capacity: integer("capacity").notNull().default(1),
+  allocationType: text("allocation_type").notNull().default("pool"), // pool | staff | department | school | temporary | student_transport
+  custodianStaffId: integer("custodian_staff_id").references(() => staff.id),
+  primaryDriverStaffId: integer("primary_driver_staff_id").references(() => staff.id),
+  currentOdometer: integer("current_odometer").notNull().default(0),
+  status: text("status").notNull().default("available"),
+  serviceIntervalKm: integer("service_interval_km").notNull().default(10000),
+  serviceIntervalMonths: integer("service_interval_months").notNull().default(6),
+  lastServiceDate: date("last_service_date"),
+  lastServiceOdometer: integer("last_service_odometer"),
+  nextServiceDate: date("next_service_date"),
+  nextServiceOdometer: integer("next_service_odometer"),
+  notes: text("notes"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  assetUnique: uniqueIndex("fleet_vehicle_profiles_asset_uidx").on(table.assetId),
+  transportUnique: uniqueIndex("fleet_vehicle_profiles_transport_uidx").on(table.transportVehicleId).where(sql`${table.transportVehicleId} is not null`),
+  orgStatusIdx: index("fleet_vehicle_profiles_org_status_idx").on(table.organizationId, table.status),
+}));
+
+export const fleetVehicleOccupants = pgTable("fleet_vehicle_occupants", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  occupantType: text("occupant_type").notNull(), // student | staff | other
+  studentId: integer("student_id").references(() => students.id),
+  staffId: integer("staff_id").references(() => staff.id),
+  occupantName: text("occupant_name"),
+  routeId: integer("route_id").references(() => transportRoutes.id),
+  routeName: text("route_name"),
+  serviceType: text("service_type").notNull().default("both"), // both | pickup | dropoff
+  sameLocation: boolean("same_location").notNull().default(true),
+  pickupServicePointId: integer("pickup_service_point_id").references(() => transportServicePoints.id),
+  dropoffServicePointId: integer("dropoff_service_point_id").references(() => transportServicePoints.id),
+  pickupName: text("pickup_name").notNull(),
+  pickupAddress: text("pickup_address"),
+  pickupLandmark: text("pickup_landmark"),
+  pickupLatitude: decimal("pickup_latitude", { precision: 10, scale: 7 }),
+  pickupLongitude: decimal("pickup_longitude", { precision: 10, scale: 7 }),
+  pickupPrivacyClass: text("pickup_privacy_class").notNull().default("private_household"),
+  pickupInstructions: text("pickup_instructions"),
+  dropoffName: text("dropoff_name"),
+  dropoffAddress: text("dropoff_address"),
+  dropoffLandmark: text("dropoff_landmark"),
+  dropoffLatitude: decimal("dropoff_latitude", { precision: 10, scale: 7 }),
+  dropoffLongitude: decimal("dropoff_longitude", { precision: 10, scale: 7 }),
+  dropoffPrivacyClass: text("dropoff_privacy_class").notNull().default("private_household"),
+  dropoffInstructions: text("dropoff_instructions"),
+  startDate: date("start_date").notNull(),
+  endDate: date("end_date"),
+  notes: text("notes"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  vehicleActiveIdx: index("fleet_vehicle_occupants_vehicle_active_idx").on(table.vehicleId, table.isActive),
+  routeIdx: index("fleet_vehicle_occupants_route_idx").on(table.routeId),
+  activeStudentUnique: uniqueIndex("fleet_vehicle_occupants_active_student_uidx").on(table.vehicleId, table.studentId).where(sql`${table.isActive} = true AND ${table.studentId} IS NOT NULL`),
+  activeStaffUnique: uniqueIndex("fleet_vehicle_occupants_active_staff_uidx").on(table.vehicleId, table.staffId).where(sql`${table.isActive} = true AND ${table.staffId} IS NOT NULL`),
+}));
+
+export const fleetDriverProfiles = pgTable("fleet_driver_profiles", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  staffId: integer("staff_id").notNull().references(() => staff.id),
+  licenceNumber: text("licence_number").notNull(),
+  licenceClass: text("licence_class").notNull(),
+  licenceExpiry: date("licence_expiry").notNull(),
+  permittedVehicleClasses: jsonb("permitted_vehicle_classes").notNull().default(sql`'[]'::jsonb`),
+  defensiveDrivingExpiry: date("defensive_driving_expiry"),
+  status: text("status").notNull().default("active"),
+  suspensionReason: text("suspension_reason"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ staffUnique: uniqueIndex("fleet_driver_profiles_staff_uidx").on(table.staffId) }));
+
+export const fleetAllocations = pgTable("fleet_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  allocationType: text("allocation_type").notNull(),
+  allocatedToType: text("allocated_to_type").notNull(), // staff | school | department | student_transport
+  allocatedToStaffId: integer("allocated_to_staff_id").references(() => staff.id),
+  allocatedToSchoolId: integer("allocated_to_school_id").references(() => schools.id),
+  allocatedToName: text("allocated_to_name"),
+  primaryDriverStaffId: integer("primary_driver_staff_id").references(() => staff.id),
+  startsAt: timestamp("starts_at").notNull().defaultNow(),
+  endsAt: timestamp("ends_at"),
+  odometerOut: integer("odometer_out"),
+  odometerIn: integer("odometer_in"),
+  conditionOut: text("condition_out").default("good"),
+  conditionIn: text("condition_in"),
+  status: text("status").notNull().default("active"),
+  reason: text("reason"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ vehicleStatusIdx: index("fleet_allocations_vehicle_status_idx").on(table.vehicleId, table.status) }));
+
+export const fleetVehicleRequests = pgTable("fleet_vehicle_requests", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  requesterStaffId: integer("requester_staff_id").notNull().references(() => staff.id),
+  purpose: text("purpose").notNull(),
+  destination: text("destination").notNull(),
+  departureAt: timestamp("departure_at").notNull(),
+  expectedReturnAt: timestamp("expected_return_at").notNull(),
+  passengerCount: integer("passenger_count").notNull().default(1),
+  vehicleRequirement: text("vehicle_requirement").notNull().default("any"),
+  driverRequired: boolean("driver_required").notNull().default(true),
+  specialRequirements: text("special_requirements"),
+  status: text("status").notNull().default("submitted"),
+  rejectionReason: text("rejection_reason"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  emergencyOverride: boolean("emergency_override").notNull().default(false),
+  emergencyReason: text("emergency_reason"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ orgStatusIdx: index("fleet_vehicle_requests_org_status_idx").on(table.organizationId, table.status) }));
+
+export const fleetTrips = pgTable("fleet_trips", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  requestId: integer("request_id").references(() => fleetVehicleRequests.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  driverStaffId: integer("driver_staff_id").notNull().references(() => staff.id),
+  purpose: text("purpose").notNull(),
+  destination: text("destination").notNull(),
+  plannedDepartureAt: timestamp("planned_departure_at"),
+  expectedReturnAt: timestamp("expected_return_at"),
+  actualDepartureAt: timestamp("actual_departure_at"),
+  actualReturnAt: timestamp("actual_return_at"),
+  startOdometer: integer("start_odometer"),
+  endOdometer: integer("end_odometer"),
+  distanceKm: integer("distance_km"),
+  passengerCount: integer("passenger_count").notNull().default(1),
+  status: text("status").notNull().default("allocated"),
+  emergencyOverride: boolean("emergency_override").notNull().default(false),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ vehicleStatusIdx: index("fleet_trips_vehicle_status_idx").on(table.vehicleId, table.status), driverStatusIdx: index("fleet_trips_driver_status_idx").on(table.driverStaffId, table.status) }));
+
+export const fleetOdometerReadings = pgTable("fleet_odometer_readings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  tripId: integer("trip_id").references(() => fleetTrips.id),
+  readingKm: integer("reading_km").notNull(),
+  readingType: text("reading_type").notNull(),
+  recordedAt: timestamp("recorded_at").notNull().defaultNow(),
+  notes: text("notes"),
+  recordedByUserId: integer("recorded_by_user_id").references(() => users.id),
+});
+
+export const fleetFuelTransactions = pgTable("fleet_fuel_transactions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  tripId: integer("trip_id").references(() => fleetTrips.id),
+  driverStaffId: integer("driver_staff_id").references(() => staff.id),
+  transactionDate: date("transaction_date").notNull(),
+  odometerKm: integer("odometer_km").notNull(),
+  fuelType: text("fuel_type").notNull(),
+  litres: decimal("litres", { precision: 12, scale: 3 }).notNull(),
+  pricePerLitre: decimal("price_per_litre", { precision: 12, scale: 4 }).notNull().default("0"),
+  totalCost: decimal("total_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  supplier: text("supplier"),
+  paymentMethod: text("payment_method").notNull().default("organisation_account"),
+  receiptReference: text("receipt_reference"),
+  receiptUrl: text("receipt_url"),
+  fullTank: boolean("full_tank").notNull().default(false),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const fleetInspections = pgTable("fleet_inspections", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  tripId: integer("trip_id").references(() => fleetTrips.id),
+  inspectorStaffId: integer("inspector_staff_id").references(() => staff.id),
+  inspectionType: text("inspection_type").notNull(), // pre_trip | return | scheduled
+  odometerKm: integer("odometer_km"),
+  checklist: jsonb("checklist").notNull().default(sql`'{}'::jsonb`),
+  result: text("result").notNull().default("pass"),
+  defects: text("defects"),
+  inspectedAt: timestamp("inspected_at").notNull().defaultNow(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+});
+
+export const fleetMaintenanceJobs = pgTable("fleet_maintenance_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  assetMaintenanceRecordId: integer("asset_maintenance_record_id").references(() => assetMaintenanceRecords.id),
+  referenceNumber: text("reference_number").notNull(),
+  jobType: text("job_type").notNull().default("repair"),
+  issueDescription: text("issue_description").notNull(),
+  odometerKm: integer("odometer_km"),
+  priority: text("priority").notNull().default("normal"),
+  status: text("status").notNull().default("reported"),
+  serviceProvider: text("service_provider"),
+  estimatedCost: decimal("estimated_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  actualCost: decimal("actual_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  workCompleted: text("work_completed"),
+  nextServiceDate: date("next_service_date"),
+  nextServiceOdometer: integer("next_service_odometer"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+  releasedByUserId: integer("released_by_user_id").references(() => users.id),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ orgReferenceUnique: uniqueIndex("fleet_maintenance_jobs_org_ref_uidx").on(table.organizationId, table.referenceNumber) }));
+
+export const fleetComplianceDocuments = pgTable("fleet_compliance_documents", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  documentType: text("document_type").notNull(),
+  documentNumber: text("document_number"),
+  issueDate: date("issue_date"),
+  expiryDate: date("expiry_date").notNull(),
+  issuingAuthority: text("issuing_authority"),
+  documentUrl: text("document_url"),
+  verificationStatus: text("verification_status").notNull().default("unverified"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ vehicleTypeIdx: index("fleet_compliance_vehicle_type_idx").on(table.vehicleId, table.documentType) }));
+
+export const fleetIncidents = pgTable("fleet_incidents", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  tripId: integer("trip_id").references(() => fleetTrips.id),
+  driverStaffId: integer("driver_staff_id").references(() => staff.id),
+  incidentType: text("incident_type").notNull(),
+  occurredAt: timestamp("occurred_at").notNull(),
+  location: text("location"),
+  description: text("description").notNull(),
+  injuriesReported: boolean("injuries_reported").notNull().default(false),
+  policeReportReference: text("police_report_reference"),
+  insuranceClaimNumber: text("insurance_claim_number"),
+  claimStatus: text("claim_status"),
+  estimatedDamage: decimal("estimated_damage", { precision: 14, scale: 2 }).notNull().default("0"),
+  amountRecovered: decimal("amount_recovered", { precision: 14, scale: 2 }).notNull().default("0"),
+  status: text("status").notNull().default("open"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const fleetDisposalRecommendations = pgTable("fleet_disposal_recommendations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  vehicleId: integer("vehicle_id").notNull().references(() => fleetVehicleProfiles.id),
+  reason: text("reason").notNull(),
+  conditionSnapshot: text("condition_snapshot"),
+  odometerSnapshot: integer("odometer_snapshot"),
+  maintenanceCostSnapshot: decimal("maintenance_cost_snapshot", { precision: 14, scale: 2 }).notNull().default("0"),
+  currentAssetValueSnapshot: decimal("current_asset_value_snapshot", { precision: 14, scale: 2 }).notNull().default("0"),
+  status: text("status").notNull().default("recommended"), // recommended | approved | declined | handed_to_assets | completed
+  reviewNotes: text("review_notes"),
+  recommendedByUserId: integer("recommended_by_user_id").references(() => users.id),
+  reviewedByUserId: integer("reviewed_by_user_id").references(() => users.id),
+  reviewedAt: timestamp("reviewed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ vehicleStatusIdx: index("fleet_disposal_vehicle_status_idx").on(table.vehicleId, table.status) }));
+
+export const fleetComponents = pgTable("fleet_components", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  schoolId: integer("school_id").references(() => schools.id),
+  componentType: text("component_type").notNull(), // tyre | battery
+  serialNumber: text("serial_number").notNull(),
+  brand: text("brand"),
+  specification: text("specification"),
+  purchaseDate: date("purchase_date"),
+  purchaseCost: decimal("purchase_cost", { precision: 14, scale: 2 }).notNull().default("0"),
+  supplier: text("supplier"),
+  warrantyExpiry: date("warranty_expiry"),
+  vehicleId: integer("vehicle_id").references(() => fleetVehicleProfiles.id),
+  wheelPosition: text("wheel_position"),
+  fittedAtOdometer: integer("fitted_at_odometer"),
+  fittedAt: timestamp("fitted_at"),
+  removedAtOdometer: integer("removed_at_odometer"),
+  removedAt: timestamp("removed_at"),
+  condition: text("condition").notNull().default("new"),
+  status: text("status").notNull().default("in_stock"),
+  removalReason: text("removal_reason"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ orgSerialUnique: uniqueIndex("fleet_components_org_serial_uidx").on(table.organizationId, table.serialNumber) }));
 
 export const insertAssetInventorySettingsSchema = omitInsertFields(createInsertSchema(assetInventorySettings), { id: true, createdAt: true, updatedAt: true });
 export const insertInventoryReturnableIssueSchema = omitInsertFields(createInsertSchema(inventoryReturnableIssues), { id: true, updatedAt: true });

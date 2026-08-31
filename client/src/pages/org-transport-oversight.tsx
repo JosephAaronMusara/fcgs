@@ -1,164 +1,66 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { AlertTriangle, BusFront, CircleDollarSign, Download, ExternalLink, Route, ShieldAlert, Users } from "lucide-react";
+import { AlertTriangle, BusFront, CircleDollarSign, Download, ExternalLink, Plus, Route, ShieldAlert, Users, WalletCards } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 
-type SchoolTransportSummary = {
-  schoolId: number;
-  schoolName: string;
-  shortCode: string;
-  enabled: boolean;
-  activeRoutes: number;
-  activeVehicles: number;
-  activeLearners: number;
-  totalCharges: number;
-  totalCollections: number;
-  outstandingBalance: number;
-  collectionRate: number;
-  openIncidents: number;
-  openClaims: number;
-  complianceWarnings: number;
-  status: "operating" | "not_configured";
-};
+const MONTHS=["January","February","March","April","May","June","July","August","September","October","November","December"];
+const money=(value:any)=>Number(value||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const title=(value:any)=>String(value||"—").replaceAll("_"," ").replace(/\b\w/g,(m)=>m.toUpperCase());
+function Status({value}:{value:any}){const v=String(value||"unknown");return <Badge variant={["paid","approved","active","reviewed"].includes(v)?"default":["rejected","cancelled"].includes(v)?"destructive":"secondary"}>{title(v)}</Badge>}
+function Field({label,children}:{label:string;children:any}){return <div className="space-y-2"><Label>{label}</Label>{children}</div>}
+function GridTable({heads,children}:{heads:string[];children:any}){return <div className="overflow-x-auto"><Table><TableHeader><TableRow>{heads.map(h=><TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader><TableBody>{children}</TableBody></Table></div>}
 
-type TransportOverview = {
-  summary: Omit<SchoolTransportSummary, "schoolId" | "schoolName" | "shortCode" | "enabled" | "status"> & { schoolsOperating: number };
-  schools: SchoolTransportSummary[];
-  alerts: Array<{ schoolId: number; schoolName: string; type: string; count: number; severity: string; message: string }>;
-  generatedAt: string;
-};
+type Overview=any; type Settlement=any;
 
-function money(value: number) {
-  return new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0);
+export default function OrgTransportOversightPage(){
+ const {enterSchool,hasPermission}=useAuth(); const [,setLocation]=useLocation(); const {toast}=useToast();
+ const [tab,setTab]=useState("overview"); const [claimStatus,setClaimStatus]=useState("all"); const [schoolFilter,setSchoolFilter]=useState("all"); const [payoutStatus,setPayoutStatus]=useState("all"); const [dialog,setDialog]=useState<any>(null);
+ const overview=useQuery<Overview>({queryKey:["/api/hq/transport/overview"]});
+ const settlements=useQuery<Settlement>({queryKey:["/api/hq/transport/settlements"],enabled:tab!=="overview"});
+ const mutate=useMutation({mutationFn:async({url,body}:{url:string;body?:any})=>{const r=await apiRequest("POST",url,body);return r.status===204?null:r.json()},onSuccess:async()=>{await queryClient.invalidateQueries({queryKey:["/api/hq/transport/settlements"]});setDialog(null);toast({title:"HQ Transport record saved"})},onError:(e:any)=>toast({title:"Action failed",description:e?.message||"Unable to complete action",variant:"destructive"})});
+ const openSchool=(schoolId:number)=>{enterSchool(schoolId);setLocation("/transport?mode=hq-oversight")};
+ const downloadExport=async()=>{const response=await fetch("/api/hq/transport/overview.csv",{credentials:"include"});if(!response.ok)throw new Error("Unable to export");const blob=await response.blob();const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="hq-transport-oversight.csv";a.click();URL.revokeObjectURL(url)};
+ if(overview.isLoading)return <div className="p-8 text-center text-muted-foreground">Loading HQ Transport…</div>;
+ if(!overview.data)return <Card><CardContent className="p-8 text-center text-destructive">Unable to load organisation Transport.</CardContent></Card>;
+ const data=overview.data, s=settlements.data;
+ const schoolClaims=(s?.schoolClaims||[]).filter((r:any)=>(schoolFilter==="all"||String(r.schoolId)===schoolFilter)&&(claimStatus==="all"||r.status===claimStatus)&&(payoutStatus==="all"||String(r.payoutStatus||"not_paid")===payoutStatus));
+ const cards=[{label:"Schools operating",value:data.summary.schoolsOperating,icon:BusFront},{label:"Active destinations",value:data.summary.activeRoutes,icon:Route},{label:"Learners using transport",value:data.summary.activeLearners,icon:Users},{label:"Open incidents",value:data.summary.openIncidents,icon:AlertTriangle},{label:"Outstanding learner balances",value:`USD ${money(data.summary.outstandingBalance)}`,icon:CircleDollarSign},{label:"Compliance warnings",value:data.summary.complianceWarnings,icon:ShieldAlert}];
+ return <div className="space-y-6" data-testid="hq-transport-oversight">
+  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="text-2xl font-semibold">HQ Transport</h2><p className="text-sm text-muted-foreground">Organisation oversight plus central provider settlement, payout and policy management.</p></div>{hasPermission("transport.organization.export")&&<Button variant="outline" onClick={()=>void downloadExport()}><Download className="mr-2 h-4 w-4"/>Export CSV</Button>}</div>
+  <Tabs value={tab} onValueChange={setTab}><div className="overflow-x-auto"><TabsList className="w-max"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="schoolClaims">School Claims</TabsTrigger><TabsTrigger value="hqClaims">HQ Consolidated Claims</TabsTrigger><TabsTrigger value="payouts">Payouts</TabsTrigger><TabsTrigger value="runs">Provider Payment Runs</TabsTrigger><TabsTrigger value="subscriptions">Subscription Rules</TabsTrigger></TabsList></div>
+   <TabsContent value="overview" className="space-y-5">
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{cards.map(({label,value,icon:Icon})=><Card key={label}><CardContent className="flex items-center justify-between p-5"><div><p className="text-sm text-muted-foreground">{label}</p><p className="mt-1 text-2xl font-semibold">{value}</p></div><Icon className="h-5 w-5"/></CardContent></Card>)}</div>
+    <Card><CardHeader><CardTitle>School comparison</CardTitle><CardDescription>Open a school to work in its real Transport context. HQ actions on organisation records remain organisation-wide.</CardDescription></CardHeader><CardContent><GridTable heads={["School","Destinations","Vehicles serving","Learners","Collection rate","Outstanding","Open claims","Actions"]}>{data.schools.map((r:any)=><TableRow key={r.schoolId}><TableCell className="font-medium">{r.schoolName}</TableCell><TableCell>{r.activeRoutes}</TableCell><TableCell>{r.activeVehicles}</TableCell><TableCell>{r.activeLearners}</TableCell><TableCell>{Number(r.collectionRate||0).toFixed(1)}%</TableCell><TableCell>USD {money(r.outstandingBalance)}</TableCell><TableCell>{r.openClaims}</TableCell><TableCell><Button size="sm" variant="outline" onClick={()=>openSchool(r.schoolId)}><ExternalLink className="mr-1 h-3.5 w-3.5"/>Open</Button></TableCell></TableRow>)}</GridTable></CardContent></Card>
+   </TabsContent>
+   <TabsContent value="schoolClaims"><Card><CardHeader className="gap-3 lg:flex-row lg:items-end lg:justify-between"><div><CardTitle>School Claims</CardTitle><CardDescription>Verified source claims from centres. HQ consolidation never rewrites the school claim history.</CardDescription></div><div className="flex flex-wrap gap-2"><SearchableSelect value={schoolFilter} onValueChange={setSchoolFilter} options={[{value:"all",label:"All Schools"},...(s?.schools||[]).map((x:any)=>({value:String(x.id),label:x.name}))]}/><SearchableSelect value={claimStatus} onValueChange={setClaimStatus} options={["all","draft","submitted","verified","approved","paid"].map(v=>({value:v,label:v==="all"?"All claim statuses":title(v)}))}/><SearchableSelect value={payoutStatus} onValueChange={setPayoutStatus} options={["all","not_paid","partially_paid","paid"].map(v=>({value:v,label:v==="all"?"All payout statuses":title(v)}))}/></div></CardHeader><CardContent>{!s?<p className="text-muted-foreground">Loading settlements…</p>:<GridTable heads={["School","Claim","Vehicle","Month","Net","Status","HQ Claim","Payout"]}>{schoolClaims.map((r:any)=><TableRow key={r.id}><TableCell>{r.schoolName}</TableCell><TableCell className="font-medium">{r.claimNumber}</TableCell><TableCell>{r.vehicleRegistration}</TableCell><TableCell>{MONTHS[Number(r.serviceMonth)-1]} {r.serviceYear}</TableCell><TableCell>USD {money(r.netAmount)}</TableCell><TableCell><Status value={r.status}/></TableCell><TableCell>{r.hqClaimNumber||"—"}</TableCell><TableCell><Status value={r.payoutStatus||"not_paid"}/></TableCell></TableRow>)}</GridTable>}</CardContent></Card></TabsContent>
+   <TabsContent value="hqClaims"><Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle>HQ Consolidated Claims</CardTitle><CardDescription>One consolidated vehicle/month settlement referencing all eligible school claims.</CardDescription></div><Button onClick={()=>setDialog({type:"consolidate"})}><Plus className="mr-2 h-4 w-4"/>Consolidate Claim</Button></CardHeader><CardContent><GridTable heads={["HQ Claim","Vehicle","Provider","Month","Schools","Net","Status","Actions"]}>{(s?.hqClaims||[]).map((r:any)=><TableRow key={r.id}><TableCell className="font-medium">{r.claimNumber}</TableCell><TableCell>{r.vehicleRegistration}</TableCell><TableCell>{r.ownerName}</TableCell><TableCell>{MONTHS[Number(r.serviceMonth)-1]} {r.serviceYear}</TableCell><TableCell>{r.items?.length||0}</TableCell><TableCell>USD {money(r.netAmount)}</TableCell><TableCell><Status value={r.status}/></TableCell><TableCell><div className="flex gap-1">{r.status==="draft"&&<Button size="sm" variant="outline" onClick={()=>mutate.mutate({url:`/api/hq/transport/claims/${r.id}/status`,body:{status:"reviewed"}})}>Review</Button>}{r.status==="reviewed"&&<Button size="sm" onClick={()=>mutate.mutate({url:`/api/hq/transport/claims/${r.id}/status`,body:{status:"approved"}})}>Approve</Button>}</div></TableCell></TableRow>)}</GridTable></CardContent></Card></TabsContent>
+   <TabsContent value="payouts"><Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle>HQ Provider Payouts</CardTitle><CardDescription>Payouts are created from approved HQ claims. Actual cash/bank disbursement is recorded through a Provider Payment Run.</CardDescription></div><Button onClick={()=>setDialog({type:"paymentRun"})}><WalletCards className="mr-2 h-4 w-4"/>Create Payment Run</Button></CardHeader><CardContent><GridTable heads={["Payout","HQ Claim","Vehicle","Provider","Net","Paid","Outstanding","Status"]}>{(s?.payouts||[]).map((r:any)=><TableRow key={r.id}><TableCell className="font-medium">{r.payoutNumber}</TableCell><TableCell>{r.claim?.claimNumber||"—"}</TableCell><TableCell>{r.vehicleRegistration}</TableCell><TableCell>{r.ownerName}</TableCell><TableCell>USD {money(r.netAmount)}</TableCell><TableCell>USD {money(r.amountPaid)}</TableCell><TableCell>USD {money(Math.max(0,Number(r.netAmount)-Number(r.amountPaid)))}</TableCell><TableCell><Status value={r.status}/></TableCell></TableRow>)}</GridTable></CardContent></Card></TabsContent>
+   <TabsContent value="runs"><Card><CardHeader><CardTitle>Provider Payment Runs</CardTitle><CardDescription>A run groups payouts owed to one provider. Each real-world cash collection is a separate disbursement with a named collector.</CardDescription></CardHeader><CardContent><GridTable heads={["Run","Provider","Period","Due","Paid","Status","Collections / Actions"]}>{(s?.paymentRuns||[]).map((r:any)=><TableRow key={r.id}><TableCell className="font-medium">{r.runNumber}</TableCell><TableCell>{r.ownerName}</TableCell><TableCell>{r.serviceMonth?`${MONTHS[Number(r.serviceMonth)-1]} ${r.serviceYear}`:"Mixed periods"}</TableCell><TableCell>USD {money(r.totalDue)}</TableCell><TableCell>USD {money(r.amountPaid)}</TableCell><TableCell><Status value={r.status}/></TableCell><TableCell><div className="flex flex-wrap gap-1">{r.disbursements?.map((d:any)=><Button key={d.id} size="sm" variant="ghost" onClick={()=>window.open(`/api/hq/transport/disbursements/${d.id}/print`,"_blank")}>{d.disbursementNumber}</Button>)}{r.status!=="paid"&&<Button size="sm" onClick={()=>setDialog({type:"disburse",run:r})}>Record Disbursement</Button>}</div></TableCell></TableRow>)}</GridTable></CardContent></Card></TabsContent>
+   <TabsContent value="subscriptions"><Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle>Organisation Subscription Rules</CardTitle><CardDescription>Only one rule per scope/month. A current open-month rule may be replaced before accounting/settlement is frozen; history is retained.</CardDescription></div><Button onClick={()=>setDialog({type:"subscription"})}><Plus className="mr-2 h-4 w-4"/>Add Rule</Button></CardHeader><CardContent><GridTable heads={["Scope","Rule","Value","Starts","Status","Notes"]}>{(s?.subscriptionPolicies||[]).map((r:any)=><TableRow key={r.id}><TableCell>{r.vehicleId?(s?.vehicles||[]).find((v:any)=>v.id===r.vehicleId)?.registrationNumber||`Vehicle ${r.vehicleId}`:"Organisation default"}</TableCell><TableCell>{title(r.ruleType)}</TableCell><TableCell>{r.ruleType==="fixed"?`USD ${money(r.value)}`:`${money(r.value)}%`}</TableCell><TableCell>{MONTHS[Number(r.startMonth)-1]} {r.startYear}</TableCell><TableCell><Status value={r.status}/></TableCell><TableCell>{r.notes||"—"}</TableCell></TableRow>)}</GridTable></CardContent></Card></TabsContent>
+  </Tabs>
+  {dialog&&<HqDialog state={dialog} data={s} close={()=>setDialog(null)} saving={mutate.isPending} submit={(url:string,body:any)=>mutate.mutate({url,body})}/>}
+ </div>
 }
 
-export default function OrgTransportOversightPage() {
-  const { enterSchool, hasPermission } = useAuth();
-  const [, setLocation] = useLocation();
-  const { data, isLoading, error } = useQuery<TransportOverview>({
-    queryKey: ["/api/hq/transport/overview"],
-  });
-
-  const openSchool = (schoolId: number) => {
-    enterSchool(schoolId);
-    setLocation("/transport?mode=hq-oversight");
-  };
-
-  const downloadExport = async () => {
-    const response = await fetch("/api/hq/transport/overview.csv", { credentials: "include" });
-    if (!response.ok) throw new Error("Unable to export transport oversight report");
-    const blob = await response.blob();
-    const disposition = response.headers.get("content-disposition") || "";
-    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "hq-transport-oversight.csv";
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  if (isLoading) {
-    return <div className="flex min-h-[360px] items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-b-2 border-primary" /></div>;
-  }
-  if (error || !data) {
-    return <Card><CardContent className="p-8 text-center text-destructive">Unable to load organisation transport oversight.</CardContent></Card>;
-  }
-
-  const summary = data.summary;
-  const cards = [
-    { label: "Schools operating", value: summary.schoolsOperating, icon: BusFront },
-    { label: "Active routes", value: summary.activeRoutes, icon: Route },
-    { label: "Learners using transport", value: summary.activeLearners, icon: Users },
-    { label: "Open incidents", value: summary.openIncidents, icon: AlertTriangle },
-    { label: "Outstanding balances", value: money(summary.outstandingBalance), icon: CircleDollarSign },
-    { label: "Compliance warnings", value: summary.complianceWarnings, icon: ShieldAlert },
-  ];
-
-  return (
-    <div className="space-y-6" data-testid="hq-transport-oversight">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold">Transport Oversight</h2>
-          <p className="text-sm text-muted-foreground">Organisation-wide read-only monitoring of outsourced school transport operations.</p>
-        </div>
-        {hasPermission("transport.organization.export") && (
-          <Button variant="outline" onClick={() => void downloadExport()} data-testid="button-export-hq-transport">
-            <Download className="mr-2 h-4 w-4" /> Export CSV
-          </Button>
-        )}
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {cards.map(({ label, value, icon: Icon }) => (
-          <Card key={label}>
-            <CardContent className="flex items-center justify-between p-5">
-              <div><p className="text-sm text-muted-foreground">{label}</p><p className="mt-1 text-2xl font-semibold">{value}</p></div>
-              <div className="rounded-full bg-primary/10 p-3"><Icon className="h-5 w-5 text-primary" /></div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Collections overview</CardTitle>
-          <CardDescription>Total charges {money(summary.totalCharges)} · collections {money(summary.totalCollections)}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <div className="flex items-center justify-between text-sm"><span>Organisation collection rate</span><strong>{summary.collectionRate.toFixed(1)}%</strong></div>
-          <Progress value={summary.collectionRate} />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>School comparison</CardTitle>
-          <CardDescription>Select a school to open its Transport workspace in HQ oversight mode.</CardDescription>
-        </CardHeader>
-        <CardContent className="overflow-x-auto p-0">
-          <Table>
-            <TableHeader><TableRow>
-              <TableHead>School</TableHead><TableHead>Routes</TableHead><TableHead>Vehicles</TableHead><TableHead>Learners</TableHead>
-              <TableHead>Collection rate</TableHead><TableHead>Outstanding</TableHead><TableHead>Incidents</TableHead><TableHead>Compliance</TableHead><TableHead />
-            </TableRow></TableHeader>
-            <TableBody>
-              {data.schools.map((school) => (
-                <TableRow key={school.schoolId}>
-                  <TableCell><div className="font-medium">{school.schoolName}</div><Badge variant={school.status === "operating" ? "default" : "secondary"}>{school.status === "operating" ? "Operating" : "Not configured"}</Badge></TableCell>
-                  <TableCell>{school.activeRoutes}</TableCell><TableCell>{school.activeVehicles}</TableCell><TableCell>{school.activeLearners}</TableCell>
-                  <TableCell className="min-w-32"><div className="space-y-1"><span className="text-sm">{school.collectionRate.toFixed(1)}%</span><Progress value={school.collectionRate} /></div></TableCell>
-                  <TableCell>{money(school.outstandingBalance)}</TableCell>
-                  <TableCell>{school.openIncidents ? <Badge variant="destructive">{school.openIncidents}</Badge> : "0"}</TableCell>
-                  <TableCell>{school.complianceWarnings ? <Badge variant="outline">{school.complianceWarnings}</Badge> : "0"}</TableCell>
-                  <TableCell><Button size="sm" variant="outline" onClick={() => openSchool(school.schoolId)}><ExternalLink className="mr-1 h-3.5 w-3.5" /> View</Button></TableCell>
-                </TableRow>
-              ))}
-              {!data.schools.length && <TableRow><TableCell colSpan={9} className="py-10 text-center text-muted-foreground">No schools are available.</TableCell></TableRow>}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader><CardTitle>Attention required</CardTitle><CardDescription>Items that HQ should follow up with the relevant school.</CardDescription></CardHeader>
-        <CardContent className="space-y-3">
-          {data.alerts.slice(0, 20).map((alert, index) => (
-            <div key={`${alert.schoolId}-${alert.type}-${index}`} className="flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div><p className="font-medium">{alert.schoolName}</p><p className="text-sm text-muted-foreground">{alert.message}</p></div>
-              <Button size="sm" variant="ghost" onClick={() => openSchool(alert.schoolId)}>Review school</Button>
-            </div>
-          ))}
-          {!data.alerts.length && <p className="py-6 text-center text-sm text-muted-foreground">No organisation-level transport alerts.</p>}
-        </CardContent>
-      </Card>
-    </div>
-  );
+function HqDialog({state,data,close,saving,submit}:any){
+ const now=new Date(); const [form,setForm]=useState<any>({serviceYear:now.getFullYear(),serviceMonth:now.getMonth()+1,startYear:now.getFullYear(),startMonth:now.getMonth()+1,ruleType:"fixed",value:"",vehicleId:null,payoutIds:[],paymentDate:new Date().toISOString().slice(0,10),paymentMethod:"cash",collectorType:"owner",allocations:[]}); const set=(k:string,v:any)=>setForm((c:any)=>({...c,[k]:v}));
+ if(state.type==="consolidate"){return <Dialog open onOpenChange={o=>!o&&close()}><DialogContent><DialogHeader><DialogTitle>Consolidate HQ Claim</DialogTitle><DialogDescription>Combines all verified school claims for one vehicle/month into one HQ settlement record.</DialogDescription></DialogHeader><Field label="Vehicle"><SearchableSelect value={form.vehicleId?String(form.vehicleId):""} onValueChange={v=>set("vehicleId",Number(v))} options={(data?.vehicles||[]).map((v:any)=>({value:String(v.id),label:v.registrationNumber}))}/></Field><div className="grid grid-cols-2 gap-3"><Field label="Year"><Input type="number" value={form.serviceYear} onChange={e=>set("serviceYear",Number(e.target.value))}/></Field><Field label="Month"><SearchableSelect value={String(form.serviceMonth)} onValueChange={v=>set("serviceMonth",Number(v))} options={MONTHS.map((m,i)=>({value:String(i+1),label:m}))}/></Field></div><DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving||!form.vehicleId} onClick={()=>submit("/api/hq/transport/claims/consolidate",{vehicleId:form.vehicleId,serviceYear:form.serviceYear,serviceMonth:form.serviceMonth})}>Consolidate</Button></DialogFooter></DialogContent></Dialog>}
+ if(state.type==="paymentRun"){const open=(data?.payouts||[]).filter((p:any)=>Number(p.amountPaid)<Number(p.netAmount)); const toggle=(id:number)=>set("payoutIds",form.payoutIds.includes(id)?form.payoutIds.filter((x:number)=>x!==id):[...form.payoutIds,id]);return <Dialog open onOpenChange={o=>!o&&close()}><DialogContent className="max-w-3xl"><DialogHeader><DialogTitle>Create Provider Payment Run</DialogTitle><DialogDescription>Select outstanding payouts for the same provider.</DialogDescription></DialogHeader><div className="max-h-80 overflow-y-auto rounded-md border">{open.map((p:any)=><label key={p.id} className="flex items-center gap-3 border-b p-3 text-sm"><input type="checkbox" checked={form.payoutIds.includes(p.id)} onChange={()=>toggle(p.id)}/><span className="font-medium">{p.payoutNumber}</span><span>{p.ownerName}</span><span className="ml-auto">USD {money(Number(p.netAmount)-Number(p.amountPaid))}</span></label>)}</div><DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving||!form.payoutIds.length} onClick={()=>submit("/api/hq/transport/payment-runs",{payoutIds:form.payoutIds})}>Create Run</Button></DialogFooter></DialogContent></Dialog>}
+ if(state.type==="subscription"){return <Dialog open onOpenChange={o=>!o&&close()}><DialogContent><DialogHeader><DialogTitle>Add Subscription Rule</DialogTitle><DialogDescription>A new rule supersedes the currently applicable rule for the same scope from the selected month. Historical records are retained.</DialogDescription></DialogHeader><Field label="Vehicle override"><SearchableSelect value={form.vehicleId?String(form.vehicleId):"all"} onValueChange={v=>set("vehicleId",v==="all"?null:Number(v))} options={[{value:"all",label:"Organisation default"},...(data?.vehicles||[]).map((v:any)=>({value:String(v.id),label:v.registrationNumber}))]}/></Field><div className="grid grid-cols-2 gap-3"><Field label="Rule type"><Select value={form.ruleType} onValueChange={v=>set("ruleType",v)}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="fixed">Fixed amount</SelectItem><SelectItem value="percentage">Percentage</SelectItem></SelectContent></Select></Field><Field label={form.ruleType==="fixed"?"Value (USD)":"Value (%)"}><Input type="number" value={form.value} onChange={e=>set("value",e.target.value)}/></Field><Field label="Start year"><Input type="number" value={form.startYear} onChange={e=>set("startYear",Number(e.target.value))}/></Field><Field label="Start month"><SearchableSelect value={String(form.startMonth)} onValueChange={v=>set("startMonth",Number(v))} options={MONTHS.map((m,i)=>({value:String(i+1),label:m}))}/></Field></div><Field label="Notes"><Textarea value={form.notes||""} onChange={e=>set("notes",e.target.value)}/></Field><DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving||form.value===""} onClick={()=>{if(window.confirm("This rule will supersede the currently applicable rule for the same scope from the selected month. Continue?"))submit("/api/hq/transport/subscription-policies",{vehicleId:form.vehicleId,ruleType:form.ruleType,value:Number(form.value),startYear:form.startYear,startMonth:form.startMonth,notes:form.notes||null})}}>Save Rule</Button></DialogFooter></DialogContent></Dialog>}
+ if(state.type==="disburse"){const run=state.run; const ownerDrivers=(data?.drivers||[]).filter((d:any)=>!run.ownerId||Number(d.ownerId)===Number(run.ownerId)); const paidByItem=new Map<number,number>(); for(const d of run.disbursements||[])for(const a of d.allocations||[])paidByItem.set(Number(a.runItemId),(paidByItem.get(Number(a.runItemId))||0)+Number(a.amount||0)); const remainingItems=(run.items||[]).map((item:any)=>({...item,remaining:Math.max(0,Number(item.amountDue)-Number(paidByItem.get(Number(item.id))||0))})).filter((item:any)=>item.remaining>0); const total=remainingItems.reduce((sum:number,item:any)=>sum+item.remaining,0); return <Dialog open onOpenChange={o=>!o&&close()}><DialogContent className="max-w-3xl"><DialogHeader><DialogTitle>Record Provider Disbursement</DialogTitle><DialogDescription>{run.runNumber} · {run.ownerName}. Each collection is recorded separately even when several payouts belong to one provider.</DialogDescription></DialogHeader><div className="grid gap-3 md:grid-cols-2"><Field label="Payment date"><Input type="date" value={form.paymentDate} onChange={e=>set("paymentDate",e.target.value)}/></Field><Field label="Payment method"><Select value={form.paymentMethod} onValueChange={v=>set("paymentMethod",v)}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="cash">Cash</SelectItem><SelectItem value="bank_transfer">Bank transfer</SelectItem><SelectItem value="mobile_money">Mobile money</SelectItem><SelectItem value="other">Other</SelectItem></SelectContent></Select></Field><Field label="Collected by"><Select value={form.collectorType} onValueChange={v=>set("collectorType",v)}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="owner">Owner / Provider</SelectItem><SelectItem value="driver">Driver</SelectItem><SelectItem value="other">Authorised Representative</SelectItem></SelectContent></Select></Field>{form.collectorType==="driver"&&<Field label="Driver"><SearchableSelect value={form.collectorDriverId?String(form.collectorDriverId):""} onValueChange={v=>set("collectorDriverId",Number(v))} options={ownerDrivers.map((d:any)=>({value:String(d.id),label:`${d.firstName} ${d.lastName}`}))}/></Field>}{form.collectorType==="other"&&<><Field label="Collector name"><Input value={form.collectorName||""} onChange={e=>set("collectorName",e.target.value)}/></Field><Field label="National ID"><Input value={form.collectorNationalId||""} onChange={e=>set("collectorNationalId",e.target.value)}/></Field><Field label="Phone"><Input value={form.collectorPhone||""} onChange={e=>set("collectorPhone",e.target.value)}/></Field><Field label="Role / relationship"><Input value={form.collectorRole||""} onChange={e=>set("collectorRole",e.target.value)}/></Field></>}<Field label="Payment reference"><Input value={form.paymentReference||""} onChange={e=>set("paymentReference",e.target.value)}/></Field></div><Card><CardHeader><CardTitle className="text-base">Outstanding payouts</CardTitle></CardHeader><CardContent>{remainingItems.map((item:any)=><div key={item.id} className="flex justify-between border-b py-2 text-sm"><span>{item.payout?.payoutNumber||`Payout ${item.payoutId}`}</span><span>USD {money(item.remaining)}</span></div>)}<div className="mt-3 flex justify-between font-semibold"><span>Disbursement total</span><span>USD {money(total)}</span></div></CardContent></Card><DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving||!remainingItems.length||(form.collectorType==="driver"&&!form.collectorDriverId)||(form.collectorType==="other"&&(!form.collectorName||!form.collectorNationalId))} onClick={()=>submit(`/api/hq/transport/payment-runs/${run.id}/disbursements`,{paymentDate:form.paymentDate,paymentMethod:form.paymentMethod,paymentReference:form.paymentReference||null,collectorType:form.collectorType,collectorDriverId:form.collectorType==="driver"?form.collectorDriverId:null,collectorName:form.collectorType==="other"?form.collectorName:null,collectorNationalId:form.collectorNationalId||null,collectorPhone:form.collectorPhone||null,collectorRole:form.collectorRole||null,allocations:remainingItems.map((item:any)=>({runItemId:item.id,amount:item.remaining}))})}>Record Disbursement</Button></DialogFooter></DialogContent></Dialog>}
+ return null;
 }

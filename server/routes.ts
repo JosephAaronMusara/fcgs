@@ -15,6 +15,7 @@ import { registerTransportDocumentRoutes } from "./transport-document-routes";
 import { registerAssetsInventoryRoutes } from "./assets-inventory-routes";
 import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { registerRecruitmentRoutes } from "./recruitment-routes";
+import { registerFleetRoutes } from "./fleet-routes";
 import { communicationService, createInAppNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, academicReportPreparationDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportCommentsFingerprint, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
@@ -3105,6 +3106,7 @@ export async function registerRoutes(
   registerAssetsInventoryRoutes(app);
   registerHqOperationsRoutes(app);
   registerRecruitmentRoutes(app);
+  registerFleetRoutes(app);
   await ensureEcdSeedData();
 
   const readOnlyExemptPaths = [

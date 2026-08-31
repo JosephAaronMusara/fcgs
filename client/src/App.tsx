@@ -70,6 +70,7 @@ const Student360Page = lazy(() => import("@/pages/student-360"));
 const Staff360Page = lazy(() => import("@/pages/staff-360"));
 const KundAiPage = lazy(() => import("@/pages/kundai"));
 const TransportPage = lazy(() => import("@/pages/transport"));
+const FleetManagementPage = lazy(() => import("@/pages/fleet-management"));
 const InternalTransfersPage = lazy(() => import("@/pages/internal-transfers"));
 const LearningMaterialsPage = lazy(() => import("@/pages/learning-materials"));
 
@@ -89,6 +90,7 @@ const SCHOOL_FINANCE_ROUTE_PERMISSIONS = [
   "financial_statements.view",
 ];
 const ASSETS_INVENTORY_ROUTE_PERMISSIONS = ["assets.view", "inventory.view", "damage.view"];
+const FLEET_ROUTE_PERMISSIONS = ["fleet.view"];
 
 const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/dashboard$/, permissions: ["dashboard.view"] },
@@ -113,6 +115,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/kundai$/, permissions: ["kundai.view"] },
   { pattern: /^\/internal-transfers$/, permissions: ["internal_transfers.view"] },
   { pattern: /^\/transport$/, permissions: ["transport.view"] },
+  { pattern: /^\/fleet-management$/, permissions: FLEET_ROUTE_PERMISSIONS },
   { pattern: /^\/arrears$/, permissions: ["arrears.view"] },
   { pattern: /^\/school-finance$/, permissions: SCHOOL_FINANCE_ROUTE_PERMISSIONS },
   { pattern: /^\/assets-inventory$/, permissions: ASSETS_INVENTORY_ROUTE_PERMISSIONS },
@@ -856,6 +859,7 @@ function AuthenticatedRoutes() {
         <Route path="/kundai"><ProtectedRoute component={KundAiPage} /></Route>
         <Route path="/internal-transfers"><ProtectedRoute component={InternalTransfersPage} /></Route>
         <Route path="/transport"><ProtectedRoute component={TransportPage} /></Route>
+        <Route path="/fleet-management"><ProtectedRoute component={FleetManagementPage} /></Route>
         <Route path="/school-finance"><ProtectedRoute component={SchoolFinancePage} /></Route>
         <Route path="/arrears"><ProtectedRoute component={ParentsWithArrearsRedirectPage} /></Route>
         <Route path="/school-expenses"><ProtectedRoute component={SchoolExpensesRedirectPage} /></Route>

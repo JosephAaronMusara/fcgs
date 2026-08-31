@@ -100,7 +100,8 @@ const ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS = [
   "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.payments.view",
   "transport.receipts.view", "transport.claims.view", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
   "transport.documents.view", "transport.compliance.view",
-  "transport.organization.view", "transport.organization.reports", "transport.organization.export",
+  "transport.organization.view", "transport.organization.reports", "transport.organization.export", "transport.organization.manage",
+  "transport.subscription.manage", "transport.hq.claims.manage", "transport.hq.payouts.manage", "transport.hq.disbursements.manage",
 ];
 
 async function replaceAccessGroupPermissionSubset(groupName: string, prefix: string, allowedCodes: string[]) {
@@ -172,6 +173,24 @@ async function ensureAssetsInventoryAccessGroupDefaults() {
   await ensureAccessGroupPermissions("Teacher", ["assets.view", "damage.view", "damage.report"]);
 }
 
+const FLEET_MANAGER_PERMISSIONS = RBAC_PERMISSIONS_DATA
+  .filter((permission) => permission.code.startsWith("fleet."))
+  .map((permission) => permission.code);
+
+async function ensureFleetAccessGroupDefaults() {
+  await ensureAccessGroupPermissions("School Admin", FLEET_MANAGER_PERMISSIONS);
+  await ensureAccessGroupPermissions("Org HQ", FLEET_MANAGER_PERMISSIONS);
+  await ensureAccessGroupPermissions("Fleet Manager", FLEET_MANAGER_PERMISSIONS, true, "Manages organisation Fleet vehicles, drivers, allocations, trips, inspections, maintenance, compliance, incidents and operating records.");
+  await ensureAccessGroupPermissions("Transport Manager", [
+    "fleet.view", "fleet.dashboard.view", "fleet.requests.create", "fleet.requests.manage", "fleet.trips.manage",
+    "fleet.inspections.perform", "fleet.incidents.create", "fleet.compliance.view",
+  ]);
+  const requestOnly = ["fleet.view", "fleet.requests.create", "fleet.incidents.create"];
+  for (const group of ["Teacher", "Assistant Teacher", "Accountant", "Librarian", "Quality Control Officer"]) {
+    await ensureAccessGroupPermissions(group, requestOnly);
+  }
+}
+
 async function ensurePhotoAccessGroupDefaults() {
   const adminPhotoPermissions = ["students.manage_photo", "staff.manage_photo", "parents.manage_photo", "users.manage_photo"];
   await ensureAccessGroupPermissions("School Admin", adminPhotoPermissions);
@@ -216,6 +235,7 @@ export async function ensureRbacBaseline() {
   await ensureTransportAccessGroupDefaults();
   await ensureRecruitmentAccessGroupDefaults();
   await ensureAssetsInventoryAccessGroupDefaults();
+  await ensureFleetAccessGroupDefaults();
   await ensurePhotoAccessGroupDefaults();
   await cleanupLegacyBlanketAdminOverrides();
   await storage.normalizeAllUserBaselineAccessGroups();

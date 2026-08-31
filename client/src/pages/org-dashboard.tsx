@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import CalendarPage from "@/pages/calendar";
 import InternalTransfersPage from "@/pages/internal-transfers";
 import AssetsInventoryPage from "@/pages/assets-inventory";
+import FleetManagementPage from "@/pages/fleet-management";
 import OrgTransportOversightPage from "@/pages/org-transport-oversight";
 import RecruitmentPage from "@/pages/recruitment";
 import { RecordPhotoActions } from "@/components/record-photo-actions";
@@ -68,6 +69,7 @@ import {
   LayoutDashboard,
   PackageSearch,
   BusFront,
+  CarFront,
   BriefcaseBusiness,
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
@@ -201,6 +203,7 @@ export default function OrgDashboard() {
   const [isInternalTransfersOpen, setIsInternalTransfersOpen] = useState(false);
   const [isTransportOversightOpen, setIsTransportOversightOpen] = useState(false);
   const [isAssetsInventoryOpen, setIsAssetsInventoryOpen] = useState(false);
+  const [isFleetManagementOpen, setIsFleetManagementOpen] = useState(false);
   const [isRecruitmentOpen, setIsRecruitmentOpen] = useState(false);
   const [isHqNavOpen, setIsHqNavOpen] = useState(false);
   const currentYear = new Date().getFullYear();
@@ -905,6 +908,7 @@ export default function OrgDashboard() {
           <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsInternalTransfersOpen(true); if (mobile) setIsHqNavOpen(false); }}><ArrowRightLeft className="mr-2 h-4 w-4" />Internal Transfers</Button>
           {(hasPermission("transport.organization.view") || hasPermission("transport.organization.reports") || hasPermission("transport.organization.manage")) && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsTransportOversightOpen(true); if (mobile) setIsHqNavOpen(false); }}><BusFront className="mr-2 h-4 w-4" />Transport</Button>}
           {(hasPermission("assets.view") || hasPermission("inventory.view")) && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsAssetsInventoryOpen(true); if (mobile) setIsHqNavOpen(false); }}><PackageSearch className="mr-2 h-4 w-4" />Assets & Inventory</Button>}
+          {hasPermission("fleet.view") && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsFleetManagementOpen(true); if (mobile) setIsHqNavOpen(false); }}><CarFront className="mr-2 h-4 w-4" />Fleet Management</Button>}
           {hasPermission("recruitment.view") && <Button variant="ghost" className="w-full justify-start" onClick={() => { setIsRecruitmentOpen(true); if (mobile) setIsHqNavOpen(false); }}><BriefcaseBusiness className="mr-2 h-4 w-4" />Recruitment</Button>}
         </div>
       </div>
@@ -2090,6 +2094,16 @@ export default function OrgDashboard() {
             <DialogDescription>Operate HQ stores and assets or switch to organisation-wide and centre views.</DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto"><AssetsInventoryPage /></div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isFleetManagementOpen} onOpenChange={setIsFleetManagementOpen}>
+        <DialogContent className="flex h-[96dvh] w-[99vw] max-w-[99vw] flex-col p-0">
+          <DialogHeader className="border-b px-6 pb-4 pt-6">
+            <DialogTitle className="flex items-center gap-2"><CarFront className="h-5 w-5" />Fleet Management</DialogTitle>
+            <DialogDescription>Organisation-wide Fleet operations connected to Assets & Inventory and school transport.</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto"><FleetManagementPage /></div>
         </DialogContent>
       </Dialog>
 

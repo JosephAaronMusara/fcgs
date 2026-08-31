@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { schoolFetch, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -27,6 +27,7 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
   const [file, setFile] = useState<File | null>(null);
   const [categoryCode, setCategoryCode] = useState("other");
   const [expiryDate, setExpiryDate] = useState("");
+  const [isPrimary, setIsPrimary] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
   const [overrideExpiry, setOverrideExpiry] = useState("");
 
@@ -62,12 +63,13 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
       form.append("file", file);
       form.append("categoryCode", categoryCode);
       if (expiryDate) form.append("expiryDate", expiryDate);
+      if (isPrimary) form.append("isPrimary", "true");
       const response = await schoolFetch(`/api/transport/${entityType}/${entityId}/documents`, { method: "POST", body: form });
       if (!response.ok) throw new Error((await response.json().catch(() => null))?.message || "Upload failed");
       return response.json();
     },
     onSuccess: async () => {
-      setFile(null); setExpiryDate("");
+      setFile(null); setExpiryDate(""); setIsPrimary(false);
       await refresh();
       toast({ title: "Document uploaded" });
     },
@@ -101,6 +103,8 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
   const record = payload?.record || {};
   const documentPayload = documentsQuery.data || { requirements: [], documents: [], compliance: null };
   const activeDocuments = useMemo(() => (documentPayload.documents || []).filter((item: any) => item.isActive), [documentPayload.documents]);
+  const selectedRequirement = (documentPayload.requirements || []).find((item: any) => item.categoryCode === categoryCode);
+  const primaryImage = activeDocuments.find((item: any) => item.isPrimary && String(item.mimeType || "").startsWith("image/")) || activeDocuments.find((item: any) => entityType === "driver" && item.categoryCode === "driver_photo") || activeDocuments.find((item: any) => String(item.mimeType || "").startsWith("image/"));
   const relationships = payload?.relationships || {};
   const historyRows = [
     ...(Array.isArray(relationships.ownerHistory) ? relationships.ownerHistory : []),
@@ -133,9 +137,10 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
   return <Tabs defaultValue="overview" className="space-y-4">
     <div className="overflow-x-auto"><TabsList className="w-max"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="relationships">Relationships</TabsTrigger><TabsTrigger value="documents">Documents & Images</TabsTrigger><TabsTrigger value="compliance">Compliance</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="incidents">Incidents</TabsTrigger></TabsList></div>
 
-    <TabsContent value="overview"><Card><CardHeader><CardTitle className="flex items-center gap-2">{entityType === "vehicle" ? record.registrationNumber : entityType === "driver" ? `${record.firstName} ${record.lastName}` : record.name}{record.isStaffOwner && <Badge>Staff Owner</Badge>}</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-2">
-      {Object.entries(record).filter(([key]) => !["id", "schoolId", "createdAt", "updatedAt", "notes"].includes(key)).map(([key, value]) => <div key={key} className="rounded-md border p-3"><div className="text-xs text-muted-foreground">{titleCase(key)}</div><div className="break-words text-sm font-medium">{value == null || value === "" ? "—" : typeof value === "boolean" ? (value ? "Yes" : "No") : String(value)}</div></div>)}
-      {record.notes && <div className="md:col-span-2 rounded-md border p-3"><div className="text-xs text-muted-foreground">Notes</div><div className="whitespace-pre-wrap text-sm">{record.notes}</div></div>}
+    <TabsContent value="overview"><Card><CardHeader><CardTitle className="flex items-center gap-2">{entityType === "vehicle" ? record.registrationNumber : entityType === "driver" ? `${record.firstName} ${record.lastName}` : record.name}{record.isStaffOwner && <Badge>Staff Owner</Badge>}</CardTitle></CardHeader><CardContent className="space-y-4">
+      {(entityType === "vehicle" || entityType === "driver") && <div className="flex flex-col gap-4 rounded-lg border p-4 sm:flex-row sm:items-start"><div className="h-48 w-full overflow-hidden rounded-md border bg-muted sm:w-72">{primaryImage ? <ProtectedTransportImage documentId={primaryImage.id} alt={entityType === "vehicle" ? `Vehicle ${record.registrationNumber}` : `${record.firstName} ${record.lastName}`}/> : <div className="flex h-full items-center justify-center p-4 text-center text-sm text-muted-foreground">No {entityType === "vehicle" ? "vehicle image" : "driver photo"} uploaded yet.<br/>Use Documents & Images to add one.</div>}</div><div className="space-y-1 text-sm"><div className="font-semibold">{entityType === "vehicle" ? "Primary vehicle image" : "Driver photograph"}</div><div className="text-muted-foreground">Stored securely with this Transport record. Additional images and documents are available under Documents & Images.</div></div></div>}
+      <div className="grid gap-3 md:grid-cols-2">{Object.entries(record).filter(([key]) => !["id", "schoolId", "createdAt", "updatedAt", "notes", "photo", "primaryImage"].includes(key)).map(([key, value]) => <div key={key} className="rounded-md border p-3"><div className="text-xs text-muted-foreground">{titleCase(key)}</div><div className="break-words text-sm font-medium">{value == null || value === "" ? "—" : typeof value === "boolean" ? (value ? "Yes" : "No") : String(value)}</div></div>)}
+      {record.notes && <div className="md:col-span-2 rounded-md border p-3"><div className="text-xs text-muted-foreground">Notes</div><div className="whitespace-pre-wrap text-sm">{record.notes}</div></div>}</div>
     </CardContent></Card></TabsContent>
 
     <TabsContent value="relationships"><div className="grid gap-4 lg:grid-cols-2">
@@ -144,7 +149,7 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
 
     <TabsContent value="documents"><Card><CardHeader><CardTitle className="flex items-center gap-2"><FileCheck2 className="h-5 w-5"/>Document checklist</CardTitle></CardHeader><CardContent className="space-y-4">
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{(documentPayload.requirements || []).map((requirement: any) => { const present = activeDocuments.some((document: any) => document.categoryCode === requirement.categoryCode); return <div key={requirement.id} className="flex items-center justify-between rounded-md border p-3"><div><div className="text-sm font-medium">{requirement.label}</div><div className="text-xs text-muted-foreground">{requirement.isRequired ? "Required" : "Optional"}{requirement.tracksExpiry ? " · Tracks expiry" : ""}</div></div><Badge variant={present ? "default" : requirement.isRequired ? "destructive" : "secondary"}>{present ? "Uploaded" : "Missing"}</Badge></div>; })}</div>
-      {canManageDocuments && <div className="grid gap-3 rounded-md border p-4 md:grid-cols-4"><div className="space-y-2"><Label>Category</Label><Select value={categoryCode} onValueChange={setCategoryCode}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent>{(documentPayload.requirements || []).map((item: any) => <SelectItem key={item.categoryCode} value={item.categoryCode}>{item.label}</SelectItem>)}<SelectItem value="other">Other</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label>Expiry date</Label><Input type="date" value={expiryDate} onChange={(event) => setExpiryDate(event.target.value)}/></div><div className="space-y-2 md:col-span-2"><Label>Attachment</Label><div className="flex gap-2"><Input type="file" onChange={(event) => setFile(event.target.files?.[0] || null)}/><Button disabled={!file || upload.isPending} onClick={() => upload.mutate()}><FileUp className="mr-2 h-4 w-4"/>{upload.isPending ? "Uploading…" : "Upload"}</Button></div></div></div>}
+      {canManageDocuments && <div className="grid gap-3 rounded-md border p-4 md:grid-cols-4"><div className="space-y-2"><Label>Category</Label><Select value={categoryCode} onValueChange={(value) => { setCategoryCode(value); setIsPrimary(value === "driver_photo"); }}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent>{(documentPayload.requirements || []).map((item: any) => <SelectItem key={item.categoryCode} value={item.categoryCode}>{item.label}</SelectItem>)}<SelectItem value="other">Other</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label>Expiry date</Label><Input type="date" value={expiryDate} onChange={(event) => setExpiryDate(event.target.value)}/></div><div className="space-y-2 md:col-span-2"><Label>Attachment</Label><div className="flex gap-2"><Input type="file" accept={selectedRequirement?.isImage ? "image/*" : undefined} onChange={(event) => setFile(event.target.files?.[0] || null)}/><Button disabled={!file || upload.isPending} onClick={() => upload.mutate()}><FileUp className="mr-2 h-4 w-4"/>{upload.isPending ? "Uploading…" : "Upload"}</Button></div>{selectedRequirement?.isImage && entityType === "vehicle" && <label className="mt-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={isPrimary} onChange={(event) => setIsPrimary(event.target.checked)}/><span>Use as primary vehicle image</span></label>}{entityType === "driver" && categoryCode === "driver_photo" && <div className="mt-2 text-xs text-muted-foreground">Driver Photograph automatically becomes the primary driver image.</div>}</div></div>}
       <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Category</TableHead><TableHead>File</TableHead><TableHead>Expiry</TableHead><TableHead>Status</TableHead><TableHead>Actions</TableHead></TableRow></TableHeader><TableBody>{(documentPayload.documents || []).map((document: any) => <TableRow key={document.id}><TableCell>{titleCase(document.categoryCode)}</TableCell><TableCell>{document.originalName}</TableCell><TableCell>{document.expiryDate || "—"}</TableCell><TableCell><Badge variant={document.isActive ? "default" : "secondary"}>{document.isActive ? "Active" : "Archived"}</Badge></TableCell><TableCell><div className="flex gap-1"><Button size="sm" variant="outline" onClick={() => void openDocument(document.id)}><Download className="mr-1 h-3.5 w-3.5"/>Open</Button>{document.isActive && canManageDocuments && <Button size="sm" variant="ghost" onClick={() => archive.mutate(document.id)}>Archive</Button>}</div></TableCell></TableRow>)}</TableBody></Table></div>
     </CardContent></Card></TabsContent>
 
@@ -158,4 +163,12 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
 
     <TabsContent value="incidents"><Card><CardHeader><CardTitle>Linked incidents</CardTitle></CardHeader><CardContent><div className="space-y-2">{incidents.length ? incidents.map((item: any) => <div key={item.id} className="rounded-md border p-3 text-sm"><div className="flex items-center justify-between"><b>{item.incidentNumber}</b><Badge variant={item.severity === "critical" ? "destructive" : "secondary"}>{titleCase(item.severity)}</Badge></div><div>{item.description}</div><div className="text-xs text-muted-foreground">Incident: {new Date(item.occurredAt).toLocaleString()} · Logged: {new Date(item.createdAt).toLocaleString()}</div></div>) : <div className="text-sm text-muted-foreground">No linked incidents.</div>}</div></CardContent></Card></TabsContent>
   </Tabs>;
+}
+
+
+function ProtectedTransportImage({ documentId, alt }: { documentId: number; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => { let alive = true; let objectUrl: string | null = null; void (async () => { try { const response = await schoolFetch(`/api/transport/documents/${documentId}?inline=1`); if (!response.ok) return; objectUrl = URL.createObjectURL(await response.blob()); if (alive) setSrc(objectUrl); } catch {} })(); return () => { alive = false; if (objectUrl) URL.revokeObjectURL(objectUrl); }; }, [documentId]);
+  if (!src) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading image…</div>;
+  return <img src={src} alt={alt} className="h-full w-full object-cover"/>;
 }

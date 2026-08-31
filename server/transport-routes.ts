@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { randomBytes, createHash } from "node:crypto";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { db } from "./db";
@@ -9,21 +9,32 @@ import { storage } from "./storage";
 import { createInAppNotifications } from "./communication";
 import { renderHtmlPdf, reportPdfFilename } from "./pdf-renderer";
 import {
+  assetRegister,
+  assetVehicleDetails,
   classes,
+  parents,
+  fleetVehicleProfiles,
+  fleetVehicleOccupants,
   schools,
   staff,
   students,
+  users,
   transportAccountAdjustments,
   transportAdvances,
   transportAssignments,
   transportAssignmentEvents,
   transportAuditEvents,
   transportCashupPayments,
+  transportCashupRefunds,
   transportCashups,
   transportCharges,
+  transportBillingRuns,
   transportClaimAllocations,
   transportClaimDeductions,
   transportClaims,
+  transportHqClaimItems,
+  transportHqClaims,
+  transportHqPayouts,
   transportDrivers,
   transportDriverOwnerHistory,
   transportIncidents,
@@ -45,6 +56,8 @@ import {
   transportServicePoints,
   transportSettings,
   transportSubscriptionRules,
+  transportSubscriptionPolicies,
+  transportVehicleDestinations,
   transportVehicleDriverHistory,
   transportVehicleOwnerHistory,
   transportVehiclePaths,
@@ -72,6 +85,7 @@ const nullablePositiveInt = z.coerce.number().int().positive().optional().nullab
 const optionalText = z.string().trim().optional().nullable();
 const dateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const monthInput = z.coerce.number().int().min(1).max(12);
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 const routeInput = z.object({
   name: z.string().trim().min(1),
@@ -145,7 +159,7 @@ const driverInput = z.object({
 });
 
 const vehicleInput = z.object({
-  registrationNumber: z.string().trim().min(1).transform((value) => value.toUpperCase()),
+  registrationNumber: z.string().trim().min(1).max(40).regex(/^[A-Za-z0-9 ]+$/, "Vehicle registration may contain letters, numbers and spaces only").transform((value) => value.replace(/\s+/g, " ").toUpperCase()),
   makeModel: optionalText,
   capacity: z.coerce.number().int().positive(),
   ownershipType: z.enum(["school", "staff", "contracted"]).default("school"),
@@ -158,13 +172,14 @@ const vehicleInput = z.object({
   primaryImage: optionalText,
   status: z.enum(["draft", "active", "suspended", "retired"]).default("active"),
   notes: optionalText,
+  routeNotes: optionalText,
   isActive: z.boolean().optional().default(true),
   effectiveDate: dateString.optional(),
   changeReason: optionalText,
 });
 
 const servicePointInput = z.object({
-  studentId: z.coerce.number().int().positive(),
+  studentId: nullablePositiveInt,
   pointType: z.enum(["pickup", "dropoff", "both"]).default("both"),
   name: z.string().trim().min(1),
   latitude: z.coerce.number().min(-90).max(90),
@@ -256,7 +271,7 @@ const stateInput = z.object({
 
 const chargeInput = z.object({
   academicYear: z.coerce.number().int().min(2020),
-  term: z.string().min(1),
+  term: z.string().optional().default("Monthly"),
   month: monthInput,
   dueDate: dateString.optional().nullable(),
   assignmentIds: z.array(z.coerce.number().int().positive()).optional(),
@@ -269,7 +284,7 @@ const paymentInput = z.object({
   paymentDate: dateString,
   paymentMethod: z.enum(["cash", "bank_transfer", "mobile_money", "card", "cheque", "other"]),
   academicYear: z.coerce.number().int().min(2020),
-  term: z.string().min(1),
+  term: z.string().optional().default("Monthly"),
   month: z.coerce.number().int().min(0).max(12).default(0),
   externalReference: optionalText,
   notes: optionalText,
@@ -304,9 +319,10 @@ const refundInput = z.object({
 
 const cashupInput = z.object({
   cashupDate: dateString,
-  paymentIds: z.array(z.coerce.number().int().positive()).min(1),
-  actualCash: money,
-  actualNonCash: money,
+  paymentIds: z.array(z.coerce.number().int().positive()).optional().default([]),
+  refundIds: z.array(z.coerce.number().int().positive()).optional().default([]),
+  actualCash: z.coerce.number().finite(),
+  actualNonCash: z.coerce.number().finite(),
   depositReference: optionalText,
   notes: optionalText,
 });
@@ -373,11 +389,12 @@ const incidentInput = z.object({
 });
 
 const claimInput = z.object({
-  vehicleId: z.coerce.number().int().positive(),
+  vehicleId: z.coerce.number().int().positive().optional().nullable(),
+  allVehicles: z.boolean().optional().default(false),
   serviceYear: z.coerce.number().int().min(2020),
   serviceMonth: monthInput,
   notes: optionalText,
-});
+}).refine((value) => value.allVehicles || Boolean(value.vehicleId), { message: "Select a vehicle or choose All vehicles" });
 
 const payoutPaymentInput = z.object({
   paymentDate: dateString,
@@ -410,6 +427,7 @@ const settingsInput = z.object({
   fortnightAnchorDate: dateString.optional().nullable(),
   mapProvider: z.literal("openstreetmap").default("openstreetmap"),
   defaultCheckpointRadiusMeters: z.coerce.number().int().min(1).max(5000),
+  savedPointSuggestionRadiusMeters: z.coerce.number().int().min(1).max(5000),
   attachmentSizeLimitMB: z.coerce.number().int().refine((value) => [5, 10, 15, 20, 25, 50].includes(value), "Choose a supported Transport attachment limit"),
   complianceNotificationDays: z.array(z.coerce.number().int()).transform((values) => Array.from(new Set(values.filter((value) => [30, 14, 7, 1, 0].includes(value))))),
   complianceNotificationRecipients: z.array(z.string()).optional(),
@@ -567,26 +585,77 @@ async function assertSchoolRecord(table: any, id: number, schoolId: number) {
   return row ?? null;
 }
 
+async function organizationSchoolIds(school: SchoolRow): Promise<number[]> {
+  if (!school.organizationId) return [school.id];
+  const rows = await db.select({ id: schools.id }).from(schools).where(eq(schools.organizationId, school.organizationId));
+  return rows.map((row) => Number(row.id));
+}
+
+async function assertOrganizationRecord(table: any, id: number, school: SchoolRow) {
+  const [row] = await db.select().from(table).where(eq(table.id, id));
+  if (!row) return null;
+  if (Number(row.schoolId) === Number(school.id)) return row;
+  if (!school.organizationId) return null;
+  const [origin] = await db.select({ organizationId: schools.organizationId }).from(schools).where(eq(schools.id, Number(row.schoolId)));
+  return origin?.organizationId === school.organizationId ? row : null;
+}
+
+async function reconcileTransportAssignmentDates(schoolId: number) {
+  const today = isoDate(new Date());
+  await db.transaction(async (tx) => {
+    await tx.update(transportAssignments).set({ isActive: false, serviceState: "terminated", updatedAt: new Date() }).where(and(
+      eq(transportAssignments.schoolId, schoolId), eq(transportAssignments.isActive, true), lte(transportAssignments.endDate, previousDay(today)),
+    ));
+    const due = await tx.select().from(transportAssignments).where(and(
+      eq(transportAssignments.schoolId, schoolId), eq(transportAssignments.isActive, false), eq(transportAssignments.serviceState, "pending_start"), lte(transportAssignments.startDate, today),
+    ));
+    for (const row of due) {
+      if (row.financialStatus === "pending_first_payment") continue;
+      await tx.update(transportAssignments).set({ isActive: false, serviceState: "terminated", updatedAt: new Date() }).where(and(
+        eq(transportAssignments.schoolId, schoolId), eq(transportAssignments.studentId, row.studentId), eq(transportAssignments.isActive, true), ne(transportAssignments.id, row.id),
+      ));
+      await tx.update(transportAssignments).set({ isActive: true, serviceState: row.financialStatus === "payment_plan" ? "active_payment_plan" : "active", updatedAt: new Date() }).where(eq(transportAssignments.id, row.id));
+    }
+  });
+}
+
+function registrationKey(value: unknown): string {
+  return String(value ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+function displayRegistration(value: unknown): string {
+  const raw = String(value ?? "").replace(/\s+/g, " ").trim().toUpperCase();
+  const key = registrationKey(raw);
+  return /^[A-Z]{3}[0-9]{4}$/.test(key) ? `${key.slice(0, 3)} ${key.slice(3)}` : raw;
+}
+
 async function accountSummary(studentId: number, schoolId: number) {
   const result = await db.execute(sql`
     SELECT
       COALESCE((SELECT SUM(c.amount) FROM transport_charges c WHERE c.school_id=${schoolId} AND c.student_id=${studentId} AND c.status <> 'cancelled'), 0)::text AS charges,
       COALESCE((SELECT SUM(CASE WHEN a.direction='debit' THEN a.amount ELSE -a.amount END) FROM transport_account_adjustments a WHERE a.school_id=${schoolId} AND a.student_id=${studentId} AND a.status='approved'), 0)::text AS adjustments,
       COALESCE((SELECT SUM(pa.amount) FROM transport_payment_allocations pa JOIN transport_payments p ON p.id=pa.payment_id WHERE p.school_id=${schoolId} AND p.student_id=${studentId} AND p.reversed_at IS NULL), 0)::text AS allocated,
-      COALESCE((SELECT SUM(p.amount) FROM transport_payments p WHERE p.school_id=${schoolId} AND p.student_id=${studentId} AND p.reversed_at IS NULL), 0)::text AS received
+      COALESCE((SELECT SUM(p.amount) FROM transport_payments p WHERE p.school_id=${schoolId} AND p.student_id=${studentId} AND p.reversed_at IS NULL), 0)::text AS received,
+      COALESCE((SELECT SUM(r.amount) FROM transport_refunds r WHERE r.school_id=${schoolId} AND r.student_id=${studentId} AND r.status='paid' AND r.method <> 'credit'), 0)::text AS external_refunds_paid
   `);
   const row = (result.rows[0] ?? {}) as any;
   const charges = amount(row.charges);
   const adjustments = amount(row.adjustments);
   const allocated = amount(row.allocated);
   const received = amount(row.received);
+  const externalRefundsPaid = amount(row.external_refunds_paid);
+  const ledgerBalance = rounded(charges + adjustments + externalRefundsPaid - received);
   return {
     charges: rounded(charges),
     adjustments: rounded(adjustments),
     allocated: rounded(allocated),
     received: rounded(received),
-    balance: rounded(charges + adjustments - allocated),
-    credit: rounded(Math.max(0, received - allocated)),
+    externalRefundsPaid: rounded(externalRefundsPaid),
+    // Learner account balance uses every valid payment, including unallocated credit.
+    // Payment allocation remains separate because provider claims may only use allocated money.
+    balance: ledgerBalance,
+    credit: rounded(Math.max(0, -ledgerBalance)),
+    unallocatedCredit: rounded(Math.max(0, received - allocated)),
   };
 }
 
@@ -755,16 +824,28 @@ async function validateAssignmentSelection(
   input: any,
   excludeAssignmentId?: number,
 ) {
+  const [school] = await db.select().from(schools).where(eq(schools.id, schoolId));
+  if (!school) throw Object.assign(new Error("School not found"), { status: 404 });
+  const orgSchoolIds = await organizationSchoolIds(school);
   const [learner, route] = await Promise.all([
     assertSchoolRecord(students, Number(input.studentId), schoolId),
     assertSchoolRecord(transportRoutes, Number(input.routeId), schoolId),
   ]);
   if (!learner || !route) throw Object.assign(new Error("Learner or route not found in the selected school"), { status: 404 });
+  if (input.serviceType === "both" && input.vehicleId && input.outboundVehicleId && Number(input.vehicleId) !== Number(input.outboundVehicleId)) {
+    throw Object.assign(new Error("Two-way service must use the same vehicle for School-bound and Home-bound journeys."), { status: 409 });
+  }
+  if ((input.serviceType === "pickup" || input.serviceType === "both") && !input.vehicleId) {
+    throw Object.assign(new Error("Select a vehicle serving the learner's destination."), { status: 400 });
+  }
+  if (input.serviceType === "dropoff" && !(input.outboundVehicleId || input.vehicleId)) {
+    throw Object.assign(new Error("Select a vehicle serving the learner's destination."), { status: 400 });
+  }
 
   const validatePoint = async (id: number | null | undefined, allowed: string[]) => {
     if (!id) return null;
-    const point = await assertSchoolRecord(transportServicePoints, Number(id), schoolId);
-    if (!point || point.studentId !== Number(input.studentId) || !allowed.includes(point.pointType)) {
+    const point = await assertOrganizationRecord(transportServicePoints, Number(id), school);
+    if (!point || (point.studentId && Number(point.studentId) !== Number(input.studentId)) || !allowed.includes(point.pointType)) {
       throw Object.assign(new Error("The selected learner service point is not valid for this service leg"), { status: 409 });
     }
     return point;
@@ -773,12 +854,18 @@ async function validateAssignmentSelection(
   await validatePoint(input.dropoffServicePointId, ["dropoff", "both"]);
 
   const today = isoDate(new Date());
-  const checkedVehicles = new Set<number>();
-  const validateVehicle = async (vehicleId: number | null | undefined) => {
-    if (!vehicleId || checkedVehicles.has(Number(vehicleId))) return;
-    checkedVehicles.add(Number(vehicleId));
-    const vehicle = await assertSchoolRecord(transportVehicles, Number(vehicleId), schoolId);
-    if (!vehicle || !vehicle.isActive || vehicle.status !== "active") throw Object.assign(new Error("The selected vehicle is not active in this school"), { status: 409 });
+  const checkedVehicles = new Set<string>();
+  const validateVehicle = async (vehicleId: number | null | undefined, direction: "schoolbound" | "homebound") => {
+    if (!vehicleId) return;
+    const checkKey = `${Number(vehicleId)}:${direction}`;
+    if (checkedVehicles.has(checkKey)) return;
+    checkedVehicles.add(checkKey);
+    const vehicle = await assertOrganizationRecord(transportVehicles, Number(vehicleId), school);
+    if (!vehicle || !vehicle.isActive || vehicle.status !== "active") throw Object.assign(new Error("The selected vehicle is not active in this organization"), { status: 409 });
+    const [destinationLink] = await db.select({ id: transportVehicleDestinations.id }).from(transportVehicleDestinations).where(and(
+      eq(transportVehicleDestinations.vehicleId, Number(vehicleId)), eq(transportVehicleDestinations.routeId, Number(input.routeId)),
+    ));
+    if (!destinationLink) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} is not configured to serve the selected destination.`), { status: 409 });
     if (vehicle.registrationExpiry && vehicle.registrationExpiry < today) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has expired registration`), { status: 409 });
     if (vehicle.insuranceExpiry && vehicle.insuranceExpiry < today) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has expired insurance`), { status: 409 });
     if (vehicle.fitnessExpiry && vehicle.fitnessExpiry < today) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has expired fitness certification`), { status: 409 });
@@ -787,21 +874,25 @@ async function validateAssignmentSelection(
       const mayOverrideCompliance = await userHasAnyPermission(userId, "transport.vehicles.override_compliance", "transport.compliance.manage");
       if (!mayOverrideCompliance) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} is non-compliant and cannot receive a new assignment.`), { status: 409 });
     }
+    const directionPredicate = direction === "schoolbound"
+      ? sql`((service_type IN ('pickup','both') AND vehicle_id=${Number(vehicleId)}))`
+      : sql`((service_type='both' AND vehicle_id=${Number(vehicleId)}) OR (service_type='dropoff' AND COALESCE(outbound_vehicle_id,vehicle_id)=${Number(vehicleId)}))`;
     const countResult = await db.execute(sql`
-      SELECT COUNT(DISTINCT id)::int AS count
+      SELECT COUNT(DISTINCT student_id)::int AS count
       FROM transport_assignments
-      WHERE school_id=${schoolId} AND is_active=true
+      WHERE school_id IN (${sql.join(orgSchoolIds.map((id) => sql`${id}`), sql`,`)})
+        AND (is_active=true OR (service_state='pending_start' AND financial_status <> 'pending_first_payment'))
         ${excludeAssignmentId ? sql`AND id <> ${excludeAssignmentId}` : sql``}
-        AND (vehicle_id=${Number(vehicleId)} OR outbound_vehicle_id=${Number(vehicleId)})
+        AND ${directionPredicate}
     `);
     const occupied = Number(countResult.rows[0]?.count ?? 0);
     if (occupied >= vehicle.capacity) {
       const mayOverride = Boolean(input.capacityOverrideReason) && await userHasAnyPermission(userId, "transport.capacity.override", "transport.edit");
-      if (!mayOverride) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} is at its configured capacity. Select another vehicle or use an authorised capacity override.`), { status: 409 });
+      if (!mayOverride) throw Object.assign(new Error(`Vehicle ${vehicle.registrationNumber} has no ${direction === "schoolbound" ? "School-bound" : "Home-bound"} seats available. Select another vehicle or use an authorised capacity override.`), { status: 409 });
     }
   };
-  await validateVehicle(input.vehicleId);
-  await validateVehicle(input.outboundVehicleId);
+  if (input.serviceType === "pickup" || input.serviceType === "both") await validateVehicle(input.vehicleId, "schoolbound");
+  if (input.serviceType === "dropoff" || input.serviceType === "both") await validateVehicle(input.outboundVehicleId || input.vehicleId, "homebound");
 
   const validatePath = async (pathId: number | null | undefined, expectedDirection: "pickup" | "dropoff", vehicleId: number | null | undefined, traversal: string | null | undefined) => {
     if (!pathId) return null;
@@ -1029,8 +1120,33 @@ async function validateTransportMasterValues(args: {
       throw Object.assign(new Error("Select the vehicle owner who employs this external driver."), { status: 400 });
     }
     if (values.ownerId) {
-      const owner = await assertSchoolRecord(transportOwners, Number(values.ownerId), args.school.id);
-      if (!owner || !owner.isActive) throw Object.assign(new Error("The selected owner is unavailable for this school."), { status: 400 });
+      const owner = await assertOrganizationRecord(transportOwners, Number(values.ownerId), args.school);
+      if (!owner || !owner.isActive) throw Object.assign(new Error("The selected owner is unavailable in this organization."), { status: 400 });
+    }
+    if (args.previous) {
+      const relationshipChanged = String(values.engagementType || "") !== String(args.previous.engagementType || "")
+        || Number(values.ownerId || 0) !== Number(args.previous.ownerId || 0)
+        || Boolean(values.isActive) !== Boolean(args.previous.isActive);
+      if (relationshipChanged) {
+        const orgSchoolIds = await organizationSchoolIds(args.school);
+        const assignedVehicles = await db.select().from(transportVehicles).where(and(
+          inArray(transportVehicles.schoolId, orgSchoolIds),
+          eq(transportVehicles.driverId, Number(args.previous.id)),
+          eq(transportVehicles.isActive, true),
+        ));
+        if (assignedVehicles.length && !values.isActive) {
+          throw Object.assign(new Error(`This driver is assigned to active vehicle ${assignedVehicles[0].registrationNumber}. Remove the vehicle assignment before making the driver inactive.`), { status: 409 });
+        }
+        for (const vehicle of assignedVehicles) {
+          if (vehicle.ownershipType === "school") {
+            if (values.engagementType !== "internal") {
+              throw Object.assign(new Error(`This driver is assigned to school-owned vehicle ${vehicle.registrationNumber} and must remain an Internal / school driver.`), { status: 409 });
+            }
+          } else if (values.engagementType !== "external" || Number(values.ownerId || 0) !== Number(vehicle.ownerId || 0)) {
+            throw Object.assign(new Error(`This driver is assigned to vehicle ${vehicle.registrationNumber}. The driver's employer must match that vehicle's owner.`), { status: 409 });
+          }
+        }
+      }
     }
   }
   if (args.entityType === "vehicle") {
@@ -1040,16 +1156,41 @@ async function validateTransportMasterValues(args: {
     }
     let owner: any = null;
     if (values.ownerId) {
-      owner = await assertSchoolRecord(transportOwners, Number(values.ownerId), args.school.id);
-      if (!owner || !owner.isActive) throw Object.assign(new Error("The selected owner is unavailable for this school."), { status: 400 });
+      owner = await assertOrganizationRecord(transportOwners, Number(values.ownerId), args.school);
+      if (!owner || !owner.isActive) throw Object.assign(new Error("The selected owner is unavailable in this organization."), { status: 400 });
       if (values.ownershipType === "staff" && !owner.isStaffOwner) throw Object.assign(new Error("Staff-owned vehicles can only be linked to a Staff Owner."), { status: 400 });
       if (values.ownershipType === "contracted" && owner.isStaffOwner) throw Object.assign(new Error("Contracted vehicles can only be linked to a non-staff owner."), { status: 400 });
     }
+    values.registrationNumber = displayRegistration(values.registrationNumber);
+    values.registrationKey = registrationKey(values.registrationNumber);
+    if (!values.registrationKey) throw Object.assign(new Error("Enter a valid vehicle registration."), { status: 400 });
+    const orgSchoolIds = await organizationSchoolIds(args.school);
+    const orgVehicles = await db.select().from(transportVehicles).where(inArray(transportVehicles.schoolId, orgSchoolIds));
+    const duplicate = orgVehicles.find((vehicle: any) => Number(vehicle.id) !== Number(args.previous?.id || 0) && registrationKey(vehicle.registrationNumber) === values.registrationKey);
+    if (duplicate) throw Object.assign(new Error(`Vehicle registration ${values.registrationNumber} already exists in Transport.`), { status: 409 });
     if (values.driverId) {
-      const driver = await assertSchoolRecord(transportDrivers, Number(values.driverId), args.school.id);
-      if (!driver || !driver.isActive) throw Object.assign(new Error("The selected driver is unavailable for this school."), { status: 400 });
-      if (values.ownershipType !== "school" && driver.engagementType === "external" && Number(driver.ownerId || 0) !== Number(values.ownerId || 0)) {
-        throw Object.assign(new Error("The selected driver does not work for this vehicle owner."), { status: 400 });
+      const driver = await assertOrganizationRecord(transportDrivers, Number(values.driverId), args.school);
+      if (!driver) throw Object.assign(new Error("The selected driver is unavailable in this organization."), { status: 400 });
+      const previousDriverId = Number(args.previous?.driverId || 0);
+      const selectedDriverId = Number(values.driverId || 0);
+      const driverChanged = !args.previous || previousDriverId !== selectedDriverId;
+      const ownerRelationshipChanged = Boolean(args.previous) && (
+        String(values.ownershipType || "") !== String(args.previous.ownershipType || "")
+        || Number(values.ownerId || 0) !== Number(args.previous.ownerId || 0)
+      );
+      const vehicleReactivated = Boolean(args.previous) && !args.previous.isActive && Boolean(values.isActive);
+      const mustValidateEligibility = driverChanged || ownerRelationshipChanged || vehicleReactivated;
+      if (mustValidateEligibility) {
+        if (!driver.isActive) throw Object.assign(new Error("The selected driver is inactive and cannot be assigned to an active vehicle."), { status: 400 });
+        if (values.ownershipType === "school") {
+          if (driver.engagementType !== "internal") {
+            throw Object.assign(new Error("School-owned vehicles can only be assigned to active Internal / school drivers."), { status: 400 });
+          }
+        } else if (driver.engagementType !== "external" || Number(driver.ownerId || 0) !== Number(values.ownerId || 0)) {
+          throw Object.assign(new Error("The selected driver does not work for this vehicle owner."), { status: 400 });
+        }
+        const driverVehicle = orgVehicles.find((vehicle: any) => Number(vehicle.id) !== Number(args.previous?.id || 0) && vehicle.isActive && Number(vehicle.driverId || 0) === selectedDriverId);
+        if (driverVehicle) throw Object.assign(new Error(`This driver is already assigned to vehicle ${driverVehicle.registrationNumber}. A driver cannot be assigned to multiple active vehicles.`), { status: 409 });
       }
     }
   }
@@ -1074,7 +1215,13 @@ function registerMasterCrud(
       const school = await schoolContext(req);
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const requestedDestinationIds = entityType === "vehicle"
+        ? Array.from(new Set((Array.isArray(req.body?.destinationIds) ? req.body.destinationIds : []).map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        : [];
       const raw = clean(schema.parse(req.body));
+      if (entityType === "vehicle" && String((raw as any).status || "active") === "active" && requestedDestinationIds.length === 0) {
+        throw Object.assign(new Error("Select at least one Destination before saving an active Transport vehicle."), { status: 400 });
+      }
       const effectiveDate = (raw as any).effectiveDate || (raw as any).effectiveFrom || isoDate(new Date());
       const changeReason = (raw as any).changeReason || "Initial assignment";
       delete (raw as any).effectiveDate;
@@ -1093,7 +1240,13 @@ function registerMasterCrud(
         if (entityType === "driver") {
           await tx.insert(transportDriverOwnerHistory).values({ schoolId: school.id, driverId: row.id, ownerId: row.ownerId || null, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
         }
-        await writeAudit(tx, school.id, user.id, entityType, row.id, "create", null, row, changeReason);
+        if (entityType === "vehicle" && requestedDestinationIds.length) {
+          const orgSchoolIds = await organizationSchoolIds(school);
+          const destinationRows = await tx.select({ id: transportRoutes.id }).from(transportRoutes).where(and(inArray(transportRoutes.id, requestedDestinationIds), inArray(transportRoutes.schoolId, orgSchoolIds)));
+          if (destinationRows.length !== requestedDestinationIds.length) throw Object.assign(new Error("One or more selected destinations are not available in this organisation."), { status: 400 });
+          await tx.insert(transportVehicleDestinations).values(requestedDestinationIds.map((routeId) => ({ vehicleId: row.id, routeId, createdByUserId: user.id })));
+        }
+        await writeAudit(tx, school.id, user.id, entityType, row.id, "create", null, row, changeReason, entityType === "vehicle" ? { destinationIds: requestedDestinationIds } : null);
         return row;
       });
       return res.status(201).json(created);
@@ -1108,9 +1261,18 @@ function registerMasterCrud(
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const id = Number(req.params.id);
-      const previous = await assertSchoolRecord(table, id, school.id);
+      const isOrganizationMaster = ["owner", "driver", "vehicle"].includes(entityType);
+      const previous = isOrganizationMaster ? await assertOrganizationRecord(table, id, school) : await assertSchoolRecord(table, id, school.id);
       if (!previous) return res.status(404).json({ message: "Record not found" });
+      const destinationIdsProvided = entityType === "vehicle" && Array.isArray(req.body?.destinationIds);
+      const requestedDestinationIds = destinationIdsProvided
+        ? Array.from(new Set(req.body.destinationIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        : [];
       const partial: any = clean(schema.partial().parse(req.body));
+      const effectiveVehicleStatus = String(partial.status || previous.status || "active");
+      if (entityType === "vehicle" && destinationIdsProvided && effectiveVehicleStatus === "active" && requestedDestinationIds.length === 0) {
+        throw Object.assign(new Error("Select at least one Destination before saving an active Transport vehicle."), { status: 400 });
+      }
       const effectiveDate = partial.effectiveDate || isoDate(new Date());
       const changeReason = partial.changeReason || "Record updated";
       delete partial.effectiveDate;
@@ -1126,7 +1288,7 @@ function registerMasterCrud(
       parsed.updatedAt = new Date();
 
       const updated = await db.transaction(async (tx) => {
-        const [row] = await tx.update(table).set(parsed).where(and(eq(table.id, id), eq(table.schoolId, school.id))).returning();
+        const [row] = await tx.update(table).set(parsed).where(eq(table.id, id)).returning();
         if (entityType === "vehicle" && Number(row.ownerId || 0) !== Number(previous.ownerId || 0)) {
           await tx.update(transportVehicleOwnerHistory).set({ effectiveTo: previousDay(effectiveDate) })
             .where(and(eq(transportVehicleOwnerHistory.vehicleId, id), isNull(transportVehicleOwnerHistory.effectiveTo)));
@@ -1142,7 +1304,16 @@ function registerMasterCrud(
             .where(and(eq(transportDriverOwnerHistory.driverId, id), isNull(transportDriverOwnerHistory.effectiveTo)));
           await tx.insert(transportDriverOwnerHistory).values({ schoolId: school.id, driverId: id, ownerId: row.ownerId || null, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
         }
-        await writeAudit(tx, school.id, user.id, entityType, id, "update", previous, row, changeReason);
+        if (entityType === "vehicle" && destinationIdsProvided) {
+          const orgSchoolIds = await organizationSchoolIds(school);
+          if (requestedDestinationIds.length) {
+            const destinationRows = await tx.select({ id: transportRoutes.id }).from(transportRoutes).where(and(inArray(transportRoutes.id, requestedDestinationIds), inArray(transportRoutes.schoolId, orgSchoolIds)));
+            if (destinationRows.length !== requestedDestinationIds.length) throw Object.assign(new Error("One or more selected destinations are not available in this organisation."), { status: 400 });
+          }
+          await tx.delete(transportVehicleDestinations).where(eq(transportVehicleDestinations.vehicleId, id));
+          if (requestedDestinationIds.length) await tx.insert(transportVehicleDestinations).values(requestedDestinationIds.map((routeId) => ({ vehicleId: id, routeId, createdByUserId: user.id })));
+        }
+        await writeAudit(tx, school.id, user.id, entityType, id, "update", previous, row, changeReason, entityType === "vehicle" ? { destinationIds: requestedDestinationIds } : null);
         return row;
       });
       return res.json(updated);
@@ -1152,17 +1323,198 @@ function registerMasterCrud(
   });
 }
 
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const toRad = (value: number) => value * Math.PI / 180;
+  const earth = 6371000;
+  const dLat = toRad(lat2 - lat1); const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return earth * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+type RouteCoordinate = { latitude: number; longitude: number; name?: string; type?: string; schoolId?: number | null; servicePointId?: number | null };
+
+function nearestNeighborOrder(points: RouteCoordinate[], start?: RouteCoordinate): RouteCoordinate[] {
+  if (!points.length) return [];
+  const remaining = [...points];
+  let current = start || remaining.shift()!;
+  const ordered = start ? [start] : [current];
+  if (start) {
+    const index = remaining.findIndex((point) => point === start || (point.latitude === start.latitude && point.longitude === start.longitude && point.name === start.name));
+    if (index >= 0) remaining.splice(index, 1);
+  }
+  while (remaining.length) {
+    let bestIndex = 0; let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < remaining.length; index += 1) {
+      const point = remaining[index];
+      const distance = haversineMeters(current.latitude, current.longitude, point.latitude, point.longitude);
+      if (distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+    }
+    current = remaining.splice(bestIndex, 1)[0]; ordered.push(current);
+  }
+  return ordered;
+}
+
+async function roadRoute(coordinates: RouteCoordinate[]) {
+  if (coordinates.length < 2) return { geometry: coordinates.map((point) => [point.longitude, point.latitude]), distanceKm: 0, durationMinutes: 0, provider: "derived" };
+  try {
+    const baseUrl = (process.env.TRANSPORT_ROUTING_URL || "https://router.project-osrm.org").replace(/\/$/, "");
+    const coordinatePath = coordinates.map((point) => `${point.longitude},${point.latitude}`).join(";");
+    const response = await fetch(`${baseUrl}/route/v1/driving/${coordinatePath}?overview=full&geometries=geojson&steps=false`);
+    if (!response.ok) throw new Error(`Routing provider returned ${response.status}`);
+    const payload: any = await response.json(); const route = payload?.routes?.[0];
+    if (!route?.geometry?.coordinates) throw new Error("No road route returned");
+    return { geometry: route.geometry.coordinates, distanceKm: rounded(Number(route.distance || 0) / 1000), durationMinutes: Math.round(Number(route.duration || 0) / 60), provider: "osrm" };
+  } catch {
+    let meters = 0;
+    for (let index=1; index<coordinates.length; index += 1) meters += haversineMeters(coordinates[index-1].latitude, coordinates[index-1].longitude, coordinates[index].latitude, coordinates[index].longitude);
+    return { geometry: coordinates.map((point) => [point.longitude, point.latitude]), distanceKm: rounded(meters/1000), durationMinutes: Math.round((meters/1000)/30*60), provider: "straight-line-fallback" };
+  }
+}
+
 async function getTransportPeriodSummary(schoolId: number, from: string, to: string) {
   const summary = await db.execute(sql`
     SELECT
       COALESCE((SELECT SUM(amount) FROM transport_payments WHERE school_id=${schoolId} AND payment_date BETWEEN ${from} AND ${to} AND reversed_at IS NULL),0)::text AS received,
-      COALESCE((SELECT SUM(amount) FROM transport_charges WHERE school_id=${schoolId} AND service_period_start <= ${to} AND service_period_end >= ${from} AND status <> 'cancelled'),0)::text AS charged,
-      COALESCE((SELECT SUM(amount) FROM transport_refunds WHERE school_id=${schoolId} AND effective_date BETWEEN ${from} AND ${to} AND status IN ('approved','paid')),0)::text AS refunds,
-      COALESCE((SELECT SUM(gross_amount) FROM transport_claims WHERE school_id=${schoolId} AND make_date(service_year,service_month,1) BETWEEN date_trunc('month',${from}::date) AND date_trunc('month',${to}::date)),0)::text AS claim_gross,
-      COALESCE((SELECT SUM(net_amount) FROM transport_payouts WHERE school_id=${schoolId} AND created_at::date BETWEEN ${from} AND ${to}),0)::text AS payout_net
+      COALESCE((SELECT SUM(amount) FROM transport_charges WHERE school_id=${schoolId} AND service_period_start <= ${to} AND service_period_end >= ${from} AND status NOT IN ('cancelled','void')),0)::text AS charged,
+      COALESCE((SELECT SUM(amount) FROM transport_refunds WHERE school_id=${schoolId} AND effective_date BETWEEN ${from} AND ${to} AND status='paid' AND method <> 'credit'),0)::text AS external_refunds_paid,
+      COALESCE((SELECT SUM(amount) FROM transport_refunds WHERE school_id=${schoolId} AND effective_date BETWEEN ${from} AND ${to} AND status='credited' AND method='credit'),0)::text AS account_credits,
+      COALESCE((SELECT SUM(gross_amount) FROM transport_claims WHERE school_id=${schoolId} AND make_date(service_year,service_month,1) BETWEEN date_trunc('month',${from}::date) AND date_trunc('month',${to}::date)),0)::text AS claim_gross
   `);
+  const row: any = summary.rows[0] || {};
+  const grossReceived = amount(row.received); const refundsPaid = amount(row.external_refunds_paid);
+  const normalized = { ...row, refunds: String(refundsPaid), net_collections: String(rounded(grossReceived - refundsPaid)), payout_net: "0" };
   const byMethod = await db.execute(sql`SELECT payment_method AS method, SUM(amount)::text amount, COUNT(*)::int count FROM transport_payments WHERE school_id=${schoolId} AND payment_date BETWEEN ${from} AND ${to} AND reversed_at IS NULL GROUP BY payment_method ORDER BY payment_method`);
-  return { from, to, summary: summary.rows[0], byMethod: byMethod.rows };
+  const refundByMethod = await db.execute(sql`SELECT method, SUM(amount)::text amount, COUNT(*)::int count FROM transport_refunds WHERE school_id=${schoolId} AND effective_date BETWEEN ${from} AND ${to} AND status='paid' AND method <> 'credit' GROUP BY method ORDER BY method`);
+  return { from, to, summary: normalized, byMethod: byMethod.rows, refundsByMethod: refundByMethod.rows };
+}
+
+
+type SchoolClaimComputation = {
+  vehicle: any;
+  candidates: any[];
+  excluded: Array<{ allocationId: number; receiptNo: string; amount: number; reason: string }>;
+  currentPeriodAmount: number;
+  priorPeriodAmount: number;
+  providerAdditions: number;
+  gross: number;
+  deductions: Array<{ type: string; sourceId?: number; description: string; amount: number; priority: number }>;
+  deductionAmount: number;
+  net: number;
+  providerAdjustments: any[];
+};
+
+async function computeSchoolClaim(school: SchoolRow, vehicleId: number, serviceYear: number, serviceMonth: number, existingDraftId?: number | null): Promise<SchoolClaimComputation> {
+  const vehicle = await assertOrganizationRecord(transportVehicles, vehicleId, school);
+  if (!vehicle) throw Object.assign(new Error("Vehicle not found"), { status: 404 });
+  const settings = await getOrCreateSettings(school.id);
+  const allocationRows = await db.execute(sql`
+    SELECT pa.id, pa.amount, pa.service_year AS "serviceYear", pa.service_month AS "serviceMonth",
+      p.receipt_no AS "receiptNo", p.verification_status AS "verificationStatus", p.reversed_at AS "reversedAt",
+      ca.claim_id AS "claimId"
+    FROM transport_payment_allocations pa
+    JOIN transport_payments p ON p.id=pa.payment_id
+    LEFT JOIN transport_claim_allocations ca ON ca.allocation_id=pa.id
+    WHERE p.school_id=${school.id} AND pa.vehicle_id=${vehicleId}
+      AND (pa.service_year < ${serviceYear} OR (pa.service_year=${serviceYear} AND pa.service_month <= ${serviceMonth}))
+    ORDER BY p.payment_date, p.id, pa.id
+  `);
+  const excluded: SchoolClaimComputation["excluded"] = [];
+  const candidates = (allocationRows.rows as any[]).filter((row) => {
+    let reason = "";
+    if (row.reversedAt) reason = "Payment reversed";
+    else if (row.claimId && Number(row.claimId) !== Number(existingDraftId || 0)) reason = "Already included in another claim";
+    else if (settings.requireCashupForClaim && row.verificationStatus !== "reconciled") reason = "Payment has not been reconciled in a verified cash-up";
+    else if (!settings.requireCashupForClaim && !["verified", "reconciled"].includes(String(row.verificationStatus))) reason = "Payment has not been verified";
+    if (reason) excluded.push({ allocationId: Number(row.id), receiptNo: String(row.receiptNo || "—"), amount: amount(row.amount), reason });
+    return !reason;
+  });
+  const currentPeriodAmount = rounded(candidates.filter((row) => Number(row.serviceYear) === serviceYear && Number(row.serviceMonth) === serviceMonth).reduce((sum, row) => sum + amount(row.amount), 0));
+  const priorPeriodAmount = rounded(candidates.reduce((sum, row) => sum + amount(row.amount), 0) - currentPeriodAmount);
+  const providerAdjustmentPredicate = existingDraftId
+    ? or(eq(transportProviderAdjustments.status, "pending"), eq(transportProviderAdjustments.claimId, existingDraftId))
+    : eq(transportProviderAdjustments.status, "pending");
+  const providerAdjustments = await db.select().from(transportProviderAdjustments).where(and(
+    eq(transportProviderAdjustments.schoolId, school.id), eq(transportProviderAdjustments.vehicleId, vehicleId), providerAdjustmentPredicate,
+    or(lte(transportProviderAdjustments.applyYear, serviceYear - 1), and(eq(transportProviderAdjustments.applyYear, serviceYear), lte(transportProviderAdjustments.applyMonth, serviceMonth))),
+  )).orderBy(asc(transportProviderAdjustments.applyYear), asc(transportProviderAdjustments.applyMonth), asc(transportProviderAdjustments.id));
+  const providerAdditions = rounded(providerAdjustments.filter((row) => row.direction === "addition").reduce((sum, row) => sum + amount(row.amount), 0));
+  const gross = rounded(currentPeriodAmount + priorPeriodAmount + providerAdditions);
+
+  let policy: any = null;
+  if (school.organizationId) {
+    const policies = await db.select().from(transportSubscriptionPolicies).where(and(
+      eq(transportSubscriptionPolicies.organizationId, school.organizationId),
+      ne(transportSubscriptionPolicies.status, "replaced_before_posting"),
+      or(isNull(transportSubscriptionPolicies.vehicleId), eq(transportSubscriptionPolicies.vehicleId, vehicleId)),
+      or(lt(transportSubscriptionPolicies.startYear, serviceYear), and(eq(transportSubscriptionPolicies.startYear, serviceYear), lte(transportSubscriptionPolicies.startMonth, serviceMonth))),
+    ));
+    policies.sort((a, b) => Number(Boolean(b.vehicleId)) - Number(Boolean(a.vehicleId)) || periodKeyForTransport(b.startYear, b.startMonth) - periodKeyForTransport(a.startYear, a.startMonth) || Number(b.id) - Number(a.id));
+    policy = policies[0] || null;
+  }
+  let legacyRule: any = null;
+  if (!policy) {
+    const legacyRules = await db.select().from(transportSubscriptionRules).where(and(
+      eq(transportSubscriptionRules.schoolId, school.id), eq(transportSubscriptionRules.isActive, true),
+      or(isNull(transportSubscriptionRules.vehicleId), eq(transportSubscriptionRules.vehicleId, vehicleId)),
+      lte(transportSubscriptionRules.effectiveFrom, `${serviceYear}-${String(serviceMonth).padStart(2, "0")}-01`),
+      or(isNull(transportSubscriptionRules.effectiveTo), gte(transportSubscriptionRules.effectiveTo, `${serviceYear}-${String(serviceMonth).padStart(2, "0")}-01`)),
+    )).orderBy(desc(transportSubscriptionRules.vehicleId), desc(transportSubscriptionRules.effectiveFrom)).limit(1);
+    legacyRule = legacyRules[0] || null;
+  }
+  const deductions: SchoolClaimComputation["deductions"] = [];
+  const subscriptionRule = policy || legacyRule;
+  if (subscriptionRule) {
+    let value = subscriptionRule.ruleType === "fixed" ? amount(subscriptionRule.value) : rounded(gross * amount(subscriptionRule.value) / 100);
+    if (subscriptionRule.minimumAmount != null) value = Math.max(value, amount(subscriptionRule.minimumAmount));
+    if (subscriptionRule.maximumAmount != null) value = Math.min(value, amount(subscriptionRule.maximumAmount));
+    deductions.push({ type: "subscription", sourceId: subscriptionRule.id, description: policy ? `HQ subscription policy (${MONTH_NAMES[serviceMonth - 1]} ${serviceYear})` : "Vehicle subscription fee", amount: rounded(value), priority: deductionPriority(settings, "subscription") });
+  }
+  const penalties = await db.select().from(transportPenalties).where(and(eq(transportPenalties.schoolId, school.id), eq(transportPenalties.vehicleId, vehicleId), eq(transportPenalties.effectiveYear, serviceYear), eq(transportPenalties.effectiveMonth, serviceMonth), eq(transportPenalties.status, "approved")));
+  for (const penalty of penalties) deductions.push({ type: "penalty", sourceId: penalty.id, description: `${penalty.category}: ${penalty.reason}`, amount: amount(penalty.amount), priority: deductionPriority(settings, "penalty") });
+  const advances = await db.select().from(transportAdvances).where(and(eq(transportAdvances.schoolId, school.id), eq(transportAdvances.vehicleId, vehicleId), gtZero(transportAdvances.outstandingAmount), inArray(transportAdvances.status, ["disbursed", "recovering"])));
+  let availableAfterMandatory = Math.max(0, gross - deductions.reduce((sum, item) => sum + item.amount, 0));
+  for (const advance of advances) {
+    if (serviceYear < advance.recoveryStartYear || (serviceYear === advance.recoveryStartYear && serviceMonth < advance.recoveryStartMonth)) continue;
+    const outstanding = amount(advance.outstandingAmount); const protectedAmount = amount(advance.minimumOwnerTakeHome); const recoverablePool = Math.max(0, availableAfterMandatory - protectedAmount);
+    let recovery = advance.recoveryMethod === "percentage" ? rounded(gross * amount(advance.recoveryValue) / 100) : advance.recoveryMethod === "full_available" ? recoverablePool : amount(advance.recoveryValue);
+    if (advance.maximumMonthlyRecovery != null) recovery = Math.min(recovery, amount(advance.maximumMonthlyRecovery));
+    recovery = rounded(Math.min(recovery, outstanding, recoverablePool));
+    if (recovery > 0) { deductions.push({ type: "advance", sourceId: advance.id, description: `Advance recovery ${advance.advanceNumber}`, amount: recovery, priority: deductionPriority(settings, "advance") }); availableAfterMandatory = Math.max(0, availableAfterMandatory - recovery); }
+  }
+  for (const adjustment of providerAdjustments.filter((row) => row.direction === "deduction")) deductions.push({ type: adjustment.adjustmentType === "refund_recovery" ? "refund" : "other", sourceId: adjustment.id, description: adjustment.reason, amount: amount(adjustment.amount), priority: deductionPriority(settings, adjustment.adjustmentType === "refund_recovery" ? "refund" : "other") });
+  const deductionAmount = rounded(Math.min(gross, deductions.reduce((sum, item) => sum + item.amount, 0))); const net = rounded(Math.max(0, gross - deductionAmount));
+  return { vehicle, candidates, excluded, currentPeriodAmount, priorPeriodAmount, providerAdditions, gross, deductions, deductionAmount, net, providerAdjustments };
+}
+
+function periodKeyForTransport(year: number, month: number) { return year * 100 + month; }
+
+async function saveSchoolClaim(school: SchoolRow, userId: number, serviceYear: number, serviceMonth: number, vehicleId: number, notes?: string | null) {
+  await ensureNotLocked(school.id, serviceYear, serviceMonth);
+  const existingRows = await db.select().from(transportClaims).where(and(eq(transportClaims.schoolId, school.id), eq(transportClaims.vehicleId, vehicleId), eq(transportClaims.serviceYear, serviceYear), eq(transportClaims.serviceMonth, serviceMonth)));
+  const existing = existingRows[0] || null;
+  if (existing && existing.status !== "draft") throw Object.assign(new Error(`Claim ${existing.claimNumber} is already ${existing.status} and is frozen. Only Draft claims can be recalculated.`), { status: 409 });
+  const computed = await computeSchoolClaim(school, vehicleId, serviceYear, serviceMonth, existing?.id || null);
+  if (computed.gross <= 0 && computed.providerAdditions <= 0) {
+    const reasonSummary = computed.excluded.length ? Array.from(new Set(computed.excluded.map((row) => row.reason))).join("; ") : "No eligible payment allocations were found";
+    throw Object.assign(new Error(`No claimable amount exists for ${computed.vehicle.registrationNumber}. ${reasonSummary}.`), { status: 409, preview: computed });
+  }
+  const claim = await db.transaction(async (tx) => {
+    let row: any;
+    if (existing) {
+      await tx.delete(transportClaimAllocations).where(eq(transportClaimAllocations.claimId, existing.id));
+      await tx.delete(transportClaimDeductions).where(eq(transportClaimDeductions.claimId, existing.id));
+      await tx.update(transportProviderAdjustments).set({ status: "pending", claimId: null }).where(eq(transportProviderAdjustments.claimId, existing.id));
+      [row] = await tx.update(transportClaims).set({ ownerId: computed.vehicle.ownerId, driverId: computed.vehicle.driverId, currentPeriodAmount: String(computed.currentPeriodAmount), priorPeriodAmount: String(computed.priorPeriodAmount), grossAmount: String(computed.gross), deductionAmount: String(computed.deductionAmount), netAmount: String(computed.net), notes: notes ?? existing.notes, preparedByUserId: userId }).where(eq(transportClaims.id, existing.id)).returning();
+    } else {
+      [row] = await tx.insert(transportClaims).values({ schoolId: school.id, vehicleId, ownerId: computed.vehicle.ownerId, driverId: computed.vehicle.driverId, claimNumber: numberCode("CLM", school.shortCode, Date.now().toString().slice(-6)), serviceYear, serviceMonth, currentPeriodAmount: String(computed.currentPeriodAmount), priorPeriodAmount: String(computed.priorPeriodAmount), grossAmount: String(computed.gross), deductionAmount: String(computed.deductionAmount), netAmount: String(computed.net), notes, preparedByUserId: userId }).returning();
+    }
+    for (const candidate of computed.candidates) await tx.insert(transportClaimAllocations).values({ claimId: row.id, allocationId: Number(candidate.id), amount: String(candidate.amount) });
+    for (const deduction of computed.deductions) await tx.insert(transportClaimDeductions).values({ claimId: row.id, deductionType: deduction.type, sourceId: deduction.sourceId, description: deduction.description, amount: String(deduction.amount), priority: deduction.priority });
+    if (computed.providerAdjustments.length) await tx.update(transportProviderAdjustments).set({ status: "applied", claimId: row.id }).where(inArray(transportProviderAdjustments.id, computed.providerAdjustments.map((item) => item.id)));
+    await writeAudit(tx, school.id, userId, "claim", row.id, existing ? "recalculate_draft" : "generate", existing, { claim: row, allocations: computed.candidates.length, excluded: computed.excluded, deductions: computed.deductions });
+    return row;
+  });
+  return { claim, preview: computed };
 }
 
 export function registerTransportRoutes(app: Express) {
@@ -1183,6 +1535,8 @@ export function registerTransportRoutes(app: Express) {
       const school = await schoolContext(req);
       if (!school) return res.status(400).json({ message: "Select a school" });
       const schoolId = school.id;
+      const orgSchoolIds = await organizationSchoolIds(school);
+      await reconcileTransportAssignmentDates(schoolId);
       const settings = await getOrCreateSettings(schoolId);
       const [
         routes,
@@ -1193,6 +1547,7 @@ export function registerTransportRoutes(app: Express) {
         servicePoints,
         paths,
         pathNodes,
+        pathNodeLearners,
         learnerRows,
         staffRows,
         assignmentsResult,
@@ -1210,19 +1565,26 @@ export function registerTransportRoutes(app: Express) {
       ] = await Promise.all([
         db.select().from(transportRoutes).where(eq(transportRoutes.schoolId, schoolId)).orderBy(asc(transportRoutes.name)),
         db.select().from(transportPickupPoints).where(eq(transportPickupPoints.schoolId, schoolId)).orderBy(asc(transportPickupPoints.stopOrder)),
-        db.select().from(transportOwners).where(eq(transportOwners.schoolId, schoolId)).orderBy(asc(transportOwners.name)),
-        db.select().from(transportDrivers).where(eq(transportDrivers.schoolId, schoolId)).orderBy(asc(transportDrivers.firstName)),
-        db.select().from(transportVehicles).where(eq(transportVehicles.schoolId, schoolId)).orderBy(asc(transportVehicles.registrationNumber)),
-        db.select().from(transportServicePoints).where(eq(transportServicePoints.schoolId, schoolId)).orderBy(desc(transportServicePoints.createdAt)),
+        db.select().from(transportOwners).where(inArray(transportOwners.schoolId, orgSchoolIds)).orderBy(asc(transportOwners.name)),
+        db.select().from(transportDrivers).where(inArray(transportDrivers.schoolId, orgSchoolIds)).orderBy(asc(transportDrivers.firstName)),
+        db.select().from(transportVehicles).where(inArray(transportVehicles.schoolId, orgSchoolIds)).orderBy(asc(transportVehicles.registrationNumber)),
+        db.select().from(transportServicePoints).where(inArray(transportServicePoints.schoolId, orgSchoolIds)).orderBy(desc(transportServicePoints.createdAt)),
         db.select().from(transportVehiclePaths).where(eq(transportVehiclePaths.schoolId, schoolId)).orderBy(desc(transportVehiclePaths.createdAt)),
         db.select().from(transportPathNodes).where(eq(transportPathNodes.schoolId, schoolId)).orderBy(asc(transportPathNodes.pathId), asc(transportPathNodes.stopOrder)),
-        db.select({ id: students.id, firstName: students.firstName, lastName: students.lastName, admissionNo: students.admissionNo, classId: students.classId, className: classes.className })
+        db.select().from(transportPathNodeLearners).where(eq(transportPathNodeLearners.schoolId, schoolId)),
+        db.select({ id: students.id, firstName: students.firstName, lastName: students.lastName, admissionNo: students.admissionNo, classId: students.classId, className: classes.className, status: students.status })
           .from(students).leftJoin(classes, eq(classes.id, students.classId))
-          .where(and(eq(students.schoolId, schoolId), eq(students.status, "active"))).orderBy(asc(students.firstName), asc(students.lastName)),
+          .where(eq(students.schoolId, schoolId)).orderBy(asc(students.firstName), asc(students.lastName)),
         db.select({ id: staff.id, firstName: staff.firstName, lastName: staff.lastName, position: staff.role, status: staff.status })
           .from(staff).where(eq(staff.schoolId, schoolId)).orderBy(asc(staff.firstName), asc(staff.lastName)),
         db.execute(sql`
-          SELECT a.*, s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className",
+          SELECT a.*,
+            a.student_id AS "studentId", a.route_id AS "routeId", a.service_type AS "serviceType",
+            a.start_date AS "startDate", a.end_date AS "endDate", a.is_active AS "isActive",
+            a.service_state AS "serviceState", a.financial_status AS "financialStatus", a.planning_status AS "planningStatus",
+            a.agreed_fee AS "agreedFee", a.base_monthly_fee AS "fullFee", a.vehicle_id AS "vehicleId", a.outbound_vehicle_id AS "outboundVehicleId",
+            a.driver_id AS "driverId", a.pickup_service_point_id AS "pickupServicePointId", a.dropoff_service_point_id AS "dropoffServicePointId",
+            s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className",
             r.name AS "routeName", v.registration_number AS "vehicleRegistration", ov.registration_number AS "outboundVehicleRegistration",
             CONCAT(d.first_name,' ',d.last_name) AS "driverName", sp.name AS "pickupName", dsp.name AS "dropoffName",
             COALESCE(ch.charged,0)::text AS charged, COALESCE(ad.adjustments,0)::text AS adjustments,
@@ -1243,19 +1605,28 @@ export function registerTransportRoutes(app: Express) {
           WHERE a.school_id=${schoolId} ORDER BY a.is_active DESC,s.first_name,s.last_name
         `),
         db.execute(sql`
-          SELECT p.*, s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo",
+          SELECT p.*,
+            p.student_id AS "studentId", p.payment_date AS "paymentDate", p.payment_method AS "paymentMethod",
+            p.academic_year AS "academicYear", p.receipt_no AS "receiptNo", p.verification_status AS "verificationStatus",
+            p.external_reference AS "externalReference", p.received_by_user_id AS "receivedByUserId", p.verified_at AS "verifiedAt",
+            p.verified_by_user_id AS "verifiedByUserId", p.reconciled_at AS "reconciledAt", p.reconciled_by_user_id AS "reconciledByUserId",
+            p.reversed_at AS "reversedAt", p.reversed_by_user_id AS "reversedByUserId", p.reversal_reason AS "reversalReason",
+            s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo",
             COALESCE(SUM(a.amount),0)::text AS "allocatedAmount",
             (p.amount-COALESCE(SUM(a.amount),0))::text AS "unallocatedAmount",
             (SELECT COUNT(*) FROM transport_receipt_events re WHERE re.payment_id=p.id AND re.event_type='reprint')::int AS "reprintCount",
-            ca.claim_id AS "claimId", cl.claim_number AS "claimNumber", po.payout_number AS "payoutNumber"
+            ca.claim_id AS "claimId", cl.claim_number AS "claimNumber", po.payout_number AS "payoutNumber",
+            cp.cashup_id AS "cashupId", cu.status AS "cashupStatus"
           FROM transport_payments p
           JOIN students s ON s.id=p.student_id
           LEFT JOIN transport_payment_allocations a ON a.payment_id=p.id
           LEFT JOIN transport_claim_allocations ca ON ca.allocation_id=a.id
           LEFT JOIN transport_claims cl ON cl.id=ca.claim_id
           LEFT JOIN transport_payouts po ON po.claim_id=cl.id
+          LEFT JOIN transport_cashup_payments cp ON cp.payment_id=p.id
+          LEFT JOIN transport_cashups cu ON cu.id=cp.cashup_id
           WHERE p.school_id=${schoolId}
-          GROUP BY p.id,s.id,ca.claim_id,cl.claim_number,po.payout_number
+          GROUP BY p.id,s.id,ca.claim_id,cl.claim_number,po.payout_number,cp.cashup_id,cu.status
           ORDER BY p.created_at DESC LIMIT 500
         `),
         db.select().from(transportPaymentPlans).where(eq(transportPaymentPlans.schoolId, schoolId)).orderBy(desc(transportPaymentPlans.createdAt)),
@@ -1270,19 +1641,221 @@ export function registerTransportRoutes(app: Express) {
         db.select().from(transportAuditEvents).where(eq(transportAuditEvents.schoolId, schoolId)).orderBy(desc(transportAuditEvents.createdAt)).limit(300),
       ]);
 
+      const [organizationRoutes, vehicleDestinationRows, billingRuns, learnerAccountsResult] = await Promise.all([
+        db.select({ id: transportRoutes.id, schoolId: transportRoutes.schoolId, name: transportRoutes.name, code: transportRoutes.code, isActive: transportRoutes.isActive, status: transportRoutes.status })
+          .from(transportRoutes).where(inArray(transportRoutes.schoolId, orgSchoolIds)).orderBy(asc(transportRoutes.name)),
+        db.select({ vehicleId: transportVehicleDestinations.vehicleId, routeId: transportVehicleDestinations.routeId })
+          .from(transportVehicleDestinations)
+          .innerJoin(transportRoutes, eq(transportRoutes.id, transportVehicleDestinations.routeId))
+          .where(inArray(transportRoutes.schoolId, orgSchoolIds)),
+        db.select().from(transportBillingRuns).where(eq(transportBillingRuns.schoolId, schoolId)).orderBy(desc(transportBillingRuns.createdAt)).limit(100),
+        db.execute(sql`
+          WITH learner_ids AS (
+            SELECT DISTINCT a.student_id
+            FROM transport_assignments a
+            WHERE a.school_id=${schoolId}
+          ), charge_totals AS (
+            SELECT student_id, COALESCE(SUM(amount),0) AS charges
+            FROM transport_charges WHERE school_id=${schoolId} AND status <> 'cancelled' GROUP BY student_id
+          ), adjustment_totals AS (
+            SELECT student_id, COALESCE(SUM(CASE WHEN direction='debit' THEN amount ELSE -amount END),0) AS adjustments
+            FROM transport_account_adjustments WHERE school_id=${schoolId} AND status='approved' GROUP BY student_id
+          ), payment_totals AS (
+            SELECT student_id, COALESCE(SUM(amount),0) AS received
+            FROM transport_payments WHERE school_id=${schoolId} AND reversed_at IS NULL GROUP BY student_id
+          ), refund_totals AS (
+            SELECT student_id, COALESCE(SUM(amount),0) AS external_refunds_paid
+            FROM transport_refunds WHERE school_id=${schoolId} AND status='paid' AND method <> 'credit' GROUP BY student_id
+          ), current_assignment AS (
+            SELECT DISTINCT ON (student_id) student_id, id AS assignment_id, route_id, vehicle_id, service_state, financial_status, start_date, end_date
+            FROM transport_assignments WHERE school_id=${schoolId}
+            ORDER BY student_id, is_active DESC, start_date DESC, id DESC
+          )
+          SELECT s.id AS "studentId", s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className",
+                 ca.assignment_id AS "assignmentId", ca.service_state AS "serviceState", ca.financial_status AS "financialStatus", ca.start_date AS "startDate", ca.end_date AS "endDate",
+                 r.name AS "destinationName", v.registration_number AS "vehicleRegistration",
+                 COALESCE(ct.charges,0)::text AS charges, COALESCE(at.adjustments,0)::text AS adjustments, COALESCE(pt.received,0)::text AS received,
+                 COALESCE(rt.external_refunds_paid,0)::text AS "externalRefundsPaid",
+                 (COALESCE(ct.charges,0)+COALESCE(at.adjustments,0)+COALESCE(rt.external_refunds_paid,0)-COALESCE(pt.received,0))::text AS balance
+          FROM learner_ids li
+          JOIN students s ON s.id=li.student_id
+          LEFT JOIN classes c ON c.id=s.class_id
+          LEFT JOIN charge_totals ct ON ct.student_id=s.id
+          LEFT JOIN adjustment_totals at ON at.student_id=s.id
+          LEFT JOIN payment_totals pt ON pt.student_id=s.id
+          LEFT JOIN refund_totals rt ON rt.student_id=s.id
+          LEFT JOIN current_assignment ca ON ca.student_id=s.id
+          LEFT JOIN transport_routes r ON r.id=ca.route_id
+          LEFT JOIN transport_vehicles v ON v.id=ca.vehicle_id
+          ORDER BY s.first_name,s.last_name,s.admission_no
+        `),
+      ]);
+
+      const fleetLinks = vehicles.length
+        ? await db.select({
+            transportVehicleId: fleetVehicleProfiles.transportVehicleId,
+            fleetVehicleId: fleetVehicleProfiles.id,
+            assetId: fleetVehicleProfiles.assetId,
+            assetNumber: assetRegister.assetNumber,
+            assetName: assetRegister.name,
+            assetRegistrationNumber: assetVehicleDetails.registrationNumber,
+          }).from(fleetVehicleProfiles)
+            .innerJoin(assetRegister, eq(assetRegister.id, fleetVehicleProfiles.assetId))
+            .leftJoin(assetVehicleDetails, eq(assetVehicleDetails.assetId, assetRegister.id))
+            .where(inArray(fleetVehicleProfiles.transportVehicleId, vehicles.map((vehicle) => vehicle.id)))
+        : [];
+      const fleetLinkByTransportVehicle = new Map(fleetLinks.filter((link) => link.transportVehicleId != null).map((link) => [Number(link.transportVehicleId), link]));
+      const transportVehiclesWithSource = vehicles.map((vehicle) => {
+        const link = fleetLinkByTransportVehicle.get(vehicle.id);
+        return { ...vehicle, sourceType: link ? "fcgs_asset" : "transport_only", fleetVehicleId: link?.fleetVehicleId ?? null, assetId: link?.assetId ?? null, assetNumber: link?.assetNumber ?? null, assetName: link?.assetName ?? null };
+      });
+
+      const [assignmentPointRefs, fleetPointRefs, orgSchoolRows] = await Promise.all([
+        db.select({ schoolId: transportAssignments.schoolId, studentId: transportAssignments.studentId, routeId: transportAssignments.routeId, serviceType: transportAssignments.serviceType, serviceState: transportAssignments.serviceState, financialStatus: transportAssignments.financialStatus, startDate: transportAssignments.startDate, endDate: transportAssignments.endDate, isActive: transportAssignments.isActive, pickupServicePointId: transportAssignments.pickupServicePointId, dropoffServicePointId: transportAssignments.dropoffServicePointId, vehicleId: transportAssignments.vehicleId, outboundVehicleId: transportAssignments.outboundVehicleId })
+          .from(transportAssignments).where(and(inArray(transportAssignments.schoolId, orgSchoolIds), or(eq(transportAssignments.isActive, true), and(eq(transportAssignments.serviceState, "pending_start"), ne(transportAssignments.financialStatus, "pending_first_payment"))))),
+        school.organizationId
+          ? db.select({ studentId: fleetVehicleOccupants.studentId, pickupServicePointId: fleetVehicleOccupants.pickupServicePointId, dropoffServicePointId: fleetVehicleOccupants.dropoffServicePointId, vehicleId: fleetVehicleOccupants.vehicleId })
+              .from(fleetVehicleOccupants).where(and(eq(fleetVehicleOccupants.organizationId, school.organizationId), eq(fleetVehicleOccupants.isActive, true)))
+          : Promise.resolve([] as any[]),
+        db.select({ id: schools.id, name: schools.name }).from(schools).where(inArray(schools.id, orgSchoolIds)),
+      ]);
+      const schoolNameById = new Map(orgSchoolRows.map((row) => [Number(row.id), row.name]));
+      const studentUsage = new Map<number, Set<number>>();
+      const vehicleUsage = new Map<number, Set<string>>();
+      const directionUsage = new Map<number, Set<string>>();
+      const addUsage = (pointId: unknown, studentId: unknown, vehicleKeys: Array<unknown>) => {
+        const point = Number(pointId || 0);
+        if (!point) return;
+        if (studentId) {
+          if (!studentUsage.has(point)) studentUsage.set(point, new Set());
+          studentUsage.get(point)!.add(Number(studentId));
+        }
+        if (!vehicleUsage.has(point)) vehicleUsage.set(point, new Set());
+        const bucket = vehicleUsage.get(point)!;
+        for (const key of vehicleKeys) if (key) bucket.add(String(key));
+      };
+      for (const row of assignmentPointRefs) {
+        if (row.serviceType === "pickup" || row.serviceType === "both") {
+          addUsage(row.pickupServicePointId, row.studentId, [row.vehicleId ? `transport:${row.vehicleId}` : null]);
+          const pointId = Number(row.pickupServicePointId || 0); if (pointId) { if (!directionUsage.has(pointId)) directionUsage.set(pointId, new Set()); directionUsage.get(pointId)!.add("schoolbound"); }
+        }
+        if (row.serviceType === "dropoff" || row.serviceType === "both") {
+          const pointId = Number(row.dropoffServicePointId || row.pickupServicePointId || 0);
+          addUsage(pointId, row.studentId, [row.outboundVehicleId ? `transport:${row.outboundVehicleId}` : row.vehicleId ? `transport:${row.vehicleId}` : null]);
+          if (pointId) { if (!directionUsage.has(pointId)) directionUsage.set(pointId, new Set()); directionUsage.get(pointId)!.add("homebound"); }
+        }
+      }
+      for (const row of fleetPointRefs as any[]) {
+        addUsage(row.pickupServicePointId, row.studentId, [row.vehicleId ? `fleet:${row.vehicleId}` : null]);
+        addUsage(row.dropoffServicePointId, row.studentId, [row.vehicleId ? `fleet:${row.vehicleId}` : null]);
+      }
+      const servicePointsWithUsage = servicePoints.map((point: any) => ({
+        ...point,
+        originSchoolName: schoolNameById.get(Number(point.schoolId)) || null,
+        studentUsageCount: studentUsage.get(Number(point.id))?.size || 0,
+        vehicleUsageCount: vehicleUsage.get(Number(point.id))?.size || 0,
+        usageDirections: Array.from(directionUsage.get(Number(point.id)) || []),
+      }));
+      const destinationIdsByVehicle = new Map<number, number[]>();
+      for (const row of vehicleDestinationRows) {
+        const vehicleId = Number(row.vehicleId);
+        if (!destinationIdsByVehicle.has(vehicleId)) destinationIdsByVehicle.set(vehicleId, []);
+        destinationIdsByVehicle.get(vehicleId)!.push(Number(row.routeId));
+      }
+      const destinationById = new Map(organizationRoutes.map((route: any) => [Number(route.id), route]));
+      const vehicleStudents = new Map<number, Set<number>>();
+      const schoolboundStudents = new Map<number, Set<number>>();
+      const homeboundStudents = new Map<number, Set<number>>();
+      const schoolsByVehicle = new Map<number, Set<number>>();
+      const servingSchoolVehicleIds = new Set<number>();
+      for (const row of assignmentPointRefs) {
+        const primaryVehicleId = row.vehicleId ? Number(row.vehicleId) : null;
+        const homeVehicleId = row.outboundVehicleId ? Number(row.outboundVehicleId) : primaryVehicleId;
+        const touchVehicle = (vehicleId: number | null, direction: "schoolbound" | "homebound") => {
+          if (!vehicleId) return;
+          if (!vehicleStudents.has(vehicleId)) vehicleStudents.set(vehicleId, new Set());
+          vehicleStudents.get(vehicleId)!.add(Number(row.studentId));
+          const directionMap = direction === "schoolbound" ? schoolboundStudents : homeboundStudents;
+          if (!directionMap.has(vehicleId)) directionMap.set(vehicleId, new Set());
+          directionMap.get(vehicleId)!.add(Number(row.studentId));
+          if (!schoolsByVehicle.has(vehicleId)) schoolsByVehicle.set(vehicleId, new Set());
+          schoolsByVehicle.get(vehicleId)!.add(Number(row.schoolId));
+          if (row.isActive && Number(row.schoolId) === Number(schoolId)) servingSchoolVehicleIds.add(vehicleId);
+        };
+        if (row.serviceType === "pickup" || row.serviceType === "both") touchVehicle(primaryVehicleId, "schoolbound");
+        if (row.serviceType === "dropoff" || row.serviceType === "both") touchVehicle(homeVehicleId, "homebound");
+      }
+      const vehiclesWithOccupancy = transportVehiclesWithSource.map((vehicle: any) => {
+        const destinationIds = destinationIdsByVehicle.get(Number(vehicle.id)) || [];
+        const schoolIdsServed = Array.from(schoolsByVehicle.get(Number(vehicle.id)) || []);
+        const schoolboundOccupied = schoolboundStudents.get(Number(vehicle.id))?.size || 0;
+        const homeboundOccupied = homeboundStudents.get(Number(vehicle.id))?.size || 0;
+        return {
+          ...vehicle,
+          destinationIds,
+          destinations: destinationIds.map((routeId) => destinationById.get(routeId)).filter(Boolean),
+          occupantCount: vehicleStudents.get(Number(vehicle.id))?.size || 0,
+          schoolboundOccupied,
+          homeboundOccupied,
+          schoolboundSeatsAvailable: Math.max(0, Number(vehicle.capacity || 0) - schoolboundOccupied),
+          homeboundSeatsAvailable: Math.max(0, Number(vehicle.capacity || 0) - homeboundOccupied),
+          schoolsServed: schoolIdsServed.map((servedSchoolId) => ({ id: servedSchoolId, name: schoolNameById.get(servedSchoolId) || `School ${servedSchoolId}` })),
+        };
+      });
+      const servingVehicles = vehiclesWithOccupancy.filter((vehicle: any) => servingSchoolVehicleIds.has(Number(vehicle.id)));
+
+      const assignmentAccounts = new Map<number, any>();
+      for (const row of learnerAccountsResult.rows as any[]) assignmentAccounts.set(Number(row.studentId), row);
+      const assignmentsWithLedger = (assignmentsResult.rows as any[]).map((row: any) => {
+        const account = assignmentAccounts.get(Number(row.studentId));
+        return account ? { ...row, charged: account.charges, adjustments: account.adjustments, paid: account.received, balance: account.balance } : row;
+      });
+
       const totalsResult = await db.execute(sql`
         SELECT
           (SELECT COUNT(*) FROM transport_assignments WHERE school_id=${schoolId} AND is_active=true)::int AS active_learners,
           (SELECT COUNT(*) FROM transport_assignments WHERE school_id=${schoolId} AND service_state='pending_start')::int AS pending_learners,
           (SELECT COUNT(*) FROM transport_routes WHERE school_id=${schoolId} AND is_active=true)::int AS active_routes,
-          (SELECT COUNT(*) FROM transport_vehicles WHERE school_id=${schoolId} AND is_active=true)::int AS active_vehicles,
+          (SELECT COUNT(DISTINCT COALESCE(vehicle_id,outbound_vehicle_id)) FROM transport_assignments WHERE school_id=${schoolId} AND is_active=true AND COALESCE(vehicle_id,outbound_vehicle_id) IS NOT NULL)::int AS active_vehicles,
           COALESCE((SELECT SUM(amount) FROM transport_charges WHERE school_id=${schoolId} AND status <> 'cancelled'),0)::text AS expected,
           COALESCE((SELECT SUM(amount) FROM transport_payments WHERE school_id=${schoolId} AND reversed_at IS NULL),0)::text AS collected,
           COALESCE((SELECT SUM(net_amount-amount_paid) FROM transport_payouts WHERE school_id=${schoolId} AND status <> 'paid'),0)::text AS payouts_due,
           COALESCE((SELECT SUM(outstanding_amount) FROM transport_advances WHERE school_id=${schoolId} AND status NOT IN ('settled','cancelled')),0)::text AS advances_outstanding,
           (SELECT COUNT(*) FROM transport_claims WHERE school_id=${schoolId} AND status IN ('draft','submitted','verified'))::int AS pending_claims,
-          (SELECT COUNT(*) FROM transport_refunds WHERE school_id=${schoolId} AND status IN ('requested','approved'))::int AS pending_refunds
+          (SELECT COUNT(*) FROM transport_refunds WHERE school_id=${schoolId} AND status IN ('requested','approved_awaiting_payment'))::int AS pending_refunds
       `);
+
+      const [subscriptionPolicies, hqClaimLinks, auditUsers] = await Promise.all([
+        school.organizationId ? db.select().from(transportSubscriptionPolicies).where(eq(transportSubscriptionPolicies.organizationId, school.organizationId)).orderBy(desc(transportSubscriptionPolicies.startYear), desc(transportSubscriptionPolicies.startMonth), desc(transportSubscriptionPolicies.createdAt)) : Promise.resolve([] as any[]),
+        claims.length ? db.select({ schoolClaimId: transportHqClaimItems.schoolClaimId, hqClaimId: transportHqClaimItems.hqClaimId, hqClaimNumber: transportHqClaims.claimNumber, hqClaimStatus: transportHqClaims.status, hqPayoutId: transportHqPayouts.id, hqPayoutNumber: transportHqPayouts.payoutNumber, hqPayoutStatus: transportHqPayouts.status, hqPayoutAmountPaid: transportHqPayouts.amountPaid, hqPayoutNetAmount: transportHqPayouts.netAmount })
+          .from(transportHqClaimItems).innerJoin(transportHqClaims, eq(transportHqClaims.id, transportHqClaimItems.hqClaimId)).leftJoin(transportHqPayouts, eq(transportHqPayouts.hqClaimId, transportHqClaims.id)).where(inArray(transportHqClaimItems.schoolClaimId, claims.map((row) => row.id))) : Promise.resolve([] as any[]),
+        audits.length ? db.select({ id: users.id, username: users.username, firstName: users.firstName, lastName: users.lastName }).from(users).where(inArray(users.id, Array.from(new Set(audits.map((row) => Number(row.userId)).filter(Boolean))))) : Promise.resolve([] as any[]),
+      ]);
+      const hqBySchoolClaim = new Map(hqClaimLinks.map((row: any) => [Number(row.schoolClaimId), row]));
+      const claimsWithHq = claims.map((claim: any) => ({ ...claim, ...(hqBySchoolClaim.get(Number(claim.id)) || {}), payoutStatus: hqBySchoolClaim.get(Number(claim.id))?.hqPayoutStatus || "not_paid", paidAmount: hqBySchoolClaim.get(Number(claim.id))?.hqPayoutAmountPaid || "0", outstandingAmount: String(Math.max(0, amount(claim.netAmount) - amount(hqBySchoolClaim.get(Number(claim.id))?.hqPayoutAmountPaid))) }));
+      const auditUserById = new Map(auditUsers.map((row: any) => [Number(row.id), row]));
+      const paymentById = new Map((paymentsResult.rows as any[]).map((row: any) => [Number(row.id), row]));
+      const claimById = new Map(claimsWithHq.map((row: any) => [Number(row.id), row]));
+      const payoutById = new Map(payouts.map((row: any) => [Number(row.id), row]));
+      const refundById = new Map(refunds.map((row: any) => [Number(row.id), row]));
+      const cashupById = new Map(cashups.map((row: any) => [Number(row.id), row]));
+      const billingRunById = new Map(billingRuns.map((row: any) => [Number(row.id), row]));
+      const vehicleByIdForAudit = new Map(vehiclesWithOccupancy.map((row: any) => [Number(row.id), row]));
+      const studentByIdForAudit = new Map(learnerRows.map((row: any) => [Number(row.id), row]));
+      const auditsWithNames = audits.map((audit: any) => {
+        const auditUser = auditUserById.get(Number(audit.userId));
+        const userName = auditUser ? `${auditUser.firstName || ""} ${auditUser.lastName || ""}`.trim() || auditUser.username : audit.userId ? `User #${audit.userId}` : "System";
+        let recordReference = audit.entityId ? `#${audit.entityId}` : "—";
+        if (audit.entityType === "vehicle") recordReference = vehicleByIdForAudit.get(Number(audit.entityId))?.registrationNumber || recordReference;
+        if (audit.entityType === "claim") recordReference = claimById.get(Number(audit.entityId))?.claimNumber || recordReference;
+        if (audit.entityType === "payout") recordReference = payoutById.get(Number(audit.entityId))?.payoutNumber || recordReference;
+        if (audit.entityType === "refund") recordReference = refundById.get(Number(audit.entityId))?.refundNumber || recordReference;
+        if (audit.entityType === "cashup") recordReference = cashupById.get(Number(audit.entityId))?.cashupNumber || recordReference;
+        if (audit.entityType === "payment") recordReference = paymentById.get(Number(audit.entityId))?.receiptNo || recordReference;
+        if (audit.entityType === "billing_run") recordReference = billingRunById.get(Number(audit.entityId))?.runNumber || recordReference;
+        if (audit.entityType === "learner" || audit.entityType === "student") { const student = studentByIdForAudit.get(Number(audit.entityId)); recordReference = student ? `${student.firstName} ${student.lastName}` : recordReference; }
+        return { ...audit, userName, recordReference };
+      });
 
       return res.json({
         school,
@@ -1291,29 +1864,146 @@ export function registerTransportRoutes(app: Express) {
         points,
         owners,
         drivers,
-        vehicles,
-        servicePoints,
+        vehicles: servingVehicles,
+        allVehicles: vehiclesWithOccupancy,
+        organizationRoutes,
+        vehicleDestinations: vehicleDestinationRows,
+        servicePoints: servicePointsWithUsage,
         paths,
         pathNodes,
+        pathNodeLearners,
         students: learnerRows,
         staff: staffRows,
-        assignments: assignmentsResult.rows,
+        assignments: assignmentsWithLedger,
+        learnerAccounts: learnerAccountsResult.rows,
         payments: paymentsResult.rows,
         paymentPlans: plans,
         refunds,
         cashups,
+        billingRuns,
         subscriptions,
         penalties,
         advances,
         incidents,
-        claims,
+        claims: claimsWithHq,
         payouts,
-        audits,
+        audits: auditsWithNames,
+        subscriptionPolicies,
         dashboard: totalsResult.rows[0],
       });
     } catch (error) {
       return routeError(res, error);
     }
+  });
+
+  app.get("/api/transport/overview", requireAuth, requireAnyPermission("transport.dashboard.view", "transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      if (!school) return res.status(400).json({ message: "Select a school" });
+      const parsed = z.object({ from: dateString, to: dateString }).parse(req.query);
+      if (parsed.from > parsed.to) return res.status(400).json({ message: "From date cannot be after To date" });
+      const [learners, charges, payments, claims, refunds, advances] = await Promise.all([
+        db.execute(sql`
+          SELECT a.id,a.student_id AS "studentId",a.service_state AS "serviceState",a.financial_status AS "financialStatus",a.start_date AS "startDate",a.end_date AS "endDate",
+                 s.first_name AS "firstName",s.last_name AS "lastName",s.admission_no AS "admissionNo",r.name AS "destinationName",v.registration_number AS "vehicleRegistration",a.vehicle_id AS "vehicleId"
+          FROM transport_assignments a JOIN students s ON s.id=a.student_id JOIN transport_routes r ON r.id=a.route_id LEFT JOIN transport_vehicles v ON v.id=a.vehicle_id
+          WHERE a.school_id=${school.id} AND a.start_date <= ${parsed.to} AND (a.end_date IS NULL OR a.end_date >= ${parsed.from}) AND a.service_state NOT IN ('terminated','completed')
+          ORDER BY s.first_name,s.last_name
+        `),
+        db.execute(sql`SELECT c.*,s.first_name AS "firstName",s.last_name AS "lastName",s.admission_no AS "admissionNo" FROM transport_charges c JOIN students s ON s.id=c.student_id WHERE c.school_id=${school.id} AND c.status <> 'cancelled' AND COALESCE(c.service_period_start,make_date(c.academic_year,GREATEST(c.month,1),1)) <= ${parsed.to} AND COALESCE(c.service_period_end,(date_trunc('month',make_date(c.academic_year,GREATEST(c.month,1),1))+interval '1 month - 1 day')::date) >= ${parsed.from} ORDER BY c.service_period_start,c.id`),
+        db.execute(sql`SELECT p.*,s.first_name AS "firstName",s.last_name AS "lastName",s.admission_no AS "admissionNo" FROM transport_payments p JOIN students s ON s.id=p.student_id WHERE p.school_id=${school.id} AND p.payment_date BETWEEN ${parsed.from} AND ${parsed.to} AND p.reversed_at IS NULL ORDER BY p.payment_date,p.id`),
+        db.execute(sql`SELECT c.*,v.registration_number AS "vehicleRegistration",o.name AS "ownerName",p.status AS "legacyPayoutStatus",p.amount_paid AS "legacyAmountPaid" FROM transport_claims c JOIN transport_vehicles v ON v.id=c.vehicle_id LEFT JOIN transport_owners o ON o.id=c.owner_id LEFT JOIN transport_payouts p ON p.claim_id=c.id WHERE c.school_id=${school.id} AND make_date(c.service_year,c.service_month,1) BETWEEN date_trunc('month',${parsed.from}::date) AND date_trunc('month',${parsed.to}::date) ORDER BY c.service_year,c.service_month,c.id`),
+        db.execute(sql`SELECT r.*,s.first_name AS "firstName",s.last_name AS "lastName",s.admission_no AS "admissionNo" FROM transport_refunds r JOIN students s ON s.id=r.student_id WHERE r.school_id=${school.id} AND r.effective_date BETWEEN ${parsed.from} AND ${parsed.to} ORDER BY r.effective_date,r.id`),
+        db.execute(sql`SELECT a.*,v.registration_number AS "vehicleRegistration",o.name AS "ownerName" FROM transport_advances a JOIN transport_vehicles v ON v.id=a.vehicle_id LEFT JOIN transport_owners o ON o.id=a.owner_id WHERE a.school_id=${school.id} AND a.request_date BETWEEN ${parsed.from} AND ${parsed.to} ORDER BY a.request_date,a.id`),
+      ]);
+      const learnerRows = learners.rows as any[];
+      const vehicleIds = new Set(learnerRows.map((row) => Number(row.vehicleId || 0)).filter(Boolean));
+      const chargeRows = charges.rows as any[];
+      const paymentRows = payments.rows as any[];
+      const claimRows = claims.rows as any[];
+      const refundRows = refunds.rows as any[];
+      const advanceRows = advances.rows as any[];
+      const totalCharged = rounded(chargeRows.reduce((sum,row) => sum + amount(row.amount),0));
+      const totalCollected = rounded(paymentRows.reduce((sum,row) => sum + amount(row.amount),0));
+      const pendingRefundRows = refundRows.filter((row) => ["requested","approved_awaiting_payment"].includes(String(row.status)));
+      const pendingClaims = claimRows.filter((row) => ["draft","submitted","verified"].includes(String(row.status)));
+      const payoutDueRows = claimRows.filter((row) => ["verified","approved","paid"].includes(String(row.status))).map((row) => ({ ...row, outstanding: Math.max(0, amount(row.netAmount) - amount(row.legacyAmountPaid)) })).filter((row) => row.outstanding > 0);
+      const activeDestinationIds = new Set(learnerRows.map((row:any) => row.destinationName).filter(Boolean));
+      return res.json({
+        period: parsed,
+        summary: { activeLearners: learnerRows.length, activeDestinations: activeDestinationIds.size, activeVehicles: vehicleIds.size, totalCharged, totalCollected, outstanding: rounded(totalCharged-totalCollected), payoutsDue: rounded(payoutDueRows.reduce((sum,row) => sum + row.outstanding,0)), pendingClaims: pendingClaims.length, pendingRefunds: pendingRefundRows.length, advancesOutstanding: rounded(advanceRows.filter((row) => !["settled","cancelled","rejected"].includes(String(row.status))).reduce((sum,row)=>sum+amount(row.outstandingAmount),0)) },
+        records: { activeLearners: learnerRows, activeVehicles: Array.from(vehicleIds).map((id) => ({ id, registrationNumber: learnerRows.find((row) => Number(row.vehicleId)===id)?.vehicleRegistration, learnerCount: learnerRows.filter((row) => Number(row.vehicleId)===id).length })), charges: chargeRows, payments: paymentRows, payoutsDue: payoutDueRows, pendingClaims, pendingRefunds: pendingRefundRows, advances: advanceRows },
+      });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.get("/api/transport/learner-accounts/:studentId", requireAuth, requireAnyPermission("transport.payments.view", "transport.charges.view", "transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      if (!school) return res.status(400).json({ message: "Select a school" });
+      const studentId = Number(req.params.studentId);
+      const [learner] = await db.select({
+        id: students.id, firstName: students.firstName, lastName: students.lastName, admissionNo: students.admissionNo, className: classes.className,
+        parentId: students.parentId, parentFirstName: parents.firstName, parentLastName: parents.lastName, parentPhone: parents.phone, parentEmail: parents.email,
+      }).from(students).leftJoin(classes, eq(classes.id, students.classId)).leftJoin(parents, eq(parents.id, students.parentId))
+        .where(and(eq(students.id, studentId), eq(students.schoolId, school.id)));
+      if (!learner) return res.status(404).json({ message: "Learner not found" });
+      const [summary, assignments, charges, payments, adjustments, refunds, plans] = await Promise.all([
+        accountSummary(studentId, school.id),
+        db.execute(sql`
+          SELECT a.*,
+                 a.student_id AS "studentId", a.route_id AS "routeId", a.service_type AS "serviceType",
+                 a.start_date AS "startDate", a.end_date AS "endDate", a.is_active AS "isActive",
+                 a.service_state AS "serviceState", a.financial_status AS "financialStatus", a.planning_status AS "planningStatus",
+                 a.agreed_fee AS "agreedFee", a.base_monthly_fee AS "fullFee", a.vehicle_id AS "vehicleId", a.outbound_vehicle_id AS "outboundVehicleId",
+                 r.name AS "destinationName", v.registration_number AS "vehicleRegistration", ov.registration_number AS "homeboundVehicleRegistration"
+          FROM transport_assignments a
+          JOIN transport_routes r ON r.id=a.route_id
+          LEFT JOIN transport_vehicles v ON v.id=a.vehicle_id
+          LEFT JOIN transport_vehicles ov ON ov.id=a.outbound_vehicle_id
+          WHERE a.school_id=${school.id} AND a.student_id=${studentId}
+          ORDER BY a.start_date DESC,a.id DESC
+        `),
+        db.execute(sql`
+          SELECT c.*,
+                 c.student_id AS "studentId", c.assignment_id AS "assignmentId", c.route_id AS "routeId", c.vehicle_id AS "vehicleId",
+                 c.academic_year AS "academicYear", c.service_period_start AS "servicePeriodStart", c.service_period_end AS "servicePeriodEnd",
+                 c.chargeable_days AS "chargeableDays", c.days_in_period AS "daysInPeriod", c.calculation_type AS "calculationType", c.due_date AS "dueDate",
+                 r.name AS "destinationName", v.registration_number AS "vehicleRegistration",
+                 COALESCE((SELECT SUM(pa.amount) FROM transport_payment_allocations pa JOIN transport_payments p ON p.id=pa.payment_id WHERE pa.charge_id=c.id AND p.reversed_at IS NULL),0)::text AS allocated
+          FROM transport_charges c
+          LEFT JOIN transport_routes r ON r.id=c.route_id LEFT JOIN transport_vehicles v ON v.id=c.vehicle_id
+          WHERE c.school_id=${school.id} AND c.student_id=${studentId}
+          ORDER BY c.academic_year DESC,c.month DESC,c.id DESC
+        `),
+        db.execute(sql`
+          SELECT p.*,
+                 p.student_id AS "studentId", p.payment_date AS "paymentDate", p.payment_method AS "paymentMethod", p.academic_year AS "academicYear",
+                 p.receipt_no AS "receiptNo", p.verification_status AS "verificationStatus", p.external_reference AS "externalReference",
+                 p.received_by_user_id AS "receivedByUserId", p.verified_at AS "verifiedAt", p.verified_by_user_id AS "verifiedByUserId",
+                 p.reconciled_at AS "reconciledAt", p.reconciled_by_user_id AS "reconciledByUserId", p.reversed_at AS "reversedAt",
+                 p.reversed_by_user_id AS "reversedByUserId", p.reversal_reason AS "reversalReason",
+                 COALESCE((SELECT SUM(pa.amount) FROM transport_payment_allocations pa WHERE pa.payment_id=p.id),0)::text AS allocated,
+                 cp.cashup_id AS "cashupId", cu.cashup_number AS "cashupNumber", cu.status AS "cashupStatus"
+          FROM transport_payments p
+          LEFT JOIN transport_cashup_payments cp ON cp.payment_id=p.id LEFT JOIN transport_cashups cu ON cu.id=cp.cashup_id
+          WHERE p.school_id=${school.id} AND p.student_id=${studentId}
+          ORDER BY p.payment_date DESC,p.id DESC
+        `),
+        db.select().from(transportAccountAdjustments).where(and(eq(transportAccountAdjustments.schoolId, school.id), eq(transportAccountAdjustments.studentId, studentId))).orderBy(desc(transportAccountAdjustments.effectiveDate), desc(transportAccountAdjustments.id)),
+        db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), eq(transportRefunds.studentId, studentId))).orderBy(desc(transportRefunds.effectiveDate), desc(transportRefunds.id)),
+        db.select().from(transportPaymentPlans).where(and(eq(transportPaymentPlans.schoolId, school.id), eq(transportPaymentPlans.studentId, studentId))).orderBy(desc(transportPaymentPlans.createdAt)),
+      ]);
+      const transactions: any[] = [];
+      for (const row of charges.rows as any[]) transactions.push({ kind: "charge", date: row.servicePeriodStart || `${row.academicYear}-${String(row.month).padStart(2,"0")}-01`, reference: `Charge #${row.id}`, description: row.description || `${row.destinationName || "Transport"} · ${MONTH_NAMES[Number(row.month) - 1] || row.month} ${row.academicYear}`, debit: amount(row.amount), credit: 0, record: row });
+      for (const row of payments.rows as any[]) if (!row.reversedAt) transactions.push({ kind: "payment", date: row.paymentDate, reference: row.receiptNo, description: `Payment · ${String(row.paymentMethod || "").replaceAll("_"," ")}`, debit: 0, credit: amount(row.amount), record: row });
+      for (const row of adjustments as any[]) if (row.status === "approved") transactions.push({ kind: "adjustment", date: row.effectiveDate, reference: `Adjustment #${row.id}`, description: row.reason || row.adjustmentType, debit: row.direction === "debit" ? amount(row.amount) : 0, credit: row.direction === "credit" ? amount(row.amount) : 0, record: row });
+      for (const row of refunds as any[]) if (row.status === "paid" && row.method !== "credit") transactions.push({ kind: "refund", date: row.paidAt ? isoDate(new Date(row.paidAt)) : row.effectiveDate, reference: row.refundNumber, description: `Refund paid · ${String(row.method || "").replaceAll("_", " ")}${row.reason ? ` · ${row.reason}` : ""}`, debit: amount(row.amount), credit: 0, record: row });
+      transactions.sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.reference).localeCompare(String(b.reference)));
+      let running = 0;
+      for (const line of transactions) { running = rounded(running + line.debit - line.credit); line.balance = running; }
+      return res.json({ learner, summary, assignments: assignments.rows, charges: charges.rows, payments: payments.rows, adjustments, refunds, paymentPlans: plans, transactions });
+    } catch (error) { return routeError(res, error); }
   });
 
   registerMasterCrud(app, "/api/transport/routes", transportRoutes, routeInput, "route", "transport.routes.create", "transport.routes.edit");
@@ -1348,8 +2038,10 @@ export function registerTransportRoutes(app: Express) {
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = clean(servicePointInput.parse(req.body));
-      const learner = await assertSchoolRecord(students, parsed.studentId, school.id);
-      if (!learner) return res.status(404).json({ message: "Learner not found" });
+      if (parsed.studentId) {
+        const learner = await assertOrganizationRecord(students, Number(parsed.studentId), school);
+        if (!learner) return res.status(404).json({ message: "Learner not found in this organization" });
+      }
       const servicePointValues: any = { ...parsed, latitude: String(parsed.latitude), longitude: String(parsed.longitude), schoolId: school.id, createdByUserId: user.id };
       const [created] = await db.insert(transportServicePoints).values(servicePointValues).returning();
       await writeAudit(db, school.id, user.id, "service_point", created.id, "create", null, created);
@@ -1365,7 +2057,7 @@ export function registerTransportRoutes(app: Express) {
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const id = Number(req.params.id);
-      const previous = await assertSchoolRecord(transportServicePoints, id, school.id);
+      const previous = await assertOrganizationRecord(transportServicePoints, id, school);
       if (!previous) return res.status(404).json({ message: "Service point not found" });
       const parsed = clean(servicePointInput.partial().parse(req.body));
       // Coordinate changes are versioned instead of overwriting historical service locations.
@@ -1388,12 +2080,204 @@ export function registerTransportRoutes(app: Express) {
       const updateValues: any = { ...parsed };
       if (updateValues.latitude !== undefined) updateValues.latitude = String(updateValues.latitude);
       if (updateValues.longitude !== undefined) updateValues.longitude = String(updateValues.longitude);
-      const [updated] = await db.update(transportServicePoints).set(updateValues).where(and(eq(transportServicePoints.id, id), eq(transportServicePoints.schoolId, school.id))).returning();
+      const [updated] = await db.update(transportServicePoints).set(updateValues).where(eq(transportServicePoints.id, id)).returning();
       await writeAudit(db, school.id, user.id, "service_point", id, "update", previous, updated);
       return res.json(updated);
     } catch (error) {
       return routeError(res, error);
     }
+  });
+
+  app.get("/api/transport/service-points/:id/usage", requireAuth, requirePermission("transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      if (!school) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const point = await assertOrganizationRecord(transportServicePoints, id, school);
+      if (!point) return res.status(404).json({ message: "Service point not found" });
+      const orgSchoolIds = await organizationSchoolIds(school);
+      const assignments = await db.select({
+        assignmentId: transportAssignments.id,
+        studentId: students.id,
+        firstName: students.firstName,
+        lastName: students.lastName,
+        admissionNo: students.admissionNo,
+        className: classes.className,
+        parentFirstName: parents.firstName,
+        parentLastName: parents.lastName,
+        parentPhone: parents.phone,
+        parentEmail: parents.email,
+        schoolName: schools.name,
+        vehicleId: transportVehicles.id,
+        vehicleRegistration: transportVehicles.registrationNumber,
+        driverFirstName: transportDrivers.firstName,
+        driverLastName: transportDrivers.lastName,
+      }).from(transportAssignments)
+        .innerJoin(students, eq(students.id, transportAssignments.studentId))
+        .innerJoin(schools, eq(schools.id, students.schoolId))
+        .leftJoin(classes, eq(classes.id, students.classId))
+        .leftJoin(parents, eq(parents.id, students.parentId))
+        .leftJoin(transportVehicles, eq(transportVehicles.id, transportAssignments.vehicleId))
+        .leftJoin(transportDrivers, eq(transportDrivers.id, transportAssignments.driverId))
+        .where(and(
+          inArray(transportAssignments.schoolId, orgSchoolIds),
+          eq(transportAssignments.isActive, true),
+          or(eq(transportAssignments.pickupServicePointId, id), eq(transportAssignments.dropoffServicePointId, id)),
+        ));
+      const fleetRows = school.organizationId ? await db.select({
+        occupantId: fleetVehicleOccupants.id,
+        studentId: students.id,
+        firstName: students.firstName,
+        lastName: students.lastName,
+        admissionNo: students.admissionNo,
+        className: classes.className,
+        parentFirstName: parents.firstName,
+        parentLastName: parents.lastName,
+        parentPhone: parents.phone,
+        parentEmail: parents.email,
+        schoolName: schools.name,
+        fleetVehicleId: fleetVehicleProfiles.id,
+        assetNumber: assetRegister.assetNumber,
+        vehicleName: assetRegister.name,
+        vehicleRegistration: assetVehicleDetails.registrationNumber,
+      }).from(fleetVehicleOccupants)
+        .innerJoin(fleetVehicleProfiles, eq(fleetVehicleProfiles.id, fleetVehicleOccupants.vehicleId))
+        .innerJoin(assetRegister, eq(assetRegister.id, fleetVehicleProfiles.assetId))
+        .leftJoin(assetVehicleDetails, eq(assetVehicleDetails.assetId, assetRegister.id))
+        .leftJoin(students, eq(students.id, fleetVehicleOccupants.studentId))
+        .leftJoin(classes, eq(classes.id, students.classId))
+        .leftJoin(parents, eq(parents.id, students.parentId))
+        .leftJoin(schools, eq(schools.id, students.schoolId))
+        .where(and(
+          eq(fleetVehicleOccupants.organizationId, school.organizationId),
+          eq(fleetVehicleOccupants.isActive, true),
+          or(eq(fleetVehicleOccupants.pickupServicePointId, id), eq(fleetVehicleOccupants.dropoffServicePointId, id)),
+        )) : [];
+      const studentMap = new Map<number, any>();
+      for (const row of assignments) studentMap.set(Number(row.studentId), {
+        studentId: row.studentId, name: `${row.firstName || ""} ${row.lastName || ""}`.trim(), admissionNo: row.admissionNo,
+        className: row.className, parentName: `${row.parentFirstName || ""} ${row.parentLastName || ""}`.trim() || null,
+        parentPhone: row.parentPhone, parentEmail: row.parentEmail, schoolName: row.schoolName,
+        vehicle: row.vehicleRegistration || null, driver: `${row.driverFirstName || ""} ${row.driverLastName || ""}`.trim() || null,
+      });
+      for (const row of fleetRows as any[]) if (row.studentId && !studentMap.has(Number(row.studentId))) studentMap.set(Number(row.studentId), {
+        studentId: row.studentId, name: `${row.firstName || ""} ${row.lastName || ""}`.trim(), admissionNo: row.admissionNo,
+        className: row.className, parentName: `${row.parentFirstName || ""} ${row.parentLastName || ""}`.trim() || null,
+        parentPhone: row.parentPhone, parentEmail: row.parentEmail, schoolName: row.schoolName,
+        vehicle: row.vehicleRegistration || row.vehicleName || row.assetNumber || null, driver: null,
+      });
+      const vehicleMap = new Map<string, any>();
+      for (const row of assignments) if (row.vehicleId) vehicleMap.set(`transport:${row.vehicleId}`, { source: "Transport", id: row.vehicleId, registration: row.vehicleRegistration });
+      for (const row of fleetRows as any[]) if (row.fleetVehicleId) vehicleMap.set(`fleet:${row.fleetVehicleId}`, { source: "Fleet", id: row.fleetVehicleId, registration: row.vehicleRegistration || row.vehicleName || row.assetNumber });
+      return res.json({ point, students: Array.from(studentMap.values()), vehicles: Array.from(vehicleMap.values()) });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.delete("/api/transport/service-points/:id", requireAuth, requireAnyPermission("transport.stops.manage", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const point = await assertOrganizationRecord(transportServicePoints, id, school);
+      if (!point) return res.status(404).json({ message: "Service point not found" });
+      const orgSchoolIds = await organizationSchoolIds(school);
+      const [assignmentUse] = await db.select({ id: transportAssignments.id }).from(transportAssignments).where(and(
+        inArray(transportAssignments.schoolId, orgSchoolIds),
+        or(eq(transportAssignments.pickupServicePointId, id), eq(transportAssignments.dropoffServicePointId, id)),
+      )).limit(1);
+      const [fleetUse] = school.organizationId ? await db.select({ id: fleetVehicleOccupants.id }).from(fleetVehicleOccupants).where(and(
+        eq(fleetVehicleOccupants.organizationId, school.organizationId),
+        or(eq(fleetVehicleOccupants.pickupServicePointId, id), eq(fleetVehicleOccupants.dropoffServicePointId, id)),
+      )).limit(1) : [];
+      if (assignmentUse || fleetUse) return res.status(409).json({ message: "This Pick-Up/Drop-Off Point is in use and cannot be deleted." });
+      await db.delete(transportServicePoints).where(eq(transportServicePoints.id, id));
+      await writeAudit(db, Number(point.schoolId), user.id, "service_point", id, "delete", point, null, "Unused saved Pick-Up/Drop-Off Point deleted");
+      return res.json({ ok: true });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.get("/api/transport/vehicles/:id/occupants", requireAuth, requirePermission("transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      if (!school) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, id, school);
+      if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
+      const orgSchoolIds = await organizationSchoolIds(school);
+      const rows = await db.select({
+        assignmentId: transportAssignments.id, studentId: students.id, firstName: students.firstName, lastName: students.lastName,
+        admissionNo: students.admissionNo, className: classes.className, schoolName: schools.name,
+        startDate: transportAssignments.startDate, endDate: transportAssignments.endDate, isActive: transportAssignments.isActive,
+        serviceState: transportAssignments.serviceState, financialStatus: transportAssignments.financialStatus,
+        routeName: transportRoutes.name,
+      }).from(transportAssignments)
+        .innerJoin(students, eq(students.id, transportAssignments.studentId))
+        .innerJoin(schools, eq(schools.id, transportAssignments.schoolId))
+        .leftJoin(classes, eq(classes.id, students.classId))
+        .leftJoin(transportRoutes, eq(transportRoutes.id, transportAssignments.routeId))
+        .where(and(inArray(transportAssignments.schoolId, orgSchoolIds), or(eq(transportAssignments.vehicleId, id), eq(transportAssignments.outboundVehicleId, id)), or(eq(transportAssignments.isActive, true), and(eq(transportAssignments.serviceState, "pending_start"), ne(transportAssignments.financialStatus, "pending_first_payment")))));
+      const unique = new Map<number, any>();
+      for (const row of rows) unique.set(Number(row.studentId), row);
+      return res.json({ vehicle, occupants: Array.from(unique.values()) });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.get("/api/transport/vehicles/:id/route", requireAuth, requireAnyPermission("transport.vehicles.edit", "transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      if (!school) return res.status(400).json({ message: "Select a school" });
+      const vehicleId = Number(req.params.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, vehicleId, school);
+      if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
+      const direction = z.enum(["pickup","dropoff"]).default("pickup").parse(req.query.direction || "pickup");
+      const orgSchoolIds = await organizationSchoolIds(school);
+      const rows = await db.execute(sql`
+        SELECT a.id,a.school_id AS "schoolId",a.student_id AS "studentId",a.service_type AS "serviceType",
+               sp.id AS "pickupPointId",sp.name AS "pickupName",sp.latitude AS "pickupLatitude",sp.longitude AS "pickupLongitude",
+               dp.id AS "dropoffPointId",dp.name AS "dropoffName",dp.latitude AS "dropoffLatitude",dp.longitude AS "dropoffLongitude",
+               sc.name AS "schoolName",sc.latitude AS "schoolLatitude",sc.longitude AS "schoolLongitude"
+        FROM transport_assignments a
+        JOIN schools sc ON sc.id=a.school_id
+        LEFT JOIN transport_service_points sp ON sp.id=a.pickup_service_point_id
+        LEFT JOIN transport_service_points dp ON dp.id=a.dropoff_service_point_id
+        WHERE a.school_id IN (${sql.join(orgSchoolIds.map((id) => sql`${id}`), sql`,`)})
+          AND (a.is_active=true OR (a.service_state='pending_start' AND a.financial_status <> 'pending_first_payment'))
+          AND (
+            (${direction}='pickup' AND a.service_type IN ('pickup','both') AND a.vehicle_id=${vehicleId}) OR
+            (${direction}='dropoff' AND a.service_type IN ('dropoff','both') AND COALESCE(a.outbound_vehicle_id,a.vehicle_id)=${vehicleId})
+          )
+      `);
+      const learnerPoints = new Map<number, RouteCoordinate>();
+      const schoolPoints = new Map<number, RouteCoordinate>();
+      const warnings: string[] = [];
+      for (const row of rows.rows as any[]) {
+        const pointId = direction === "pickup" ? Number(row.pickupPointId || 0) : Number(row.dropoffPointId || row.pickupPointId || 0);
+        const latitude = Number(direction === "pickup" ? row.pickupLatitude : (row.dropoffLatitude ?? row.pickupLatitude));
+        const longitude = Number(direction === "pickup" ? row.pickupLongitude : (row.dropoffLongitude ?? row.pickupLongitude));
+        const name = String(direction === "pickup" ? row.pickupName : (row.dropoffName || row.pickupName || "Learner stop"));
+        if (pointId && Number.isFinite(latitude) && Number.isFinite(longitude)) learnerPoints.set(pointId, { latitude, longitude, name, type: "learner_stop", schoolId: Number(row.schoolId), servicePointId: pointId });
+        const schoolLat = Number(row.schoolLatitude); const schoolLng = Number(row.schoolLongitude);
+        if (Number.isFinite(schoolLat) && Number.isFinite(schoolLng) && row.schoolLatitude != null && row.schoolLongitude != null) {
+          schoolPoints.set(Number(row.schoolId), { latitude: schoolLat, longitude: schoolLng, name: String(row.schoolName), type: "school_checkpoint", schoolId: Number(row.schoolId) });
+        } else if (!warnings.includes(`${row.schoolName} has no configured coordinates.`)) warnings.push(`${row.schoolName} has no configured coordinates.`);
+      }
+      const learners = Array.from(learnerPoints.values()); const checkpoints = Array.from(schoolPoints.values());
+      let schoolboundOrder: RouteCoordinate[] = [];
+      if (learners.length) {
+        let start = learners[0]; let farthest = -1;
+        for (const point of learners) {
+          const nearestSchool = checkpoints.length ? Math.min(...checkpoints.map((checkpoint) => haversineMeters(point.latitude, point.longitude, checkpoint.latitude, checkpoint.longitude))) : 0;
+          if (nearestSchool > farthest) { farthest = nearestSchool; start = point; }
+        }
+        const orderedLearners = nearestNeighborOrder(learners, start);
+        const orderedSchools = checkpoints.length ? nearestNeighborOrder(checkpoints, orderedLearners[orderedLearners.length - 1]) .slice(1) : [];
+        schoolboundOrder = [...orderedLearners, ...orderedSchools];
+      } else schoolboundOrder = nearestNeighborOrder(checkpoints);
+      const ordered = direction === "pickup" ? schoolboundOrder : [...schoolboundOrder].reverse();
+      const routed = await roadRoute(ordered);
+      return res.json({ vehicle: { id: vehicle.id, registrationNumber: vehicle.registrationNumber, routeNotes: vehicle.routeNotes || null }, direction, nodes: ordered, geometry: routed.geometry, distanceKm: routed.distanceKm, durationMinutes: routed.durationMinutes, provider: routed.provider, warnings, generatedAt: new Date().toISOString(), editable: false });
+    } catch (error) { return routeError(res, error); }
   });
 
   app.post("/api/transport/maps/route", requireAuth, requireAnyPermission("transport.paths.manage", "transport.view"), async (req, res) => {
@@ -1425,7 +2309,7 @@ export function registerTransportRoutes(app: Express) {
       const parsed = pathInput.parse(req.body);
       const [route, vehicle] = await Promise.all([
         assertSchoolRecord(transportRoutes, parsed.routeId, school.id),
-        assertSchoolRecord(transportVehicles, parsed.vehicleId, school.id),
+        assertOrganizationRecord(transportVehicles, parsed.vehicleId, school),
       ]);
       if (!route || !vehicle) return res.status(404).json({ message: "Route or vehicle not found" });
       const existing = await db.select().from(transportVehiclePaths).where(and(
@@ -1483,6 +2367,51 @@ export function registerTransportRoutes(app: Express) {
     }
   });
 
+  app.put("/api/transport/paths/:id", requireAuth, requireAnyPermission("transport.paths.manage", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const previous = await assertSchoolRecord(transportVehiclePaths, id, school.id);
+      if (!previous) return res.status(404).json({ message: "Vehicle path not found" });
+      if (previous.status !== "draft") return res.status(409).json({ message: "Only draft path versions can be edited. Create a new version for an active path." });
+      const parsed = pathInput.parse(req.body);
+      const [route, vehicle] = await Promise.all([
+        assertSchoolRecord(transportRoutes, parsed.routeId, school.id),
+        assertOrganizationRecord(transportVehicles, parsed.vehicleId, school),
+      ]);
+      if (!route || !vehicle) return res.status(404).json({ message: "Route or vehicle not found" });
+      const updated = await db.transaction(async (tx) => {
+        const pathValues: any = {
+          routeId: parsed.routeId, vehicleId: parsed.vehicleId, direction: parsed.direction,
+          isTwoWay: parsed.isTwoWay, canonicalTraversal: parsed.canonicalTraversal, name: parsed.name,
+          effectiveFrom: parsed.effectiveFrom, effectiveTo: parsed.effectiveTo,
+          geometry: parsed.geometry ?? parsed.nodes.map((node) => [node.latitude, node.longitude]),
+          estimatedDistanceKm: parsed.estimatedDistanceKm, estimatedDurationMinutes: parsed.estimatedDurationMinutes,
+          notes: parsed.notes, updatedAt: new Date(),
+        };
+        if (pathValues.estimatedDistanceKm !== undefined && pathValues.estimatedDistanceKm !== null) pathValues.estimatedDistanceKm = String(pathValues.estimatedDistanceKm);
+        const [path] = await tx.update(transportVehiclePaths).set(pathValues).where(eq(transportVehiclePaths.id, id)).returning();
+        const oldNodes = await tx.select({ id: transportPathNodes.id }).from(transportPathNodes).where(eq(transportPathNodes.pathId, id));
+        if (oldNodes.length) await tx.delete(transportPathNodeLearners).where(inArray(transportPathNodeLearners.pathNodeId, oldNodes.map((row) => row.id)));
+        await tx.delete(transportPathNodes).where(eq(transportPathNodes.pathId, id));
+        for (const nodeInput of [...parsed.nodes].sort((a, b) => a.stopOrder - b.stopOrder)) {
+          const [node] = await tx.insert(transportPathNodes).values({
+            schoolId: school.id, pathId: path.id, nodeType: nodeInput.nodeType, name: nodeInput.name,
+            latitude: String(nodeInput.latitude), longitude: String(nodeInput.longitude), stopOrder: nodeInput.stopOrder,
+            expectedTime: nodeInput.expectedTime, reverseExpectedTime: nodeInput.reverseExpectedTime,
+            checkpointRadiusMeters: nodeInput.checkpointRadiusMeters, notes: nodeInput.notes,
+          }).returning();
+          for (const link of nodeInput.learnerLinks ?? []) await tx.insert(transportPathNodeLearners).values({ ...link, schoolId: school.id, pathNodeId: node.id });
+        }
+        await writeAudit(tx, school.id, user.id, "vehicle_path", id, "edit_draft", previous, path, "Draft vehicle path edited");
+        return path;
+      });
+      return res.json(updated);
+    } catch (error) { return routeError(res, error); }
+  });
+
   app.put("/api/transport/paths/:id/activate", requireAuth, requireAnyPermission("transport.paths.manage", "transport.edit"), async (req, res) => {
     try {
       const school = await schoolContext(req);
@@ -1512,7 +2441,7 @@ export function registerTransportRoutes(app: Express) {
         maximumOccupancy = Math.max(maximumOccupancy, occupancy);
         occupancy = Math.max(0, occupancy - nodeLinks.filter((link) => link.alightsHere).length);
       }
-      const vehicle = await assertSchoolRecord(transportVehicles, path.vehicleId, school.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, path.vehicleId, school);
       if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
       if (maximumOccupancy > vehicle.capacity) {
         return res.status(409).json({ message: `This path reaches ${maximumOccupancy} passengers, above vehicle capacity ${vehicle.capacity}` });
@@ -1543,6 +2472,9 @@ export function registerTransportRoutes(app: Express) {
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed: any = clean(assignmentInput.parse(req.body));
+      if (parsed.serviceType === "both") parsed.outboundVehicleId = parsed.vehicleId;
+      parsed.serviceState = "pending_start";
+      parsed.financialStatus = "pending_first_payment";
       await validateAssignmentSelection(school.id, user.id, parsed);
       const existing = await db.select().from(transportAssignments).where(and(
         eq(transportAssignments.schoolId, school.id),
@@ -1595,6 +2527,7 @@ export function registerTransportRoutes(app: Express) {
       if (!previous || !previous.isActive) return res.status(404).json({ message: "Active assignment not found" });
       const parsed: any = clean(transferInput.parse(req.body));
       const prospective = { ...previous, ...parsed, studentId: previous.studentId };
+      if (prospective.serviceType === "both") prospective.outboundVehicleId = prospective.vehicleId;
       await validateAssignmentSelection(school.id, user.id, prospective, previous.id);
       const effectiveDate = parsed.effectiveDate;
       const previousEnd = isoDate(new Date(new Date(`${effectiveDate}T00:00:00Z`).getTime() - 86400000));
@@ -1606,10 +2539,12 @@ export function registerTransportRoutes(app: Express) {
       delete (parsed as any).capacityOverrideReason;
       const settings = await getOrCreateSettings(school.id);
       const base = { ...previous, ...parsed } as any;
+      if (base.serviceType === "both") base.outboundVehicleId = base.vehicleId;
       const serviceType = base.serviceType ?? previous.serviceType;
       const percent = serviceType === "pickup" ? amount(settings.inboundOneWayPercent) : serviceType === "dropoff" ? amount(settings.outboundOneWayPercent) : 100;
       const newAssignment = await db.transaction(async (tx) => {
-        await tx.update(transportAssignments).set({ endDate: previousEnd, isActive: false, serviceState: "terminated", updatedAt: new Date() }).where(eq(transportAssignments.id, id));
+        const startsNow = effectiveDate <= isoDate(new Date());
+        await tx.update(transportAssignments).set({ endDate: previousEnd, isActive: startsNow ? false : true, serviceState: startsNow ? "terminated" : previous.serviceState, updatedAt: new Date() }).where(eq(transportAssignments.id, id));
         const values: any = {
           schoolId: school.id,
           studentId: previous.studentId,
@@ -1626,7 +2561,7 @@ export function registerTransportRoutes(app: Express) {
           pickupPathNodeId: base.pickupPathNodeId,
           dropoffPathNodeId: base.dropoffPathNodeId,
           serviceType,
-          serviceState: "active",
+          serviceState: effectiveDate <= isoDate(new Date()) ? (previous.financialStatus === "payment_plan" ? "active_payment_plan" : "active") : "pending_start",
           planningStatus: base.planningStatus ?? "assigned_to_path",
           financialStatus: previous.financialStatus,
           billingFrequency: "monthly",
@@ -1635,7 +2570,7 @@ export function registerTransportRoutes(app: Express) {
           oneWayPercentSnapshot: String(percent),
           startDate: effectiveDate,
           endDate: base.endDate,
-          isActive: true,
+          isActive: effectiveDate <= isoDate(new Date()),
           notes: base.notes,
           createdByUserId: user.id,
         };
@@ -1651,6 +2586,34 @@ export function registerTransportRoutes(app: Express) {
     } catch (error) {
       return routeError(res, error);
     }
+  });
+
+  app.post("/api/transport/assignments/:id/cancel", requireAuth, requireAnyPermission("transport.learners.edit_service", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const previous = await assertSchoolRecord(transportAssignments, id, school.id);
+      if (!previous || !previous.isActive) return res.status(404).json({ message: "Active transport registration not found" });
+      const parsed = z.object({ stopServiceDate: dateString, reason: z.string().trim().min(3), refundMethod: z.enum(["credit", "cash", "bank_transfer", "mobile_money", "original_method"]).optional() }).parse(req.body);
+      if (parsed.stopServiceDate < previous.startDate) return res.status(409).json({ message: "Stop Service Date cannot be before the Service Start Date." });
+      const settings = await getOrCreateSettings(school.id);
+      const refundEffectiveDate = isoDate(new Date(new Date(`${parsed.stopServiceDate}T00:00:00Z`).getTime() + 86400000));
+      const result = await db.transaction(async (tx) => {
+        const [row] = await tx.update(transportAssignments).set({ endDate: parsed.stopServiceDate, isActive: parsed.stopServiceDate < isoDate(new Date()) ? false : previous.isActive, serviceState: parsed.stopServiceDate < isoDate(new Date()) ? "terminated" : previous.serviceState, updatedAt: new Date() }).where(eq(transportAssignments.id, id)).returning();
+        await tx.insert(transportAssignmentEvents).values({ schoolId: school.id, assignmentId: id, eventType: "service_cancelled", effectiveDate: parsed.stopServiceDate, previousValues: previous, newValues: row, reason: parsed.reason, createdByUserId: user.id });
+        const calculation = unusedServiceRefund(previous, refundEffectiveDate, settings);
+        let refund: any = null;
+        if (calculation.amount > 0) {
+          [refund] = await tx.insert(transportRefunds).values({ schoolId: school.id, studentId: previous.studentId, assignmentId: previous.id, refundNumber: numberCode("REF", school.shortCode, Date.now().toString().slice(-6)), refundType: "termination_refund", amount: String(calculation.amount), effectiveDate: refundEffectiveDate, method: parsed.refundMethod || "credit", calculationSnapshot: calculation, reason: parsed.reason, requestedByUserId: user.id }).returning();
+        }
+        await writeAudit(tx, school.id, user.id, "assignment", id, "cancel_service", previous, row, parsed.reason, { stopServiceDate: parsed.stopServiceDate, refundId: refund?.id ?? null });
+        return { assignment: row, refund };
+      });
+      await notifyParentForStudent(previous.studentId, school.id, user.id, "Transport service cancellation recorded", `The last day of transport service is ${parsed.stopServiceDate}.`, "info");
+      return res.json(result);
+    } catch (error) { return routeError(res, error); }
   });
 
   app.post("/api/transport/assignments/:id/state", requireAuth, requireAnyPermission("transport.learners.edit_service", "transport.edit"), async (req, res) => {
@@ -1760,6 +2723,8 @@ export function registerTransportRoutes(app: Express) {
       const assignments = await db.select().from(transportAssignments).where(and(...filters));
       let created = 0;
       let skipped = 0;
+      let totalGenerated = 0;
+      let billingRun: any = null;
       await db.transaction(async (tx) => {
         for (const assignment of assignments) {
           const [existing] = await tx.select().from(transportCharges).where(and(
@@ -1800,10 +2765,19 @@ export function registerTransportRoutes(app: Express) {
             createdByUserId: user.id,
           });
           created += 1;
+          totalGenerated = rounded(totalGenerated + calculated);
         }
-        await writeAudit(tx, school.id, user.id, "charge_batch", null, "generate", null, { year: parsed.academicYear, month: parsed.month, created, skipped });
+        [billingRun] = await tx.insert(transportBillingRuns).values({
+          schoolId: school.id,
+          runNumber: numberCode("BILL", school.shortCode, Date.now().toString().slice(-6)),
+          serviceYear: parsed.academicYear, serviceMonth: parsed.month, status: "completed",
+          generatedCount: created, skippedCount: skipped, failedCount: 0, totalAmount: String(totalGenerated),
+          details: { assignmentIds: parsed.assignmentIds || null, dueDate: parsed.dueDate || null, description: parsed.description || null },
+          generatedByUserId: user.id,
+        }).returning();
+        await writeAudit(tx, school.id, user.id, "billing_run", billingRun.id, "generate", null, billingRun);
       });
-      return res.status(201).json({ created, skipped });
+      return res.status(201).json({ created, skipped, total: totalGenerated, billingRun });
     } catch (error) {
       return routeError(res, error);
     }
@@ -2015,10 +2989,15 @@ export function registerTransportRoutes(app: Express) {
       const parsed = paymentPlanInput.parse(req.body);
       const previousAssignment = await assertSchoolRecord(transportAssignments, parsed.assignmentId, school.id);
       if (!previousAssignment || previousAssignment.studentId !== parsed.studentId) return res.status(404).json({ message: "Assignment not found" });
+      if (["terminated", "completed"].includes(String(previousAssignment.serviceState))) return res.status(409).json({ message: "A payment plan cannot be created for a completed or terminated Transport service." });
+      const [existingPlan] = await db.select({ id: transportPaymentPlans.id, planNumber: transportPaymentPlans.planNumber }).from(transportPaymentPlans).where(and(eq(transportPaymentPlans.assignmentId, previousAssignment.id), inArray(transportPaymentPlans.status, ["active", "pending"]))).limit(1);
+      if (existingPlan) return res.status(409).json({ message: `This Transport registration already has payment plan ${existingPlan.planNumber}.` });
       const created = await db.transaction(async (tx) => {
         let assignment = previousAssignment;
+        const today = isoDate(new Date());
         if (!previousAssignment.isActive && ["suspended", "paused"].includes(previousAssignment.serviceState)) {
-          const values: any = { ...previousAssignment, id: undefined, startDate: parsed.startDate, endDate: null, isActive: true, serviceState: "active_payment_plan", financialStatus: "payment_plan", createdAt: undefined, updatedAt: new Date(), createdByUserId: user.id };
+          const serviceCanStart = parsed.startDate <= today;
+          const values: any = { ...previousAssignment, id: undefined, startDate: parsed.startDate, endDate: null, isActive: serviceCanStart, serviceState: serviceCanStart ? "active_payment_plan" : "pending_start", financialStatus: "payment_plan", createdAt: undefined, updatedAt: new Date(), createdByUserId: user.id };
           delete values.id; delete values.createdAt;
           [assignment] = await tx.insert(transportAssignments).values(values).returning();
           await linkAssignmentNodes(tx, school.id, assignment);
@@ -2043,7 +3022,9 @@ export function registerTransportRoutes(app: Express) {
         for (const instalment of parsed.instalments ?? []) {
           await tx.insert(transportPaymentPlanInstalments).values({ planId: plan.id, dueDate: instalment.dueDate, amount: String(instalment.amount) });
         }
-        await tx.update(transportAssignments).set({ serviceState: "active_payment_plan", financialStatus: "payment_plan", updatedAt: new Date() }).where(eq(transportAssignments.id, assignment.id));
+        const assignmentStart = assignment.startDate || parsed.startDate;
+        const serviceCanStart = assignmentStart <= isoDate(new Date());
+        await tx.update(transportAssignments).set({ serviceState: serviceCanStart ? "active_payment_plan" : "pending_start", financialStatus: "payment_plan", isActive: serviceCanStart, updatedAt: new Date() }).where(eq(transportAssignments.id, assignment.id));
         await writeAudit(tx, school.id, user.id, "payment_plan", plan.id, "create", null, plan);
         return { plan, assignmentId: assignment.id };
       });
@@ -2073,7 +3054,8 @@ export function registerTransportRoutes(app: Express) {
       if (previous.status !== "requested") return res.status(409).json({ message: "Only requested refunds can be approved" });
       if (previous.requestedByUserId === user.id) return res.status(409).json({ message: "The refund requester cannot approve the same refund" });
       const [updated] = await db.transaction(async (tx) => {
-        const [row] = await tx.update(transportRefunds).set({ status: "approved", approvedByUserId: user.id, approvedAt: new Date() }).where(eq(transportRefunds.id, id)).returning();
+        const nextStatus = previous.method === "credit" ? "credited" : "approved_awaiting_payment";
+        const [row] = await tx.update(transportRefunds).set({ status: nextStatus, approvedByUserId: user.id, approvedAt: new Date(), ...(nextStatus === "credited" ? { paidAt: new Date(), paidByUserId: user.id } : {}) }).where(eq(transportRefunds.id, id)).returning();
         if (row.method === "credit") await tx.insert(transportAccountAdjustments).values({ schoolId: school.id, studentId: row.studentId, assignmentId: row.assignmentId, adjustmentType: row.refundType, direction: "credit", amount: row.amount, effectiveDate: row.effectiveDate, reason: row.reason, approvedByUserId: user.id, createdByUserId: user.id });
         if (row.assignmentId) {
           const [assignment] = await tx.select().from(transportAssignments).where(and(eq(transportAssignments.id, row.assignmentId), eq(transportAssignments.schoolId, school.id)));
@@ -2122,7 +3104,7 @@ export function registerTransportRoutes(app: Express) {
       const school = await schoolContext(req); const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const id = Number(req.params.id); const previous = await assertSchoolRecord(transportRefunds, id, school.id);
-      if (!previous || previous.status !== "approved") return res.status(409).json({ message: "Refund must be approved first" });
+      if (!previous || previous.status !== "approved_awaiting_payment") return res.status(409).json({ message: "External refund must be approved and awaiting payment first" });
       const reference = z.object({ externalReference: optionalText }).parse(req.body).externalReference;
       const [updated] = await db.update(transportRefunds).set({ status: "paid", paidByUserId: user.id, paidAt: new Date(), externalReference: reference }).where(eq(transportRefunds.id, id)).returning();
       await writeAudit(db, school.id, user.id, "refund", id, "pay", previous, updated, updated.reason);
@@ -2135,15 +3117,27 @@ export function registerTransportRoutes(app: Express) {
       const school = await schoolContext(req); const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = cashupInput.parse(req.body);
-      const payments = await db.select().from(transportPayments).where(and(eq(transportPayments.schoolId, school.id), inArray(transportPayments.id, parsed.paymentIds), isNull(transportPayments.reversedAt)));
+      if (!parsed.paymentIds.length && !parsed.refundIds.length) return res.status(400).json({ message: "Select at least one receipt or paid refund for this cash-up." });
+      const payments = parsed.paymentIds.length ? await db.select().from(transportPayments).where(and(eq(transportPayments.schoolId, school.id), inArray(transportPayments.id, parsed.paymentIds), isNull(transportPayments.reversedAt))) : [];
       if (payments.length !== parsed.paymentIds.length) return res.status(400).json({ message: "One or more payments are invalid or already reversed" });
-      const expectedCash = rounded(payments.filter((p) => p.paymentMethod === "cash").reduce((sum, p) => sum + amount(p.amount), 0));
-      const expectedNonCash = rounded(payments.filter((p) => p.paymentMethod !== "cash").reduce((sum, p) => sum + amount(p.amount), 0));
+      const refunds = parsed.refundIds.length ? await db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), inArray(transportRefunds.id, parsed.refundIds), eq(transportRefunds.status, "paid"))) : [];
+      if (refunds.length !== parsed.refundIds.length) return res.status(400).json({ message: "One or more refunds are invalid or have not been paid yet." });
+      const alreadyCashed = parsed.paymentIds.length ? await db.select({ paymentId: transportCashupPayments.paymentId }).from(transportCashupPayments).where(inArray(transportCashupPayments.paymentId, parsed.paymentIds)) : [];
+      if (alreadyCashed.length) return res.status(409).json({ message: "One or more selected payments have already been included in a cash-up. Refresh the list and select only uncash-up payments." });
+      const alreadyRefunded = parsed.refundIds.length ? await db.select({ refundId: transportCashupRefunds.refundId }).from(transportCashupRefunds).where(inArray(transportCashupRefunds.refundId, parsed.refundIds)) : [];
+      if (alreadyRefunded.length) return res.status(409).json({ message: "One or more selected refunds have already been included in a cash-up." });
+      const cashReceipts = payments.filter((p) => p.paymentMethod === "cash").reduce((sum, p) => sum + amount(p.amount), 0);
+      const nonCashReceipts = payments.filter((p) => p.paymentMethod !== "cash").reduce((sum, p) => sum + amount(p.amount), 0);
+      const cashRefunds = refunds.filter((r) => r.method === "cash").reduce((sum, r) => sum + amount(r.amount), 0);
+      const nonCashRefunds = refunds.filter((r) => r.method !== "cash").reduce((sum, r) => sum + amount(r.amount), 0);
+      const expectedCash = rounded(cashReceipts - cashRefunds);
+      const expectedNonCash = rounded(nonCashReceipts - nonCashRefunds);
       const variance = rounded(parsed.actualCash + parsed.actualNonCash - expectedCash - expectedNonCash);
       const created = await db.transaction(async (tx) => {
         const [cashup] = await tx.insert(transportCashups).values({ schoolId: school.id, cashupNumber: numberCode("CASH", school.shortCode, Date.now().toString().slice(-6)), cashupDate: parsed.cashupDate, cashierUserId: user.id, expectedCash: String(expectedCash), actualCash: String(parsed.actualCash), expectedNonCash: String(expectedNonCash), actualNonCash: String(parsed.actualNonCash), variance: String(variance), depositReference: parsed.depositReference, notes: parsed.notes }).returning();
         for (const payment of payments) await tx.insert(transportCashupPayments).values({ cashupId: cashup.id, paymentId: payment.id });
-        await writeAudit(tx, school.id, user.id, "cashup", cashup.id, "create", null, cashup);
+        for (const refund of refunds) await tx.insert(transportCashupRefunds).values({ cashupId: cashup.id, refundId: refund.id });
+        await writeAudit(tx, school.id, user.id, "cashup", cashup.id, "create", null, cashup, null, { paymentIds: parsed.paymentIds, refundIds: parsed.refundIds, cashReceipts, cashRefunds, nonCashReceipts, nonCashRefunds });
         return cashup;
       });
       return res.status(201).json(created);
@@ -2240,7 +3234,7 @@ export function registerTransportRoutes(app: Express) {
       const school = await schoolContext(req); const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = advanceInput.parse(req.body);
-      const vehicle = await assertSchoolRecord(transportVehicles, parsed.vehicleId, school.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, parsed.vehicleId, school);
       if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
       const [created] = await db.insert(transportAdvances).values({ ...parsed, disbursementDate: null, disbursementReference: null, amount: String(parsed.amount), outstandingAmount: String(parsed.amount), recoveryValue: String(parsed.recoveryValue), minimumOwnerTakeHome: String(parsed.minimumOwnerTakeHome), maximumMonthlyRecovery: parsed.maximumMonthlyRecovery == null ? null : String(parsed.maximumMonthlyRecovery), schoolId: school.id, advanceNumber: numberCode("ADV", school.shortCode, Date.now().toString().slice(-6)), status: "requested", createdByUserId: user.id }).returning();
       await writeAudit(db, school.id, user.id, "advance", created.id, "request", null, created, created.purpose);
@@ -2293,7 +3287,7 @@ export function registerTransportRoutes(app: Express) {
       const school = await schoolContext(req); const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = incidentInput.parse(req.body);
-      const vehicle = await assertSchoolRecord(transportVehicles, parsed.vehicleId, school.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, parsed.vehicleId, school);
       if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
 
       const activePaths = await db.select().from(transportVehiclePaths).where(and(
@@ -2301,7 +3295,7 @@ export function registerTransportRoutes(app: Express) {
         eq(transportVehiclePaths.vehicleId, vehicle.id),
         eq(transportVehiclePaths.status, "active"),
       )).orderBy(desc(transportVehiclePaths.activatedAt), desc(transportVehiclePaths.versionNumber));
-      let expectedPath = parsed.pathId ? activePaths.find((path) => path.id === parsed.pathId) || null : activePaths.length === 1 ? activePaths[0] : null;
+      let expectedPath: any = parsed.pathId ? activePaths.find((path) => path.id === parsed.pathId) || null : activePaths.length === 1 ? activePaths[0] : null;
       if (parsed.pathId && !expectedPath) {
         const selectedPath = await assertSchoolRecord(transportVehiclePaths, parsed.pathId, school.id);
         if (!selectedPath || selectedPath.vehicleId !== vehicle.id) return res.status(400).json({ message: "The selected path is not assigned to this vehicle." });
@@ -2341,8 +3335,8 @@ export function registerTransportRoutes(app: Express) {
           || Number(actual.pathId || 0) !== Number(expected.pathId || 0);
         if (mismatched) return res.status(409).json({ message: "The incident context does not match the vehicle's current owner, driver, route and path. Enable the substitute/deviation option and provide a reason." });
       }
-      if (actual.ownerId && !(await assertSchoolRecord(transportOwners, Number(actual.ownerId), school.id))) return res.status(400).json({ message: "Incident owner was not found" });
-      if (actual.driverId && !(await assertSchoolRecord(transportDrivers, Number(actual.driverId), school.id))) return res.status(400).json({ message: "Incident driver was not found" });
+      if (actual.ownerId && !(await assertOrganizationRecord(transportOwners, Number(actual.ownerId), school))) return res.status(400).json({ message: "Incident owner was not found" });
+      if (actual.driverId && !(await assertOrganizationRecord(transportDrivers, Number(actual.driverId), school))) return res.status(400).json({ message: "Incident driver was not found" });
       if (actual.routeId && !(await assertSchoolRecord(transportRoutes, Number(actual.routeId), school.id))) return res.status(400).json({ message: "Incident route was not found" });
 
       const incidentValues: any = {
@@ -2366,97 +3360,46 @@ export function registerTransportRoutes(app: Express) {
     } catch (error) { return routeError(res, error); }
   });
 
+  app.post("/api/transport/claims/preview", requireAuth, requireAnyPermission("transport.claims.generate", "transport.claims.view", "transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); if (!school) return res.status(400).json({ message: "Select a school" });
+      const parsed = claimInput.parse(req.body);
+      let vehicleIds: number[] = [];
+      if (parsed.allVehicles) {
+        const rows = await db.execute(sql`SELECT DISTINCT pa.vehicle_id AS id FROM transport_payment_allocations pa JOIN transport_payments p ON p.id=pa.payment_id WHERE p.school_id=${school.id} AND p.reversed_at IS NULL AND (pa.service_year < ${parsed.serviceYear} OR (pa.service_year=${parsed.serviceYear} AND pa.service_month <= ${parsed.serviceMonth}))`);
+        vehicleIds = (rows.rows as any[]).map((row) => Number(row.id)).filter(Boolean);
+      } else if (parsed.vehicleId) vehicleIds = [Number(parsed.vehicleId)];
+      const previews = [] as any[];
+      for (const vehicleId of vehicleIds) {
+        const existing = await db.select().from(transportClaims).where(and(eq(transportClaims.schoolId, school.id), eq(transportClaims.vehicleId, vehicleId), eq(transportClaims.serviceYear, parsed.serviceYear), eq(transportClaims.serviceMonth, parsed.serviceMonth)));
+        if (existing[0] && existing[0].status !== "draft") {
+          previews.push({ vehicleId, vehicleRegistration: (await assertOrganizationRecord(transportVehicles, vehicleId, school))?.registrationNumber || `#${vehicleId}`, frozenClaim: existing[0], eligibleAmount: amount(existing[0].grossAmount), excluded: [] });
+          continue;
+        }
+        const computed = await computeSchoolClaim(school, vehicleId, parsed.serviceYear, parsed.serviceMonth, existing[0]?.id || null);
+        previews.push({ vehicleId, vehicleRegistration: computed.vehicle.registrationNumber, eligibleAllocations: computed.candidates.length, eligibleAmount: computed.gross, currentPeriodAmount: computed.currentPeriodAmount, priorPeriodAmount: computed.priorPeriodAmount, deductions: computed.deductions, deductionAmount: computed.deductionAmount, netAmount: computed.net, excluded: computed.excluded });
+      }
+      return res.json({ serviceYear: parsed.serviceYear, serviceMonth: parsed.serviceMonth, allVehicles: parsed.allVehicles, previews });
+    } catch (error) { return routeError(res, error); }
+  });
+
   app.post("/api/transport/claims/generate", requireAuth, requireAnyPermission("transport.claims.generate", "transport.create"), async (req, res) => {
     try {
-      const school = await schoolContext(req); const user = userOf(req);
-      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const school = await schoolContext(req); const user = userOf(req); if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = claimInput.parse(req.body);
-      await ensureNotLocked(school.id, parsed.serviceYear, parsed.serviceMonth);
-      const vehicle = await assertSchoolRecord(transportVehicles, parsed.vehicleId, school.id);
-      if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
-      const settings = await getOrCreateSettings(school.id);
-      const eligibility = settings.requireCashupForClaim
-        ? sql`p.verification_status='reconciled'`
-        : sql`p.verification_status IN ('verified','reconciled')`;
-      const candidatesResult = await db.execute(sql`
-        SELECT pa.id, pa.amount, pa.service_year AS "serviceYear", pa.service_month AS "serviceMonth"
-        FROM transport_payment_allocations pa
-        JOIN transport_payments p ON p.id=pa.payment_id
-        LEFT JOIN transport_claim_allocations ca ON ca.allocation_id=pa.id
-        WHERE p.school_id=${school.id} AND pa.vehicle_id=${parsed.vehicleId} AND p.reversed_at IS NULL
-          AND ${eligibility} AND ca.id IS NULL
-          AND (pa.service_year < ${parsed.serviceYear} OR (pa.service_year=${parsed.serviceYear} AND pa.service_month <= ${parsed.serviceMonth}))
-      `);
-      const candidates = candidatesResult.rows as any[];
-      const currentPeriodAmount = rounded(candidates.filter((row) => Number(row.serviceYear) === parsed.serviceYear && Number(row.serviceMonth) === parsed.serviceMonth).reduce((sum, row) => sum + amount(row.amount), 0));
-      const priorPeriodAmount = rounded(candidates.reduce((sum, row) => sum + amount(row.amount), 0) - currentPeriodAmount);
-      const providerAdjustments = await db.select().from(transportProviderAdjustments).where(and(
-        eq(transportProviderAdjustments.schoolId, school.id),
-        eq(transportProviderAdjustments.vehicleId, parsed.vehicleId),
-        eq(transportProviderAdjustments.status, "pending"),
-        or(
-          lte(transportProviderAdjustments.applyYear, parsed.serviceYear - 1),
-          and(eq(transportProviderAdjustments.applyYear, parsed.serviceYear), lte(transportProviderAdjustments.applyMonth, parsed.serviceMonth)),
-        ),
-      )).orderBy(asc(transportProviderAdjustments.applyYear), asc(transportProviderAdjustments.applyMonth), asc(transportProviderAdjustments.id));
-      const providerAdditions = rounded(providerAdjustments.filter((row) => row.direction === "addition").reduce((sum, row) => sum + amount(row.amount), 0));
-      const gross = rounded(currentPeriodAmount + priorPeriodAmount + providerAdditions);
-      const subscriptionRules = await db.select().from(transportSubscriptionRules).where(and(
-        eq(transportSubscriptionRules.schoolId, school.id),
-        eq(transportSubscriptionRules.isActive, true),
-        or(isNull(transportSubscriptionRules.vehicleId), eq(transportSubscriptionRules.vehicleId, parsed.vehicleId)),
-        lte(transportSubscriptionRules.effectiveFrom, `${parsed.serviceYear}-${String(parsed.serviceMonth).padStart(2, "0")}-01`),
-        or(isNull(transportSubscriptionRules.effectiveTo), gte(transportSubscriptionRules.effectiveTo, `${parsed.serviceYear}-${String(parsed.serviceMonth).padStart(2, "0")}-01`)),
-      )).orderBy(desc(transportSubscriptionRules.vehicleId), desc(transportSubscriptionRules.effectiveFrom)).limit(1);
-      const deductions: Array<{ type: string; sourceId?: number; description: string; amount: number; priority: number }> = [];
-      if (subscriptionRules[0]) {
-        const rule = subscriptionRules[0];
-        let value = rule.ruleType === "fixed" ? amount(rule.value) : rounded(gross * amount(rule.value) / 100);
-        if (rule.minimumAmount != null) value = Math.max(value, amount(rule.minimumAmount));
-        if (rule.maximumAmount != null) value = Math.min(value, amount(rule.maximumAmount));
-        deductions.push({ type: "subscription", sourceId: rule.id, description: "Vehicle subscription fee", amount: rounded(value), priority: deductionPriority(settings, "subscription") });
+      let vehicleIds: number[] = [];
+      if (parsed.allVehicles) {
+        const rows = await db.execute(sql`SELECT DISTINCT pa.vehicle_id AS id FROM transport_payment_allocations pa JOIN transport_payments p ON p.id=pa.payment_id WHERE p.school_id=${school.id} AND p.reversed_at IS NULL AND (pa.service_year < ${parsed.serviceYear} OR (pa.service_year=${parsed.serviceYear} AND pa.service_month <= ${parsed.serviceMonth}))`);
+        vehicleIds = (rows.rows as any[]).map((row) => Number(row.id)).filter(Boolean);
+      } else if (parsed.vehicleId) vehicleIds = [Number(parsed.vehicleId)];
+      if (!vehicleIds.length) return res.status(409).json({ message: "No vehicles with payment allocations were found for this school and service month." });
+      const generated: any[] = []; const skipped: any[] = [];
+      for (const vehicleId of vehicleIds) {
+        try { const result = await saveSchoolClaim(school, user.id, parsed.serviceYear, parsed.serviceMonth, vehicleId, parsed.notes); generated.push(result.claim); }
+        catch (error: any) { if (parsed.allVehicles && Number(error?.status || 400) === 409) skipped.push({ vehicleId, message: error?.message || "No claimable amount" }); else throw error; }
       }
-      const penalties = await db.select().from(transportPenalties).where(and(eq(transportPenalties.schoolId, school.id), eq(transportPenalties.vehicleId, parsed.vehicleId), eq(transportPenalties.effectiveYear, parsed.serviceYear), eq(transportPenalties.effectiveMonth, parsed.serviceMonth), eq(transportPenalties.status, "approved")));
-      for (const penalty of penalties) deductions.push({ type: "penalty", sourceId: penalty.id, description: `${penalty.category}: ${penalty.reason}`, amount: amount(penalty.amount), priority: deductionPriority(settings, "penalty") });
-      const advances = await db.select().from(transportAdvances).where(and(eq(transportAdvances.schoolId, school.id), eq(transportAdvances.vehicleId, parsed.vehicleId), gtZero(transportAdvances.outstandingAmount), inArray(transportAdvances.status, ["disbursed", "recovering"])));
-      let availableAfterMandatory = Math.max(0, gross - deductions.reduce((sum, item) => sum + item.amount, 0));
-      for (const advance of advances) {
-        if (parsed.serviceYear < advance.recoveryStartYear || (parsed.serviceYear === advance.recoveryStartYear && parsed.serviceMonth < advance.recoveryStartMonth)) continue;
-        const outstanding = amount(advance.outstandingAmount);
-        const protectedAmount = amount(advance.minimumOwnerTakeHome);
-        const recoverablePool = Math.max(0, availableAfterMandatory - protectedAmount);
-        let recovery = advance.recoveryMethod === "percentage" ? rounded(gross * amount(advance.recoveryValue) / 100)
-          : advance.recoveryMethod === "full_available" ? recoverablePool
-            : amount(advance.recoveryValue);
-        if (advance.maximumMonthlyRecovery != null) recovery = Math.min(recovery, amount(advance.maximumMonthlyRecovery));
-        recovery = rounded(Math.min(recovery, outstanding, recoverablePool));
-        if (recovery > 0) {
-          deductions.push({ type: "advance", sourceId: advance.id, description: `Advance recovery ${advance.advanceNumber}`, amount: recovery, priority: deductionPriority(settings, "advance") });
-          availableAfterMandatory = Math.max(0, availableAfterMandatory - recovery);
-        }
-      }
-      for (const adjustment of providerAdjustments.filter((row) => row.direction === "deduction")) {
-        deductions.push({
-          type: adjustment.adjustmentType === "refund_recovery" ? "refund" : "other",
-          sourceId: adjustment.id,
-          description: adjustment.reason,
-          amount: amount(adjustment.amount),
-          priority: deductionPriority(settings, adjustment.adjustmentType === "refund_recovery" ? "refund" : "other"),
-        });
-      }
-      const deductionAmount = rounded(Math.min(gross, deductions.reduce((sum, item) => sum + item.amount, 0)));
-      const net = rounded(Math.max(0, gross - deductionAmount));
-      const created = await db.transaction(async (tx) => {
-        const [claim] = await tx.insert(transportClaims).values({ schoolId: school.id, vehicleId: parsed.vehicleId, ownerId: vehicle.ownerId, driverId: vehicle.driverId, claimNumber: numberCode("CLM", school.shortCode, Date.now().toString().slice(-6)), serviceYear: parsed.serviceYear, serviceMonth: parsed.serviceMonth, currentPeriodAmount: String(currentPeriodAmount), priorPeriodAmount: String(priorPeriodAmount), grossAmount: String(gross), deductionAmount: String(deductionAmount), netAmount: String(net), notes: parsed.notes, preparedByUserId: user.id }).returning();
-        for (const candidate of candidates) await tx.insert(transportClaimAllocations).values({ claimId: claim.id, allocationId: Number(candidate.id), amount: String(candidate.amount) });
-        for (const deduction of deductions) await tx.insert(transportClaimDeductions).values({ claimId: claim.id, deductionType: deduction.type, sourceId: deduction.sourceId, description: deduction.description, amount: String(deduction.amount), priority: deduction.priority });
-        if (providerAdjustments.length) {
-          await tx.update(transportProviderAdjustments).set({ status: "applied", claimId: claim.id }).where(inArray(transportProviderAdjustments.id, providerAdjustments.map((row) => row.id)));
-        }
-        await writeAudit(tx, school.id, user.id, "claim", claim.id, "generate", null, { claim, allocations: candidates.length, providerAdditions, providerAdjustments: providerAdjustments.length, deductions });
-        return claim;
-      });
-      return res.status(201).json(created);
+      if (!generated.length) return res.status(409).json({ message: "No claimable vehicle amounts were available.", skipped });
+      return res.status(201).json(parsed.allVehicles ? { generated, skipped } : generated[0]);
     } catch (error) { return routeError(res, error); }
   });
 
@@ -2467,9 +3410,9 @@ export function registerTransportRoutes(app: Express) {
       const claim = await assertSchoolRecord(transportClaims, Number(req.params.id), school.id);
       if (!claim) return res.status(404).send("Claim not found");
       const [vehicle, owner, driver] = await Promise.all([
-        assertSchoolRecord(transportVehicles, claim.vehicleId, school.id),
-        claim.ownerId ? assertSchoolRecord(transportOwners, claim.ownerId, school.id) : Promise.resolve(null),
-        claim.driverId ? assertSchoolRecord(transportDrivers, claim.driverId, school.id) : Promise.resolve(null),
+        assertOrganizationRecord(transportVehicles, claim.vehicleId, school),
+        claim.ownerId ? assertOrganizationRecord(transportOwners, claim.ownerId, school) : Promise.resolve(null),
+        claim.driverId ? assertOrganizationRecord(transportDrivers, claim.driverId, school) : Promise.resolve(null),
       ]);
       const details = await db.execute(sql`
         SELECT ca.amount, p.receipt_no AS "receiptNo", p.payment_date AS "paymentDate", p.payment_method AS "paymentMethod",
@@ -2553,8 +3496,8 @@ export function registerTransportRoutes(app: Express) {
       const existing = await db.select().from(transportPayouts).where(eq(transportPayouts.claimId, id));
       if (existing.length) return res.status(409).json({ message: "A payout slip already exists for this claim" });
       const deductions = await db.select().from(transportClaimDeductions).where(eq(transportClaimDeductions.claimId, id)).orderBy(asc(transportClaimDeductions.priority));
-      const vehicle = await assertSchoolRecord(transportVehicles, claim.vehicleId, school.id);
-      const owner = claim.ownerId ? await assertSchoolRecord(transportOwners, claim.ownerId, school.id) : null;
+      const vehicle = await assertOrganizationRecord(transportVehicles, claim.vehicleId, school);
+      const owner = claim.ownerId ? await assertOrganizationRecord(transportOwners, claim.ownerId, school) : null;
       const token = verificationToken();
       const [payout] = await db.insert(transportPayouts).values({ schoolId: school.id, claimId: id, payoutNumber: numberCode("PAY", school.shortCode, Date.now().toString().slice(-6)), grossAmount: claim.grossAmount, deductionAmount: claim.deductionAmount, netAmount: claim.netAmount, verificationToken: token, snapshot: { claim, deductions, vehicle, owner, generatedAt: new Date().toISOString() }, generatedByUserId: user.id, approvedByUserId: claim.approvedByUserId }).returning();
       await writeAudit(db, school.id, user.id, "payout", payout.id, "generate", null, payout);

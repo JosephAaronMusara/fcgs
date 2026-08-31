@@ -53,6 +53,7 @@ import {
   Package,
   ArrowRightLeft,
   BriefcaseBusiness,
+  CarFront,
 } from "lucide-react";
 import type { School as SchoolType } from "@shared/schema";
 
@@ -90,6 +91,7 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Applications", url: "/applications", icon: FileText, requiredPermissions: ["applications.view"] },
       { title: "Internal Transfers", url: "/internal-transfers", icon: ArrowRightLeft, requiredPermissions: ["internal_transfers.view"] },
       { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport" },
+      { title: "Fleet Management", url: "/fleet-management", icon: CarFront, requiredPermissions: ["fleet.view"] },
     ],
   },
   {
