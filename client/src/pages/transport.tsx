@@ -126,7 +126,7 @@ function statusVariant(status: string): "default" | "secondary" | "destructive" 
 }
 
 export default function TransportPage() {
-  const { currentSchoolId, user, hasAnyPermission } = useAuth();
+  const { currentSchoolId, user, isLoading: authLoading, hasAnyPermission } = useAuth();
   const { toast } = useToast();
   const [topTab, setTopTab] = useState(() => localStorage.getItem("transportTopTab") || "overview");
   const [operationsTab, setOperationsTab] = useState(() => localStorage.getItem("transportOperationsTab") || "learners");
@@ -219,27 +219,35 @@ export default function TransportPage() {
   useEffect(() => localStorage.setItem("transportBillingTab", billingTab), [billingTab]);
   useEffect(() => localStorage.setItem("transportSettlementsTab", settlementsTab), [settlementsTab]);
 
+  const hasSchoolScope = effectiveSchoolId != null;
+
   const { data, isLoading, error, refetch } = useQuery<Bootstrap>({
-    queryKey: ["/api/transport/bootstrap"],
+    queryKey: ["/api/transport/bootstrap", effectiveSchoolId],
+    enabled: hasSchoolScope,
     queryFn: async () => {
-      const response = await schoolFetch("/api/transport/bootstrap");
+      const response = await schoolFetch("/api/transport/bootstrap", {
+        headers: { "X-School-Id": String(effectiveSchoolId) },
+      });
       if (!response.ok) throw new Error(await response.text());
       return response.json();
     },
   });
 
   const { data: reportData, refetch: refreshReport, isFetching: reportLoading } = useQuery<any>({
-    queryKey: ["/api/transport/reports/summary", reportFrom, reportTo],
+    queryKey: ["/api/transport/reports/summary", effectiveSchoolId, reportFrom, reportTo],
+    enabled: hasSchoolScope && topTab === "reports",
     queryFn: async () => {
-      const response = await schoolFetch(`/api/transport/reports/summary?from=${encodeURIComponent(reportFrom)}&to=${encodeURIComponent(reportTo)}`);
+      const response = await schoolFetch(`/api/transport/reports/summary?from=${encodeURIComponent(reportFrom)}&to=${encodeURIComponent(reportTo)}`, {
+        headers: { "X-School-Id": String(effectiveSchoolId) },
+      });
       if (!response.ok) throw new Error(await response.text());
       return response.json();
     },
-    enabled: topTab === "reports",
   });
 
   const refresh = async () => {
-    await queryClient.invalidateQueries({ queryKey: ["/api/transport/bootstrap"] });
+    if (!hasSchoolScope) return;
+    await queryClient.invalidateQueries({ queryKey: ["/api/transport/reports/summary", effectiveSchoolId] });
     await refetch();
   };
 
@@ -274,7 +282,8 @@ export default function TransportPage() {
 
   const open = (type: string, record?: any) => setDialog({ type, record });
 
-  if (isLoading) return <div className="p-6"><Card><CardContent className="p-8 text-center text-muted-foreground">Loading Transport workspace…</CardContent></Card></div>;
+  if (authLoading || (hasSchoolScope && isLoading)) return <div className="p-6"><Card><CardContent className="p-8 text-center text-muted-foreground">Loading Transport workspace…</CardContent></Card></div>;
+  if (!hasSchoolScope) return <div className="p-6"><Alert><MapPin className="h-4 w-4"/><AlertTitle>Select a school</AlertTitle><AlertDescription>Open a school from HQ before entering the Transport workspace.</AlertDescription></Alert></div>;
   if (error || !data) return <div className="p-6"><Alert variant="destructive"><TriangleAlert className="h-4 w-4"/><AlertTitle>Unable to load Transport</AlertTitle><AlertDescription>{error instanceof Error ? error.message : "No Transport data was returned."}</AlertDescription></Alert></div>;
 
   const d = data.dashboard || {};
