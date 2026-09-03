@@ -23,6 +23,7 @@ import { ResidentialAreaInput } from "@/components/residential-area-input";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 import { RecordPhotoActions } from "@/components/record-photo-actions";
+import { SignaturePad } from "@/components/signature-pad";
 
 type PaginatedResponse<T> = {
   items: T[];
@@ -78,6 +79,23 @@ export default function StaffPage() {
     },
     placeholderData: (previousData) => previousData,
   });
+
+  const profileStaffId = Number(new URLSearchParams(window.location.search).get("staffId") || 0);
+  const openProfileForEdit = new URLSearchParams(window.location.search).get("edit") === "1";
+  const { data: linkedProfileStaff } = useQuery<Staff>({
+    queryKey: ["/api/staff", profileStaffId],
+    enabled: profileStaffId > 0,
+    queryFn: async () => {
+      const res = await schoolFetch(`/api/staff/${profileStaffId}`);
+      if (!res.ok) throw new Error("Unable to load staff profile");
+      return res.json();
+    },
+  });
+
+  useEffect(() => {
+    if (linkedProfileStaff && openProfileForEdit) setEditingStaff(linkedProfileStaff);
+    else if (linkedProfileStaff) setViewingStaff(linkedProfileStaff);
+  }, [linkedProfileStaff, openProfileForEdit]);
 
   const staffList = staffPageData?.items || [];
   const totalStaff = staffPageData?.total || 0;
@@ -973,11 +991,14 @@ function StaffForm({
   const { toast } = useToast();
   const [photoPreview, setPhotoPreview] = useState<string | null>(defaultValues?.photo || null);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [isSavingSignature, setIsSavingSignature] = useState(false);
+  const [signaturePreview, setSignaturePreview] = useState<string | null>(defaultValues?.signatureData || null);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setPhotoPreview(defaultValues?.photo || null);
-  }, [defaultValues?.id, defaultValues?.photo]);
+    setSignaturePreview(defaultValues?.signatureData || null);
+  }, [defaultValues?.id, defaultValues?.photo, defaultValues?.signatureData]);
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1002,6 +1023,31 @@ function StaffForm({
       toast({ title: err?.message || "Failed to upload photo", variant: "destructive" });
     } finally {
       setIsUploadingPhoto(false);
+    }
+  };
+
+  const handleSignatureSave = async (signatureData: string) => {
+    if (!defaultValues?.id) return;
+    setIsSavingSignature(true);
+    try {
+      const res = await schoolFetch(`/api/staff/${defaultValues.id}/signature`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ signatureData }),
+      });
+      if (!res.ok) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Unable to save signature");
+      }
+      const saved = await res.json();
+      setSignaturePreview(saved.signatureData);
+      await queryClient.invalidateQueries({ queryKey: ["/api/staff"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/staff/self-profile"] });
+      toast({ title: "Signature saved", description: "This specimen can now be used for password-authorised electronic signing." });
+    } catch (error: any) {
+      toast({ title: "Unable to save signature", description: error?.message || "Please try again", variant: "destructive" });
+    } finally {
+      setIsSavingSignature(false);
     }
   };
 
@@ -1075,6 +1121,7 @@ function StaffForm({
                   <SelectItem value="assistant_teacher">Assistant Teacher</SelectItem>
                   <SelectItem value="administrator">Administrator</SelectItem>
                   <SelectItem value="accountant">Accountant</SelectItem>
+                  <SelectItem value="receptionist">Receptionist</SelectItem>
                   <SelectItem value="librarian">Librarian</SelectItem>
                   <SelectItem value="quality_control_officer">Quality Control Officer</SelectItem>
                 </>
@@ -1215,6 +1262,18 @@ function StaffForm({
           defaultValue={defaultValues?.address || ""}
           data-testid="input-address"
         />
+      </div>
+      <div className="space-y-2 rounded-md border p-4">
+        <div>
+          <Label>Electronic Signature</Label>
+          <p className="text-xs text-muted-foreground">The staff member signs by hand once. Future documents use this stored specimen only after the signer enters their own account password.</p>
+        </div>
+        {defaultValues?.id ? (
+          <SignaturePad value={signaturePreview} onSave={handleSignatureSave} disabled={isSavingSignature} />
+        ) : (
+          <p className="text-sm text-muted-foreground">Save the staff record first, then reopen it to register the signature.</p>
+        )}
+        {defaultValues?.signatureUpdatedAt && <p className="text-xs text-muted-foreground">Last updated: {new Date(defaultValues.signatureUpdatedAt as any).toLocaleString()}</p>}
       </div>
       <Button type="submit" className="w-full" disabled={isLoading} data-testid="button-save-staff">
         {isLoading ? "Saving..." : defaultValues ? "Update Staff" : "Add Staff"}

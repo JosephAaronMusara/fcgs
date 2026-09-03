@@ -17,3 +17,6 @@ event.json
 .Local/
 _sql_applied/
 repair-transport-additive.cjs
+
+# Local Gate Bridge credentials
+gate-bridge.env

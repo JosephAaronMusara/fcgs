@@ -54,6 +54,7 @@ import {
   ArrowRightLeft,
   BriefcaseBusiness,
   CarFront,
+  DoorOpen,
 } from "lucide-react";
 import type { School as SchoolType } from "@shared/schema";
 
@@ -92,6 +93,7 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Internal Transfers", url: "/internal-transfers", icon: ArrowRightLeft, requiredPermissions: ["internal_transfers.view"] },
       { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport" },
       { title: "Fleet Management", url: "/fleet-management", icon: CarFront, requiredPermissions: ["fleet.view"] },
+      { title: "Access Control", url: "/access-control", icon: DoorOpen, requiredPermissions: ["access_control.view"] },
     ],
   },
   {
@@ -259,13 +261,25 @@ const parentMenuGroups: MenuGroup[] = [
 ];
 
 export function AppSidebar() {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const { user, logout, currentSchoolId, hasAnyPermission } = useAuth();
   const { isMobile, setOpenMobile } = useSidebar();
 
   const { data: schools } = useQuery<SchoolType[]>({
     queryKey: ["/api/schools"],
     enabled: !!user,
+  });
+
+  const { data: selfStaffProfile } = useQuery<any | null>({
+    queryKey: ["/api/staff/self-profile", user?.id],
+    enabled: !!user && !["student", "parent"].includes(String(user.role)),
+    retry: false,
+    queryFn: async () => {
+      const response = await fetch("/api/staff/self-profile", { credentials: "include" });
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error("Unable to load linked staff profile");
+      return response.json();
+    },
   });
 
   const currentSchool = schools?.find(s => s.id === currentSchoolId) || schools?.find(s => s.id === user?.schoolId);
@@ -380,7 +394,17 @@ export function AppSidebar() {
         ))}
       </SidebarContent>
       <SidebarFooter className="border-t border-sidebar-border p-4">
-        <div className="flex items-center gap-3 mb-3">
+        <button
+          type="button"
+          className="mb-3 flex w-full items-center gap-3 rounded-md p-1 text-left transition-colors hover:bg-sidebar-accent"
+          onClick={() => {
+            const target = selfStaffProfile?.id ? `/staff?staffId=${selfStaffProfile.id}&edit=1` : "/staff";
+            setLocation(target);
+            if (isMobile) setOpenMobile(false);
+          }}
+          title="Open my staff profile"
+          data-testid="button-sidebar-profile"
+        >
           <Avatar className="h-9 w-9">
             <AvatarFallback className="bg-primary text-primary-foreground text-sm">
               {user?.firstName?.[0] || user?.username?.[0]?.toUpperCase() || "U"}
@@ -392,7 +416,7 @@ export function AppSidebar() {
             </p>
             <p className="text-xs text-sidebar-foreground/70">{getRoleLabel()}</p>
           </div>
-        </div>
+        </button>
         <Button variant="ghost" size="sm" className="w-full justify-start" onClick={() => logout()} data-testid="button-logout">
           <LogOut className="w-4 h-4 mr-2" />
           Sign Out

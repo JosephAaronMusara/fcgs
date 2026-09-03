@@ -8,6 +8,7 @@ import {
   schools,
   transportAssignments,
   transportCharges,
+  transportCashups,
   transportClaims,
   transportDrivers,
   transportHqClaimItems,
@@ -126,7 +127,7 @@ async function buildSettlementWorkspace(organizationId: number) {
   await refreshPolicyStatuses(organizationId);
   const orgSchools = await orgSchoolRows(organizationId);
   const schoolIds = orgSchools.map((row) => row.id);
-  const [vehicles, owners, drivers, schoolClaims, hqClaims, hqItems, hqPayouts, runs, runItems, disbursements, allocations, policies, userRows] = await Promise.all([
+  const [vehicles, owners, drivers, schoolClaims, hqClaims, hqItems, hqPayouts, cashups, runs, runItems, disbursements, allocations, policies, userRows] = await Promise.all([
     schoolIds.length ? db.select().from(transportVehicles).where(inArray(transportVehicles.schoolId, schoolIds)) : [],
     schoolIds.length ? db.select().from(transportOwners).where(inArray(transportOwners.schoolId, schoolIds)) : [],
     schoolIds.length ? db.select().from(transportDrivers).where(inArray(transportDrivers.schoolId, schoolIds)) : [],
@@ -134,6 +135,7 @@ async function buildSettlementWorkspace(organizationId: number) {
     db.select().from(transportHqClaims).where(eq(transportHqClaims.organizationId, organizationId)).orderBy(desc(transportHqClaims.createdAt)),
     db.select().from(transportHqClaimItems),
     db.select().from(transportHqPayouts).where(eq(transportHqPayouts.organizationId, organizationId)).orderBy(desc(transportHqPayouts.createdAt)),
+    schoolIds.length ? db.select().from(transportCashups).where(inArray(transportCashups.schoolId, schoolIds)).orderBy(desc(transportCashups.cashupDate), desc(transportCashups.createdAt)) : [],
     db.select().from(transportProviderPaymentRuns).where(eq(transportProviderPaymentRuns.organizationId, organizationId)).orderBy(desc(transportProviderPaymentRuns.createdAt)),
     db.select().from(transportProviderPaymentRunItems),
     db.select().from(transportProviderDisbursements).orderBy(desc(transportProviderDisbursements.createdAt)),
@@ -153,9 +155,26 @@ async function buildSettlementWorkspace(organizationId: number) {
     return { ...claim, schoolName: schoolMap.get(claim.schoolId)?.name || `School #${claim.schoolId}`, vehicleRegistration: vehicleMap.get(claim.vehicleId)?.registrationNumber || `Vehicle #${claim.vehicleId}`, ownerName: claim.ownerId ? ownerMap.get(claim.ownerId)?.name || `Owner #${claim.ownerId}` : "—", hqClaimId: hq?.id || null, hqClaimNumber: hq?.claimNumber || null, payoutId: payout?.id || null, payoutNumber: payout?.payoutNumber || null, payoutStatus: payout?.status || "not_paid", paidAmount: payout ? numberValue(payout.amountPaid) : 0 };
   });
   const enrichedHqClaims = hqClaims.map((claim) => ({ ...claim, vehicleRegistration: vehicleMap.get(claim.vehicleId)?.registrationNumber || `Vehicle #${claim.vehicleId}`, ownerName: claim.ownerId ? ownerMap.get(claim.ownerId)?.name || `Owner #${claim.ownerId}` : "—", items: hqItems.filter((row) => row.hqClaimId === claim.id).map((row) => ({ ...row, schoolName: schoolMap.get(row.schoolId)?.name || `School #${row.schoolId}`, claim: schoolClaims.find((claimRow) => claimRow.id === row.schoolClaimId) })), payout: payoutByClaim.get(claim.id) || null }));
+  const payableSchoolClaims = enrichedSchoolClaims.filter((claim: any) => ["submitted", "verified", "approved", "paid"].includes(String(claim.status)));
+  const payablesBySchool = Array.from(new Set(payableSchoolClaims.map((claim: any) => Number(claim.schoolId)))).map((schoolId) => {
+    const rows = payableSchoolClaims.filter((claim: any) => Number(claim.schoolId) === schoolId);
+    const gross = rounded(rows.reduce((sum: number, row: any) => sum + numberValue(row.grossAmount), 0));
+    const deductions = rounded(rows.reduce((sum: number, row: any) => sum + numberValue(row.deductionAmount), 0));
+    const netPayable = rounded(rows.reduce((sum: number, row: any) => sum + numberValue(row.netAmount), 0));
+    const paid = rounded(rows.reduce((sum: number, row: any) => sum + numberValue(row.paidAmount), 0));
+    return { schoolId, schoolName: schoolMap.get(schoolId)?.name || `School #${schoolId}`, claimsDue: rows.length, gross, deductions, netPayable, paid, outstanding: Math.max(0, rounded(netPayable - paid)) };
+  }).sort((a, b) => a.schoolName.localeCompare(b.schoolName));
+  const enrichedCashups = cashups.map((row: any) => ({
+    ...row,
+    schoolName: schoolMap.get(Number(row.schoolId))?.name || `School #${row.schoolId}`,
+    expectedTotal: rounded(numberValue(row.expectedCash) + numberValue(row.expectedNonCash)),
+    receptionistDeclared: rounded(numberValue(row.actualCash) + numberValue(row.actualNonCash)),
+    accountsReceived: rounded(numberValue(row.accountsReceivedCash) + numberValue(row.accountsReceivedNonCash)),
+    hqReceived: rounded(numberValue(row.hqReceivedCash) + numberValue(row.hqReceivedNonCash)),
+  }));
   const runItemMap = new Map(runItems.map((row) => [row.id, row]));
   const enrichedRuns = runs.map((run) => ({ ...run, ownerName: run.ownerId ? ownerMap.get(run.ownerId)?.name || `Owner #${run.ownerId}` : "—", items: runItems.filter((row) => row.runId === run.id).map((row) => ({ ...row, payout: hqPayouts.find((payout) => payout.id === row.payoutId) })), disbursements: disbursements.filter((row) => row.runId === run.id).map((row) => ({ ...row, processedByName: (() => { const u = userMap.get(row.processedByUserId); return u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.username : `User #${row.processedByUserId}`; })(), allocations: allocations.filter((a) => a.disbursementId === row.id).map((a) => ({ ...a, runItem: runItemMap.get(a.runItemId) })) })) }));
-  return { schools: orgSchools, vehicles, owners, drivers, schoolClaims: enrichedSchoolClaims, hqClaims: enrichedHqClaims, payouts: hqPayouts.map((payout) => ({ ...payout, claim: hqClaimMap.get(payout.hqClaimId), vehicleRegistration: vehicleMap.get(hqClaimMap.get(payout.hqClaimId)?.vehicleId || 0)?.registrationNumber || "—", ownerName: payout.ownerId ? ownerMap.get(payout.ownerId)?.name || `Owner #${payout.ownerId}` : "—" })), paymentRuns: enrichedRuns, subscriptionPolicies: policies };
+  return { schools: orgSchools, vehicles, owners, drivers, schoolClaims: enrichedSchoolClaims, hqClaims: enrichedHqClaims, payouts: hqPayouts.map((payout) => ({ ...payout, claim: hqClaimMap.get(payout.hqClaimId), vehicleRegistration: vehicleMap.get(hqClaimMap.get(payout.hqClaimId)?.vehicleId || 0)?.registrationNumber || "—", ownerName: payout.ownerId ? ownerMap.get(payout.ownerId)?.name || `Owner #${payout.ownerId}` : "—" })), payablesBySchool, cashups: enrichedCashups, paymentRuns: enrichedRuns, subscriptionPolicies: policies };
 }
 
 function csvCell(value: unknown) { const text = String(value ?? ""); return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; }
@@ -169,6 +188,73 @@ export function registerHqOperationsRoutes(app: Express) {
   app.get("/api/hq/transport/settlements", requireAuth, requireAnyPermission("transport.organization.view", "transport.hq.claims.manage", "transport.hq.payouts.manage", "transport.organization.manage"), async (req, res) => {
     try { const user = requireHqUser(req); res.json(await buildSettlementWorkspace(user.organizationId!)); }
     catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load HQ settlement workspace" }); }
+  });
+
+  app.get("/api/hq/transport/payables", requireAuth, requireAnyPermission("transport.organization.view", "transport.organization.reports", "transport.hq.claims.manage", "transport.organization.manage"), async (req, res) => {
+    try {
+      const user = requireHqUser(req);
+      const parsed = z.object({ year: z.coerce.number().int().min(2020), month: monthSchema }).parse(req.query);
+      const workspace = await buildSettlementWorkspace(user.organizationId!);
+      const claims = (workspace.schoolClaims || []).filter((row: any) => Number(row.serviceYear) === parsed.year && Number(row.serviceMonth) === parsed.month && ["submitted", "verified", "approved", "paid"].includes(String(row.status)));
+      const rows = (workspace.schools || []).map((school: any) => {
+        const schoolClaims = claims.filter((row: any) => Number(row.schoolId) === Number(school.id));
+        const gross = rounded(schoolClaims.reduce((sum: number, row: any) => sum + numberValue(row.grossAmount), 0));
+        const deductions = rounded(schoolClaims.reduce((sum: number, row: any) => sum + numberValue(row.deductionAmount), 0));
+        const netPayable = rounded(schoolClaims.reduce((sum: number, row: any) => sum + numberValue(row.netAmount), 0));
+        const paid = rounded(schoolClaims.reduce((sum: number, row: any) => sum + numberValue(row.paidAmount), 0));
+        return { schoolId: school.id, schoolName: school.name, claimsDue: schoolClaims.length, gross, deductions, netPayable, paid, outstanding: Math.max(0, rounded(netPayable - paid)) };
+      }).filter((row: any) => row.claimsDue > 0 || row.netPayable > 0);
+      res.json({ ...parsed, rows, totals: rows.reduce((acc: any, row: any) => ({ claimsDue: acc.claimsDue + row.claimsDue, gross: rounded(acc.gross + row.gross), deductions: rounded(acc.deductions + row.deductions), netPayable: rounded(acc.netPayable + row.netPayable), paid: rounded(acc.paid + row.paid), outstanding: rounded(acc.outstanding + row.outstanding) }), { claimsDue: 0, gross: 0, deductions: 0, netPayable: 0, paid: 0, outstanding: 0 }) });
+    } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load payables report" }); }
+  });
+
+  app.post("/api/hq/transport/cashups/:id/confirm", requireAuth, requireAnyPermission("transport.organization.manage", "transport.organization.reports"), async (req, res) => {
+    try {
+      const user = requireHqUser(req);
+      const parsed = z.object({ receivedCash: z.coerce.number().finite().min(0), receivedNonCash: z.coerce.number().finite().min(0).default(0), notes: z.string().trim().nullable().optional() }).parse(req.body);
+      const schoolRows = await orgSchoolRows(user.organizationId!); const schoolIds = schoolRows.map((row) => row.id);
+      const [previous] = await db.select().from(transportCashups).where(and(eq(transportCashups.id, Number(req.params.id)), inArray(transportCashups.schoolId, schoolIds)));
+      if (!previous) return res.status(404).json({ message: "Cash-up not found." });
+      if (!["verified", "hq_discrepancy"].includes(String(previous.status))) return res.status(409).json({ message: "Accounts must verify this cash-up before HQ confirmation." });
+      const expected = rounded(numberValue(previous.expectedCash) + numberValue(previous.expectedNonCash));
+      const received = rounded(parsed.receivedCash + parsed.receivedNonCash);
+      const variance = rounded(received - expected);
+      if (Math.abs(variance) > 0.009 && !parsed.notes) return res.status(400).json({ message: "Enter a reconciliation note because the HQ amount received differs from the system expected amount." });
+      const [updated] = await db.update(transportCashups).set({
+        hqReceivedCash: String(parsed.receivedCash), hqReceivedNonCash: String(parsed.receivedNonCash), hqVariance: String(variance), hqNotes: parsed.notes || null,
+        hqConfirmedByUserId: user.id, hqConfirmedAt: new Date(), status: Math.abs(variance) > 0.009 ? "hq_discrepancy" : "hq_confirmed",
+      }).where(eq(transportCashups.id, previous.id)).returning();
+      res.json(updated);
+    } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : "Unable to confirm HQ cash-up" }); }
+  });
+
+  app.get("/api/hq/transport/payment-register/print", requireAuth, requireAnyPermission("transport.organization.reports", "transport.hq.payouts.manage", "transport.organization.manage"), async (req, res) => {
+    try {
+      const user = requireHqUser(req);
+      const parsed = z.object({ year: z.coerce.number().int().min(2020), month: monthSchema, schoolId: z.coerce.number().int().positive().optional() }).parse(req.query);
+      const workspace = await buildSettlementWorkspace(user.organizationId!);
+      let claims = (workspace.schoolClaims || []).filter((row: any) => Number(row.serviceYear) === parsed.year && Number(row.serviceMonth) === parsed.month && ["submitted", "verified", "approved", "paid"].includes(String(row.status)));
+      if (parsed.schoolId) claims = claims.filter((row: any) => Number(row.schoolId) === parsed.schoolId);
+      const vehicleById = new Map((workspace.vehicles || []).map((row: any) => [Number(row.id), row]));
+      const ownerById = new Map((workspace.owners || []).map((row: any) => [Number(row.id), row]));
+      const driverById = new Map((workspace.drivers || []).map((row: any) => [Number(row.id), row]));
+      const payoutById = new Map((workspace.payouts || []).map((row: any) => [Number(row.id), row]));
+      const disbursementByPayout = new Map<number, any>();
+      for (const run of workspace.paymentRuns || []) for (const disbursement of run.disbursements || []) for (const allocation of disbursement.allocations || []) {
+        const payoutId = allocation.runItem?.payoutId; if (payoutId) disbursementByPayout.set(Number(payoutId), disbursement);
+      }
+      const rows = claims.map((claim: any) => {
+        const vehicle = vehicleById.get(Number(claim.vehicleId)); const owner = claim.ownerId ? ownerById.get(Number(claim.ownerId)) : null; const driver = claim.driverId ? driverById.get(Number(claim.driverId)) : null;
+        const payout = claim.payoutId ? payoutById.get(Number(claim.payoutId)) : null; const disbursement = payout ? disbursementByPayout.get(Number(payout.id)) : null;
+        const collector = disbursement?.collectorType === "driver" && disbursement.collectorDriverId ? driverById.get(Number(disbursement.collectorDriverId)) : null;
+        return { claim, vehicle, owner, driver, payout, disbursement, collectorName: collector ? `${collector.firstName} ${collector.lastName}` : disbursement?.collectorName || (disbursement?.collectorType === "owner" ? owner?.name : null) || "—" };
+      });
+      const bodyRows = rows.map(({ claim, vehicle, owner, driver, disbursement, collectorName }: any) => `<tr><td>${escapeHtml(claim.schoolName)}</td><td>${escapeHtml(owner?.name || "FCGS")}</td><td>${escapeHtml(driver ? `${driver.firstName} ${driver.lastName}` : "—")}</td><td>${escapeHtml(vehicle?.registrationNumber || "—")}</td><td>${escapeHtml(claim.claimNumber)}</td><td>${numberValue(claim.grossAmount).toFixed(2)}</td><td>${numberValue(claim.deductionAmount).toFixed(2)}</td><td>${numberValue(claim.netAmount).toFixed(2)}</td><td>${numberValue(claim.paidAmount).toFixed(2)}</td><td>${escapeHtml(disbursement?.paymentMethod || "—")} ${escapeHtml(disbursement?.paymentReference || "")}</td><td>${escapeHtml(collectorName)}</td><td class="signature"></td></tr>`).join("");
+      const html = `<!doctype html><html><head><meta charset="utf-8"/><style>@page{size:A4 landscape;margin:8mm}body{font-family:Arial;font-size:9px}h1,h2{text-align:center;margin:3px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #aaa;padding:5px}th{background:#eee}.signature{min-width:90px;height:28px}</style></head><body><h1>FIRST CHOICE GROUP OF SCHOOLS</h1><h2>MONTHLY TRANSPORT PROVIDER PAYMENT REGISTER · ${parsed.year}-${String(parsed.month).padStart(2,"0")}</h2><table><thead><tr><th>School</th><th>Payee / Provider</th><th>Driver</th><th>Vehicle</th><th>Claim</th><th>Gross</th><th>Deductions</th><th>Net Due</th><th>Paid</th><th>Method / Ref</th><th>Collected By</th><th>Acknowledgement</th></tr></thead><tbody>${bodyRows || '<tr><td colspan="12">No payable claims for this period.</td></tr>'}</tbody></table></body></html>`;
+      const pdf = await renderHtmlPdf({ html, pdfOptions: { format: "A4", landscape: true, printBackground: true, preferCSSPageSize: true } });
+      const filename = reportPdfFilename(`Transport_Provider_Payment_Register_${parsed.year}_${String(parsed.month).padStart(2,"0")}`);
+      res.setHeader("Content-Type", "application/pdf"); res.setHeader("Content-Disposition", `inline; filename="${filename}.pdf"`); res.send(pdf);
+    } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : "Unable to generate provider payment register" }); }
   });
 
   app.post("/api/hq/transport/subscription-policies", requireAuth, requireAnyPermission("transport.subscription.manage", "transport.organization.manage"), async (req, res) => {
@@ -201,8 +287,8 @@ export function registerHqOperationsRoutes(app: Express) {
       const schoolRows = await orgSchoolRows(user.organizationId!); const schoolIds = schoolRows.map((row) => row.id);
       const [vehicle] = await db.select().from(transportVehicles).where(and(eq(transportVehicles.id, parsed.vehicleId), inArray(transportVehicles.schoolId, schoolIds)));
       if (!vehicle) return res.status(404).json({ message: "Vehicle not found in this organisation." });
-      const sourceClaims = await db.select().from(transportClaims).where(and(inArray(transportClaims.schoolId, schoolIds), eq(transportClaims.vehicleId, parsed.vehicleId), eq(transportClaims.serviceYear, parsed.serviceYear), eq(transportClaims.serviceMonth, parsed.serviceMonth), inArray(transportClaims.status, ["verified", "approved"]))).orderBy(asc(transportClaims.schoolId));
-      if (!sourceClaims.length) return res.status(409).json({ message: "There are no school-verified claims to consolidate for this vehicle and month." });
+      const sourceClaims = await db.select().from(transportClaims).where(and(inArray(transportClaims.schoolId, schoolIds), eq(transportClaims.vehicleId, parsed.vehicleId), eq(transportClaims.serviceYear, parsed.serviceYear), eq(transportClaims.serviceMonth, parsed.serviceMonth), inArray(transportClaims.status, ["submitted", "verified", "approved"]))).orderBy(asc(transportClaims.schoolId));
+      if (!sourceClaims.length) return res.status(409).json({ message: "There are no Transport Manager-submitted claims to prepare for payment for this vehicle and month." });
       const existingLinks = await db.select().from(transportHqClaimItems).where(inArray(transportHqClaimItems.schoolClaimId, sourceClaims.map((row) => row.id)));
       const existing = await db.select().from(transportHqClaims).where(and(eq(transportHqClaims.organizationId, user.organizationId!), eq(transportHqClaims.vehicleId, parsed.vehicleId), eq(transportHqClaims.serviceYear, parsed.serviceYear), eq(transportHqClaims.serviceMonth, parsed.serviceMonth)));
       if (existing[0] && !["draft", "reviewed"].includes(existing[0].status)) return res.status(409).json({ message: "The HQ claim is already approved/frozen and cannot be recalculated." });
@@ -210,14 +296,18 @@ export function registerHqOperationsRoutes(app: Express) {
       const gross = rounded(sourceClaims.reduce((sum, row) => sum + numberValue(row.grossAmount), 0)); const deductions = rounded(sourceClaims.reduce((sum, row) => sum + numberValue(row.deductionAmount), 0)); const net = rounded(sourceClaims.reduce((sum, row) => sum + numberValue(row.netAmount), 0));
       const result = await db.transaction(async (tx) => {
         let hq = existing[0];
+        const approvedAt = new Date();
         if (hq) {
-          [hq] = await tx.update(transportHqClaims).set({ ownerId: vehicle.ownerId || null, grossAmount: String(gross), deductionAmount: String(deductions), netAmount: String(net), notes: parsed.notes || hq.notes, snapshot: { refreshedAt: new Date().toISOString(), schoolClaimIds: sourceClaims.map((row) => row.id) }, updatedAt: new Date(), status: "draft" }).where(eq(transportHqClaims.id, hq.id)).returning();
+          [hq] = await tx.update(transportHqClaims).set({ ownerId: vehicle.ownerId || null, grossAmount: String(gross), deductionAmount: String(deductions), netAmount: String(net), notes: parsed.notes || hq.notes, snapshot: { refreshedAt: approvedAt.toISOString(), schoolClaimIds: sourceClaims.map((row) => row.id), sourceVerifiedAtSchool: true }, updatedAt: approvedAt, status: "approved", approvedByUserId: user.id, approvedAt }).where(eq(transportHqClaims.id, hq.id)).returning();
           await tx.delete(transportHqClaimItems).where(eq(transportHqClaimItems.hqClaimId, hq.id));
         } else {
-          [hq] = await tx.insert(transportHqClaims).values({ organizationId: user.organizationId!, vehicleId: parsed.vehicleId, ownerId: vehicle.ownerId || null, claimNumber: numberCode("HQCLM", user.organizationId!), serviceYear: parsed.serviceYear, serviceMonth: parsed.serviceMonth, status: "draft", grossAmount: String(gross), deductionAmount: String(deductions), netAmount: String(net), notes: parsed.notes || null, snapshot: { createdAt: new Date().toISOString(), schoolClaimIds: sourceClaims.map((row) => row.id) }, preparedByUserId: user.id }).returning();
+          [hq] = await tx.insert(transportHqClaims).values({ organizationId: user.organizationId!, vehicleId: parsed.vehicleId, ownerId: vehicle.ownerId || null, claimNumber: numberCode("HQCLM", user.organizationId!), serviceYear: parsed.serviceYear, serviceMonth: parsed.serviceMonth, status: "approved", grossAmount: String(gross), deductionAmount: String(deductions), netAmount: String(net), notes: parsed.notes || null, snapshot: { createdAt: approvedAt.toISOString(), schoolClaimIds: sourceClaims.map((row) => row.id), sourceVerifiedAtSchool: true }, preparedByUserId: user.id, approvedByUserId: user.id, approvedAt }).returning();
         }
         await tx.insert(transportHqClaimItems).values(sourceClaims.map((row) => ({ hqClaimId: hq.id, schoolClaimId: row.id, schoolId: row.schoolId, grossAmount: row.grossAmount, deductionAmount: row.deductionAmount, netAmount: row.netAmount })));
-        return hq;
+        const existingPayout = await tx.select().from(transportHqPayouts).where(eq(transportHqPayouts.hqClaimId, hq.id));
+        let payout = existingPayout[0];
+        if (!payout) [payout] = await tx.insert(transportHqPayouts).values({ organizationId: user.organizationId!, hqClaimId: hq.id, ownerId: hq.ownerId || null, payoutNumber: numberCode("HQPAY", user.organizationId!), status: "not_paid", netAmount: hq.netAmount, amountPaid: "0", generatedByUserId: user.id }).returning();
+        return { claim: hq, payout };
       });
       res.status(201).json(result);
     } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : "Unable to consolidate HQ claim" }); }

@@ -73,6 +73,7 @@ const TransportPage = lazy(() => import("@/pages/transport"));
 const FleetManagementPage = lazy(() => import("@/pages/fleet-management"));
 const InternalTransfersPage = lazy(() => import("@/pages/internal-transfers"));
 const LearningMaterialsPage = lazy(() => import("@/pages/learning-materials"));
+const AccessControlPage = lazy(() => import("@/pages/access-control"));
 
 
 type RoutePermissionRule = {
@@ -116,6 +117,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/internal-transfers$/, permissions: ["internal_transfers.view"] },
   { pattern: /^\/transport$/, permissions: ["transport.view"] },
   { pattern: /^\/fleet-management$/, permissions: FLEET_ROUTE_PERMISSIONS },
+  { pattern: /^\/access-control$/, permissions: ["access_control.view"] },
   { pattern: /^\/arrears$/, permissions: ["arrears.view"] },
   { pattern: /^\/school-finance$/, permissions: SCHOOL_FINANCE_ROUTE_PERMISSIONS },
   { pattern: /^\/assets-inventory$/, permissions: ASSETS_INVENTORY_ROUTE_PERMISSIONS },
@@ -860,6 +862,7 @@ function AuthenticatedRoutes() {
         <Route path="/internal-transfers"><ProtectedRoute component={InternalTransfersPage} /></Route>
         <Route path="/transport"><ProtectedRoute component={TransportPage} /></Route>
         <Route path="/fleet-management"><ProtectedRoute component={FleetManagementPage} /></Route>
+        <Route path="/access-control"><ProtectedRoute component={AccessControlPage} /></Route>
         <Route path="/school-finance"><ProtectedRoute component={SchoolFinancePage} /></Route>
         <Route path="/arrears"><ProtectedRoute component={ParentsWithArrearsRedirectPage} /></Route>
         <Route path="/school-expenses"><ProtectedRoute component={SchoolExpensesRedirectPage} /></Route>

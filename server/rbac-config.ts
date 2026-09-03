@@ -344,6 +344,12 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "damage.record_recovery", name: "Record Damage Recoveries", description: "Record payments and recoveries against approved charges", category: "Assets & Inventory" },
   { code: "damage.reports", name: "View Damage Reports", description: "View damage liability and recovery reports", category: "Assets & Inventory" },
 
+  // Access Control
+  { code: "access_control.view", name: "View Access Control", description: "View gate bridges, face terminals, connection status and command history", category: "Access Control" },
+  { code: "access_control.control_gates", name: "Control Gates", description: "Send audited manual gate-open and device test commands", category: "Access Control" },
+  { code: "access_control.manage_devices", name: "Manage Access Control Devices", description: "Register and configure Gate Bridges and face-recognition terminals", category: "Access Control" },
+  { code: "access_control.audit.view", name: "View Access Control Audit", description: "View gate control command and integration audit history", category: "Access Control" },
+
   // Placeholder / Coming Soon Modules
   { code: "kundai.view", name: "View kundAi", description: "Open the kundAi module", category: "kundAi" },
   { code: "learning_materials.view", name: "View Learning Materials", description: "Open the learning materials module", category: "Learning Materials" },

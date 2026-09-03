@@ -52,7 +52,8 @@
     "numbering:source-check": "node script/validate-person-numbering-hardening.cjs",
     "fleet:preflight": "tsx script/preflight-fleet.ts",
     "transport:test-data": "tsx script/seed-transport-test-data.ts",
-    "transport:test-data:reset": "tsx script/seed-transport-test-data.ts --reset"
+    "transport:test-data:reset": "tsx script/seed-transport-test-data.ts --reset",
+    "gate:bridge": "tsx script/gate-bridge.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

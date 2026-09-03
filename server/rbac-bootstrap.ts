@@ -68,6 +68,12 @@ const TRANSPORT_MANAGER_PERMISSIONS = [
   "transport.advances.request", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
 ];
 
+const RECEPTIONIST_TRANSPORT_PERMISSIONS = [
+  "transport.view", "transport.dashboard.view", "transport.charges.view",
+  "transport.payments.view", "transport.payments.record", "transport.receipts.view",
+  "transport.payment_plans.manage", "transport.refunds.request", "transport.cashups.prepare",
+];
+
 const ACCOUNTANT_TRANSPORT_PERMISSIONS = [
   "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.charges.generate", "transport.charges.adjust",
   "transport.payments.view", "transport.payments.record", "transport.payments.verify", "transport.payments.reverse",
@@ -123,6 +129,12 @@ async function ensureTransportAccessGroupDefaults() {
   await ensureAccessGroupPermissions("School Admin", allTransportCodes);
   await replaceAccessGroupPermissionSubset("Org HQ", "transport.", ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS);
   await ensureAccessGroupPermissions("Accountant", ACCOUNTANT_TRANSPORT_PERMISSIONS);
+  await ensureAccessGroupPermissions(
+    "Receptionist",
+    RECEPTIONIST_TRANSPORT_PERMISSIONS,
+    true,
+    "Records school transport receipts and prepares blind daily cash handovers without cash-up verification authority.",
+  );
   await ensureAccessGroupPermissions(
     "Transport Manager",
     TRANSPORT_MANAGER_PERMISSIONS,
@@ -191,6 +203,14 @@ async function ensureFleetAccessGroupDefaults() {
   }
 }
 
+async function ensureAccessControlDefaults() {
+  const codes = RBAC_PERMISSIONS_DATA
+    .filter((permission) => permission.code.startsWith("access_control."))
+    .map((permission) => permission.code);
+  await ensureAccessGroupPermissions("School Admin", codes);
+  await ensureAccessGroupPermissions("Org HQ", codes);
+}
+
 async function ensurePhotoAccessGroupDefaults() {
   const adminPhotoPermissions = ["students.manage_photo", "staff.manage_photo", "parents.manage_photo", "users.manage_photo"];
   await ensureAccessGroupPermissions("School Admin", adminPhotoPermissions);
@@ -236,6 +256,7 @@ export async function ensureRbacBaseline() {
   await ensureRecruitmentAccessGroupDefaults();
   await ensureAssetsInventoryAccessGroupDefaults();
   await ensureFleetAccessGroupDefaults();
+  await ensureAccessControlDefaults();
   await ensurePhotoAccessGroupDefaults();
   await cleanupLegacyBlanketAdminOverrides();
   await storage.normalizeAllUserBaselineAccessGroups();

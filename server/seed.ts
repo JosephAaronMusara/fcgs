@@ -179,6 +179,18 @@ const ACCESS_GROUPS_DATA = [
     ],
   },
   {
+    name: "Receptionist",
+    description: "Records receipts and prepares daily transport cash handovers without verification authority.",
+    isSystemDefault: true,
+    permissions: [
+      "dashboard.view", "students.view", "parents.view", "classes.view", "fees.view",
+      "transport.view", "transport.dashboard.view", "transport.charges.view",
+      "transport.payments.view", "transport.payments.record", "transport.receipts.view",
+      "transport.payment_plans.manage", "transport.refunds.request", "transport.cashups.prepare",
+      "calendar.view", "staff_attendance.view_own", "staff_attendance.clock_in", "staff_attendance.clock_out",
+    ],
+  },
+  {
     name: "Transport Manager",
     description: "Manages school transport operations, learner services, path setup, claims verification and reporting without final finance payout authority.",
     isSystemDefault: true,
@@ -452,6 +464,7 @@ async function seed() {
     { name: "assistant_teacher", label: "Assistant Teacher", description: "Supports lead teachers in classroom activities", isSystemDefault: true },
     { name: "administrator", label: "Administrator", description: "School administrator managing operations", isSystemDefault: true },
     { name: "accountant", label: "Accountant", description: "Handles financial records, fees, and POS", isSystemDefault: true },
+    { name: "receptionist", label: "Receptionist", description: "Receives payments, issues receipts and prepares school cash handovers", isSystemDefault: true },
     { name: "librarian", label: "Librarian", description: "Manages library resources and circulation", isSystemDefault: true },
     { name: "quality_control_officer", label: "Quality Control Officer", description: "Oversees academic quality and standards", isSystemDefault: true },
   ];

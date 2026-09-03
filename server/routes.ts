@@ -16,6 +16,7 @@ import { registerAssetsInventoryRoutes } from "./assets-inventory-routes";
 import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { registerRecruitmentRoutes } from "./recruitment-routes";
 import { registerFleetRoutes } from "./fleet-routes";
+import { registerAccessControlRoutes } from "./access-control-routes";
 import { communicationService, createInAppNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, academicReportPreparationDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportCommentsFingerprint, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
@@ -3107,6 +3108,7 @@ export async function registerRoutes(
   registerHqOperationsRoutes(app);
   registerRecruitmentRoutes(app);
   registerFleetRoutes(app);
+  registerAccessControlRoutes(app);
   await ensureEcdSeedData();
 
   const readOnlyExemptPaths = [
@@ -3738,6 +3740,40 @@ export async function registerRoutes(
 
       res.json(results);
     } catch (error) { next(error); }
+  });
+
+  app.get("/api/staff/self-profile", requireAuth, async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const [staffMember] = await db.select().from(staffTable).where(eq(staffTable.userId, currentUser.id)).limit(1);
+      if (!staffMember) return res.status(404).json({ message: "No staff record is linked to this user account" });
+      return res.json(staffMember);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/staff/:id/signature", requireAuth, async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const staffId = parseIdParam(req.params.id);
+      const staffMember = await storage.getStaff(staffId);
+      if (!staffMember) return res.status(404).json({ message: "Staff not found" });
+      const isSelf = Number(staffMember.userId || 0) === Number(currentUser.id);
+      const canEditStaff = await userHasAnyPermission(currentUser.id, ["staff.edit"]);
+      if (!isSelf && !canEditStaff && !["school_admin", "org_admin"].includes(currentUser.role)) {
+        return res.status(403).json({ message: "You may only register your own signature" });
+      }
+      const parsed = z.object({ signatureData: z.string().min(50).max(700000) }).parse(req.body);
+      if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(parsed.signatureData)) {
+        return res.status(400).json({ message: "Signature must be captured using the signature pad" });
+      }
+      const [updated] = await db.update(staffTable).set({ signatureData: parsed.signatureData, signatureUpdatedAt: new Date() }).where(eq(staffTable.id, staffId)).returning();
+      logActivity(req, { action: "update_signature", category: "staff", description: `Updated electronic signature for ${updated.firstName} ${updated.lastName}`, targetType: "staff", targetId: updated.id, targetName: `${updated.firstName} ${updated.lastName}` });
+      return res.json({ id: updated.id, signatureData: updated.signatureData, signatureUpdatedAt: updated.signatureUpdatedAt });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/api/staff/:id", requireAuth, async (req, res, next) => {

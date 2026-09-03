@@ -196,6 +196,8 @@ export const staff = pgTable("staff", {
   status: staffStatusEnum("status").default("active"),
   mobileId: text("mobile_id"),
   accessGroupId: integer("access_group_id"),
+  signatureData: text("signature_data"),
+  signatureUpdatedAt: timestamp("signature_updated_at"),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => ({
   normalizedStaffNoUniqueIdx: uniqueIndex("staff_staff_no_normalized_uidx").on(sql`upper(btrim(${table.staffNo}))`),
@@ -203,6 +205,25 @@ export const staff = pgTable("staff", {
     "staff_staff_no_canonical_chk",
     sql`${table.staffNo} = upper(btrim(${table.staffNo})) AND ${table.staffNo} ~ '^FCGS[0-9]{2}E[0-9]{4,}[A-Z]+$'`,
   ),
+}));
+
+// Reusable electronic signatures. The signature snapshot is copied at signing time so
+// historical acknowledgements never change when a staff member later replaces their specimen.
+export const electronicSignatures = pgTable("electronic_signatures", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  entityType: text("entity_type").notNull(),
+  entityId: integer("entity_id").notNull(),
+  signatureRole: text("signature_role").notNull(),
+  signerUserId: integer("signer_user_id").references(() => users.id).notNull(),
+  signerStaffId: integer("signer_staff_id").references(() => staff.id),
+  signerName: text("signer_name").notNull(),
+  statement: text("statement").notNull(),
+  signatureSnapshot: text("signature_snapshot").notNull(),
+  specimenUpdatedAt: timestamp("specimen_updated_at"),
+  signedAt: timestamp("signed_at").notNull().defaultNow(),
+  metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+}, (table) => ({
+  entityRoleUnique: uniqueIndex("electronic_signatures_entity_role_uidx").on(table.entityType, table.entityId, table.signatureRole),
 }));
 
 export const streams = pgTable("streams", {
@@ -506,10 +527,22 @@ export const feesPayments = pgTable("fees_payments", {
 });
 
 // Transport operations, learner billing, reconciliation and provider settlements.
+
+export const transportDestinationMasters = pgTable("transport_destination_masters", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  name: text("name").notNull(),
+  canonicalKey: text("canonical_key").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ organizationCanonicalUnique: uniqueIndex("transport_destination_masters_org_canonical_uidx").on(table.organizationId, table.canonicalKey) }));
+
 // Existing Stage 1 tables are retained and extended additively so production data remains valid.
 export const transportRoutes = pgTable("transport_routes", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
+  destinationMasterId: integer("destination_master_id").references(() => transportDestinationMasters.id),
   name: text("name").notNull(),
   code: text("code").notNull(),
   direction: text("direction").notNull().default("both"),
@@ -624,6 +657,33 @@ export const transportVehicles = pgTable("transport_vehicles", {
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({ schoolRegistrationUnique: uniqueIndex("transport_vehicles_school_registration_uidx").on(table.schoolId, table.registrationNumber) }));
+
+export const transportVehicleSchools = pgTable("transport_vehicle_schools", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  associatedAt: timestamp("associated_at").defaultNow(),
+  associatedByUserId: integer("associated_by_user_id").references(() => users.id),
+}, (table) => ({ vehicleSchoolUnique: uniqueIndex("transport_vehicle_schools_vehicle_school_uidx").on(table.vehicleId, table.schoolId) }));
+
+export const transportDriverSchools = pgTable("transport_driver_schools", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  driverId: integer("driver_id").references(() => transportDrivers.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  associatedAt: timestamp("associated_at").defaultNow(),
+  associatedByUserId: integer("associated_by_user_id").references(() => users.id),
+}, (table) => ({ driverSchoolUnique: uniqueIndex("transport_driver_schools_driver_school_uidx").on(table.driverId, table.schoolId) }));
+
+export const transportOwnerSchools = pgTable("transport_owner_schools", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  ownerId: integer("owner_id").references(() => transportOwners.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  associatedAt: timestamp("associated_at").defaultNow(),
+  associatedByUserId: integer("associated_by_user_id").references(() => users.id),
+}, (table) => ({ ownerSchoolUnique: uniqueIndex("transport_owner_schools_owner_school_uidx").on(table.ownerId, table.schoolId) }));
 
 export const transportSettings = pgTable("transport_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -977,6 +1037,16 @@ export const transportCashups = pgTable("transport_cashups", {
   expectedNonCash: decimal("expected_non_cash", { precision: 12, scale: 2 }).notNull().default("0"),
   actualNonCash: decimal("actual_non_cash", { precision: 12, scale: 2 }).notNull().default("0"),
   variance: decimal("variance", { precision: 12, scale: 2 }).notNull().default("0"),
+  accountsReceivedCash: decimal("accounts_received_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  accountsReceivedNonCash: decimal("accounts_received_non_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  accountsVerificationNotes: text("accounts_verification_notes"),
+  accountsDiscrepancyReason: text("accounts_discrepancy_reason"),
+  hqReceivedCash: decimal("hq_received_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  hqReceivedNonCash: decimal("hq_received_non_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  hqVariance: decimal("hq_variance", { precision: 12, scale: 2 }).notNull().default("0"),
+  hqNotes: text("hq_notes"),
+  hqConfirmedByUserId: integer("hq_confirmed_by_user_id").references(() => users.id),
+  hqConfirmedAt: timestamp("hq_confirmed_at"),
   depositReference: text("deposit_reference"),
   status: text("status").notNull().default("draft"),
   notes: text("notes"),
@@ -1198,6 +1268,14 @@ export const transportClaims = pgTable("transport_claims", {
   grossAmount: decimal("gross_amount", { precision: 12, scale: 2 }).notNull().default("0"),
   deductionAmount: decimal("deduction_amount", { precision: 12, scale: 2 }).notNull().default("0"),
   netAmount: decimal("net_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  manualClaimReference: text("manual_claim_reference"),
+  manualClaimDocument: text("manual_claim_document"),
+  reconciliationStatus: text("reconciliation_status").notNull().default("pending"),
+  reconciliationNotes: text("reconciliation_notes"),
+  disputeReason: text("dispute_reason"),
+  disputeResolution: text("dispute_resolution"),
+  reconciledByUserId: integer("reconciled_by_user_id").references(() => users.id),
+  reconciledAt: timestamp("reconciled_at"),
   notes: text("notes"),
   preparedByUserId: integer("prepared_by_user_id").references(() => users.id).notNull(),
   submittedAt: timestamp("submitted_at"),
@@ -1255,6 +1333,7 @@ export const transportVehicleDestinations = pgTable("transport_vehicle_destinati
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
   routeId: integer("route_id").references(() => transportRoutes.id).notNull(),
+  destinationMasterId: integer("destination_master_id").references(() => transportDestinationMasters.id),
   createdByUserId: integer("created_by_user_id").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => ({ vehicleRouteUnique: uniqueIndex("transport_vehicle_destination_uidx").on(table.vehicleId, table.routeId) }));
@@ -2601,6 +2680,80 @@ export const activityLogs = pgTable("activity_logs", {
   ipAddress: text("ip_address"),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+// Access Control / Gate integration
+export const gateBridges = pgTable("gate_bridges", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  name: text("name").notNull(),
+  bridgeKeyHash: text("bridge_key_hash").notNull().unique(),
+  isActive: boolean("is_active").default(true).notNull(),
+  lastHeartbeatAt: timestamp("last_heartbeat_at"),
+  lastIpAddress: text("last_ip_address"),
+  softwareVersion: text("software_version"),
+  lastError: text("last_error"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolIdx: index("gate_bridges_school_idx").on(table.schoolId),
+  schoolNameUniqueIdx: uniqueIndex("gate_bridges_school_name_uidx").on(table.schoolId, table.name),
+}));
+
+export const gateDevices = pgTable("gate_devices", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  bridgeId: integer("bridge_id").references(() => gateBridges.id).notNull(),
+  deviceKey: text("device_key").notNull().unique(),
+  name: text("name").notNull(),
+  location: text("location"),
+  direction: text("direction").notNull().default("entry"),
+  protocol: text("protocol").notNull().default("http"),
+  localAddress: text("local_address"),
+  localPort: integer("local_port").notNull().default(9090),
+  deviceSn: text("device_sn"),
+  macAddress: text("mac_address"),
+  isActive: boolean("is_active").default(true).notNull(),
+  lastSeenAt: timestamp("last_seen_at"),
+  lastConnectionStatus: text("last_connection_status").notNull().default("never_seen"),
+  lastVersionInfo: jsonb("last_version_info"),
+  lastError: text("last_error"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  bridgeIdx: index("gate_devices_bridge_idx").on(table.bridgeId),
+  schoolIdx: index("gate_devices_school_idx").on(table.schoolId),
+  bridgeNameUniqueIdx: uniqueIndex("gate_devices_bridge_name_uidx").on(table.bridgeId, table.name),
+}));
+
+export const gateCommands = pgTable("gate_commands", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  bridgeId: integer("bridge_id").references(() => gateBridges.id).notNull(),
+  deviceId: integer("device_id").references(() => gateDevices.id).notNull(),
+  commandType: text("command_type").notNull(),
+  status: text("status").notNull().default("pending"),
+  requestedByUserId: integer("requested_by_user_id").references(() => users.id),
+  requestReason: text("request_reason"),
+  payload: jsonb("payload"),
+  result: jsonb("result"),
+  errorMessage: text("error_message"),
+  requestedAt: timestamp("requested_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  claimedAt: timestamp("claimed_at"),
+  completedAt: timestamp("completed_at"),
+}, (table) => ({
+  bridgeStatusIdx: index("gate_commands_bridge_status_idx").on(table.bridgeId, table.status, table.requestedAt),
+  deviceIdx: index("gate_commands_device_idx").on(table.deviceId, table.requestedAt),
+}));
+
+export type GateBridge = typeof gateBridges.$inferSelect;
+export type GateDevice = typeof gateDevices.$inferSelect;
+export type GateCommand = typeof gateCommands.$inferSelect;
 
 export const insertActivityLogSchema = omitInsertFields(createInsertSchema(activityLogs), { id: true, createdAt: true });
 export type InsertActivityLog = z.infer<typeof insertActivityLogSchema>;

@@ -81,6 +81,19 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+function sanitizeApiLogPayload(value: unknown): unknown {
+  const sensitiveKeys = new Set([
+    "password", "token", "bridgeToken", "setupCredential", "secret", "apiKey", "apikey",
+    "sessionSecret", "authorization",
+  ]);
+  if (Array.isArray(value)) return value.map(sanitizeApiLogPayload);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+    key,
+    sensitiveKeys.has(key) ? "<REDACTED>" : sanitizeApiLogPayload(entry),
+  ]));
+}
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
@@ -95,9 +108,17 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
+      const quietSuccessfulHeartbeat = path === "/api/gate-bridge/heartbeat" && res.statusCode < 400;
+      const quietEmptyBridgePoll = path === "/api/gate-bridge/commands/claim"
+        && req.method === "POST"
+        && res.statusCode < 400
+        && Array.isArray(capturedJsonResponse?.commands)
+        && capturedJsonResponse.commands.length === 0;
+      if (quietSuccessfulHeartbeat || quietEmptyBridgePoll) return;
+
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        logLine += ` :: ${JSON.stringify(sanitizeApiLogPayload(capturedJsonResponse))}`;
       }
 
       log(logLine);
