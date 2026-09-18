@@ -41,6 +41,7 @@ type Props = {
   onSelectedPointIdChange?: (id: number | null) => void;
   suggestionRadiusMeters?: number;
   selectorLabel?: string;
+  showAddress?: boolean;
 };
 
 export default function ServiceLocationEditor({
@@ -54,6 +55,7 @@ export default function ServiceLocationEditor({
   onSelectedPointIdChange,
   suggestionRadiusMeters = 50,
   selectorLabel = "Pick-Up/Drop-Off Point",
+  showAddress = true,
 }: Props) {
   const [nearby, setNearby] = useState<SavedPoint[]>([]);
   const set = <K extends keyof ServiceLocationDraft>(key: K, next: ServiceLocationDraft[K]) => {
@@ -116,7 +118,7 @@ export default function ServiceLocationEditor({
       <Field label="Privacy Level"><Select value={value.privacyClass} onValueChange={(next) => set("privacyClass", next as ServiceLocationDraft["privacyClass"])}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="private_household">Private Household</SelectItem><SelectItem value="shared_household">Shared Household</SelectItem><SelectItem value="public_common">Public/Common Stop</SelectItem></SelectContent></Select></Field>
     </div>
 
-    <Field label="Address"><Input value={value.address} onChange={(event) => set("address", event.target.value)} placeholder="Street / suburb / area"/></Field>
+    {showAddress && <Field label="Address"><Input value={value.address} onChange={(event) => set("address", event.target.value)} placeholder="Street / suburb / area"/></Field>}
     <Field label="Driver / Access / Safety Instructions"><Textarea value={value.instructions} onChange={(event) => set("instructions", event.target.value)} placeholder="Gate, access, waiting point, road side or safety instructions"/></Field>
 
     <Dialog open={nearby.length > 0} onOpenChange={(open) => !open && setNearby([])}>
@@ -126,7 +128,7 @@ export default function ServiceLocationEditor({
           <DialogDescription>The spot selected on the map is within {suggestionRadiusMeters} metres of saved Public/Common Stops. Select the most convenient existing point, or close this message to keep the new spot.</DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          {nearby.map((point) => <Button key={point.id} variant="outline" className="h-auto w-full justify-start py-3 text-left" onClick={() => useSavedPoint(point)}><span><span className="block font-medium">{point.name}</span><span className="block text-xs text-muted-foreground">{point.address || point.landmark || `${Number(point.latitude).toFixed(5)}, ${Number(point.longitude).toFixed(5)}`}</span></span></Button>)}
+          {nearby.map((point) => <Button key={point.id} variant="outline" className="h-auto w-full justify-start py-3 text-left" onClick={() => useSavedPoint(point)}><span><span className="block font-medium">{point.name}</span><span className="block text-xs text-muted-foreground">{(showAddress ? point.address : null) || point.landmark || `${Number(point.latitude).toFixed(5)}, ${Number(point.longitude).toFixed(5)}`}</span></span></Button>)}
         </div>
       </DialogContent>
     </Dialog>

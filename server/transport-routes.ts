@@ -274,6 +274,11 @@ const assignmentInput = z.object({
   capacityOverrideReason: optionalText,
 });
 
+const assignmentServicePointsInput = z.object({
+  pickupServicePointId: nullablePositiveInt,
+  dropoffServicePointId: nullablePositiveInt,
+});
+
 const transferInput = assignmentInput.partial().extend({
   effectiveDate: dateString,
   reason: z.string().trim().min(3),
@@ -976,6 +981,20 @@ async function allocationCandidates(studentId: number, schoolId: number, specifi
   })).filter((charge) => charge.outstanding > 0);
 }
 
+async function validateLearnerServicePoint(
+  school: any,
+  studentId: number,
+  pointId: number | null | undefined,
+  allowedPointTypes: string[],
+) {
+  if (!pointId) return null;
+  const point = await assertOrganizationRecord(transportServicePoints, Number(pointId), school);
+  if (!point || (point.studentId && Number(point.studentId) !== Number(studentId)) || !allowedPointTypes.includes(point.pointType)) {
+    throw Object.assign(new Error("The selected learner service point is not valid for this service leg"), { status: 409 });
+  }
+  return point;
+}
+
 async function validateAssignmentSelection(
   schoolId: number,
   userId: number,
@@ -1000,16 +1019,8 @@ async function validateAssignmentSelection(
     throw Object.assign(new Error("Select a vehicle serving the learner's destination."), { status: 400 });
   }
 
-  const validatePoint = async (id: number | null | undefined, allowed: string[]) => {
-    if (!id) return null;
-    const point = await assertOrganizationRecord(transportServicePoints, Number(id), school);
-    if (!point || (point.studentId && Number(point.studentId) !== Number(input.studentId)) || !allowed.includes(point.pointType)) {
-      throw Object.assign(new Error("The selected learner service point is not valid for this service leg"), { status: 409 });
-    }
-    return point;
-  };
-  await validatePoint(input.pickupServicePointId, ["pickup", "both"]);
-  await validatePoint(input.dropoffServicePointId, ["dropoff", "both"]);
+  await validateLearnerServicePoint(school, Number(input.studentId), input.pickupServicePointId, ["pickup", "both"]);
+  await validateLearnerServicePoint(school, Number(input.studentId), input.dropoffServicePointId, ["dropoff", "both"]);
 
   const today = isoDate(new Date());
   const checkedVehicles = new Set<string>();
@@ -3605,6 +3616,44 @@ export function registerTransportRoutes(app: Express) {
         return row;
       });
       return res.status(201).json(created);
+    } catch (error) {
+      return routeError(res, error);
+    }
+  });
+
+  app.patch("/api/transport/assignments/:id/service-points", requireAuth, requireAnyPermission("transport.learners.edit_service", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const previous = await assertSchoolRecord(transportAssignments, id, school.id);
+      if (!previous || !previous.isActive) return res.status(404).json({ message: "Active assignment not found" });
+      const parsed = assignmentServicePointsInput.parse(req.body);
+      const pickupServicePointId = parsed.pickupServicePointId ?? null;
+      const dropoffServicePointId = parsed.dropoffServicePointId ?? null;
+
+      if ((previous.serviceType === "pickup" || previous.serviceType === "both") && !pickupServicePointId) {
+        return res.status(400).json({ message: "Select or create the learner's Pick-Up Point." });
+      }
+      if ((previous.serviceType === "dropoff" || previous.serviceType === "both") && !dropoffServicePointId) {
+        return res.status(400).json({ message: "Select or create the learner's Drop-Off Point." });
+      }
+      await validateLearnerServicePoint(school, Number(previous.studentId), pickupServicePointId, ["pickup", "both"]);
+      await validateLearnerServicePoint(school, Number(previous.studentId), dropoffServicePointId, ["dropoff", "both"]);
+
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx.update(transportAssignments).set({
+          pickupServicePointId,
+          dropoffServicePointId,
+          updatedAt: new Date(),
+        }).where(eq(transportAssignments.id, id)).returning();
+        await tx.delete(transportPathNodeLearners).where(eq(transportPathNodeLearners.assignmentId, id));
+        await linkAssignmentNodes(tx, school.id, row);
+        await writeAudit(tx, school.id, user.id, "assignment", id, "service_points_update", previous, row, "Learner Pick-Up/Drop-Off Point completed");
+        return row;
+      });
+      return res.json(updated);
     } catch (error) {
       return routeError(res, error);
     }

@@ -475,6 +475,7 @@ function Overview({ data, onOpen }: any) {
 
 function OperationsWorkspace({ data, assignments, search, setSearch, tab, setTab, open, can, canManageLegacy, mutate }: any) {
   const canEdit = canManageLegacy || can("transport.routes.edit", "transport.vehicles.edit", "transport.learners.edit_service");
+  const canEditLearnerService = canManageLegacy || can("transport.learners.edit_service");
   const [learnerStatus, setLearnerStatus] = useState("all");
   const [destinationUsage, setDestinationUsage] = useState<{ route: any; mode: "students" | "vehicles" | "points" } | null>(null);
   const visibleAssignments = assignments.filter((row:any) =>
@@ -496,12 +497,23 @@ function OperationsWorkspace({ data, assignments, search, setSearch, tab, setTab
       <CardContent><DataTable heads={["Learner", "Destination", "Service location", "Vehicle", "Service", "Planning", "Financial", "Balance", "Actions"]}>{visibleAssignments.map((assignment: any) => <TableRow key={assignment.id}>
         <TableCell><button type="button" className="text-left font-medium hover:underline" onClick={() => open("learnerAccount", { studentId: assignment.studentId })}>{assignment.firstName} {assignment.lastName}</button><div className="text-xs text-muted-foreground">{assignment.admissionNo} · {assignment.className || "No class"}</div></TableCell>
         <TableCell>{assignment.routeName}</TableCell>
-        <TableCell><div>{assignment.pickupName || "—"}</div>{assignment.dropoffName && assignment.dropoffName !== assignment.pickupName && <div className="text-xs text-muted-foreground">Home-bound: {assignment.dropoffName}</div>}</TableCell>
+        <TableCell>{(() => {
+          const pickupRequired = assignment.serviceType !== "dropoff";
+          const dropoffRequired = assignment.serviceType !== "pickup";
+          const locationPending = (pickupRequired && !assignment.pickupServicePointId) || (dropoffRequired && !assignment.dropoffServicePointId);
+          if (locationPending) return <Badge variant="secondary">Pick/Drop Point pending</Badge>;
+          return <><div>{assignment.pickupName || assignment.dropoffName || "—"}</div>{assignment.dropoffName && assignment.dropoffName !== assignment.pickupName && <div className="text-xs text-muted-foreground">Home-bound: {assignment.dropoffName}</div>}</>;
+        })()}</TableCell>
         <TableCell>{assignment.vehicleRegistration || assignment.outboundVehicleRegistration || "—"}</TableCell>
         <TableCell><StatusBadge value={assignment.serviceState || (assignment.isActive ? "active" : "inactive")}/><div className="mt-1 text-xs text-muted-foreground">{serviceTypeLabel(assignment.serviceType)} · {assignment.endDate ? `Effective to ${assignment.endDate}` : `From ${assignment.startDate}`}</div>{assignment.serviceState === "suspended_arrears" && <div className="mt-1 text-xs text-destructive">Qualifying arrears: USD {money(assignment.qualifyingArrears)}{assignment.oldestOverdueMonth ? ` · oldest ${assignment.oldestOverdueMonth}` : ""}{assignment.seatReleasedAt ? " · seat released" : assignment.seatReservedUntil ? ` · seat reserved through ${assignment.seatReservedUntil}` : " · seat reserved"}</div>}{assignment.serviceState === "pending_vehicle_reassignment" && <div className="mt-1 text-xs text-amber-700">Arrears cleared · vehicle reassignment required</div>}</TableCell>
         <TableCell><StatusBadge value={assignment.planningStatus}/></TableCell><TableCell><StatusBadge value={assignment.financialStatus}/></TableCell>
         <TableCell className={Number(assignment.balance) > 0 ? "font-medium text-destructive" : Number(assignment.balance) < 0 ? "font-medium text-emerald-600" : ""}>USD {money(assignment.balance)}</TableCell>
-        <TableCell><div className="flex gap-1">{(can("transport.learners.transfer") || canManageLegacy) && assignment.isActive && <Button size="sm" variant="outline" onClick={() => open("transfer", assignment)}><ArrowRightLeft className="mr-1 h-3.5 w-3.5"/>Transfer</Button>}{canEdit && assignment.isActive && <Button size="sm" variant="ghost" onClick={() => open("state", assignment)}>State</Button>}{canEdit && assignment.isActive && <Button size="sm" variant="destructive" onClick={() => open("cancelService", assignment)}>Cancel Service</Button>}</div></TableCell>
+        <TableCell><div className="flex flex-wrap gap-1">{(() => {
+          const pickupRequired = assignment.serviceType !== "dropoff";
+          const dropoffRequired = assignment.serviceType !== "pickup";
+          const locationPending = (pickupRequired && !assignment.pickupServicePointId) || (dropoffRequired && !assignment.dropoffServicePointId);
+          return canEditLearnerService && assignment.isActive && locationPending ? <Button size="sm" variant="outline" onClick={() => open("assignmentServicePoint", assignment)}><MapPin className="mr-1 h-3.5 w-3.5"/>Add Service Pick/Drop Point</Button> : null;
+        })()}{(can("transport.learners.transfer") || canManageLegacy) && assignment.isActive && <Button size="sm" variant="outline" onClick={() => open("transfer", assignment)}><ArrowRightLeft className="mr-1 h-3.5 w-3.5"/>Transfer</Button>}{canEdit && assignment.isActive && <Button size="sm" variant="ghost" onClick={() => open("state", assignment)}>State</Button>}{canEdit && assignment.isActive && <Button size="sm" variant="destructive" onClick={() => open("cancelService", assignment)}>Cancel Service</Button>}</div></TableCell>
       </TableRow>)}</DataTable></CardContent>
     </Card></TabsContent>
 
@@ -541,7 +553,7 @@ function DestinationUsageDialog({ usage, setUsage, openRecord }: any) {
         <TabsList><TabsTrigger value="students">Students ({data?.students?.length || 0})</TabsTrigger><TabsTrigger value="vehicles">Vehicles ({data?.vehicles?.length || 0})</TabsTrigger><TabsTrigger value="points">Pick-Up/Drop-Off Points ({data?.points?.length || 0})</TabsTrigger></TabsList>
         <TabsContent value="students"><DataTable heads={["Learner", "School", "Class", "Service", "Pick-Up Point", "Drop-Off Point"]}>{(data?.students || []).map((student:any) => <TableRow key={student.studentId}><TableCell><div className="font-medium">{student.name}</div><div className="text-xs text-muted-foreground">{student.admissionNo || "—"}</div></TableCell><TableCell>{student.schoolName || "—"}</TableCell><TableCell>{student.className || "—"}</TableCell><TableCell>{serviceTypeLabel(student.serviceType)}</TableCell><TableCell>{student.pickupPoint || "—"}</TableCell><TableCell>{student.dropoffPoint || "—"}</TableCell></TableRow>)}</DataTable></TabsContent>
         <TabsContent value="vehicles"><DataTable heads={["Vehicle", "Source", "Base / School", "Owner", "Driver", "Status", "Actions"]}>{(data?.vehicles || []).map((vehicle:any) => <TableRow key={`${vehicle.source}-${vehicle.id}`}><TableCell><div className="font-medium">{vehicle.registration || "—"}</div>{vehicle.makeModel && <div className="text-xs text-muted-foreground">{vehicle.makeModel}</div>}</TableCell><TableCell><Badge variant={vehicle.source === "FCGS Fleet" ? "default" : "outline"}>{vehicle.source}</Badge></TableCell><TableCell>{vehicle.baseSchool || "—"}</TableCell><TableCell>{vehicle.owner || "—"}</TableCell><TableCell>{vehicle.driver || "—"}</TableCell><TableCell><StatusBadge value={vehicle.status || "active"}/></TableCell><TableCell>{vehicle.transportVehicleId ? <Button size="sm" variant="ghost" onClick={() => openRecord("details", { entityType: "vehicle", entityId: vehicle.transportVehicleId })}>View details</Button> : <span className="text-xs text-muted-foreground">Fleet record</span>}</TableCell></TableRow>)}</DataTable></TabsContent>
-        <TabsContent value="points"><DataTable heads={["Pick-Up/Drop-Off Point", "Coordinates", "Privacy", "Status"]}>{(data?.points || []).map((point:any) => <TableRow key={point.id}><TableCell><div className="font-medium">{point.name}</div><div className="text-xs text-muted-foreground">{point.address || point.landmark || "—"}</div></TableCell><TableCell className="text-xs">{point.latitude != null && point.longitude != null ? `${Number(point.latitude).toFixed(6)}, ${Number(point.longitude).toFixed(6)}` : "—"}</TableCell><TableCell>{titleCase(point.privacyClass)}</TableCell><TableCell><StatusBadge value={point.isActive === false ? "inactive" : "active"}/></TableCell></TableRow>)}</DataTable></TabsContent>
+        <TabsContent value="points"><DataTable heads={["Pick-Up/Drop-Off Point", "Coordinates", "Privacy", "Status"]}>{(data?.points || []).map((point:any) => <TableRow key={point.id}><TableCell><div className="font-medium">{point.name}</div><div className="text-xs text-muted-foreground">{point.landmark || "—"}</div></TableCell><TableCell className="text-xs">{point.latitude != null && point.longitude != null ? `${Number(point.latitude).toFixed(6)}, ${Number(point.longitude).toFixed(6)}` : "—"}</TableCell><TableCell>{titleCase(point.privacyClass)}</TableCell><TableCell><StatusBadge value={point.isActive === false ? "inactive" : "active"}/></TableCell></TableRow>)}</DataTable></TabsContent>
       </Tabs>}
     </DialogContent>
   </Dialog>;
@@ -567,7 +579,7 @@ function SavedPointsWorkspace({ data, open, can, canManageLegacy, mutate }: any)
     <CardContent>
       <DataTable heads={["Location", "Coordinates", "Privacy", "Entered At", "Students", "Vehicles", "Status", "Actions"]}>
         {data.servicePoints.map((point: any) => <TableRow key={point.id}>
-          <TableCell><div className="font-medium">{point.name}</div><div className="text-xs text-muted-foreground">{point.address || point.landmark || "—"}</div></TableCell>
+          <TableCell><div className="font-medium">{point.name}</div><div className="text-xs text-muted-foreground">{point.landmark || "—"}</div></TableCell>
           <TableCell className="text-xs">{Number(point.latitude).toFixed(6)}, {Number(point.longitude).toFixed(6)}</TableCell>
           <TableCell><Badge variant="outline">{point.privacyClass === "public_common" ? "Public/Common Stop" : point.privacyClass === "shared_household" ? "Shared Household" : "Private Household"}</Badge></TableCell>
           <TableCell>{point.originSchoolName || `School #${point.schoolId}`}</TableCell>
@@ -790,6 +802,7 @@ function TransportDialog({ state, data, saving, close, submit, canManageDocument
   if (!state) return null;
   if (state.type === "details") return <Dialog open onOpenChange={(open) => !open && close()}><DialogContent className="max-h-[94vh] max-w-6xl overflow-y-auto"><DialogHeader><DialogTitle>Complete Transport record</DialogTitle><DialogDescription>Overview, relationships, documents, compliance, history and incidents.</DialogDescription></DialogHeader><TransportRecordDetails entityType={state.record?.entityType} entityId={Number(state.record?.entityId)} canManageDocuments={canManageDocuments} canManageCompliance={canManageCompliance}/></DialogContent></Dialog>;
   if (state.type === "assignment") return <LearnerRegistrationDialog record={state.record} data={data} saving={saving} close={close} submit={submit}/>;
+  if (state.type === "assignmentServicePoint") return <LearnerServicePointDialog assignment={state.record} data={data} saving={saving} close={close} submit={submit}/>;
   if (state.type === "servicePoint") return <SavedPointDialog record={state.record} data={data} saving={saving} close={close} submit={submit}/>;
   if (state.type === "vehicleDestinations") return <VehicleDestinationsDialog vehicle={state.record} close={close}/>;
   if (state.type === "vehicleOccupants") return <VehicleOccupantsDialog vehicle={state.record} close={close}/>;
@@ -887,7 +900,7 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
   const createPoint = async (pointType: "pickup" | "dropoff" | "both", location: ServiceLocationDraft) => {
     return fetchJson("POST", "/api/transport/service-points", {
       studentId: null, pointType, name: location.name.trim(), latitude: location.latitude, longitude: location.longitude,
-      address: location.address.trim() || null, landmark: location.landmark.trim() || null, instructions: location.instructions.trim() || null,
+      landmark: location.landmark.trim() || null, instructions: location.instructions.trim() || null,
       privacyClass: location.privacyClass, effectiveFrom: form.startDate || today(), isTemporary: false,
     });
   };
@@ -896,20 +909,24 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
     const expected = Number(expectedFee.toFixed(2));
     const entered = Number(form.agreedFee || 0);
     if (Math.abs(entered - expected) > 0.009 && !window.confirm(`The Agreed Monthly Fee entered (USD ${money(entered)}) is not the set ${percentageFor(form.serviceType)}% amount (USD ${money(expected)}). Are you sure you want to register the student?`)) return;
-    if (!pickupServicePointId && (!pickupLocation.name.trim() || pickupLocation.latitude == null || pickupLocation.longitude == null)) return;
-    if (!sameLocation && !dropoffServicePointId && (!dropoffLocation.name.trim() || dropoffLocation.latitude == null || dropoffLocation.longitude == null)) return;
+    if (!locationCanSubmit) return;
     try {
       setCreatingPoints(true);
       let pickupId = pickupServicePointId;
       let dropoffId = sameLocation ? pickupId : dropoffServicePointId;
-      if (!pickupId) {
-        const created = await createPoint(sameLocation ? "both" : "pickup", pickupLocation);
-        pickupId = Number(created.id);
-        if (sameLocation) dropoffId = pickupId;
-      }
-      if (!sameLocation && !dropoffId) {
-        const created = await createPoint("dropoff", dropoffLocation);
-        dropoffId = Number(created.id);
+      if (locationReady) {
+        if (!pickupId) {
+          const created = await createPoint(sameLocation ? "both" : "pickup", pickupLocation);
+          pickupId = Number(created.id);
+          if (sameLocation) dropoffId = pickupId;
+        }
+        if (!sameLocation && !dropoffId) {
+          const created = await createPoint("dropoff", dropoffLocation);
+          dropoffId = Number(created.id);
+        }
+      } else {
+        pickupId = null;
+        dropoffId = null;
       }
       const body = {
         ...form, studentId: Number(form.studentId), routeId: Number(form.routeId),
@@ -923,8 +940,12 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
     } finally { setCreatingPoints(false); }
   };
 
-  const locationReady = Boolean(pickupServicePointId || (pickupLocation.name.trim() && pickupLocation.latitude != null && pickupLocation.longitude != null))
-    && Boolean(sameLocation || dropoffServicePointId || (dropoffLocation.name.trim() && dropoffLocation.latitude != null && dropoffLocation.longitude != null));
+  const locationDraftHasContent = (location: ServiceLocationDraft) => Boolean(location.name.trim() || location.landmark.trim() || location.instructions.trim() || location.latitude != null || location.longitude != null);
+  const pickupReady = Boolean(pickupServicePointId || (pickupLocation.name.trim() && pickupLocation.latitude != null && pickupLocation.longitude != null));
+  const dropoffReady = Boolean(dropoffServicePointId || (dropoffLocation.name.trim() && dropoffLocation.latitude != null && dropoffLocation.longitude != null));
+  const locationReady = pickupReady && Boolean(sameLocation || dropoffReady);
+  const locationStarted = Boolean(pickupServicePointId || locationDraftHasContent(pickupLocation) || (!sameLocation && (dropoffServicePointId || locationDraftHasContent(dropoffLocation))));
+  const locationCanSubmit = !locationStarted || locationReady;
 
   return <Dialog open onOpenChange={(open) => !open && close()}><DialogContent className="max-h-[94vh] max-w-6xl overflow-y-auto"><DialogHeader><DialogTitle>Register learner for transport</DialogTitle><DialogDescription>Service begins only when the Service Start Date is reached and the required Transport payment conditions are satisfied.</DialogDescription></DialogHeader>
     <div className="space-y-5">
@@ -954,13 +975,89 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
       </div>
 
       <div className="rounded-lg border p-4">
-        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-medium">Pick-Up/Drop-Off location</div><div className="text-xs text-muted-foreground">Saved points are organisation-wide and reusable. New locations are saved when Register Learner is clicked.</div></div><label className="flex items-center gap-2 text-sm"><Checkbox checked={sameLocation} onCheckedChange={(checked) => { const same = Boolean(checked); setSameLocation(same); if (same) setDropoffServicePointId(pickupServicePointId); }}/><span>Use same location</span></label></div>
-        <ServiceLocationEditor title={sameLocation ? "Pick-Up/Drop-Off Point" : "Pick-Up Point"} value={pickupLocation} onChange={setPickupLocation} required savedPoints={savedPoints} selectedPointId={pickupServicePointId} onSelectedPointIdChange={(id) => { setPickupServicePointId(id); if (sameLocation) setDropoffServicePointId(id); }} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)}/>
+        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-medium">Pick-Up/Drop-Off location</div><div className="text-xs text-muted-foreground">Optional during registration. Complete it now using a saved or new point, or leave the entire section blank and add it later from the learner's Transport service.</div></div><label className="flex items-center gap-2 text-sm"><Checkbox checked={sameLocation} onCheckedChange={(checked) => { const same = Boolean(checked); setSameLocation(same); if (same) setDropoffServicePointId(pickupServicePointId); }}/><span>Use same location</span></label></div>
+        <ServiceLocationEditor title={sameLocation ? "Pick-Up/Drop-Off Point" : "Pick-Up Point"} value={pickupLocation} onChange={setPickupLocation} savedPoints={savedPoints.filter((point: any) => !point.pointType || point.pointType === "both" || (!sameLocation && point.pointType === "pickup"))} selectedPointId={pickupServicePointId} onSelectedPointIdChange={(id) => { setPickupServicePointId(id); if (sameLocation) setDropoffServicePointId(id); }} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)} showAddress={false}/>
       </div>
-      {!sameLocation && <div className="rounded-lg border p-4"><ServiceLocationEditor title="Drop-Off Point" value={dropoffLocation} onChange={setDropoffLocation} required savedPoints={savedPoints} selectedPointId={dropoffServicePointId} onSelectedPointIdChange={setDropoffServicePointId} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)}/></div>}
+      {!sameLocation && <div className="rounded-lg border p-4"><ServiceLocationEditor title="Drop-Off Point" value={dropoffLocation} onChange={setDropoffLocation} savedPoints={savedPoints.filter((point: any) => !point.pointType || point.pointType === "both" || point.pointType === "dropoff")} selectedPointId={dropoffServicePointId} onSelectedPointIdChange={setDropoffServicePointId} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)} showAddress={false}/></div>}
+      {locationStarted && !locationReady && <p className="text-sm text-destructive">Complete the location name and coordinates for each location you started, or clear the location fields to register the learner now and add the Pick/Drop Point later.</p>}
       <Field label="Notes"><Textarea className="min-h-24 w-full" value={form.notes || ""} onChange={(event) => set("notes", event.target.value)}/></Field>
     </div>
-    <DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving || creatingPoints || !form.studentId || !form.routeId || !form.vehicleId || !locationReady} onClick={() => void submitAssignment()}>{saving || creatingPoints ? "Saving…" : "Register Learner"}</Button></DialogFooter>
+    <DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving || creatingPoints || !form.studentId || !form.routeId || !form.vehicleId || !locationCanSubmit} onClick={() => void submitAssignment()}>{saving || creatingPoints ? "Saving…" : "Register Learner"}</Button></DialogFooter>
+  </DialogContent></Dialog>;
+}
+
+function LearnerServicePointDialog({ assignment, data, saving, close, submit }: any) {
+  const defaultPrivacy: ServiceLocationDraft["privacyClass"] = String(data.school?.schoolType || "secondary").toLowerCase().includes("primary") ? "private_household" : "public_common";
+  const pointById = (id: number | null | undefined) => id ? (data.servicePoints || []).find((point: any) => Number(point.id) === Number(id)) : null;
+  const draftFromPoint = (point: any) => point ? {
+    name: point.name || "",
+    address: "",
+    landmark: point.landmark || "",
+    latitude: point.latitude == null ? null : Number(point.latitude),
+    longitude: point.longitude == null ? null : Number(point.longitude),
+    privacyClass: point.privacyClass || defaultPrivacy,
+    instructions: point.instructions || "",
+  } : emptyServiceLocation(defaultPrivacy);
+  const existingPickup = pointById(assignment.pickupServicePointId);
+  const existingDropoff = pointById(assignment.dropoffServicePointId);
+  const pickupRequired = assignment.serviceType !== "dropoff";
+  const dropoffRequired = assignment.serviceType !== "pickup";
+  const [sameLocation, setSameLocation] = useState(Boolean(pickupRequired && dropoffRequired && (!assignment.pickupServicePointId && !assignment.dropoffServicePointId || Number(assignment.pickupServicePointId) === Number(assignment.dropoffServicePointId))));
+  const [pickupLocation, setPickupLocation] = useState<ServiceLocationDraft>(() => draftFromPoint(existingPickup));
+  const [dropoffLocation, setDropoffLocation] = useState<ServiceLocationDraft>(() => draftFromPoint(existingDropoff));
+  const [pickupServicePointId, setPickupServicePointId] = useState<number | null>(assignment.pickupServicePointId ? Number(assignment.pickupServicePointId) : null);
+  const [dropoffServicePointId, setDropoffServicePointId] = useState<number | null>(assignment.dropoffServicePointId ? Number(assignment.dropoffServicePointId) : null);
+  const [creatingPoints, setCreatingPoints] = useState(false);
+  const savedPoints = (data.servicePoints || []).filter((point: any) => point.isActive !== false);
+
+  const ready = (id: number | null, location: ServiceLocationDraft) => Boolean(id || (location.name.trim() && location.latitude != null && location.longitude != null));
+  const pickupReady = !pickupRequired || ready(pickupServicePointId, pickupLocation);
+  const dropoffReady = !dropoffRequired || (sameLocation ? ready(pickupServicePointId, pickupLocation) : ready(dropoffServicePointId, dropoffLocation));
+
+  const createPoint = async (pointType: "pickup" | "dropoff" | "both", location: ServiceLocationDraft) => fetchJson("POST", "/api/transport/service-points", {
+    studentId: null,
+    pointType,
+    name: location.name.trim(),
+    latitude: location.latitude,
+    longitude: location.longitude,
+    landmark: location.landmark.trim() || null,
+    instructions: location.instructions.trim() || null,
+    privacyClass: location.privacyClass,
+    effectiveFrom: assignment.startDate || today(),
+    isTemporary: false,
+  });
+
+  const save = async () => {
+    if (!pickupReady || !dropoffReady) return;
+    try {
+      setCreatingPoints(true);
+      let pickupId = pickupRequired ? pickupServicePointId : null;
+      let dropoffId = dropoffRequired ? (sameLocation ? pickupId : dropoffServicePointId) : null;
+      if (pickupRequired && !pickupId) {
+        const created = await createPoint(sameLocation && dropoffRequired ? "both" : "pickup", pickupLocation);
+        pickupId = Number(created.id);
+        if (sameLocation && dropoffRequired) dropoffId = pickupId;
+      }
+      if (dropoffRequired && !sameLocation && !dropoffId) {
+        const created = await createPoint("dropoff", dropoffLocation);
+        dropoffId = Number(created.id);
+      }
+      submit("PATCH", `/api/transport/assignments/${assignment.id}/service-points`, {
+        pickupServicePointId: pickupId,
+        dropoffServicePointId: dropoffId,
+      });
+    } finally {
+      setCreatingPoints(false);
+    }
+  };
+
+  return <Dialog open onOpenChange={(open) => !open && close()}><DialogContent className="max-h-[94vh] max-w-6xl overflow-y-auto"><DialogHeader><DialogTitle>Add Service Pick/Drop Point</DialogTitle><DialogDescription>{assignment.firstName} {assignment.lastName} · {assignment.routeName}. Add the operational Pick-Up/Drop-Off Point that was skipped during registration.</DialogDescription></DialogHeader>
+    <div className="space-y-5">
+      {pickupRequired && dropoffRequired && <label className="flex items-center gap-2 text-sm"><Checkbox checked={sameLocation} onCheckedChange={(checked) => { const same = Boolean(checked); setSameLocation(same); if (same) setDropoffServicePointId(pickupServicePointId); }}/><span>Use same location for Pick-Up and Drop-Off</span></label>}
+      {pickupRequired && <div className="rounded-lg border p-4"><ServiceLocationEditor title={sameLocation && dropoffRequired ? "Pick-Up/Drop-Off Point" : "Pick-Up Point"} value={pickupLocation} onChange={setPickupLocation} required savedPoints={savedPoints.filter((point: any) => !point.pointType || point.pointType === "both" || (!sameLocation && point.pointType === "pickup"))} selectedPointId={pickupServicePointId} onSelectedPointIdChange={(id) => { setPickupServicePointId(id); if (sameLocation && dropoffRequired) setDropoffServicePointId(id); }} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)} showAddress={false}/></div>}
+      {dropoffRequired && !sameLocation && <div className="rounded-lg border p-4"><ServiceLocationEditor title="Drop-Off Point" value={dropoffLocation} onChange={setDropoffLocation} required savedPoints={savedPoints.filter((point: any) => !point.pointType || point.pointType === "both" || point.pointType === "dropoff")} selectedPointId={dropoffServicePointId} onSelectedPointIdChange={setDropoffServicePointId} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)} showAddress={false}/></div>}
+    </div>
+    <DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving || creatingPoints || !pickupReady || !dropoffReady} onClick={() => void save()}>{saving || creatingPoints ? "Saving…" : "Save Service Pick/Drop Point"}</Button></DialogFooter>
   </DialogContent></Dialog>;
 }
 
@@ -971,10 +1068,10 @@ function SavedPointDialog({ record, data, saving, close, submit }: any) {
   const chosen = selectedPointId ? data.servicePoints.find((point: any) => Number(point.id) === Number(selectedPointId)) : null;
   const targetId = record?.id || chosen?.id || null;
   const save = () => {
-    const body = { studentId: null, pointType: record?.pointType || chosen?.pointType || "both", name: location.name.trim(), latitude: location.latitude, longitude: location.longitude, address: location.address.trim() || null, landmark: location.landmark.trim() || null, instructions: location.instructions.trim() || null, privacyClass: location.privacyClass, effectiveFrom: record?.effectiveFrom || chosen?.effectiveFrom || today(), isTemporary: false };
+    const body = { studentId: null, pointType: record?.pointType || chosen?.pointType || "both", name: location.name.trim(), latitude: location.latitude, longitude: location.longitude, landmark: location.landmark.trim() || null, instructions: location.instructions.trim() || null, privacyClass: location.privacyClass, effectiveFrom: record?.effectiveFrom || chosen?.effectiveFrom || today(), isTemporary: false };
     submit(targetId ? "PUT" : "POST", targetId ? `/api/transport/service-points/${targetId}` : "/api/transport/service-points", body);
   };
-  return <Dialog open onOpenChange={(open) => !open && close()}><DialogContent className="max-h-[94vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>{record ? "Edit Pick-Up/Drop-Off Point" : "Add Pick-Up/Drop-Off Point"}</DialogTitle><DialogDescription>These saved points are shared across all schools in the organisation. A point in use cannot be deleted.</DialogDescription></DialogHeader><ServiceLocationEditor title="Saved Pick-Up/Drop-Off Point" value={location} onChange={setLocation} required savedPoints={data.servicePoints} selectedPointId={selectedPointId} onSelectedPointIdChange={(id) => { setSelectedPointId(id); if (id) { const point = data.servicePoints.find((row: any) => Number(row.id) === Number(id)); if (point) setLocation({ name: point.name || "", address: point.address || "", landmark: point.landmark || "", latitude: Number(point.latitude), longitude: Number(point.longitude), privacyClass: point.privacyClass || defaultPrivacy, instructions: point.instructions || "" }); } }} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)}/><DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving || !location.name.trim() || location.latitude == null || location.longitude == null} onClick={save}>{saving ? "Saving…" : targetId ? "Save Changes" : "Add Pick-Up/Drop-Off Point"}</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open onOpenChange={(open) => !open && close()}><DialogContent className="max-h-[94vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>{record ? "Edit Pick-Up/Drop-Off Point" : "Add Pick-Up/Drop-Off Point"}</DialogTitle><DialogDescription>These saved points are shared across all schools in the organisation. A point in use cannot be deleted.</DialogDescription></DialogHeader><ServiceLocationEditor title="Saved Pick-Up/Drop-Off Point" value={location} onChange={setLocation} required savedPoints={data.servicePoints} selectedPointId={selectedPointId} onSelectedPointIdChange={(id) => { setSelectedPointId(id); if (id) { const point = data.servicePoints.find((row: any) => Number(row.id) === Number(id)); if (point) setLocation({ name: point.name || "", address: point.address || "", landmark: point.landmark || "", latitude: Number(point.latitude), longitude: Number(point.longitude), privacyClass: point.privacyClass || defaultPrivacy, instructions: point.instructions || "" }); } }} suggestionRadiusMeters={Number(data.settings.savedPointSuggestionRadiusMeters || 50)} showAddress={false}/><DialogFooter><Button variant="outline" onClick={close}>Cancel</Button><Button disabled={saving || !location.name.trim() || location.latitude == null || location.longitude == null} onClick={save}>{saving ? "Saving…" : targetId ? "Save Changes" : "Add Pick-Up/Drop-Off Point"}</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function VehicleDestinationsDialog({ vehicle, close }: any) {

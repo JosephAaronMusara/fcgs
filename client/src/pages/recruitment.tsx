@@ -597,19 +597,20 @@ export default function RecruitmentPage() {
             <TabsTrigger value="applications">Applications</TabsTrigger>
             <TabsTrigger value="talent">Talent Pool</TabsTrigger>
             <TabsTrigger value="requirements">Requirements</TabsTrigger>
-            <TabsTrigger value="rejected">Rejected Attempts</TabsTrigger>
+            <TabsTrigger value="rejected">Rejected</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
         </div>
 
         <TabsContent value="dashboard" className="space-y-5">
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-7">
             <Metric title="Open vacancies" value={dashboard.openVacancies || 0} icon={<BriefcaseBusiness className="h-5 w-5" />} />
             <Metric title="Submitted" value={dashboard.submitted || 0} icon={<FileText className="h-5 w-5" />} />
             <Metric title="Under review" value={dashboard.underReview || 0} icon={<Search className="h-5 w-5" />} />
             <Metric title="Shortlisted" value={dashboard.shortlisted || 0} icon={<UserRoundCheck className="h-5 w-5" />} />
             <Metric title="Interviews" value={dashboard.interviews || 0} icon={<CalendarClock className="h-5 w-5" />} />
             <Metric title="Hired" value={dashboard.hired || 0} icon={<Trophy className="h-5 w-5" />} />
+            <Metric title="Rejected" value={dashboard.rejectedAttempts || 0} icon={<X className="h-5 w-5" />} />
           </div>
           <Card>
             <CardHeader>
@@ -1015,18 +1016,24 @@ export default function RecruitmentPage() {
         <TabsContent value="rejected">
           <Card>
             <CardHeader>
-              <CardTitle>Rejected Attempts</CardTitle>
-              <CardDescription>Rejected applications are excluded from vacancy suggestions and Final Ranking.</CardDescription>
+              <CardTitle>Rejected</CardTitle>
+              <CardDescription>Includes automatic screening rejections and applications rejected later by a recruiter. Rejected candidates are excluded from vacancy suggestions and Final Ranking.</CardDescription>
             </CardHeader>
             <CardContent>
-              <DataTable heads={["Applicant", "Opportunity", "Reason", "Failed Criteria", "Attempted"]}>
-                {(data.rejectionAttempts || []).map((attempt: any) => (
-                  <TableRow key={attempt.id}>
-                    <TableCell>{`${attempt.firstName || ""} ${attempt.lastName || ""}`.trim() || "Unknown"}</TableCell>
-                    <TableCell>{attempt.vacancyId ? vacancies.find((row: any) => row.id === attempt.vacancyId)?.title || `Vacancy ${attempt.vacancyId}` : attempt.employmentCategory}</TableCell>
-                    <TableCell><StatusBadge value={attempt.reasonCode} /></TableCell>
-                    <TableCell>{Array.isArray(attempt.failedRequirementCodes) ? attempt.failedRequirementCodes.join(", ") || "—" : "—"}</TableCell>
-                    <TableCell>{new Date(attempt.attemptedAt).toLocaleString()}</TableCell>
+              <DataTable heads={["Applicant", "Opportunity", "Source", "Reason", "Failed Criteria", "Rejected"]}>
+                {(data.rejectedEntries || []).map((entry: any) => (
+                  <TableRow key={entry.id}>
+                    <TableCell>{`${entry.firstName || ""} ${entry.lastName || ""}`.trim() || "Unknown"}</TableCell>
+                    <TableCell>{entry.vacancyId ? vacancies.find((row: any) => row.id === entry.vacancyId)?.title || `Vacancy ${entry.vacancyId}` : entry.employmentCategory}</TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <Badge variant={entry.source === "recruiter" ? "default" : "secondary"}>{entry.source === "recruiter" ? "Recruiter rejection" : "Automatic screening"}</Badge>
+                        {entry.source === "recruiter" && entry.rejectedByLabel && <div className="text-xs text-muted-foreground">{entry.rejectedByLabel}</div>}
+                      </div>
+                    </TableCell>
+                    <TableCell>{entry.source === "recruiter" ? (entry.reason || "No recruiter rejection reason recorded") : <StatusBadge value={entry.reasonCode} />}</TableCell>
+                    <TableCell>{Array.isArray(entry.failedRequirementCodes) ? entry.failedRequirementCodes.join(", ") || "—" : "—"}</TableCell>
+                    <TableCell>{entry.rejectedAt ? new Date(entry.rejectedAt).toLocaleString() : "—"}</TableCell>
                   </TableRow>
                 ))}
               </DataTable>
@@ -1772,8 +1779,10 @@ function ApplicationDialog({
   onInterview: (application: any, interview?: any) => void;
   onAddNote: (note: string) => Promise<void>;
 }) {
+  const latestRejectionHistory = (application.history || []).find((item: any) => item.newStatus === "rejected");
   const [form, setForm] = useState<any>({
     status: application.status,
+    rejectionReason: latestRejectionHistory?.notes || "",
     recruiterAssignedSubjects: normalizeSubjectList(application.recruiterAssignedSubjects),
     availabilityStatus: application.availabilityStatus || "available",
     availabilityNotes: application.availabilityNotes || "",
@@ -1784,8 +1793,10 @@ function ApplicationDialog({
   const [addingNote, setAddingNote] = useState(false);
 
   useEffect(() => {
+    const rejectionHistory = (application.history || []).find((item: any) => item.newStatus === "rejected");
     setForm({
       status: application.status,
+      rejectionReason: rejectionHistory?.notes || "",
       recruiterAssignedSubjects: normalizeSubjectList(application.recruiterAssignedSubjects),
       availabilityStatus: application.availabilityStatus || "available",
       availabilityNotes: application.availabilityNotes || "",
@@ -1922,6 +1933,13 @@ function ApplicationDialog({
                     <SelectContent>{["submitted", "under_review", "shortlisted", "interview", "rejected", "hired", "withdrawn"].map((status) => <SelectItem key={status} value={status}>{titleCase(status)}</SelectItem>)}</SelectContent>
                   </Select>
                 </Field>
+                {form.status === "rejected" && (
+                  <div className="md:col-span-2">
+                    <Field label="Rejection reason" hint="Required when a recruiter rejects an application. This reason is shown in the Rejected list and recorded in status history.">
+                      <Textarea value={form.rejectionReason || ""} onChange={(event) => setForm((current: any) => ({ ...current, rejectionReason: event.target.value }))} placeholder="Enter the recruiter rejection reason…" />
+                    </Field>
+                  </div>
+                )}
                 <Field label="Availability">
                   <Select value={form.availabilityStatus} onValueChange={(value) => setForm((current: any) => ({ ...current, availabilityStatus: value }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -2091,9 +2109,10 @@ function ApplicationDialog({
           <Button variant="outline" onClick={onClose}>Close</Button>
           {canProcess && (
             <Button
-              disabled={saving}
+              disabled={saving || (form.status === "rejected" && !(form.rejectionReason || "").trim())}
               onClick={() => onSave({
                 status: form.status,
+                rejectionReason: form.status === "rejected" ? (form.rejectionReason || "").trim() : null,
                 recruiterAssignedSubjects: form.recruiterAssignedSubjects,
                 availabilityStatus: form.availabilityStatus,
                 availabilityNotes: form.availabilityNotes || null,

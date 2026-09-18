@@ -1247,6 +1247,9 @@ export function registerRecruitmentRoutes(app: Express): void {
       const notificationLogs = await db.select().from(recruitmentNotificationLogs)
         .where(eq(recruitmentNotificationLogs.organizationId, organizationId))
         .orderBy(desc(recruitmentNotificationLogs.createdAt)).limit(500);
+      const automaticRejectedCount = canViewRejectedAttempts
+        ? Number((await db.select({ count: sql<number>`count(*)::int` }).from(recruitmentRejectionAttempts).where(eq(recruitmentRejectionAttempts.organizationId, organizationId)))[0]?.count || 0)
+        : 0;
       const visibleApplications = allApplications;
       const organizationVacancyIds = new Set(vacancies.map((vacancy) => vacancy.id));
       const visibleVacancyCandidates = vacancyCandidates.filter((candidate) => organizationVacancyIds.has(candidate.vacancyId));
@@ -1297,7 +1300,51 @@ export function registerRecruitmentRoutes(app: Express): void {
           activity: activity.filter((item) => item.applicationId === application.id),
         };
       });
+      const recruiterRejectionUserIds = Array.from(new Set(applications
+        .filter((application: any) => application.status === "rejected")
+        .map((application: any) => (application.history || []).find((item: any) => item.newStatus === "rejected")?.changedByUserId || application.reviewedByUserId)
+        .filter((id: any) => Number(id) > 0)
+        .map(Number)));
+      const recruiterRejectionUsers = recruiterRejectionUserIds.length
+        ? await db.select({ id: users.id, firstName: users.firstName, lastName: users.lastName, username: users.username }).from(users).where(inArray(users.id, recruiterRejectionUserIds))
+        : [];
       const visibleExaminationBoardConfigs = examinationBoardConfigs.filter((row) => normalizeExamBoard(row.name) !== "Both");
+      const automaticRejectedEntries = rejectionAttempts.map((attempt: any) => ({
+        id: `automatic-${attempt.id}`,
+        source: "automatic",
+        applicationId: null,
+        firstName: attempt.firstName,
+        lastName: attempt.lastName,
+        vacancyId: attempt.vacancyId,
+        employmentCategory: attempt.employmentCategory,
+        reasonCode: attempt.reasonCode,
+        reason: null,
+        failedRequirementCodes: Array.isArray(attempt.failedRequirementCodes) ? attempt.failedRequirementCodes : [],
+        rejectedAt: attempt.attemptedAt,
+        rejectedByUserId: null,
+        rejectedByLabel: "Automatic screening",
+      }));
+      const recruiterRejectedEntries = applications.filter((application: any) => application.status === "rejected").map((application: any) => {
+        const rejectionHistory = (application.history || []).find((item: any) => item.newStatus === "rejected");
+        const rejectedByUserId = rejectionHistory?.changedByUserId || application.reviewedByUserId || null;
+        const recruiter = rejectedByUserId ? recruiterRejectionUsers.find((row: any) => Number(row.id) === Number(rejectedByUserId)) : null;
+        return {
+          id: `recruiter-${application.id}`,
+          source: "recruiter",
+          applicationId: application.id,
+          firstName: application.firstName,
+          lastName: application.lastName,
+          vacancyId: application.vacancyId,
+          employmentCategory: application.employmentCategory,
+          reasonCode: "recruiter_rejected",
+          reason: rejectionHistory?.notes || null,
+          failedRequirementCodes: [],
+          rejectedAt: rejectionHistory?.changedAt || application.reviewedAt || application.updatedAt || application.submittedAt,
+          rejectedByUserId,
+          rejectedByLabel: recruiter ? (`${recruiter.firstName || ""} ${recruiter.lastName || ""}`.trim() || recruiter.username) : "Recruiter",
+        };
+      });
+      const rejectedEntries = [...automaticRejectedEntries, ...recruiterRejectedEntries].sort((a: any, b: any) => new Date(b.rejectedAt || 0).getTime() - new Date(a.rejectedAt || 0).getTime());
       res.json({
         settings,
         schools: orgSchools,
@@ -1317,6 +1364,7 @@ export function registerRecruitmentRoutes(app: Express): void {
         documentCategories: categories,
         applications,
         rejectionAttempts,
+        rejectedEntries,
         interviews: visibleInterviews,
         dashboard: {
           openVacancies: vacancies.filter((vacancy) => vacancy.status === "published").length,
@@ -1325,7 +1373,7 @@ export function registerRecruitmentRoutes(app: Express): void {
           shortlisted: applications.filter((application) => application.status === "shortlisted").length,
           interviews: visibleInterviews.filter((interview) => new Date(interview.scheduledAt) >= new Date()).length,
           hired: applications.filter((application) => application.status === "hired").length,
-          rejectedAttempts: rejectionAttempts.length,
+          rejectedAttempts: automaticRejectedCount + recruiterRejectedEntries.length,
         },
       });
     } catch (error) { next(error); }
@@ -1853,6 +1901,7 @@ export function registerRecruitmentRoutes(app: Express): void {
       const input = z.object({
         status: z.enum(["submitted", "under_review", "shortlisted", "interview", "rejected", "hired", "withdrawn"]),
         recruiterNotes: optionalText,
+        rejectionReason: optionalText,
         recruiterAssignedSubjects: z.array(z.string().trim().min(1).max(120)).max(30).optional(),
         availabilityStatus: z.enum(["available", "contacted", "not_available", "hired", "withdrawn", "archived"]).optional(),
         availabilityNotes: optionalText,
@@ -1862,6 +1911,10 @@ export function registerRecruitmentRoutes(app: Express): void {
       if (!existing || !canAccessApplication(userOf(req)!, existing)) return res.status(404).json({ message: "Application not found" });
       const userId = userOf(req)!.id;
       const statusChanged = existing.status !== input.status;
+      const rejectionReason = input.rejectionReason?.trim() || null;
+      if (statusChanged && input.status === "rejected" && !rejectionReason) {
+        return res.status(400).json({ message: "Enter a rejection reason before rejecting this application." });
+      }
       const [updated] = await db.transaction(async (tx) => {
         const [row] = await tx.update(recruitmentApplications).set({
           status: input.status,
@@ -1879,7 +1932,7 @@ export function registerRecruitmentRoutes(app: Express): void {
             applicationId: id,
             previousStatus: existing.status,
             newStatus: input.status,
-            notes: input.recruiterNotes || null,
+            notes: input.status === "rejected" ? rejectionReason : (input.recruiterNotes || null),
             changedByUserId: userId,
             actorType: "staff",
             actorLabel: null,
@@ -1887,7 +1940,7 @@ export function registerRecruitmentRoutes(app: Express): void {
           await tx.insert(recruitmentActivity).values({
             organizationId, applicationId: id, vacancyId: row.vacancyId || null, activityType: "status_changed",
             summary: `Application status changed from ${existing.status} to ${input.status}.`,
-            details: { previousStatus: existing.status, newStatus: input.status }, actorUserId: userId,
+            details: { previousStatus: existing.status, newStatus: input.status, ...(input.status === "rejected" ? { rejectionSource: "recruiter", rejectionReason } : {}) }, actorUserId: userId,
           });
         } else if (input.recruiterNotes !== undefined && input.recruiterNotes !== existing.recruiterNotes) {
           await tx.insert(recruitmentActivity).values({ organizationId, applicationId: id, vacancyId: row.vacancyId || null, activityType: "recruitment_note_updated", summary: "Recruitment notes updated.", actorUserId: userId });
