@@ -19,6 +19,7 @@ import { SearchableMultiSelect, type SearchableSelectOption } from "@/components
 import { useToast } from "@/hooks/use-toast";
 import { Mail, MessageSquare, MessageCircle, Bell, AlertCircle, CheckCircle } from "lucide-react";
 import type { Class, School, Staff, Stream, Student } from "@shared/schema";
+import { LanguageCheckButton } from "@/features/language-tools";
 
 interface NotifyRecipient {
   id: number;
@@ -292,6 +293,13 @@ export function NotifyModal({
           </div>
           {selectedChannels.has("email") && <div className="space-y-2"><Label htmlFor="subject">Subject</Label><Input id="subject" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Enter email subject" data-testid="input-email-subject" /></div>}
           <div className="space-y-2"><Label htmlFor="message">Message</Label><Textarea id="message" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Enter your message..." rows={5} data-testid="input-message" />{selectedChannels.has("sms") && !selectedChannels.has("email") && <div className="text-xs text-muted-foreground text-right">{message.length} / 160 characters (standard SMS)</div>}</div>
+          <LanguageCheckButton
+            fields={[
+              ...(selectedChannels.has("email") ? [{ id: "notify-subject", label: "Subject", text: subject, onChange: setSubject }] : []),
+              { id: "notify-message", label: "Message", text: message, onChange: setMessage },
+            ]}
+            className="w-full"
+          />
         </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button onClick={handleSend} disabled={sendNotification.isPending || !canSend()} data-testid="button-send-notification">{sendNotification.isPending ? "Sending..." : getButtonText()}</Button></DialogFooter>
       </DialogContent>

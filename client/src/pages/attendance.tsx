@@ -12,6 +12,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Calendar,
   Check,
@@ -26,6 +28,10 @@ import {
   Bell,
   BellOff,
   Search,
+  ShieldCheck,
+  Clock3,
+  DoorOpen,
+  History,
 } from "lucide-react";
 import type { Class, Student } from "@shared/schema";
 
@@ -53,6 +59,44 @@ interface AttendanceRecordLite {
   status: string;
   reason?: string | null;
   notifyParent?: boolean | null;
+  source?: string | null;
+  gateEvidenceLocked?: boolean | null;
+  firstGateArrivalAt?: string | null;
+  admittedAt?: string | null;
+  lastGateExitAt?: string | null;
+  reconciliationAt?: string | null;
+  gateId?: number | null;
+  gateDeviceId?: number | null;
+  gateName?: string | null;
+  gateDeviceName?: string | null;
+  gateDirection?: string | null;
+  gateCorrectionReason?: string | null;
+  gateCorrectedAt?: string | null;
+  gateCorrectedByUserId?: number | null;
+  gateCorrectedBy?: { id?: number; firstName?: string | null; lastName?: string | null; name?: string | null; email?: string | null } | null;
+}
+
+interface StudentGateActivity {
+  eventCount: number;
+  firstArrivalAt?: string | null;
+  latestEventAt?: string | null;
+  latestDecision?: string | null;
+  latestReason?: string | null;
+  latestGateName?: string | null;
+  latestDeviceName?: string | null;
+  latestDirection?: string | null;
+  entryDenied?: boolean;
+  admitted?: boolean;
+}
+
+interface GateCorrectionHistoryRow {
+  id: number;
+  previousStatus: string;
+  newStatus: string;
+  previousReason?: string | null;
+  correctionReason: string;
+  createdAt: string;
+  correctedBy?: { firstName?: string | null; lastName?: string | null; email?: string | null } | null;
 }
 
 interface AttendanceGridStudent {
@@ -65,6 +109,7 @@ interface AttendanceGridStudent {
   className?: string | null;
   statuses: Record<string, string>;
   records?: Record<string, AttendanceRecordLite>;
+  gateActivity?: Record<string, StudentGateActivity>;
 }
 
 interface GridData {
@@ -113,8 +158,8 @@ const STATUS_ICONS: Record<string, string> = {
   late: "L",
 };
 
-const ABSENT_REASONS = ["No Reason", "Excused", "Fees", "Sick", "Suspended", "Absconding", "Late"];
-const ABSENT_LIKE = new Set(["absent", "sick", "fees", "suspended", "absconding", "excused", "late"]);
+const ABSENT_REASONS = ["No Reason", "Excused", "Fees", "Sick", "Suspended", "Absconding"];
+const ABSENT_LIKE = new Set(["absent", "sick", "fees", "suspended", "absconding", "excused"]);
 
 function reasonToSlug(label: string): string {
   switch (label) {
@@ -139,6 +184,13 @@ function formatDateLabel(value: string) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function isWeekendDate(value: string) {
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return false;
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
 function studentMatchesSearch(student: AttendanceGridStudent, searchTerm: string) {
   const needle = searchTerm.trim().toLowerCase();
   if (!needle) return true;
@@ -157,6 +209,9 @@ function sortStudents(students: AttendanceGridStudent[]) {
 
 export default function AttendancePage() {
   const { toast } = useToast();
+  const { hasPermission } = useAuth();
+  const canCorrectGateEvidence = hasPermission("access_control.attendance_correction");
+  const canViewGateAudit = hasPermission("access_control.audit.view");
   const [selectedClass, setSelectedClass] = useState("all");
   const [studentSearch, setStudentSearch] = useState("");
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split("T")[0]);
@@ -174,6 +229,9 @@ export default function AttendancePage() {
   const markDialogStateKeyRef = useRef<string | null>(null);
   const [arrearsModalOpen, setArrearsModalOpen] = useState(false);
   const [arrearsData, setArrearsData] = useState<ArrearsData | null>(null);
+  const [correctionStatus, setCorrectionStatus] = useState("present");
+  const [correctionReason, setCorrectionReason] = useState("");
+  const [correctedGateRecord, setCorrectedGateRecord] = useState<AttendanceRecordLite | null>(null);
 
   const { data: classes } = useQuery<Class[]>({ queryKey: ["/api/classes"] });
 
@@ -186,6 +244,18 @@ export default function AttendancePage() {
     queryKey: ["/api/attendance/by-class", selectedClass, selectedDate],
     enabled: selectedClass !== "all" && markDialogOpen,
   });
+  const selectedGateRecord = correctedGateRecord || singleEditTarget?.student.records?.[singleEditTarget.date] || null;
+  const selectedGateActivity = singleEditTarget?.student.gateActivity?.[singleEditTarget.date] || null;
+  const hasGateEvidence = Boolean(selectedGateRecord && (selectedGateRecord.gateEvidenceLocked || selectedGateRecord.firstGateArrivalAt || selectedGateRecord.admittedAt || selectedGateRecord.lastGateExitAt || String(selectedGateRecord.source || "").includes("gate")));
+
+  const { data: gateCorrectionHistory } = useQuery<{ corrections: GateCorrectionHistoryRow[] }>({
+    queryKey: ["/api/access-control/attendance", selectedGateRecord?.id, "gate-corrections"],
+    enabled: Boolean(selectedGateRecord?.id && hasGateEvidence && canViewGateAudit),
+  });
+
+  useEffect(() => {
+    setCorrectedGateRecord(null);
+  }, [singleEditTarget?.student.id, singleEditTarget?.date]);
 
   const selectedClassName = useMemo(() => {
     if (!classes || selectedClass === "all") return "";
@@ -240,6 +310,8 @@ export default function AttendancePage() {
     markDialogStateKeyRef.current = null;
     const existing = singleEditTarget.student.records?.[singleEditTarget.date];
     setSelectedDate(singleEditTarget.date);
+    setCorrectionStatus(existing?.status || "present");
+    setCorrectionReason("");
     setAttendanceState({
       [singleEditTarget.student.id]: {
         status: existing?.status || "",
@@ -296,13 +368,13 @@ export default function AttendancePage() {
     invalidateAttendanceQueries();
   };
 
-  const handleStatusToggle = (studentId: number, status: "present" | "absent") => {
+  const handleStatusToggle = (studentId: number, status: "present" | "absent" | "late") => {
     attendanceStateTouchedRef.current = true;
     setAttendanceState(prev => ({
       ...prev,
       [studentId]: {
         status,
-        reason: status === "present" ? "" : prev[studentId]?.reason || "",
+        reason: status === "present" ? "" : status === "late" ? "Late arrival" : prev[studentId]?.reason || "",
       },
     }));
   };
@@ -319,9 +391,15 @@ export default function AttendancePage() {
   const handleMarkAllPresent = () => {
     attendanceStateTouchedRef.current = true;
     const targetStudents = singleEditTarget ? [singleEditTarget.student] : studentsForMarking;
+    const activeDate = singleEditTarget?.date || selectedDate;
     const newState: Record<number, AttendanceState> = {};
     targetStudents.forEach((student) => {
-      newState[student.id] = { status: "present", reason: "" };
+      const record = existingRecords?.find((item) => item.studentId === student.id) || student.records?.[activeDate];
+      if (record?.gateEvidenceLocked) {
+        newState[student.id] = { status: record.status, reason: record.reason || "" };
+      } else {
+        newState[student.id] = { status: "present", reason: "" };
+      }
     });
     setAttendanceState(newState);
   };
@@ -412,6 +490,26 @@ export default function AttendancePage() {
     },
   });
 
+  const correctGateEvidenceMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedGateRecord?.id) throw new Error("Gate attendance record not found");
+      const res = await apiRequest("POST", `/api/access-control/attendance/${selectedGateRecord.id}/correct-gate-evidence`, {
+        status: correctionStatus,
+        reason: correctionReason.trim(),
+      });
+      return res.json();
+    },
+    onSuccess: (updated: AttendanceRecordLite) => {
+      setCorrectedGateRecord(updated);
+      setCorrectionStatus(updated.status || correctionStatus);
+      toast({ title: "Gate evidence corrected", description: "The correction was saved with a permanent audit entry." });
+      setCorrectionReason("");
+      invalidateAttendanceQueries();
+      if (selectedGateRecord?.id) queryClient.invalidateQueries({ queryKey: ["/api/access-control/attendance", selectedGateRecord.id, "gate-corrections"] });
+    },
+    onError: (error: Error) => toast({ title: "Correction failed", description: error.message, variant: "destructive" }),
+  });
+
 
   useEffect(() => {
     if (!attendanceStateTouchedRef.current) return;
@@ -453,19 +551,33 @@ export default function AttendancePage() {
     visibleStudents.forEach((student) => {
       gridData?.dates.forEach((date) => {
         const status = student.statuses?.[date];
-        if (status === "present") present += 1;
-        if (status && status !== "present") absent += 1;
+        if (status === "present" || status === "late") present += 1;
+        if (status && status !== "present" && status !== "late") absent += 1;
       });
     });
     return { present, absent, total: present + absent };
   }, [visibleStudents, gridData?.dates]);
 
   const totalMarked = Object.values(attendanceState).filter(v => v.status).length;
-  const presentCount = Object.values(attendanceState).filter(v => v.status === "present").length;
-  const absentCount = Object.values(attendanceState).filter(v => v.status && v.status !== "present").length;
+  const presentCount = Object.values(attendanceState).filter(v => v.status === "present" || v.status === "late").length;
+  const absentCount = Object.values(attendanceState).filter(v => v.status && v.status !== "present" && v.status !== "late").length;
 
   const renderStatusPill = (status?: string, student?: AttendanceGridStudent, date?: string) => {
     if (!status) {
+      const activity = student && date ? student.gateActivity?.[date] : null;
+      if (activity) {
+        return (
+          <button
+            type="button"
+            className="relative inline-flex h-7 min-w-7 items-center justify-center rounded-full border border-amber-500/60 bg-amber-50 px-1.5 text-[11px] font-bold text-amber-800 shadow-sm hover:bg-amber-100 dark:bg-amber-950/30 dark:text-amber-200"
+            onClick={() => student && date && setSingleEditTarget({ student, date })}
+            title={`${activity.entryDenied && !activity.admitted ? "Gate arrival pending reconciliation" : "Gate activity without final attendance"}${activity.latestReason ? ` · ${activity.latestReason}` : ""}`}
+            aria-label="Open Gate activity details"
+          >
+            <DoorOpen className="h-3.5 w-3.5" />
+          </button>
+        );
+      }
       return (
         <button
           type="button"
@@ -478,16 +590,19 @@ export default function AttendancePage() {
       );
     }
     const color = STATUS_PALETTE[status] || "#6B7280";
+    const record = student && date ? student.records?.[date] : null;
+    const gateBacked = Boolean(record && (record.gateEvidenceLocked || record.firstGateArrivalAt || record.admittedAt || record.lastGateExitAt || String(record.source || "").includes("gate")));
     return (
       <button
         type="button"
-        className="inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[11px] font-bold text-white shadow-sm transition-transform hover:scale-105"
+        className="relative inline-flex h-7 min-w-7 items-center justify-center rounded-full px-1.5 text-[11px] font-bold text-white shadow-sm transition-transform hover:scale-105"
         style={{ backgroundColor: color }}
-        title={STATUS_LABELS[status] || status}
+        title={`${STATUS_LABELS[status] || status}${gateBacked ? " · Gate evidence" : ""}`}
         onClick={() => student && date && setSingleEditTarget({ student, date })}
         data-testid={`button-edit-attendance-${student?.id}-${date}`}
       >
         {STATUS_ICONS[status] || status.charAt(0).toUpperCase()}
+        {gateBacked && <span className="absolute -right-1 -top-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background text-primary ring-1 ring-primary"><ShieldCheck className="h-2.5 w-2.5" /></span>}
       </button>
     );
   };
@@ -499,7 +614,11 @@ export default function AttendancePage() {
           {targetStudents.map((student, idx) => {
             const st = attendanceState[student.id];
             const isPresent = st?.status === "present";
+            const isLate = st?.status === "late";
             const isAbsent = st?.status ? ABSENT_LIKE.has(st.status) : false;
+            const activeDate = singleEditTarget?.date || selectedDate;
+            const attendanceRecord = existingRecords?.find((record) => record.studentId === student.id) || student.records?.[activeDate];
+            const gateLocked = Boolean(attendanceRecord?.gateEvidenceLocked);
             return (
               <div
                 key={student.id}
@@ -513,6 +632,7 @@ export default function AttendancePage() {
                     <div className="text-xs text-muted-foreground">
                       {student.admissionNo}{student.className ? ` • ${student.className}` : ""}
                     </div>
+                    {gateLocked && <Badge variant="secondary" className="mt-1 gap-1"><ShieldCheck className="h-3 w-3" />Gate confirmed</Badge>}
                   </div>
                   <div className="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-1 sm:justify-end">
                     <button
@@ -523,10 +643,25 @@ export default function AttendancePage() {
                           : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-foreground"
                       }`}
                       onClick={() => handleStatusToggle(student.id, "present")}
+                      disabled={gateLocked}
                       data-testid={`button-status-present-${student.id}`}
                     >
                       <Check className="w-3 h-3 inline mr-1" />
                       Present
+                    </button>
+                    <button
+                      type="button"
+                      className={`px-3 py-1.5 rounded-full text-xs font-bold border-2 transition-colors min-w-[96px] text-center sm:min-w-[100px] ${
+                        isLate
+                          ? "bg-amber-700 border-amber-700 text-white"
+                          : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-foreground"
+                      }`}
+                      onClick={() => handleStatusToggle(student.id, "late")}
+                      disabled={gateLocked}
+                      data-testid={`button-status-late-${student.id}`}
+                    >
+                      <Clock3 className="w-3 h-3 inline mr-1" />
+                      Late
                     </button>
                     <button
                       type="button"
@@ -536,6 +671,7 @@ export default function AttendancePage() {
                           : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-foreground"
                       }`}
                       onClick={() => handleStatusToggle(student.id, "absent")}
+                      disabled={gateLocked}
                       data-testid={`button-status-absent-${student.id}`}
                     >
                       <X className="w-3 h-3 inline mr-1" />
@@ -544,7 +680,11 @@ export default function AttendancePage() {
                   </div>
                 </div>
 
-                {isAbsent && (
+                {gateLocked && (
+                  <div className="px-3.5 pb-2.5 text-xs text-muted-foreground">Gate-confirmed attendance cannot be changed through the normal class register. Use the audited Gate Evidence correction below if the Gate evidence is genuinely wrong.</div>
+                )}
+
+                {isAbsent && !gateLocked && (
                   <div className="px-3.5 pb-2.5 flex flex-wrap gap-1.5">
                     {ABSENT_REASONS.map((reason) => {
                       const slug = reasonToSlug(reason);
@@ -709,7 +849,12 @@ export default function AttendancePage() {
                     <TableHead className="sticky left-0 z-20 w-max min-w-[120px] bg-card px-2 text-[11px] sm:text-xs whitespace-nowrap">Student</TableHead>
                     {selectedClass === "all" && <TableHead className="w-[96px] min-w-[96px] px-2 text-[11px] sm:text-xs">Class</TableHead>}
                     {gridData.dates.map(date => (
-                      <TableHead key={date} className="w-[58px] min-w-[58px] px-1 text-center text-[11px] sm:text-xs whitespace-nowrap">{formatDateLabel(date)}</TableHead>
+                      <TableHead
+                        key={date}
+                        className={`w-[58px] min-w-[58px] px-1 text-center text-[11px] sm:text-xs whitespace-nowrap ${isWeekendDate(date) ? "bg-muted/70 dark:bg-muted/45" : ""}`}
+                      >
+                        {formatDateLabel(date)}
+                      </TableHead>
                     ))}
                   </TableRow>
                 </TableHeader>
@@ -724,7 +869,10 @@ export default function AttendancePage() {
                       </TableCell>
                       {selectedClass === "all" && <TableCell className="w-[96px] min-w-[96px] px-2 py-1.5 text-[11px] text-muted-foreground truncate sm:text-xs md:text-sm">{student.className || "—"}</TableCell>}
                       {gridData.dates.map(date => (
-                        <TableCell key={date} className="w-[58px] min-w-[58px] px-1 py-1.5 text-center">
+                        <TableCell
+                          key={date}
+                          className={`w-[58px] min-w-[58px] px-1 py-1.5 text-center ${isWeekendDate(date) ? "bg-muted/70 dark:bg-muted/45" : ""}`}
+                        >
                           {renderStatusPill(student.statuses?.[date], student, date)}
                         </TableCell>
                       ))}
@@ -852,6 +1000,89 @@ export default function AttendancePage() {
               </Button>
             </div>
           </div>
+
+          {singleEditTarget && selectedGateActivity && !selectedGateRecord ? (
+            <div className="mx-4 mt-4 rounded-lg border border-amber-300/70 bg-amber-50/60 p-4 space-y-3 dark:bg-amber-950/20">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <div className="flex items-center gap-2 font-semibold"><DoorOpen className="h-4 w-4" />Gate Activity — Attendance Pending</div>
+                  <p className="text-xs text-muted-foreground mt-1">The learner reached a Gate, but no final daily attendance record has been established yet.</p>
+                </div>
+                <Badge variant={selectedGateActivity.entryDenied && !selectedGateActivity.admitted ? "destructive" : "secondary"}>
+                  {selectedGateActivity.entryDenied && !selectedGateActivity.admitted ? "Pending reconciliation" : "Gate activity"}
+                </Badge>
+              </div>
+              <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                <div><div className="text-xs text-muted-foreground">First Gate Arrival</div><div className="font-medium">{selectedGateActivity.firstArrivalAt ? new Date(selectedGateActivity.firstArrivalAt).toLocaleString() : "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Latest Gate Event</div><div className="font-medium">{selectedGateActivity.latestEventAt ? new Date(selectedGateActivity.latestEventAt).toLocaleString() : "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Gate Events</div><div className="font-medium">{selectedGateActivity.eventCount}</div></div>
+                <div><div className="text-xs text-muted-foreground">Latest Decision</div><div className="font-medium capitalize">{selectedGateActivity.latestDecision || "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Successfully Admitted</div><div className="font-medium">{selectedGateActivity.admitted ? "Yes" : "No"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Latest Gate / Terminal</div><div className="font-medium">{selectedGateActivity.latestGateName || "-"}{selectedGateActivity.latestDeviceName ? ` · ${selectedGateActivity.latestDeviceName}` : ""}{selectedGateActivity.latestDirection ? ` · ${selectedGateActivity.latestDirection}` : ""}</div></div>
+                <div className="sm:col-span-2"><div className="text-xs text-muted-foreground">Decision Reason</div><div className="font-medium">{selectedGateActivity.latestReason || "-"}</div></div>
+              </div>
+              {selectedGateActivity.entryDenied && !selectedGateActivity.admitted ? (
+                <p className="text-xs text-muted-foreground">If the learner remains unresolved at the configured reconciliation time, the normal Gate reconciliation workflow can finalise the attendance status.</p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {singleEditTarget && hasGateEvidence && selectedGateRecord ? (
+            <div className="mx-4 mt-4 rounded-lg border bg-muted/20 p-4 space-y-4 overflow-y-auto">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <div className="flex items-center gap-2 font-semibold"><ShieldCheck className="h-4 w-4" />Gate Attendance Evidence</div>
+                  <p className="text-xs text-muted-foreground mt-1">This evidence feeds the existing class attendance record; there is no separate Gate Attendance register.</p>
+                </div>
+                <Badge variant={selectedGateRecord.gateEvidenceLocked ? "default" : "secondary"}>{selectedGateRecord.gateEvidenceLocked ? "Gate confirmed" : "Gate evidence"}</Badge>
+              </div>
+              <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                <div><div className="text-xs text-muted-foreground">Attendance Source</div><div className="font-medium">{selectedGateRecord.source || "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">First Gate Arrival</div><div className="font-medium">{selectedGateRecord.firstGateArrivalAt ? new Date(selectedGateRecord.firstGateArrivalAt).toLocaleString() : "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Successful Admission</div><div className="font-medium">{selectedGateRecord.admittedAt ? new Date(selectedGateRecord.admittedAt).toLocaleString() : "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Last Gate Exit</div><div className="font-medium">{selectedGateRecord.lastGateExitAt ? new Date(selectedGateRecord.lastGateExitAt).toLocaleString() : "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Current Gate Evidence Status</div><div className="font-medium">{STATUS_LABELS[selectedGateRecord.status] || selectedGateRecord.status || "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Last Corrected</div><div className="font-medium">{selectedGateRecord.gateCorrectedAt ? new Date(selectedGateRecord.gateCorrectedAt).toLocaleString() : "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Corrected By</div><div className="font-medium">{selectedGateRecord.gateCorrectedBy ? (selectedGateRecord.gateCorrectedBy.name || [selectedGateRecord.gateCorrectedBy.firstName, selectedGateRecord.gateCorrectedBy.lastName].filter(Boolean).join(" ") || selectedGateRecord.gateCorrectedBy.email || "-") : "-"}</div></div>
+                <div><div className="text-xs text-muted-foreground">Latest Gate / Terminal</div><div className="font-medium">{selectedGateRecord.gateName || (selectedGateRecord.gateId ? `Gate #${selectedGateRecord.gateId}` : "-")}{selectedGateRecord.gateDeviceName ? ` · ${selectedGateRecord.gateDeviceName}` : selectedGateRecord.gateDeviceId ? ` · Terminal #${selectedGateRecord.gateDeviceId}` : ""}</div></div>
+                <div><div className="text-xs text-muted-foreground">Reconciliation</div><div className="font-medium">{selectedGateRecord.reconciliationAt ? new Date(selectedGateRecord.reconciliationAt).toLocaleString() : "Not reconciled"}</div></div>
+              </div>
+
+              {canCorrectGateEvidence && selectedGateRecord.id ? (
+                <div className="border-t pt-4 space-y-3">
+                  <div className="font-medium">Correct Gate Attendance Evidence</div>
+                  <div className="grid gap-3 sm:grid-cols-[180px_1fr]">
+                    <Select value={correctionStatus} onValueChange={setCorrectionStatus}>
+                      <SelectTrigger><SelectValue placeholder="Corrected status" /></SelectTrigger>
+                      <SelectContent>{Object.entries(STATUS_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent>
+                    </Select>
+                    <Textarea value={correctionReason} onChange={(event) => setCorrectionReason(event.target.value)} placeholder="Mandatory reason for correcting Gate evidence" />
+                  </div>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={correctionReason.trim().length < 3 || correctGateEvidenceMutation.isPending}
+                    onClick={() => correctGateEvidenceMutation.mutate()}
+                  >
+                    Correct Gate Evidence
+                  </Button>
+                </div>
+              ) : null}
+
+              {(gateCorrectionHistory?.corrections?.length || 0) > 0 ? (
+                <div className="border-t pt-4 space-y-2">
+                  <div className="flex items-center gap-2 font-medium"><History className="h-4 w-4" />Correction History</div>
+                  {gateCorrectionHistory!.corrections.map((row) => (
+                    <div key={row.id} className="rounded-md border bg-background p-3 text-sm">
+                      <div className="font-medium">{STATUS_LABELS[row.previousStatus] || row.previousStatus} → {STATUS_LABELS[row.newStatus] || row.newStatus}</div>
+                      <div className="text-muted-foreground">{row.correctionReason}</div>
+                      <div className="text-xs text-muted-foreground mt-1">{new Date(row.createdAt).toLocaleString()} · {[row.correctedBy?.firstName, row.correctedBy?.lastName].filter(Boolean).join(" ") || row.correctedBy?.email || "Authorised user"}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {singleEditTarget ? renderMarkingRows([singleEditTarget.student]) : null}
         </DialogContent>

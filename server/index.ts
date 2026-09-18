@@ -10,6 +10,7 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { prewarmPdfRenderer } from "./pdf-renderer";
 import { scanAllTransportCompliance } from "./transport-compliance";
+import { runAccessControlSchedulers } from "./access-control-operations";
 
 const app = express();
 const httpServer = createServer(app);
@@ -194,16 +195,11 @@ app.use((req, res, next) => {
         }
       }, 5 * 60 * 1000);
 
-      setInterval(async () => {
-        try {
-          const updatedCount = await storage.autoClockOutOverdueStaffAttendanceLogs();
-          if (updatedCount > 0) {
-            log(`Auto clocked out ${updatedCount} overdue staff attendance session(s)`, "attendance");
-          }
-        } catch (err) {
-          console.error("Staff attendance auto clock-out job error:", err);
-        }
-      }, 60 * 1000);
+      const runAccessControlJobs = () => {
+        void runAccessControlSchedulers().catch((err) => console.error("Access Control scheduler error:", err));
+      };
+      setTimeout(runAccessControlJobs, 15_000);
+      setInterval(runAccessControlJobs, 60 * 1000);
     },
   );
 })();

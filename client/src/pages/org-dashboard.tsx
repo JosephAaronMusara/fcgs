@@ -7,6 +7,7 @@ import AssetsInventoryPage from "@/pages/assets-inventory";
 import FleetManagementPage from "@/pages/fleet-management";
 import OrgTransportOversightPage from "@/pages/org-transport-oversight";
 import RecruitmentPage from "@/pages/recruitment";
+import ParentAttendanceNotifications from "@/components/parent-attendance-notifications";
 import { RecordPhotoActions } from "@/components/record-photo-actions";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -83,7 +84,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Bell, Calendar, Save, ClipboardList, Download, ArrowLeft, ArrowRight, Tag, ChevronLeft, FileText, SlidersHorizontal } from "lucide-react";
+import { Bell, Calendar, Save, ClipboardList, Download, ArrowLeft, ArrowRight, Tag, ChevronLeft, FileText, SlidersHorizontal, Languages } from "lucide-react";
+import { LanguageCheckButton, getLanguageProviderMetadata, useLanguageToolsSettings, type LanguageToolsSettings } from "@/features/language-tools";
 
 type OrgUser = User & { schoolAccess?: number[]; permissionOverrides?: { permissionId: number; granted: boolean }[] };
 type UserPermissionState = { permission: Permission; granted: boolean; groupGranted: boolean; overrideGranted: boolean | null; source: "group" | "granted_override" | "denied_override" | "none" };
@@ -172,6 +174,132 @@ function getCountdown(terminationAt: string | Date | null): string {
   const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
   const seconds = Math.floor((diff % (1000 * 60)) / 1000);
   return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+
+function LanguageToolsGlobalSettings() {
+  const { toast } = useToast();
+  const { settings, isLoading } = useLanguageToolsSettings();
+  const [draft, setDraft] = useState<LanguageToolsSettings>(settings);
+  const [testText, setTestText] = useState("She have worked very hard this term.");
+  const [testFirstName, setTestFirstName] = useState("");
+  const [testGender, setTestGender] = useState("");
+  const { data: providers = [] } = useQuery({
+    queryKey: ["language-provider-metadata"],
+    queryFn: getLanguageProviderMetadata,
+    staleTime: Infinity,
+  });
+
+  useEffect(() => setDraft(settings), [settings]);
+
+  const saveSettings = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("PUT", "/api/language-tools/settings", draft);
+      return res.json();
+    },
+    onSuccess: (saved) => {
+      queryClient.setQueryData(["/api/language-tools/settings"], saved);
+      toast({ title: "Language Tools settings saved" });
+    },
+    onError: (error: any) => toast({ title: "Failed to save Language Tools settings", description: error?.message, variant: "destructive" }),
+  });
+
+  const effectiveProvider = draft.primaryProvider || draft.fallbackProvider || "None";
+  if (isLoading) return <p className="text-sm text-muted-foreground">Loading Language Tools settings...</p>;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h3 className="text-base font-semibold">Language Tools</h3>
+          <p className="text-sm text-muted-foreground">Configure the organisation-wide writing assistant. Providers are replaceable without changing module workflows.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="language-tools-enabled"
+            checked={draft.enabled}
+            onCheckedChange={(checked) => setDraft((current) => ({ ...current, enabled: checked === true }))}
+          />
+          <Label htmlFor="language-tools-enabled">Enabled</Label>
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-3"><CardTitle className="text-base">Provider selection</CardTitle><CardDescription>Primary may be left as None; the fallback will then be the effective provider.</CardDescription></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Primary provider</Label>
+              <Select value={draft.primaryProvider ?? "none"} onValueChange={(value) => setDraft((current) => ({ ...current, primaryProvider: value === "none" ? null : value }))}>
+                <SelectTrigger data-testid="select-language-primary"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="none">None</SelectItem>{providers.map((provider: any) => <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Offline fallback</Label>
+              <Select value={draft.fallbackProvider ?? "none"} onValueChange={(value) => setDraft((current) => ({ ...current, fallbackProvider: value === "none" ? null : value }))}>
+                <SelectTrigger data-testid="select-language-fallback"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="none">None</SelectItem>{providers.map((provider: any) => <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div className="rounded-md border p-3 text-sm">
+              <span className="font-medium">Effective provider:</span> {effectiveProvider === "harper" ? "Harper" : effectiveProvider}
+              {!draft.primaryProvider && draft.fallbackProvider ? <span className="ml-2 text-muted-foreground">(fallback active)</span> : null}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3"><CardTitle className="text-base">Behaviour</CardTitle><CardDescription>Controls how suggestions are applied throughout the portal.</CardDescription></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Language checking mode</Label>
+              <Select value={draft.mode} onValueChange={(value: any) => setDraft((current) => ({ ...current, mode: value }))}>
+                <SelectTrigger data-testid="select-language-mode"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="review_all">Review All</SelectItem>
+                  <SelectItem value="balanced">Balanced</SelectItem>
+                  <SelectItem value="auto_apply_safe">Auto-apply Safe</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2"><Label>English dialect</Label><Input value="British English" disabled /></div>
+            <label className="flex items-start gap-2 text-sm"><Checkbox checked={draft.studentNamePersonalization} onCheckedChange={(checked) => setDraft((current) => ({ ...current, studentNamePersonalization: checked === true }))} /><span><span className="font-medium">Student-name personalisation</span><span className="block text-muted-foreground">Offer a name at the start of a student comment when appropriate.</span></span></label>
+            <label className="flex items-start gap-2 text-sm"><Checkbox checked={draft.genderPronounCheck} onCheckedChange={(checked) => setDraft((current) => ({ ...current, genderPronounCheck: checked === true }))} /><span><span className="font-medium">Gender/pronoun context check</span><span className="block text-muted-foreground">Warn when a pronoun may conflict with the selected student record.</span></span></label>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader className="pb-3"><CardTitle className="text-base">Provider capabilities</CardTitle><CardDescription>The writing UI adapts to provider capabilities; FCGS can queue bulk checks even when a provider has no native bulk API.</CardDescription></CardHeader>
+        <CardContent className="space-y-3">
+          {providers.map((provider: any) => (
+            <div key={provider.id} className="rounded-md border p-3">
+              <div className="flex items-center gap-2"><span className="font-medium">{provider.name}</span>{provider.capabilities.offline ? <Badge variant="secondary">Offline</Badge> : null}<Badge variant="outline">{provider.capabilities.privacyMode}</Badge></div>
+              <div className="mt-2 flex flex-wrap gap-1.5 text-xs">{["spelling","grammar","punctuation","style","bulk","generativeRewrite","supportsBritishEnglish"].map((key) => <Badge key={key} variant={provider.capabilities[key] ? "secondary" : "outline"}>{key}: {provider.capabilities[key] ? "yes" : "no"}</Badge>)}</div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3"><CardTitle className="text-base">Diagnostic tester</CardTitle><CardDescription>Exercise the currently configured provider without affecting any report or comment record.</CardDescription></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2"><Label>Student first name (optional)</Label><Input value={testFirstName} onChange={(event) => setTestFirstName(event.target.value)} placeholder="e.g. Adele" /></div>
+            <div className="space-y-2"><Label>Student gender (optional)</Label><Select value={testGender || "none"} onValueChange={(value) => setTestGender(value === "none" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">None</SelectItem><SelectItem value="female">Female</SelectItem><SelectItem value="male">Male</SelectItem></SelectContent></Select></div>
+          </div>
+          <div className="space-y-2"><Label>Test text</Label><Textarea rows={5} value={testText} onChange={(event) => setTestText(event.target.value)} /></div>
+          <LanguageCheckButton
+            fields={[{ id: "diagnostic", label: "Diagnostic text", text: testText, onChange: setTestText, student: testFirstName || testGender ? { firstName: testFirstName || null, gender: testGender || null } : undefined }]}
+            showProviderStatus
+          />
+        </CardContent>
+      </Card>
+
+      <div className="flex justify-end"><Button onClick={() => saveSettings.mutate()} disabled={saveSettings.isPending}><Save className="mr-2 h-4 w-4" />Save Language Tools Settings</Button></div>
+    </div>
+  );
 }
 
 export default function OrgDashboard() {
@@ -2139,6 +2267,14 @@ export default function OrgDashboard() {
                 <SlidersHorizontal className="h-4 w-4 mr-1" />
                 Features
               </TabsTrigger>
+              <TabsTrigger value="language-tools" data-testid="tab-org-language-tools">
+                <Languages className="h-4 w-4 mr-1" />
+                Language Tools
+              </TabsTrigger>
+              <TabsTrigger value="attendance-day" data-testid="tab-org-attendance-day">
+                <Clock className="h-4 w-4 mr-1" />
+                Attendance & School Day
+              </TabsTrigger>
               <TabsTrigger value="access-rights" data-testid="tab-org-access-rights">
                 <Shield className="h-4 w-4 mr-1" />
                 Access Rights
@@ -2555,6 +2691,13 @@ export default function OrgDashboard() {
                   </div>
                 )}
               </div>
+            </TabsContent>
+            <TabsContent value="attendance-day" className="flex-1 overflow-y-auto mt-4">
+              <ParentAttendanceNotifications />
+            </TabsContent>
+
+            <TabsContent value="language-tools" className="flex-1 overflow-y-auto mt-4">
+              <LanguageToolsGlobalSettings />
             </TabsContent>
             <TabsContent value="access-rights" className="flex-1 overflow-y-auto mt-4">
               <AccessRightsSection />

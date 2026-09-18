@@ -95,6 +95,7 @@ import type {
 } from "@shared/schema";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { LanguageCheckButton, type LanguageFieldBinding } from "@/features/language-tools";
 
 interface AssessmentPaper {
   id: number;
@@ -2126,6 +2127,32 @@ export default function MarksEntryPage() {
         ? selectedAssessments[0].name
         : `${selectedAssessments.length} assessments selected`;
 
+  const buildStudentLanguageFields = (studentId: number, assessmentIds = selectedAssessmentNumbers): LanguageFieldBinding[] => {
+    const student = displayedStudents.find((item) => item.id === studentId);
+    if (!student) return [];
+    return assessmentIds.flatMap((assessmentId) => {
+      const data = marksDataByAssessment[assessmentId];
+      const entry = studentMarks[assessmentId]?.[studentId];
+      if (!data || !entry || data.publication?.isPublished || !data.students.some((item) => item.id === studentId)) return [];
+      const result = entry.attStatus === "present"
+        ? calculatePercentageAndGrade(assessmentId, entry.paperMarks)
+        : { percentage: null, gradeName: "", gradeId: null };
+      const poolComment = getPoolComment(assessmentId, result.gradeId);
+      const text = entry.commentSource === "custom"
+        ? (entry.customCommentText || "")
+        : (entry.autoCommentSnapshot || poolComment || "");
+      return [{
+        id: `marks:${assessmentId}:${studentId}`,
+        label: data.assessment?.name || `Assessment ${assessmentId}`,
+        text,
+        onChange: (value: string) => handleCustomCommentChange(assessmentId, studentId, value),
+        student: { id: student.id, firstName: student.firstName, lastName: student.lastName, gender: student.gender },
+      }];
+    });
+  };
+
+  const allMarksLanguageFields = displayedStudents.flatMap((student) => buildStudentLanguageFields(student.id));
+
   const renderAssessmentFields = (
     assessmentId: number,
     studentId: number,
@@ -2371,9 +2398,15 @@ export default function MarksEntryPage() {
               data-testid={`input-comment-${assessmentId}-${studentId}`}
             />
           </div>
-          <Button
+          <div className="flex items-center gap-2">
+            <LanguageCheckButton
+              fields={buildStudentLanguageFields(studentId, [assessmentId])}
+              className="flex-1"
+              disabled={published}
+            />
+            <Button
             size="sm"
-            className="h-8 w-full text-xs"
+            className="h-8 flex-1 text-xs"
             onClick={() => handleManualSave(assessmentId, studentId)}
             disabled={published || entry.isSaving || !entry.isDirty}
             data-testid={`button-save-${assessmentId}-${studentId}`}
@@ -2386,7 +2419,8 @@ export default function MarksEntryPage() {
               <CheckCircle2 className="mr-1 h-4 w-4" />
             )}
             {entry.isSaving ? "Saving" : entry.isDirty ? "Save" : "Saved"}
-          </Button>
+            </Button>
+          </div>
         </div>
       );
     }
@@ -2478,6 +2512,11 @@ export default function MarksEntryPage() {
           />
         </TableCell>
         <TableCell className="px-1 py-0.5 align-middle sm:px-2 sm:py-1">
+          <div className="flex flex-wrap items-center gap-1.5 min-w-[240px]">
+            <LanguageCheckButton
+              fields={buildStudentLanguageFields(studentId, [assessmentId])}
+              disabled={published}
+            />
           <Button
             size="sm"
             className="h-7 px-2 text-[10px] sm:h-8 sm:px-3 sm:text-xs"
@@ -2499,6 +2538,7 @@ export default function MarksEntryPage() {
               </>
             )}
           </Button>
+          </div>
         </TableCell>
       </>
     );
@@ -2944,17 +2984,20 @@ export default function MarksEntryPage() {
                     {savingCount} saving
                   </Badge>
                 )}
-                {!isMultiAssessmentMode && (
-                  <Button
-                    size="sm"
-                    className="h-8"
-                    onClick={handleSaveAll}
-                    disabled={dirtyCount === 0}
-                  >
-                    <Save className="mr-1 h-4 w-4" />
-                    Save All Marks
-                  </Button>
-                )}
+                <LanguageCheckButton
+                  fields={allMarksLanguageFields}
+                  label="Check Language for All"
+                  disabled={!allMarksLanguageFields.length}
+                />
+                <Button
+                  size="sm"
+                  className="h-8"
+                  onClick={handleSaveAll}
+                  disabled={dirtyCount === 0}
+                >
+                  <Save className="mr-1 h-4 w-4" />
+                  Save All Marks
+                </Button>
               </div>
             </div>
 
@@ -3072,9 +3115,9 @@ export default function MarksEntryPage() {
                           {isMultiAssessmentMode && (
                             <TableHead
                               rowSpan={2}
-                              className="min-w-[74px] border-l bg-background px-1 text-center text-[10px] sm:min-w-[88px] sm:px-2 sm:text-xs md:min-w-[104px] md:text-sm"
+                              className="min-w-[260px] border-l bg-background px-1 text-center text-[10px] sm:min-w-[300px] sm:px-2 sm:text-xs md:min-w-[330px] md:text-sm"
                             >
-                              Save
+                              Action
                             </TableHead>
                           )}
                         </TableRow>
@@ -3183,6 +3226,8 @@ export default function MarksEntryPage() {
                               })}
                               {isMultiAssessmentMode && (
                                 <TableCell className="border-l px-1 py-0.5 text-center align-middle sm:px-2 sm:py-1">
+                                  <div className="flex flex-wrap items-center justify-center gap-1.5 min-w-[250px]">
+                                    <LanguageCheckButton fields={buildStudentLanguageFields(student.id)} />
                                   <Button
                                     size="sm"
                                     className="h-7 px-2 text-[10px] sm:h-8 sm:px-3 sm:text-xs"
@@ -3209,6 +3254,7 @@ export default function MarksEntryPage() {
                                       </>
                                     )}
                                   </Button>
+                                  </div>
                                 </TableCell>
                               )}
                             </TableRow>

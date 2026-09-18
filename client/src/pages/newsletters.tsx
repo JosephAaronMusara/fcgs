@@ -27,6 +27,7 @@ import {
 import { SearchableMultiSelect, type SearchableSelectOption } from "@/components/ui/searchable-select";
 import { Newspaper, Plus, Calendar, Send, Eye, Trash2, Mail, MessageSquare, Bell, CheckCircle2, AlertCircle, FileText } from "lucide-react";
 import type { Class, Newsletter, School, Staff, Stream, Student } from "@shared/schema";
+import { LanguageCheckButton } from "@/features/language-tools";
 
 type NewsletterAudience = "all" | "parents" | "students" | "staff";
 type NewsletterScope = "all" | "streams" | "classes" | "individuals";
@@ -72,6 +73,8 @@ export default function NewslettersPage() {
   const [selectedClassIds, setSelectedClassIds] = useState<string[]>([]);
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
   const [selectedStaffIds, setSelectedStaffIds] = useState<string[]>([]);
+  const [newsletterTitle, setNewsletterTitle] = useState("");
+  const [newsletterContent, setNewsletterContent] = useState("");
 
   const resetTargeting = () => {
     setSelectedChannels(["email"]);
@@ -81,6 +84,8 @@ export default function NewslettersPage() {
     setSelectedClassIds([]);
     setSelectedStudentIds([]);
     setSelectedStaffIds([]);
+    setNewsletterTitle("");
+    setNewsletterContent("");
   };
 
   const { data: newsletters = [], isLoading } = useQuery<Newsletter[]>({
@@ -263,10 +268,9 @@ export default function NewslettersPage() {
     if (!hasValidTarget) return toast({ title: "Please complete the target audience selection", variant: "destructive" });
     if (isPreviewError) return toast({ title: "Unable to verify recipients", description: recipientPreviewError instanceof Error ? recipientPreviewError.message : "Recipient preview failed", variant: "destructive" });
     if (!recipientCounts || recipientCounts.total === 0) return toast({ title: "The selected audience has no recipients", variant: "destructive" });
-    const formData = new FormData(event.currentTarget);
     createNewsletter.mutate({
-      title: formData.get("title") as string,
-      content: formData.get("content") as string,
+      title: newsletterTitle,
+      content: newsletterContent,
       ...targetPayload,
       channels: selectedChannels,
       isPublished: false,
@@ -310,7 +314,7 @@ export default function NewslettersPage() {
               <DialogDescription>Compose a newsletter and select its exact audience.</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-2"><Label htmlFor="title">Title</Label><Input id="title" name="title" required data-testid="input-newsletter-title" /></div>
+              <div className="space-y-2"><Label htmlFor="title">Title</Label><Input id="title" name="title" required value={newsletterTitle} onChange={(event) => setNewsletterTitle(event.target.value)} data-testid="input-newsletter-title" /></div>
 
               <div className="space-y-3 rounded-lg border p-3">
                 <div className="space-y-2">
@@ -366,7 +370,11 @@ export default function NewslettersPage() {
                 </div>
               </div>
 
-              <div className="space-y-2"><Label htmlFor="content">Content</Label><Textarea id="content" name="content" rows={8} required placeholder="Write your newsletter content here..." data-testid="input-newsletter-content" /></div>
+              <div className="space-y-2"><Label htmlFor="content">Content</Label><Textarea id="content" name="content" rows={8} required value={newsletterContent} onChange={(event) => setNewsletterContent(event.target.value)} placeholder="Write your newsletter content here..." data-testid="input-newsletter-content" /></div>
+              <LanguageCheckButton fields={[
+                { id: "newsletter-title", label: "Newsletter title", text: newsletterTitle, onChange: setNewsletterTitle },
+                { id: "newsletter-content", label: "Newsletter content", text: newsletterContent, onChange: setNewsletterContent },
+              ]} />
 
               <div className="space-y-3">
                 <Label>Select Channels</Label>

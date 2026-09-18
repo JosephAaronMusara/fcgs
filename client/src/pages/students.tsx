@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { CreateAccountForm } from "@/components/create-account-form";
+import { LoginDetailsBulkDialog } from "@/components/login-details-bulk-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,6 +21,7 @@ import type { Student, Class, Parent, Subject, Stream, User, School, Hostel, Sta
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
 import * as XLSX from "xlsx";
+import { blobToXlsxImageDataUrl, exportXlsxWithEmbeddedImages } from "@/lib/xlsx-embedded-images";
 import { ResidentialAreaInput } from "@/components/residential-area-input";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
@@ -39,6 +41,11 @@ type StudentRecord = Student & {
   parentPhone?: string | null;
   parentEmail?: string | null;
   parentRelationship?: string | null;
+  parentAddress?: string | null;
+  parentStreetAddress?: string | null;
+  parentResidentialArea?: string | null;
+  parentOccupation?: string | null;
+  parentPhoto?: string | null;
 };
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -60,6 +67,8 @@ export default function StudentsPage() {
   const [subjectsDialogStudent, setSubjectsDialogStudent] = useState<StudentRecord | null>(null);
   const [accountDialogStudent, setAccountDialogStudent] = useState<StudentRecord | null>(null);
   const [transferDialogStudent, setTransferDialogStudent] = useState<StudentRecord | null>(null);
+  const [classroomStudent, setClassroomStudent] = useState<StudentRecord | null>(null);
+  const [classroomId, setClassroomId] = useState("");
   const [quickAddParentOpen, setQuickAddParentOpen] = useState(false);
   const [recentQuickAddedParent, setRecentQuickAddedParent] = useState<Parent | null>(null);
   const quickAddParentFlowRef = useRef(false);
@@ -162,6 +171,16 @@ export default function StudentsPage() {
   const totalStudents = studentPageData?.total || 0;
   const totalPages = studentPageData?.totalPages || 1;
 
+  const { data: unassignedPage } = useQuery<PaginatedResponse<StudentRecord>>({
+    queryKey: ["/api/students", "unassigned-classroom-count", currentSchoolId],
+    queryFn: async () => {
+      const res = await schoolFetch("/api/students?paginated=true&page=1&pageSize=1&status=active&classId=unassigned");
+      if (!res.ok) throw new Error("Could not load unassigned classroom count");
+      return res.json();
+    },
+  });
+  const unassignedClassroomCount = unassignedPage?.total || 0;
+
   const { data: classes } = useQuery<Class[]>({
     queryKey: ["/api/classes"],
   });
@@ -206,6 +225,7 @@ export default function StudentsPage() {
   const classFilterOptions = useMemo(
     () => [
       { value: "all", label: "All Classes" },
+      { value: "unassigned", label: "Needs Classroom Assignment" },
       ...((classes || []).map((cls) => ({
         value: cls.id.toString(),
         label: getClassDisplayName(cls),
@@ -275,6 +295,45 @@ export default function StudentsPage() {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     },
   });
+
+  const restoreMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await apiRequest("POST", `/api/students/${id}/restore`, { effectiveDate: new Date().toISOString().slice(0, 10) });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/students"] });
+      toast({ title: "Student restored", description: data?.message || "Student restored. Classroom assignment is required." });
+    },
+    onError: (error: Error) => toast({ title: "Restore failed", description: error.message, variant: "destructive" }),
+  });
+
+  const assignClassroomMutation = useMutation({
+    mutationFn: async ({ studentId, classId }: { studentId: number; classId: number }) => {
+      const res = await apiRequest("PUT", `/api/students/${studentId}/classroom`, { classId });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/students"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
+      setClassroomStudent(null);
+      setClassroomId("");
+      toast({ title: "Classroom assigned", description: "The student's classroom assignment has been updated." });
+    },
+    onError: (error: Error) => toast({ title: "Assignment failed", description: error.message, variant: "destructive" }),
+  });
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const studentId = Number(params.get("studentId"));
+    if (!studentId || params.get("assignClassroom") !== "1" || !hasPermission("students.classroom.assign")) return;
+    schoolFetch(`/api/students/${studentId}`).then(async (res) => {
+      if (!res.ok) return;
+      const student = await res.json();
+      setClassroomStudent(student);
+      setClassroomId(student.classId ? String(student.classId) : "");
+    }).catch(() => undefined);
+  }, [hasPermission]);
 
   const importMutation = useMutation({
     mutationFn: async ({ rows, fileName }: { rows: Array<Record<string, unknown>>; fileName?: string }) => {
@@ -481,41 +540,78 @@ export default function StudentsPage() {
       toast({ title: "Export failed", description: "Could not load student data for export", variant: "destructive" });
       return;
     }
-    const exportPage = (await exportRes.json()) as PaginatedResponse<Student>;
+    const exportPage = (await exportRes.json()) as PaginatedResponse<StudentRecord>;
     const exportStudents = exportPage.items || [];
-
     if (!exportStudents.length) {
       toast({ title: "No data", description: "No students to export", variant: "destructive" });
       return;
     }
 
-    const exportData = exportStudents.map(s => ({
-      "Admission No": s.admissionNo,
-      "First Name": s.firstName,
-      "Last Name": s.lastName,
-      "Student Email": s.email || "",
-      "Student Phone": s.phone || "",
-      "Gender": s.gender?.toUpperCase() || "",
-      "Date of Birth": s.dateOfBirth || "",
-      "Street Address": s.streetAddress || "",
-      "Residential Area": s.residentialArea || "",
-      "City": s.address || "",
-      "Class": getClassName(s.classId),
-      ...(isBoardingSchool ? { "Hostel": getHostelName(s) || "N/A" } : {}),
-      "Parent": getParentName(s.parentId, s),
-      "Status": s.status || "active",
-      "Enrollment Date": s.enrollmentDate || "",
-    }));
+    const rows: Array<Record<string, string>> = [];
+    for (const student of exportStudents) {
+      let photoDataUrl = "";
+      if (student.photo) {
+        try {
+          const photoResponse = await schoolFetch(`/api/students/${student.id}/photo/download`);
+          if (photoResponse.ok) photoDataUrl = await blobToXlsxImageDataUrl(await photoResponse.blob());
+        } catch { /* Export continues when an individual photo cannot be read. */ }
+      }
+      rows.push({
+        Photo: photoDataUrl,
+        "Admission No": student.admissionNo || "",
+        "First Name": student.firstName || "",
+        "Last Name": student.lastName || "",
+        "National ID": student.nationalIdNumber || "",
+        "Passport No": student.passportNumber || "",
+        "Student Email": student.email || "",
+        "Student Phone": student.phone || "",
+        Gender: student.gender?.toUpperCase() || "",
+        "Date of Birth": student.dateOfBirth || "",
+        "Street Address": student.streetAddress || "",
+        "Residential Area": student.residentialArea || "",
+        City: student.address || "",
+        Classroom: student.classId ? getClassName(student.classId) : "Classroom Unassigned",
+        ...(isBoardingSchool ? { Hostel: getHostelName(student) || "N/A" } : {}),
+        "Parent / Guardian": getParentName(student.parentId, student),
+        "Parent Relationship": getParentRelationship(student),
+        "Parent Phone": getParentPhone(student),
+        "Parent Email": getParentEmail(student),
+        "Parent Street Address": student.parentStreetAddress || getStudentParent(student)?.streetAddress || "",
+        "Parent Residential Area": student.parentResidentialArea || getStudentParent(student)?.residentialArea || "",
+        "Parent Address / City": student.parentAddress || getStudentParent(student)?.address || "",
+        "Parent Occupation": student.parentOccupation || getStudentParent(student)?.occupation || "",
+        Status: student.status || "active",
+        "Enrollment Date": student.enrollmentDate || "",
+      });
+    }
 
-    const worksheet = XLSX.utils.json_to_sheet(exportData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Students");
-    const datePart = new Date().toISOString().split('T')[0];
-    const classLabel = classFilter !== "all" ? `_${getClassName(parseInt(classFilter)).replace(/\s+/g, "_")}` : "";
+    const datePart = new Date().toISOString().split("T")[0];
+    const classLabel = classFilter !== "all" ? `_${classFilter === "unassigned" ? "Unassigned" : getClassName(parseInt(classFilter)).replace(/\s+/g, "_")}` : "";
     const statusLabel = statusFilter !== "all" ? `_${statusFilter}` : "";
     const searchLabel = search.trim() ? `_search_${search.trim().replace(/\s+/g, "_")}` : "";
-    XLSX.writeFile(workbook, `Students${classLabel}${statusLabel}${searchLabel}_${datePart}.xlsx`);
-    toast({ title: "Success", description: "Student list downloaded successfully" });
+    exportXlsxWithEmbeddedImages({
+      filename: `Students${classLabel}${statusLabel}${searchLabel}_${datePart}.xlsx`,
+      sheetName: "Students",
+      columns: Object.keys(rows[0]),
+      rows,
+      columnWidths: {
+        Photo: 10,
+        "Admission No": 18,
+        "First Name": 18,
+        "Last Name": 18,
+        "National ID": 22,
+        "Passport No": 18,
+        "Student Email": 30,
+        "Student Phone": 18,
+        "Date of Birth": 15,
+        Classroom: 24,
+        "Parent / Guardian": 24,
+        "Parent Relationship": 20,
+        "Parent Phone": 18,
+        "Parent Email": 30,
+      },
+    });
+    toast({ title: "Success", description: "Student list downloaded as XLSX with embedded profile photos and text-safe learner/guardian contact details." });
   };
 
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -632,6 +728,14 @@ export default function StudentsPage() {
             Upload
           </Button>
 
+          <LoginDetailsBulkDialog
+            recipientType="student"
+            selectedIds={selectedStudentIds}
+            search={debouncedSearch}
+            classFilter={classFilter}
+            statusFilter={statusFilter}
+          />
+
           <Dialog open={isAddOpen} onOpenChange={handleAddStudentOpenChange}>
             <DialogTrigger asChild>
               <Button data-testid="button-add-student">
@@ -702,6 +806,11 @@ export default function StudentsPage() {
               <GraduationCap className="w-3 h-3" />
               {totalStudents} Students
             </Badge>
+            {unassignedClassroomCount > 0 && (
+              <Button variant="outline" size="sm" className="border-amber-300 text-amber-700" onClick={() => setClassFilter("unassigned")}>
+                Needs Classroom Assignment · {unassignedClassroomCount}
+              </Button>
+            )}
           </div>
 
           {isLoading ? (
@@ -774,7 +883,9 @@ export default function StudentsPage() {
                         </div>
                       </TableCell>
                       <TableCell className="font-mono text-sm">{s.admissionNo}</TableCell>
-                      <TableCell>{getClassName(s.classId)}</TableCell>
+                      <TableCell>
+                        {s.classId ? getClassName(s.classId) : <Badge variant="outline" className="border-amber-300 text-amber-700">Classroom Unassigned</Badge>}
+                      </TableCell>
                       {isBoardingSchool && (
                         <TableCell data-testid={`text-hostel-${s.id}`}>
                           <span className={s.isDayScholar ? "text-muted-foreground" : ""}>
@@ -912,6 +1023,13 @@ export default function StudentsPage() {
                             </DialogContent>
                           </Dialog>
 
+                          {!s.classId && s.status === "active" && hasPermission("students.classroom.assign") && (
+                            <Button variant="ghost" size="icon" onClick={() => { setClassroomStudent(s); setClassroomId(""); }} title="Assign classroom">
+                              <GraduationCap className="w-4 h-4 text-amber-600" />
+                            </Button>
+                          )}
+
+                          {s.status !== "transferred" ? (
                           <Dialog
                             open={transferDialogStudent?.id === s.id}
                             onOpenChange={(open) => !open && setTransferDialogStudent(null)}
@@ -947,6 +1065,12 @@ export default function StudentsPage() {
                               </DialogFooter>
                             </DialogContent>
                           </Dialog>
+
+                          ) : hasPermission("students.restore_transferred") ? (
+                            <Button variant="ghost" size="icon" onClick={() => restoreMutation.mutate(s.id)} disabled={restoreMutation.isPending} title="Restore / re-enrol">
+                              <ArrowRightLeft className="w-4 h-4 text-emerald-600" />
+                            </Button>
+                          ) : null}
 
                           <Button
                             variant="ghost"
@@ -1092,18 +1216,20 @@ export default function StudentsPage() {
                             <BookOpen className="mobile-record-action-icon" />
                             <span className="mobile-record-action-text">Subjects</span>
                           </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="mobile-record-action-button"
-                            onClick={() => setTransferDialogStudent(s)}
-                            data-testid={`mobile-button-transfer-student-${s.id}`}
-                            title="Transfer"
-                            aria-label="Transfer"
-                          >
-                            <ArrowRightLeft className="mobile-record-action-icon" />
-                            <span className="mobile-record-action-text">Transfer</span>
-                          </Button>
+                          {s.status !== "transferred" ? (
+                            <Button variant="outline" size="sm" className="mobile-record-action-button" onClick={() => setTransferDialogStudent(s)} data-testid={`mobile-button-transfer-student-${s.id}`} title="Transfer" aria-label="Transfer">
+                              <ArrowRightLeft className="mobile-record-action-icon" /><span className="mobile-record-action-text">Transfer</span>
+                            </Button>
+                          ) : (
+                            <Button variant="outline" size="sm" className="mobile-record-action-button" onClick={() => restoreMutation.mutate(s.id)} disabled={restoreMutation.isPending} title="Restore / re-enrol">
+                              <ArrowRightLeft className="mobile-record-action-icon" /><span className="mobile-record-action-text">Restore</span>
+                            </Button>
+                          )}
+                          {!s.classId && s.status === "active" && hasPermission("students.classroom.assign") && (
+                            <Button variant="outline" size="sm" className="mobile-record-action-button" onClick={() => { setClassroomStudent(s); setClassroomId(""); }} title="Assign classroom">
+                              <GraduationCap className="mobile-record-action-icon" /><span className="mobile-record-action-text">Assign Class</span>
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="icon"
@@ -1170,6 +1296,25 @@ export default function StudentsPage() {
           onClose={() => setAccountDialogStudent(null)}
         />
       )}
+
+      <Dialog open={!!classroomStudent} onOpenChange={(open) => { if (!open) { setClassroomStudent(null); setClassroomId(""); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Assign Classroom</DialogTitle>
+            <DialogDescription>{classroomStudent ? `${classroomStudent.firstName} ${classroomStudent.lastName} currently has no classroom assigned.` : "Select an existing classroom."}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>Classroom</Label>
+            <SearchableSelect value={classroomId} onValueChange={setClassroomId} options={(classes || []).map((cls) => ({ value: String(cls.id), label: getClassDisplayName(cls), searchText: cls.className }))} placeholder="Select classroom" searchPlaceholder="Search classrooms..." emptyText="No classrooms configured" />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setClassroomStudent(null)}>Cancel</Button>
+            <Button disabled={!classroomStudent || !classroomId || assignClassroomMutation.isPending} onClick={() => classroomStudent && assignClassroomMutation.mutate({ studentId: classroomStudent.id, classId: Number(classroomId) })}>
+              {assignClassroomMutation.isPending ? "Assigning..." : "Assign Classroom"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={quickAddParentOpen} onOpenChange={handleQuickAddParentOpenChange}>
         <DialogContent>

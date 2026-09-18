@@ -84,6 +84,7 @@ import type {
 import { filterItemsByStrictGradeProfileKey, getGradingProfilesForSchool, getGradeProfileLabel, gradeProfileMatchesStrict, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, type GradeProfileKey } from "@shared/academic-profiles";
 import { EcdAssessmentTab } from "@/components/academic-reports/ecd-assessment-tab";
 import { ReportCardSlip } from "@/components/academic-reports/report-card-document";
+import { LanguageCheckButton } from "@/features/language-tools";
 
 type ViewMode = "hub" | "class-level" | "report-cards";
 
@@ -712,17 +713,17 @@ function downloadMeritWorkbook(args: {
   const headers = [
     "Student",
     ...args.subjects,
-    "Total",
+    "Total Marks",
+    "Total Points",
     "Average",
-    ...(args.showPointsColumn ? ["Points"] : []),
     ...(args.showPositionColumn !== false ? ["Pos"] : []),
   ];
   const body = args.rows.map((row) => [
     formatStudentNameWithAdmission(row.studentName, row.admissionNo),
     ...row.subjectMarks,
     row.total,
+    row.points ?? "",
     row.avg,
-    ...(args.showPointsColumn ? [row.points ?? ""] : []),
     ...(args.showPositionColumn !== false ? [row.position] : []),
   ]);
 
@@ -751,9 +752,9 @@ function downloadMeritWorkbook(args: {
     columnWidths: [
       studentColumnWidth,
       ...subjectColumnWidths,
-      64,
+      78,
       70,
-      ...(args.showPointsColumn ? [58] : []),
+      70,
       ...(args.showPositionColumn !== false ? [48] : []),
     ],
     freezeFirstColumn: true,
@@ -1030,11 +1031,9 @@ function ClassMeritDialog({
                       {s.name}
                     </th>
                   ))}
-                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total Marks</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total Points</th>
                   <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Average</th>
-                  {data.showPointsColumn && (
-                    <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Points</th>
-                  )}
                   {data.showPositionColumn !== false && (
                     <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
                   )}
@@ -1052,12 +1051,10 @@ function ClassMeritDialog({
                       </td>
                     ))}
                     <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.totalDisplay || row.total}</td>
+                    <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.pointsDisplay ?? row.points ?? "–"}</td>
                     <td className="text-center px-2 py-2 border-r font-semibold whitespace-nowrap">
                       {row.avgDisplay || (row.avg == null ? "-" : `${Math.round(row.avg)}%`)}
                     </td>
-                    {data.showPointsColumn && (
-                      <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.pointsDisplay ?? row.points ?? "–"}</td>
-                    )}
                     {data.showPositionColumn !== false && (
                       <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
                     )}
@@ -1327,11 +1324,9 @@ function StreamMeritDialog({
                       {s}
                     </th>
                   ))}
-                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total Marks</th>
+                  <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Total Points</th>
                   <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Average</th>
-                  {data.showPointsColumn && (
-                    <th className="text-center px-2 py-2 font-semibold border-r whitespace-nowrap">Points</th>
-                  )}
                   {data.showPositionColumn !== false && (
                     <th className="text-center px-2 py-2 font-semibold whitespace-nowrap">Pos</th>
                   )}
@@ -1349,10 +1344,8 @@ function StreamMeritDialog({
                       </td>
                     ))}
                     <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.total}</td>
+                    <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.points ?? "–"}</td>
                     <td className="text-center px-2 py-2 border-r font-semibold whitespace-nowrap">{row.avg}</td>
-                    {data.showPointsColumn && (
-                      <td className="text-center px-2 py-2 border-r whitespace-nowrap">{row.points ?? "–"}</td>
-                    )}
                     {data.showPositionColumn !== false && (
                       <td className="text-center px-2 py-2 whitespace-nowrap">{row.position}</td>
                     )}
@@ -1857,12 +1850,15 @@ export default function AcademicReportsPage() {
     useState<Record<string, ReportCardCommentStatus>>({});
   const reportCardCommentPoolsRef = useRef<ReportCardCommentDraftMap>({});
   const reportCardCommentTimeoutsRef = useRef<Record<string, number>>({});
+  const reportCardCommentVersionsRef = useRef<Record<string, number>>({});
   const [reportCardSubjectCommentDrafts, setReportCardSubjectCommentDrafts] =
     useState<ReportCardSubjectCommentDraftMap>({});
   const [reportCardSubjectCommentStatuses, setReportCardSubjectCommentStatuses] =
     useState<Record<string, ReportCardCommentStatus>>({});
   const reportCardSubjectCommentPoolsRef = useRef<ReportCardSubjectCommentDraftMap>({});
   const reportCardSubjectCommentTimeoutsRef = useRef<Record<string, number>>({});
+  const reportCardSubjectCommentVersionsRef = useRef<Record<string, number>>({});
+  const reportCardDraftContextRef = useRef<string>("");
 
   const [missingMarksOpen, setMissingMarksOpen] = useState(false);
   const [meritOpen, setMeritOpen] = useState(false);
@@ -1933,6 +1929,7 @@ export default function AcademicReportsPage() {
 
   useEffect(() => {
     if (!reportCardData) {
+      reportCardDraftContextRef.current = "";
       setReportCardCommentDrafts({});
       setReportCardCommentPools({});
       setReportCardCommentStatuses({});
@@ -1942,6 +1939,12 @@ export default function AcademicReportsPage() {
       reportCardSubjectCommentPoolsRef.current = {};
       return;
     }
+
+    const draftContext = `${selectedExamId}:${selectedClassId}`;
+    if (reportCardDraftContextRef.current === draftContext) return;
+    reportCardDraftContextRef.current = draftContext;
+    reportCardCommentVersionsRef.current = {};
+    reportCardSubjectCommentVersionsRef.current = {};
 
     const nextDrafts: ReportCardCommentDraftMap = {};
     const nextPools: ReportCardCommentDraftMap = {};
@@ -1969,7 +1972,7 @@ export default function AcademicReportsPage() {
     setReportCardSubjectCommentDrafts(nextSubjectDrafts);
     setReportCardSubjectCommentStatuses({});
     reportCardSubjectCommentPoolsRef.current = nextSubjectPools;
-  }, [reportCardData]);
+  }, [reportCardData, selectedExamId, selectedClassId]);
 
   useEffect(() => {
     return () => {
@@ -1986,6 +1989,7 @@ export default function AcademicReportsPage() {
     studentId: number,
     commentType: ReportCardCommentType,
     value: string,
+    expectedVersion?: number,
   ): Promise<boolean> => {
     if (!selectedExamId) return true;
 
@@ -2003,28 +2007,22 @@ export default function AcademicReportsPage() {
         commentText: value,
       });
 
-      if (!value.trim()) {
-        const fallback = reportCardCommentPoolsRef.current[studentId]?.[commentType] || "";
-        setReportCardCommentDrafts((prev) => ({
+      // The local editor remains authoritative while typing. Do not replace
+      // an empty/trailing-space draft with a server/pool value after autosave.
+      if (expectedVersion === undefined || reportCardCommentVersionsRef.current[statusKey] === expectedVersion) {
+        setReportCardCommentStatuses((prev) => ({
           ...prev,
-          [studentId]: {
-            principal: prev[studentId]?.principal || "",
-            class_teacher: prev[studentId]?.class_teacher || "",
-            [commentType]: fallback,
-          },
+          [statusKey]: "saved",
         }));
       }
-
-      setReportCardCommentStatuses((prev) => ({
-        ...prev,
-        [statusKey]: "saved",
-      }));
       return true;
     } catch (error: any) {
-      setReportCardCommentStatuses((prev) => ({
-        ...prev,
-        [statusKey]: "error",
-      }));
+      if (expectedVersion === undefined || reportCardCommentVersionsRef.current[statusKey] === expectedVersion) {
+        setReportCardCommentStatuses((prev) => ({
+          ...prev,
+          [statusKey]: "error",
+        }));
+      }
       toast({
         title: "Autosave failed",
         description: error?.message || "Failed to save report card comment.",
@@ -2043,6 +2041,7 @@ export default function AcademicReportsPage() {
     studentId: number,
     subject: Pick<ReportSubject, "assessmentId" | "subjectId">,
     value: string,
+    expectedVersion?: number,
   ): Promise<boolean> => {
     const statusKey = getSubjectDraftKey(studentId, subject);
     setReportCardSubjectCommentStatuses((prev) => ({
@@ -2060,7 +2059,6 @@ export default function AcademicReportsPage() {
         commentText: value,
       });
       const result = await response.json();
-      const resolvedComment = typeof result?.commentText === "string" ? result.commentText : "";
       const resolvedPool = typeof result?.commentPool === "string" ? result.commentPool : "";
 
       reportCardSubjectCommentPoolsRef.current = {
@@ -2068,20 +2066,23 @@ export default function AcademicReportsPage() {
         [statusKey]: resolvedPool,
       };
 
-      setReportCardSubjectCommentDrafts((prev) => ({
-        ...prev,
-        [statusKey]: resolvedComment,
-      }));
-      setReportCardSubjectCommentStatuses((prev) => ({
-        ...prev,
-        [statusKey]: "saved",
-      }));
+      // Never rehydrate an active textarea from an autosave response. The
+      // server may normalize whitespace, which previously removed a trailing
+      // space while a slower typist was composing the next word.
+      if (expectedVersion === undefined || reportCardSubjectCommentVersionsRef.current[statusKey] === expectedVersion) {
+        setReportCardSubjectCommentStatuses((prev) => ({
+          ...prev,
+          [statusKey]: "saved",
+        }));
+      }
       return true;
     } catch (error: any) {
-      setReportCardSubjectCommentStatuses((prev) => ({
-        ...prev,
-        [statusKey]: "error",
-      }));
+      if (expectedVersion === undefined || reportCardSubjectCommentVersionsRef.current[statusKey] === expectedVersion) {
+        setReportCardSubjectCommentStatuses((prev) => ({
+          ...prev,
+          [statusKey]: "error",
+        }));
+      }
       toast({
         title: "Autosave failed",
         description: error?.message || "Failed to save subject comment.",
@@ -2097,6 +2098,8 @@ export default function AcademicReportsPage() {
     value: string,
   ) => {
     const statusKey = getSubjectDraftKey(studentId, subject);
+    const version = (reportCardSubjectCommentVersionsRef.current[statusKey] ?? 0) + 1;
+    reportCardSubjectCommentVersionsRef.current[statusKey] = version;
 
     setReportCardSubjectCommentDrafts((prev) => ({
       ...prev,
@@ -2113,8 +2116,8 @@ export default function AcademicReportsPage() {
     }
 
     reportCardSubjectCommentTimeoutsRef.current[statusKey] = window.setTimeout(() => {
-      void saveReportCardSubjectComment(studentId, subject, value);
-    }, 700);
+      void saveReportCardSubjectComment(studentId, subject, value, version);
+    }, 1500);
   };
 
   const handleReportCardCommentChange = (
@@ -2132,6 +2135,8 @@ export default function AcademicReportsPage() {
     }));
 
     const statusKey = `${studentId}:${commentType}`;
+    const version = (reportCardCommentVersionsRef.current[statusKey] ?? 0) + 1;
+    reportCardCommentVersionsRef.current[statusKey] = version;
     setReportCardCommentStatuses((prev) => ({
       ...prev,
       [statusKey]: "idle",
@@ -2143,8 +2148,8 @@ export default function AcademicReportsPage() {
     }
 
     reportCardCommentTimeoutsRef.current[statusKey] = window.setTimeout(() => {
-      void saveReportCardCommentOverride(studentId, commentType, value);
-    }, 700);
+      void saveReportCardCommentOverride(studentId, commentType, value, version);
+    }, 1500);
   };
 
 
@@ -2173,6 +2178,7 @@ export default function AcademicReportsPage() {
       studentId: number;
       commentType: ReportCardCommentType;
       commentText: string;
+      version: number;
     }> = [];
     const subjectsToSave: Array<{
       studentId: number;
@@ -2180,6 +2186,7 @@ export default function AcademicReportsPage() {
       subjectId: number;
       commentText: string;
       draftKey: string;
+      version: number;
     }> = [];
 
     for (const report of reportCardData.reportCards) {
@@ -2194,6 +2201,7 @@ export default function AcademicReportsPage() {
               studentId: report.student.id,
               commentType,
               commentText: comments[commentType] || "",
+              version: reportCardCommentVersionsRef.current[statusKey] ?? 0,
             });
           }
         }
@@ -2208,6 +2216,7 @@ export default function AcademicReportsPage() {
             subjectId: subject.subjectId,
             commentText: reportCardSubjectCommentDrafts[draftKey] ?? subject.comment ?? "",
             draftKey,
+            version: reportCardSubjectCommentVersionsRef.current[draftKey] ?? 0,
           });
         }
       }
@@ -2230,43 +2239,52 @@ export default function AcademicReportsPage() {
       const response = await apiRequest("POST", "/api/report-card-comments/bulk", {
         examId: Number(selectedExamId),
         classId: Number(selectedClassId),
-        overall,
-        subjects: subjectsToSave.map(({ draftKey: _draftKey, ...row }) => row),
+        overall: overall.map(({ version: _version, ...row }) => row),
+        subjects: subjectsToSave.map(({ draftKey: _draftKey, version: _version, ...row }) => row),
       });
       const result = await response.json();
 
+      // A bulk save must never mark a newer edit as saved. If the learner's
+      // text changed while this request was in flight, handleChange already
+      // moved that field back to idle and scheduled the newer revision.
       setReportCardCommentStatuses((previous) => {
         const next = { ...previous };
-        overall.forEach((row) => { next[`${row.studentId}:${row.commentType}`] = "saved"; });
+        overall.forEach((row) => {
+          const key = `${row.studentId}:${row.commentType}`;
+          if (reportCardCommentVersionsRef.current[key] === row.version) next[key] = "saved";
+        });
         return next;
       });
       setReportCardSubjectCommentStatuses((previous) => {
         const next = { ...previous };
-        subjectsToSave.forEach((row) => { next[row.draftKey] = "saved"; });
+        subjectsToSave.forEach((row) => {
+          if (reportCardSubjectCommentVersionsRef.current[row.draftKey] === row.version) next[row.draftKey] = "saved";
+        });
         return next;
       });
 
+      // Pool metadata may be refreshed from the server, but the server-returned
+      // comment text is deliberately NOT copied into the live editor. This is
+      // what prevents whitespace normalization from eating a trailing space.
       const subjectResults = Array.isArray(result?.subjects) ? result.subjects : [];
-      if (subjectResults.length) {
-        setReportCardSubjectCommentDrafts((previous) => {
-          const next = { ...previous };
-          for (const row of subjectResults) {
-            const key = `${Number(row.studentId)}:${Number(row.assessmentId)}`;
-            next[key] = typeof row.commentText === "string" ? row.commentText : "";
-            reportCardSubjectCommentPoolsRef.current[key] = typeof row.commentPool === "string" ? row.commentPool : "";
-          }
-          return next;
-        });
+      for (const row of subjectResults) {
+        const key = `${Number(row.studentId)}:${Number(row.assessmentId)}`;
+        reportCardSubjectCommentPoolsRef.current[key] = typeof row.commentPool === "string" ? row.commentPool : "";
       }
     } catch (error: any) {
       setReportCardCommentStatuses((previous) => {
         const next = { ...previous };
-        overall.forEach((row) => { next[`${row.studentId}:${row.commentType}`] = "error"; });
+        overall.forEach((row) => {
+          const key = `${row.studentId}:${row.commentType}`;
+          if (reportCardCommentVersionsRef.current[key] === row.version) next[key] = "error";
+        });
         return next;
       });
       setReportCardSubjectCommentStatuses((previous) => {
         const next = { ...previous };
-        subjectsToSave.forEach((row) => { next[row.draftKey] = "error"; });
+        subjectsToSave.forEach((row) => {
+          if (reportCardSubjectCommentVersionsRef.current[row.draftKey] === row.version) next[row.draftKey] = "error";
+        });
         return next;
       });
       throw new Error(error?.message || "Some report changes could not be saved. Correct the failed comments before generating the PDF.");
@@ -3820,6 +3838,9 @@ function ReportCommentsModal({
                 className="resize-none"
                 rows={2}
                 data-testid="textarea-report-comment"
+              />
+              <LanguageCheckButton
+                fields={[{ id: "report-comment-bank-language", label: "Report comment", text: commentText, onChange: setCommentText }]}
               />
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-cancel-report-comment">Cancel</Button>

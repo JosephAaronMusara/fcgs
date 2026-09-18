@@ -44,11 +44,13 @@ import {
   transportIncidents,
   transportOwners,
   transportOwnerSchools,
+  transportOrganizationSettings,
+  transportVehicleAlternativeDrivers,
+  transportVehicleOperatingDriverHistory,
+  transportVehicleReplacements,
   transportPathNodeLearners,
   transportPathNodes,
   transportPaymentAllocations,
-  transportPaymentPlanInstalments,
-  transportPaymentPlans,
   transportProviderAdjustments,
   transportPayments,
   transportPenalties,
@@ -172,6 +174,7 @@ const vehicleInput = z.object({
   ownershipType: z.enum(["school", "staff", "contracted"]).default("school"),
   ownerId: nullablePositiveInt,
   driverId: nullablePositiveInt,
+  alternativeDriverIds: z.array(z.coerce.number().int().positive()).optional().default([]),
   registrationExpiry: dateString.optional().nullable(),
   insuranceExpiry: dateString.optional().nullable(),
   fitnessExpiry: dateString.optional().nullable(),
@@ -237,6 +240,14 @@ const pathInput = z.object({
   nodes: z.array(pathNodeInput).min(2),
 });
 
+const organizationTransportSettingsInput = z.object({
+  minimumArrearsSuspensionBalance: money,
+  suspendedSeatPolicy: z.enum(["reserve_indefinitely", "release_immediately", "release_after_days"]),
+  suspendedSeatReleaseDays: z.coerce.number().int().min(0).max(3650),
+  automaticArrearsReinstatement: z.boolean(),
+  arrearsWarningEnabled: z.boolean(),
+});
+
 const assignmentInput = z.object({
   studentId: z.coerce.number().int().positive(),
   routeId: z.coerce.number().int().positive(),
@@ -252,9 +263,9 @@ const assignmentInput = z.object({
   pickupPathNodeId: nullablePositiveInt,
   dropoffPathNodeId: nullablePositiveInt,
   serviceType: z.enum(["pickup", "dropoff", "both"]).default("both"),
-  serviceState: z.enum(["pending_start", "active", "active_arrears", "active_payment_plan", "suspension_pending", "suspended", "paused", "terminated", "completed"]).default("pending_start"),
+  serviceState: z.enum(["pending_start", "active", "active_arrears", "suspension_pending", "suspended", "suspended_arrears", "pending_vehicle_reassignment", "paused", "terminated", "completed"]).default("pending_start"),
   planningStatus: z.enum(["pending_path_assignment", "provisionally_assigned", "assigned_to_path", "path_confirmed"]).default("pending_path_assignment"),
-  financialStatus: z.enum(["pending_first_payment", "paid", "partially_paid", "overdue", "payment_plan", "credit"]).default("pending_first_payment"),
+  financialStatus: z.enum(["pending_first_payment", "paid", "partially_paid", "overdue", "credit"]).default("pending_first_payment"),
   baseMonthlyFee: money,
   agreedFee: money,
   startDate: dateString,
@@ -270,7 +281,7 @@ const transferInput = assignmentInput.partial().extend({
 });
 
 const stateInput = z.object({
-  state: z.enum(["active", "active_arrears", "active_payment_plan", "suspension_pending", "suspended", "paused", "terminated", "completed"]),
+  state: z.enum(["active", "suspended", "paused", "terminated", "completed"]),
   effectiveDate: dateString,
   reason: z.string().trim().min(3),
   refundMethod: z.enum(["credit", "cash", "bank_transfer", "mobile_money", "original_method"]).optional(),
@@ -299,19 +310,6 @@ const paymentInput = z.object({
   chargeIds: z.array(z.coerce.number().int().positive()).optional(),
 });
 
-const paymentPlanInput = z.object({
-  studentId: z.coerce.number().int().positive(),
-  assignmentId: z.coerce.number().int().positive(),
-  coveredAmount: positiveMoney,
-  instalmentAmount: positiveMoney,
-  frequency: z.enum(["weekly", "fortnightly", "monthly", "custom"]),
-  startDate: dateString,
-  finalDueDate: dateString.optional().nullable(),
-  graceDays: z.coerce.number().int().min(0).default(0),
-  payerAcknowledgement: optionalText,
-  notes: optionalText,
-  instalments: z.array(z.object({ dueDate: dateString, amount: positiveMoney })).optional(),
-});
 
 const refundInput = z.object({
   studentId: z.coerce.number().int().positive(),
@@ -448,11 +446,6 @@ const settingsInput = z.object({
   refundNoCreditRemainingDays: z.coerce.number().int().min(0).max(31),
   pendingSeatReservationEnabled: z.boolean(),
   pendingSeatReservationDays: z.coerce.number().int().min(0).max(365),
-  overdueWarningDays: z.coerce.number().int().min(0).max(365),
-  suspensionEligibilityDays: z.coerce.number().int().min(0).max(365),
-  suspensionNoticeDays: z.coerce.number().int().min(0).max(365),
-  minimumSuspensionBalance: money,
-  paymentPlanMissedInstalmentsToDefault: z.coerce.number().int().min(1).max(24),
   receiptPrefix: z.string().trim().min(1).max(20),
   receiptSequenceLength: z.coerce.number().int().min(3).max(12),
   receiptResetYearly: z.boolean(),
@@ -627,6 +620,70 @@ async function getOrCreateSettings(schoolId: number, executor: any = db) {
   return created;
 }
 
+async function getOrCreateOrganizationTransportSettings(organizationId: number, executor: any = db) {
+  const [existing] = await executor.select().from(transportOrganizationSettings).where(eq(transportOrganizationSettings.organizationId, organizationId));
+  if (existing) return existing;
+  const [created] = await executor.insert(transportOrganizationSettings).values({ organizationId }).returning();
+  return created;
+}
+
+async function qualifyingTransportArrears(executor: any, schoolId: number, studentId: number, beforeDate: string): Promise<{ balance: number; oldestMonth: string | null }> {
+  const rows = await executor.execute(sql`
+    SELECT c.id, c.amount, c.academic_year, c.month, c.service_period_end,
+           COALESCE((SELECT SUM(pa.amount) FROM transport_payment_allocations pa JOIN transport_payments p ON p.id=pa.payment_id WHERE pa.charge_id=c.id AND p.reversed_at IS NULL),0) AS allocated
+    FROM transport_charges c
+    WHERE c.school_id=${schoolId} AND c.student_id=${studentId} AND c.status NOT IN ('cancelled','void')
+      AND COALESCE(c.service_period_end, (date_trunc('month',make_date(c.academic_year,GREATEST(c.month,1),1))+interval '1 month - 1 day')::date) < ${beforeDate}
+    ORDER BY c.academic_year, c.month, c.id
+  `);
+  let balance = 0; let oldestMonth: string | null = null;
+  for (const row of rows.rows as any[]) {
+    const outstanding = Math.max(0, rounded(amount(row.amount) - amount(row.allocated)));
+    if (outstanding > 0) { balance = rounded(balance + outstanding); if (!oldestMonth) oldestMonth = `${row.academic_year}-${String(row.month).padStart(2,'0')}`; }
+  }
+  const credits = await executor.execute(sql`
+    SELECT COALESCE(SUM(CASE WHEN direction='credit' THEN amount ELSE -amount END),0)::text AS net_credit
+    FROM transport_account_adjustments
+    WHERE school_id=${schoolId} AND student_id=${studentId} AND status='approved' AND effective_date < ${beforeDate}
+  `);
+  balance = Math.max(0, rounded(balance - Math.max(0, amount((credits.rows as any[])[0]?.net_credit))));
+  return { balance, oldestMonth };
+}
+
+function addDaysIso(dateValue: string, days: number): string {
+  const d = new Date(`${dateValue}T00:00:00Z`); d.setUTCDate(d.getUTCDate()+days); return isoDate(d);
+}
+
+async function reconcileArrearsSeatReleases(schoolId: number, executor: any = db) {
+  const today = isoDate(new Date());
+  const due = await executor.select().from(transportAssignments).where(and(
+    eq(transportAssignments.schoolId, schoolId),
+    eq(transportAssignments.serviceState, 'suspended_arrears'),
+    eq(transportAssignments.isActive, true),
+    sql`${transportAssignments.seatReservedUntil} IS NOT NULL AND ${transportAssignments.seatReservedUntil} < ${today}`
+  ));
+  for (const assignment of due) {
+    await executor.update(transportAssignments).set({ isActive: false, seatReleasedAt: new Date(), updatedAt: new Date() }).where(eq(transportAssignments.id, assignment.id));
+    await executor.insert(transportAssignmentEvents).values({ schoolId, assignmentId: assignment.id, eventType: 'arrears_seat_released', effectiveDate: today, previousValues: assignment, newValues: { ...assignment, isActive: false }, reason: 'Seat reservation grace period expired while Transport arrears remained outstanding', createdByUserId: assignment.createdByUserId || null });
+  }
+  return due.length;
+}
+
+async function reconcileArrearsAfterPayment(executor: any, school: SchoolRow, studentId: number, userId: number) {
+  if (!school.organizationId) return null;
+  const policy = await getOrCreateOrganizationTransportSettings(school.organizationId, executor);
+  if (!policy.automaticArrearsReinstatement) return null;
+  const [assignment] = await executor.select().from(transportAssignments).where(and(eq(transportAssignments.schoolId, school.id), eq(transportAssignments.studentId, studentId), eq(transportAssignments.suspensionReason, 'arrears'))).orderBy(desc(transportAssignments.startDate), desc(transportAssignments.id)).limit(1);
+  if (!assignment) return null;
+  const arrears = await qualifyingTransportArrears(executor, school.id, studentId, isoDate(new Date()));
+  if (arrears.balance > amount(policy.minimumArrearsSuspensionBalance)) return null;
+  const seatReleased = Boolean(assignment.seatReleasedAt) || !assignment.isActive;
+  const nextState = seatReleased ? 'pending_vehicle_reassignment' : 'active';
+  const [updated] = await executor.update(transportAssignments).set({ serviceState: nextState, suspensionReason: null, financialStatus: arrears.balance > 0 ? 'partially_paid' : 'paid', isActive: seatReleased ? false : true, seatReservedUntil: null, updatedAt: new Date() }).where(eq(transportAssignments.id, assignment.id)).returning();
+  await executor.insert(transportAssignmentEvents).values({ schoolId: school.id, assignmentId: assignment.id, eventType: seatReleased ? 'arrears_cleared_reassignment_required' : 'arrears_auto_reinstated', effectiveDate: isoDate(new Date()), previousValues: assignment, newValues: updated, reason: seatReleased ? 'Arrears cleared after reserved seat had been released' : 'Qualifying Transport arrears cleared', createdByUserId: userId });
+  return updated;
+}
+
 async function writeAudit(
   executor: any,
   schoolId: number,
@@ -686,7 +743,7 @@ async function reconcileTransportAssignmentDates(schoolId: number) {
       await tx.update(transportAssignments).set({ isActive: false, serviceState: "terminated", updatedAt: new Date() }).where(and(
         eq(transportAssignments.schoolId, schoolId), eq(transportAssignments.studentId, row.studentId), eq(transportAssignments.isActive, true), ne(transportAssignments.id, row.id),
       ));
-      await tx.update(transportAssignments).set({ isActive: true, serviceState: row.financialStatus === "payment_plan" ? "active_payment_plan" : "active", updatedAt: new Date() }).where(eq(transportAssignments.id, row.id));
+      await tx.update(transportAssignments).set({ isActive: true, serviceState: "active", updatedAt: new Date() }).where(eq(transportAssignments.id, row.id));
     }
   });
 }
@@ -1368,14 +1425,135 @@ async function validateTransportMasterValues(args: {
         }
         const driverVehicle = orgVehicles.find((vehicle: any) => Number(vehicle.id) !== Number(args.previous?.id || 0) && vehicle.isActive && Number(vehicle.driverId || 0) === selectedDriverId);
         if (driverVehicle) throw Object.assign(new Error(`This driver is already assigned to vehicle ${driverVehicle.registrationNumber}. A driver cannot be assigned to multiple active vehicles.`), { status: 409 });
+        const today = isoDate(new Date());
+        const [alternativeElsewhere] = await db.select().from(transportVehicleAlternativeDrivers).where(and(
+          eq(transportVehicleAlternativeDrivers.driverId, selectedDriverId),
+          ne(transportVehicleAlternativeDrivers.vehicleId, Number(args.previous?.id || 0)),
+          lte(transportVehicleAlternativeDrivers.effectiveFrom, today),
+          or(isNull(transportVehicleAlternativeDrivers.effectiveTo), gte(transportVehicleAlternativeDrivers.effectiveTo, today)),
+        )).limit(1);
+        if (alternativeElsewhere) {
+          const [alternativeVehicle] = await db.select().from(transportVehicles).where(eq(transportVehicles.id, alternativeElsewhere.vehicleId)).limit(1);
+          throw Object.assign(new Error(`This driver is an Alternative Driver for ${alternativeVehicle?.registrationNumber || `vehicle #${alternativeElsewhere.vehicleId}`} and cannot become a Primary Driver while that relationship is active.`), { status: 409 });
+        }
       }
     }
   }
   return values;
 }
 
+async function validateAlternativeDriverIds(args: { school: SchoolRow; vehicleId?: number | null; primaryDriverId?: number | null; ownerId?: number | null; ownershipType: string; alternativeDriverIds: number[] }) {
+  const ids = Array.from(new Set(args.alternativeDriverIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+  if (args.primaryDriverId && ids.includes(Number(args.primaryDriverId))) throw Object.assign(new Error("The Primary Driver cannot also be an Alternative Driver for the same vehicle."), { status: 400 });
+  if (!ids.length) return ids;
+  const orgSchoolIds = await organizationSchoolIds(args.school);
+  const drivers = await db.select().from(transportDrivers).where(inArray(transportDrivers.id, ids));
+  if (drivers.length !== ids.length) throw Object.assign(new Error("One or more selected Alternative Drivers could not be found."), { status: 400 });
+  const orgVehicles = await db.select().from(transportVehicles).where(and(inArray(transportVehicles.schoolId, orgSchoolIds), eq(transportVehicles.isActive, true)));
+  for (const driver of drivers) {
+    if (!driver.isActive) throw Object.assign(new Error(`${driver.firstName} ${driver.lastName} is inactive and cannot be an Alternative Driver.`), { status: 400 });
+    if (args.ownershipType === "school") {
+      if (driver.engagementType !== "internal") throw Object.assign(new Error(`${driver.firstName} ${driver.lastName} is not an Internal / school driver.`), { status: 400 });
+    } else if (driver.engagementType !== "external" || Number(driver.ownerId || 0) !== Number(args.ownerId || 0)) {
+      throw Object.assign(new Error(`${driver.firstName} ${driver.lastName} does not work for this vehicle owner.`), { status: 400 });
+    }
+    const primaryElsewhere = orgVehicles.find((vehicle: any) => Number(vehicle.id) !== Number(args.vehicleId || 0) && Number(vehicle.driverId || 0) === Number(driver.id));
+    if (primaryElsewhere) throw Object.assign(new Error(`${driver.firstName} ${driver.lastName} is Primary Driver of ${primaryElsewhere.registrationNumber} and cannot be an Alternative Driver on another active vehicle.`), { status: 409 });
+  }
+  return ids;
+}
+
 function previousDay(dateValue: string): string {
   return isoDate(new Date(new Date(`${dateValue}T00:00:00Z`).getTime() - 86_400_000));
+}
+
+function monthEndDate(year: number, month: number): string {
+  return isoDate(new Date(Date.UTC(year, month, 0)));
+}
+
+async function effectiveVehicleOwnerId(vehicle: any, atDate: string): Promise<number | null> {
+  const [history] = await db.select().from(transportVehicleOwnerHistory).where(and(
+    eq(transportVehicleOwnerHistory.vehicleId, Number(vehicle.id)),
+    lte(transportVehicleOwnerHistory.effectiveFrom, atDate),
+    or(isNull(transportVehicleOwnerHistory.effectiveTo), gte(transportVehicleOwnerHistory.effectiveTo, atDate)),
+  )).orderBy(desc(transportVehicleOwnerHistory.effectiveFrom), desc(transportVehicleOwnerHistory.id)).limit(1);
+  return history?.ownerId ? Number(history.ownerId) : (vehicle.ownerId ? Number(vehicle.ownerId) : null);
+}
+
+async function effectivePrimaryDriverId(vehicle: any, atDate: string): Promise<number | null> {
+  const [history] = await db.select().from(transportVehicleDriverHistory).where(and(
+    eq(transportVehicleDriverHistory.vehicleId, Number(vehicle.id)),
+    lte(transportVehicleDriverHistory.effectiveFrom, atDate),
+    or(isNull(transportVehicleDriverHistory.effectiveTo), gte(transportVehicleDriverHistory.effectiveTo, atDate)),
+  )).orderBy(desc(transportVehicleDriverHistory.effectiveFrom), desc(transportVehicleDriverHistory.id)).limit(1);
+  return history?.driverId ? Number(history.driverId) : (vehicle.driverId ? Number(vehicle.driverId) : null);
+}
+
+async function effectiveOperatingDriverId(vehicle: any, at: Date): Promise<number | null> {
+  const [history] = await db.select().from(transportVehicleOperatingDriverHistory).where(and(
+    eq(transportVehicleOperatingDriverHistory.vehicleId, Number(vehicle.id)),
+    lte(transportVehicleOperatingDriverHistory.effectiveFrom, at),
+    or(isNull(transportVehicleOperatingDriverHistory.effectiveTo), gte(transportVehicleOperatingDriverHistory.effectiveTo, at)),
+  )).orderBy(desc(transportVehicleOperatingDriverHistory.effectiveFrom), desc(transportVehicleOperatingDriverHistory.id)).limit(1);
+  if (history?.driverId) return Number(history.driverId);
+  return effectivePrimaryDriverId(vehicle, isoDate(at));
+}
+
+async function reconcileVehicleEffectiveRelationships(schoolId: number) {
+  const now = new Date();
+  const today = isoDate(now);
+  const vehicleLinks = await db.select({ vehicleId: transportVehicleSchools.vehicleId }).from(transportVehicleSchools).where(and(
+    eq(transportVehicleSchools.schoolId, schoolId),
+    eq(transportVehicleSchools.isActive, true),
+  ));
+  const vehicleIds = Array.from(new Set(vehicleLinks.map((row) => Number(row.vehicleId)).filter(Boolean)));
+  for (const vehicleId of vehicleIds) {
+    const [vehicle] = await db.select().from(transportVehicles).where(eq(transportVehicles.id, vehicleId)).limit(1);
+    if (!vehicle) continue;
+    const ownerId = await effectiveVehicleOwnerId(vehicle, today);
+    const driverId = await effectivePrimaryDriverId(vehicle, today);
+    const operatingDriverId = await effectiveOperatingDriverId({ ...vehicle, driverId }, now);
+    const updates: any = {};
+    if (Number(vehicle.ownerId || 0) !== Number(ownerId || 0)) updates.ownerId = ownerId;
+    if (Number(vehicle.driverId || 0) !== Number(driverId || 0)) updates.driverId = driverId;
+    if (Number(vehicle.currentOperatingDriverId || 0) !== Number(operatingDriverId || 0)) updates.currentOperatingDriverId = operatingDriverId;
+    if (Object.keys(updates).length) {
+      updates.updatedAt = new Date();
+      await db.update(transportVehicles).set(updates).where(eq(transportVehicles.id, vehicleId));
+    }
+  }
+}
+
+async function applyDueVehicleReplacements(schoolId: number) {
+  const now = new Date();
+  const replacements = await db.select().from(transportVehicleReplacements).where(and(
+    eq(transportVehicleReplacements.schoolId, schoolId),
+    lte(transportVehicleReplacements.effectiveFrom, now),
+    or(isNull(transportVehicleReplacements.effectiveTo), gte(transportVehicleReplacements.effectiveTo, now)),
+  )).orderBy(asc(transportVehicleReplacements.effectiveFrom), asc(transportVehicleReplacements.id));
+  for (const record of replacements) {
+    const assignments = await db.select().from(transportAssignments).where(and(
+      eq(transportAssignments.schoolId, schoolId),
+      eq(transportAssignments.isActive, true),
+      or(eq(transportAssignments.vehicleId, record.originalVehicleId), eq(transportAssignments.outboundVehicleId, record.originalVehicleId)),
+    ));
+    for (const assignment of assignments) {
+      const changes: any = { updatedAt: new Date() };
+      if (Number(assignment.vehicleId || 0) === Number(record.originalVehicleId)) changes.vehicleId = record.replacementVehicleId;
+      if (Number(assignment.outboundVehicleId || 0) === Number(record.originalVehicleId)) changes.outboundVehicleId = record.replacementVehicleId;
+      const [updated] = await db.update(transportAssignments).set(changes).where(eq(transportAssignments.id, assignment.id)).returning();
+      await db.insert(transportAssignmentEvents).values({
+        schoolId,
+        assignmentId: assignment.id,
+        eventType: record.replacementType === "temporary" ? "temporary_vehicle_replacement" : "vehicle_replaced",
+        effectiveDate: isoDate(record.effectiveFrom),
+        previousValues: assignment,
+        newValues: updated,
+        reason: record.reason,
+        createdByUserId: record.createdByUserId,
+      });
+    }
+  }
 }
 
 function registerMasterCrud(
@@ -1395,7 +1573,11 @@ function registerMasterCrud(
       const requestedDestinationIds = entityType === "vehicle"
         ? Array.from(new Set((Array.isArray(req.body?.destinationIds) ? req.body.destinationIds : []).map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
         : [];
+      const requestedAlternativeDriverIds = entityType === "vehicle"
+        ? Array.from(new Set((Array.isArray(req.body?.alternativeDriverIds) ? req.body.alternativeDriverIds : []).map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        : [];
       const raw = clean(schema.parse(req.body));
+      if (entityType === "vehicle") delete (raw as any).alternativeDriverIds;
       if (entityType === "vehicle" && String((raw as any).status || "active") === "active" && requestedDestinationIds.length === 0) {
         throw Object.assign(new Error("Select at least one Destination before saving an active Transport vehicle."), { status: 400 });
       }
@@ -1435,6 +1617,12 @@ function registerMasterCrud(
               await db.insert(transportVehicleDestinations).values({ vehicleId: existing.id, routeId: destination.id, destinationMasterId: destination.destinationMasterId || null, createdByUserId: user.id }).onConflictDoNothing();
             }
           }
+          if (entityType === "vehicle" && requestedAlternativeDriverIds.length) {
+            const altIds = await validateAlternativeDriverIds({ school, vehicleId: existing.id, primaryDriverId: existing.driverId, ownerId: existing.ownerId, ownershipType: existing.ownershipType, alternativeDriverIds: requestedAlternativeDriverIds });
+            const active = await db.select().from(transportVehicleAlternativeDrivers).where(and(eq(transportVehicleAlternativeDrivers.vehicleId, existing.id), isNull(transportVehicleAlternativeDrivers.effectiveTo)));
+            const activeIds = new Set(active.map((row:any)=>Number(row.driverId)));
+            for (const driverId of altIds) if (!activeIds.has(driverId)) await db.insert(transportVehicleAlternativeDrivers).values({ vehicleId: existing.id, driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+          }
           await writeAudit(db, school.id, user.id, entityType, existing.id, "associate_school", null, existing, `Existing organisation ${entityType} associated with ${school.name}`);
           return res.status(200).json({ ...existing, associatedExisting: true });
         }
@@ -1460,6 +1648,14 @@ function registerMasterCrud(
         }
         if (entityType === "vehicle" && row.driverId) {
           await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId: row.id, driverId: row.driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+        }
+        if (entityType === "vehicle" && row.driverId) {
+          await tx.update(transportVehicles).set({ currentOperatingDriverId: row.driverId }).where(eq(transportVehicles.id, row.id));
+          await tx.insert(transportVehicleOperatingDriverHistory).values({ schoolId: school.id, vehicleId: row.id, driverId: row.driverId, operatingMode: "primary", effectiveFrom: new Date(`${effectiveDate}T00:00:00Z`), reason: changeReason, createdByUserId: user.id });
+        }
+        if (entityType === "vehicle" && requestedAlternativeDriverIds.length) {
+          const altIds = await validateAlternativeDriverIds({ school, vehicleId: row.id, primaryDriverId: row.driverId, ownerId: row.ownerId, ownershipType: row.ownershipType, alternativeDriverIds: requestedAlternativeDriverIds });
+          await tx.insert(transportVehicleAlternativeDrivers).values(altIds.map((driverId) => ({ vehicleId: row.id, driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id })));
         }
         if (entityType === "driver") {
           await tx.insert(transportDriverOwnerHistory).values({ schoolId: school.id, driverId: row.id, ownerId: row.ownerId || null, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
@@ -1493,7 +1689,12 @@ function registerMasterCrud(
       const requestedDestinationIds = destinationIdsProvided
         ? Array.from(new Set(req.body.destinationIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
         : [];
+      const alternativeDriverIdsProvided = entityType === "vehicle" && Array.isArray(req.body?.alternativeDriverIds);
+      const requestedAlternativeDriverIds = alternativeDriverIdsProvided
+        ? Array.from(new Set(req.body.alternativeDriverIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        : [];
       const partial: any = clean(schema.partial().parse(req.body));
+      if (entityType === "vehicle") delete partial.alternativeDriverIds;
       const effectiveVehicleStatus = String(partial.status || previous.status || "active");
       if (entityType === "vehicle" && destinationIdsProvided && effectiveVehicleStatus === "active" && requestedDestinationIds.length === 0) {
         throw Object.assign(new Error("Select at least one Destination before saving an active Transport vehicle."), { status: 400 });
@@ -1529,6 +1730,22 @@ function registerMasterCrud(
           await tx.update(transportVehicleDriverHistory).set({ effectiveTo: previousDay(effectiveDate) })
             .where(and(eq(transportVehicleDriverHistory.vehicleId, id), isNull(transportVehicleDriverHistory.effectiveTo)));
           if (row.driverId) await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId: id, driverId: row.driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
+        }
+        if (entityType === "vehicle" && Number(row.driverId || 0) !== Number(previous.driverId || 0) && row.driverId) {
+          const [activeCover] = await tx.select().from(transportVehicleOperatingDriverHistory).where(and(eq(transportVehicleOperatingDriverHistory.vehicleId, id), eq(transportVehicleOperatingDriverHistory.operatingMode, "alternative"), isNull(transportVehicleOperatingDriverHistory.effectiveTo))).limit(1);
+          if (!activeCover) {
+            await tx.update(transportVehicleOperatingDriverHistory).set({ effectiveTo: new Date(`${effectiveDate}T00:00:00Z`) }).where(and(eq(transportVehicleOperatingDriverHistory.vehicleId, id), isNull(transportVehicleOperatingDriverHistory.effectiveTo)));
+            await tx.insert(transportVehicleOperatingDriverHistory).values({ schoolId: school.id, vehicleId: id, driverId: row.driverId, operatingMode: "primary", effectiveFrom: new Date(`${effectiveDate}T00:00:00Z`), reason: changeReason, createdByUserId: user.id });
+            await tx.update(transportVehicles).set({ currentOperatingDriverId: row.driverId }).where(eq(transportVehicles.id, id));
+          }
+        }
+        if (entityType === "vehicle" && alternativeDriverIdsProvided) {
+          const altIds = await validateAlternativeDriverIds({ school, vehicleId: id, primaryDriverId: row.driverId, ownerId: row.ownerId, ownershipType: row.ownershipType, alternativeDriverIds: requestedAlternativeDriverIds });
+          const activeRows = await tx.select().from(transportVehicleAlternativeDrivers).where(and(eq(transportVehicleAlternativeDrivers.vehicleId, id), isNull(transportVehicleAlternativeDrivers.effectiveTo)));
+          const requested = new Set(altIds);
+          for (const alt of activeRows) if (!requested.has(Number(alt.driverId))) await tx.update(transportVehicleAlternativeDrivers).set({ effectiveTo: previousDay(effectiveDate), reason: changeReason }).where(eq(transportVehicleAlternativeDrivers.id, alt.id));
+          const activeIds = new Set(activeRows.map((row:any)=>Number(row.driverId)));
+          for (const driverId of altIds) if (!activeIds.has(driverId)) await tx.insert(transportVehicleAlternativeDrivers).values({ vehicleId: id, driverId, effectiveFrom: effectiveDate, reason: changeReason, createdByUserId: user.id });
         }
         if (entityType === "driver" && Number(row.ownerId || 0) !== Number(previous.ownerId || 0)) {
           await tx.update(transportDriverOwnerHistory).set({ effectiveTo: previousDay(effectiveDate) })
@@ -1725,6 +1942,9 @@ async function saveSchoolClaim(school: SchoolRow, userId: number, serviceYear: n
   const existing = existingRows[0] || null;
   if (existing && existing.status !== "draft") throw Object.assign(new Error(`Claim ${existing.claimNumber} is already ${existing.status} and is frozen. Only Draft claims can be recalculated.`), { status: 409 });
   const computed = await computeSchoolClaim(school, vehicleId, serviceYear, serviceMonth, existing?.id || null);
+  const claimEffectiveDate = monthEndDate(serviceYear, serviceMonth);
+  const claimOwnerId = await effectiveVehicleOwnerId(computed.vehicle, claimEffectiveDate);
+  const claimDriverId = await effectivePrimaryDriverId(computed.vehicle, claimEffectiveDate);
   if (computed.gross <= 0 && computed.providerAdditions <= 0) {
     const reasonSummary = computed.excluded.length ? Array.from(new Set(computed.excluded.map((row) => row.reason))).join("; ") : "No eligible payment allocations were found";
     throw Object.assign(new Error(`No claimable amount exists for ${computed.vehicle.registrationNumber}. ${reasonSummary}.`), { status: 409, preview: computed });
@@ -1735,9 +1955,9 @@ async function saveSchoolClaim(school: SchoolRow, userId: number, serviceYear: n
       await tx.delete(transportClaimAllocations).where(eq(transportClaimAllocations.claimId, existing.id));
       await tx.delete(transportClaimDeductions).where(eq(transportClaimDeductions.claimId, existing.id));
       await tx.update(transportProviderAdjustments).set({ status: "pending", claimId: null }).where(eq(transportProviderAdjustments.claimId, existing.id));
-      [row] = await tx.update(transportClaims).set({ ownerId: computed.vehicle.ownerId, driverId: computed.vehicle.driverId, currentPeriodAmount: String(computed.currentPeriodAmount), priorPeriodAmount: String(computed.priorPeriodAmount), grossAmount: String(computed.gross), deductionAmount: String(computed.deductionAmount), netAmount: String(computed.net), notes: notes ?? existing.notes, preparedByUserId: userId }).where(eq(transportClaims.id, existing.id)).returning();
+      [row] = await tx.update(transportClaims).set({ ownerId: claimOwnerId, driverId: claimDriverId, currentPeriodAmount: String(computed.currentPeriodAmount), priorPeriodAmount: String(computed.priorPeriodAmount), grossAmount: String(computed.gross), deductionAmount: String(computed.deductionAmount), netAmount: String(computed.net), notes: notes ?? existing.notes, preparedByUserId: userId }).where(eq(transportClaims.id, existing.id)).returning();
     } else {
-      [row] = await tx.insert(transportClaims).values({ schoolId: school.id, vehicleId, ownerId: computed.vehicle.ownerId, driverId: computed.vehicle.driverId, claimNumber: numberCode("CLM", school.shortCode, Date.now().toString().slice(-6)), serviceYear, serviceMonth, currentPeriodAmount: String(computed.currentPeriodAmount), priorPeriodAmount: String(computed.priorPeriodAmount), grossAmount: String(computed.gross), deductionAmount: String(computed.deductionAmount), netAmount: String(computed.net), notes, preparedByUserId: userId }).returning();
+      [row] = await tx.insert(transportClaims).values({ schoolId: school.id, vehicleId, ownerId: claimOwnerId, driverId: claimDriverId, claimNumber: numberCode("CLM", school.shortCode, Date.now().toString().slice(-6)), serviceYear, serviceMonth, currentPeriodAmount: String(computed.currentPeriodAmount), priorPeriodAmount: String(computed.priorPeriodAmount), grossAmount: String(computed.gross), deductionAmount: String(computed.deductionAmount), netAmount: String(computed.net), notes, preparedByUserId: userId }).returning();
     }
     for (const candidate of computed.candidates) await tx.insert(transportClaimAllocations).values({ claimId: row.id, allocationId: Number(candidate.id), amount: String(candidate.amount) });
     for (const deduction of computed.deductions) await tx.insert(transportClaimDeductions).values({ claimId: row.id, deductionType: deduction.type, sourceId: deduction.sourceId, description: deduction.description, amount: String(deduction.amount), priority: deduction.priority });
@@ -1768,7 +1988,10 @@ export function registerTransportRoutes(app: Express) {
       const schoolId = school.id;
       const orgSchoolIds = await organizationSchoolIds(school);
       await ensureTransportScopeFoundation(school, userOf(req)?.id || null);
+      await reconcileVehicleEffectiveRelationships(schoolId);
+      await applyDueVehicleReplacements(schoolId);
       await reconcileTransportAssignmentDates(schoolId);
+      await reconcileArrearsSeatReleases(schoolId);
       const settings = await getOrCreateSettings(schoolId);
       const destinationMasters = school.organizationId ? await db.select().from(transportDestinationMasters).where(and(eq(transportDestinationMasters.organizationId, school.organizationId), eq(transportDestinationMasters.isActive, true))).orderBy(asc(transportDestinationMasters.name)) : [];
       const [
@@ -1785,7 +2008,6 @@ export function registerTransportRoutes(app: Express) {
         staffRows,
         assignmentsResult,
         paymentsResult,
-        plans,
         refunds,
         cashups,
         subscriptions,
@@ -1815,6 +2037,7 @@ export function registerTransportRoutes(app: Express) {
             a.student_id AS "studentId", a.route_id AS "routeId", a.service_type AS "serviceType",
             a.start_date AS "startDate", a.end_date AS "endDate", a.is_active AS "isActive",
             a.service_state AS "serviceState", a.financial_status AS "financialStatus", a.planning_status AS "planningStatus",
+            a.seat_reserved_until AS "seatReservedUntil", a.suspension_reason AS "suspensionReason", a.seat_released_at AS "seatReleasedAt",
             a.agreed_fee AS "agreedFee", a.base_monthly_fee AS "fullFee", a.vehicle_id AS "vehicleId", a.outbound_vehicle_id AS "outboundVehicleId",
             a.driver_id AS "driverId", a.pickup_service_point_id AS "pickupServicePointId", a.dropoff_service_point_id AS "dropoffServicePointId",
             s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className",
@@ -1862,7 +2085,6 @@ export function registerTransportRoutes(app: Express) {
           GROUP BY p.id,s.id,ca.claim_id,cl.claim_number,po.payout_number,cp.cashup_id,cu.status
           ORDER BY p.created_at DESC LIMIT 500
         `),
-        db.select().from(transportPaymentPlans).where(eq(transportPaymentPlans.schoolId, schoolId)).orderBy(desc(transportPaymentPlans.createdAt)),
         db.select().from(transportRefunds).where(eq(transportRefunds.schoolId, schoolId)).orderBy(desc(transportRefunds.createdAt)),
         db.select().from(transportCashups).where(eq(transportCashups.schoolId, schoolId)).orderBy(desc(transportCashups.cashupDate)),
         db.select().from(transportSubscriptionRules).where(eq(transportSubscriptionRules.schoolId, schoolId)).orderBy(desc(transportSubscriptionRules.effectiveFrom)),
@@ -1900,12 +2122,14 @@ export function registerTransportRoutes(app: Express) {
             SELECT student_id, COALESCE(SUM(amount),0) AS external_refunds_paid
             FROM transport_refunds WHERE school_id=${schoolId} AND status='paid' AND method <> 'credit' GROUP BY student_id
           ), current_assignment AS (
-            SELECT DISTINCT ON (student_id) student_id, id AS assignment_id, route_id, vehicle_id, service_state, financial_status, start_date, end_date
+            SELECT DISTINCT ON (student_id) student_id, id AS assignment_id, route_id, vehicle_id, service_state, financial_status, start_date, end_date,
+                   seat_reserved_until, suspension_reason, seat_released_at, is_active
             FROM transport_assignments WHERE school_id=${schoolId}
             ORDER BY student_id, is_active DESC, start_date DESC, id DESC
           )
           SELECT s.id AS "studentId", s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className",
                  ca.assignment_id AS "assignmentId", ca.service_state AS "serviceState", ca.financial_status AS "financialStatus", ca.start_date AS "startDate", ca.end_date AS "endDate",
+                 ca.seat_reserved_until AS "seatReservedUntil", ca.suspension_reason AS "suspensionReason", ca.seat_released_at AS "seatReleasedAt", ca.is_active AS "isActive",
                  r.name AS "destinationName", v.registration_number AS "vehicleRegistration",
                  COALESCE(ct.charges,0)::text AS charges, COALESCE(at.adjustments,0)::text AS adjustments, COALESCE(pt.received,0)::text AS received,
                  COALESCE(rt.external_refunds_paid,0)::text AS "externalRefundsPaid",
@@ -1924,10 +2148,18 @@ export function registerTransportRoutes(app: Express) {
         `),
       ]);
 
-      const [vehicleSchoolLinks, driverSchoolLinks, ownerSchoolLinks] = await Promise.all([
+      const [vehicleSchoolLinks, organizationVehicleSchoolLinks, driverSchoolLinks, ownerSchoolLinks, alternativeDriverLinks, operatingDriverHistory, vehicleReplacementHistory, organizationSettings] = await Promise.all([
         db.select().from(transportVehicleSchools).where(and(eq(transportVehicleSchools.schoolId, schoolId), eq(transportVehicleSchools.isActive, true))),
+        db.select().from(transportVehicleSchools).where(and(inArray(transportVehicleSchools.schoolId, orgSchoolIds), eq(transportVehicleSchools.isActive, true))),
         db.select().from(transportDriverSchools).where(and(eq(transportDriverSchools.schoolId, schoolId), eq(transportDriverSchools.isActive, true))),
         db.select().from(transportOwnerSchools).where(and(eq(transportOwnerSchools.schoolId, schoolId), eq(transportOwnerSchools.isActive, true))),
+        db.select().from(transportVehicleAlternativeDrivers).where(and(
+          lte(transportVehicleAlternativeDrivers.effectiveFrom, isoDate(new Date())),
+          or(isNull(transportVehicleAlternativeDrivers.effectiveTo), gte(transportVehicleAlternativeDrivers.effectiveTo, isoDate(new Date()))),
+        )),
+        db.select().from(transportVehicleOperatingDriverHistory).where(eq(transportVehicleOperatingDriverHistory.schoolId, schoolId)).orderBy(desc(transportVehicleOperatingDriverHistory.effectiveFrom)),
+        db.select().from(transportVehicleReplacements).where(eq(transportVehicleReplacements.schoolId, schoolId)).orderBy(desc(transportVehicleReplacements.effectiveFrom)),
+        school.organizationId ? getOrCreateOrganizationTransportSettings(school.organizationId) : Promise.resolve(null),
       ]);
       const associatedVehicleIds = new Set(vehicleSchoolLinks.map((row: any) => Number(row.vehicleId)));
       const associatedDriverIds = new Set(driverSchoolLinks.map((row: any) => Number(row.driverId)));
@@ -1950,9 +2182,13 @@ export function registerTransportRoutes(app: Express) {
             .where(inArray(fleetVehicleProfiles.transportVehicleId, allVehicles.map((vehicle) => vehicle.id)))
         : [];
       const fleetLinkByTransportVehicle = new Map(fleetLinks.filter((link) => link.transportVehicleId != null).map((link) => [Number(link.transportVehicleId), link]));
+      const driverByIdForVehicle = new Map(allDrivers.map((driver:any)=>[Number(driver.id),driver]));
+      const alternativesByVehicle = new Map<number, any[]>();
+      for (const link of alternativeDriverLinks as any[]) { const driver=driverByIdForVehicle.get(Number(link.driverId)); if (!driver) continue; const bucket=alternativesByVehicle.get(Number(link.vehicleId))||[]; bucket.push(driver); alternativesByVehicle.set(Number(link.vehicleId),bucket); }
       const transportVehiclesWithSource = allVehicles.map((vehicle) => {
         const link = fleetLinkByTransportVehicle.get(vehicle.id);
-        return { ...vehicle, sourceType: link ? "fcgs_asset" : "transport_only", fleetVehicleId: link?.fleetVehicleId ?? null, assetId: link?.assetId ?? null, assetNumber: link?.assetNumber ?? null, assetName: link?.assetName ?? null };
+        const operatingDriver = driverByIdForVehicle.get(Number(vehicle.currentOperatingDriverId || vehicle.driverId || 0)) || null;
+        return { ...vehicle, sourceType: link ? "fcgs_asset" : "transport_only", fleetVehicleId: link?.fleetVehicleId ?? null, assetId: link?.assetId ?? null, assetNumber: link?.assetNumber ?? null, assetName: link?.assetName ?? null, alternativeDrivers: alternativesByVehicle.get(Number(vehicle.id)) || [], alternativeDriverIds: (alternativesByVehicle.get(Number(vehicle.id)) || []).map((driver:any)=>driver.id), currentOperatingDriver: operatingDriver };
       });
 
       const [assignmentPointRefs, fleetPointRefs, orgSchoolRows] = await Promise.all([
@@ -2100,6 +2336,39 @@ export function registerTransportRoutes(app: Express) {
         return account ? { ...row, charged: account.charges, adjustments: account.adjustments, paid: account.received, balance: account.balance } : row;
       });
 
+      const arrearsSnapshotResult = await db.execute(sql`
+        WITH allocated AS (
+          SELECT pa.charge_id, SUM(pa.amount)::numeric AS allocated
+          FROM transport_payment_allocations pa
+          JOIN transport_payments p ON p.id=pa.payment_id
+          WHERE p.school_id=${schoolId} AND p.reversed_at IS NULL
+          GROUP BY pa.charge_id
+        ), charge_balances AS (
+          SELECT c.student_id, c.academic_year, c.month,
+                 COALESCE(c.service_period_end,(date_trunc('month',make_date(c.academic_year,GREATEST(c.month,1),1))+interval '1 month - 1 day')::date) AS period_end,
+                 GREATEST(0,c.amount-COALESCE(a.allocated,0))::numeric AS outstanding
+          FROM transport_charges c
+          LEFT JOIN allocated a ON a.charge_id=c.id
+          WHERE c.school_id=${schoolId} AND c.status NOT IN ('cancelled','void')
+        ), credit_totals AS (
+          SELECT student_id,
+                 GREATEST(0,COALESCE(SUM(CASE WHEN direction='credit' THEN amount ELSE -amount END),0))::numeric AS credits
+          FROM transport_account_adjustments
+          WHERE school_id=${schoolId} AND status='approved' AND effective_date < date_trunc('month',CURRENT_DATE)::date
+          GROUP BY student_id
+        )
+        SELECT cb.student_id AS "studentId",
+               GREATEST(0,COALESCE(SUM(cb.outstanding) FILTER (WHERE cb.period_end < date_trunc('month',CURRENT_DATE)::date),0)-COALESCE(ct.credits,0))::text AS "qualifyingArrears",
+               MIN(make_date(cb.academic_year,GREATEST(cb.month,1),1)) FILTER (WHERE cb.period_end < date_trunc('month',CURRENT_DATE)::date AND cb.outstanding>0)::text AS "oldestOverdueMonth",
+               COALESCE(SUM(cb.outstanding) FILTER (WHERE cb.period_end >= date_trunc('month',CURRENT_DATE)::date AND cb.period_end < (date_trunc('month',CURRENT_DATE)+interval '1 month')::date),0)::text AS "currentMonthOutstanding"
+        FROM charge_balances cb
+        LEFT JOIN credit_totals ct ON ct.student_id=cb.student_id
+        GROUP BY cb.student_id,ct.credits
+      `);
+      const arrearsByStudent = new Map((arrearsSnapshotResult.rows as any[]).map((row:any)=>[Number(row.studentId),row]));
+      const assignmentsWithArrears = assignmentsWithLedger.map((row:any) => ({ ...row, ...(arrearsByStudent.get(Number(row.studentId)) || { qualifyingArrears:"0", oldestOverdueMonth:null, currentMonthOutstanding:"0" }) }));
+      const learnerAccountsWithArrears = (learnerAccountsResult.rows as any[]).map((row:any) => ({ ...row, ...(arrearsByStudent.get(Number(row.studentId)) || { qualifyingArrears:"0", oldestOverdueMonth:null, currentMonthOutstanding:"0" }) }));
+
       const totalsResult = await db.execute(sql`
         SELECT
           (SELECT COUNT(*) FROM transport_assignments WHERE school_id=${schoolId} AND is_active=true)::int AS active_learners,
@@ -2160,16 +2429,17 @@ export function registerTransportRoutes(app: Express) {
         organizationRoutes: organizationRoutesWithUsage,
         destinationMasters,
         vehicleDestinations: vehicleDestinationRows,
+        vehicleSchoolAssociations: organizationVehicleSchoolLinks,
+        organizationSchools: orgSchoolRows,
         servicePoints: servicePointsWithUsage,
         paths,
         pathNodes,
         pathNodeLearners,
         students: learnerRows,
         staff: staffRows,
-        assignments: assignmentsWithLedger,
-        learnerAccounts: learnerAccountsResult.rows,
+        assignments: assignmentsWithArrears,
+        learnerAccounts: learnerAccountsWithArrears,
         payments: paymentsResult.rows,
-        paymentPlans: plans,
         refunds,
         cashups: cashups.map(schoolCashupView),
         billingRuns,
@@ -2181,7 +2451,15 @@ export function registerTransportRoutes(app: Express) {
         payouts,
         audits: auditsWithNames,
         subscriptionPolicies,
-        dashboard: totalsResult.rows[0],
+        organizationSettings,
+        operatingDriverHistory,
+        vehicleReplacementHistory,
+        dashboard: {
+          ...(totalsResult.rows[0] as any),
+          suspendedArrears: assignmentsWithArrears.filter((row:any)=>row.serviceState==="suspended_arrears").length,
+          pendingVehicleReassignment: assignmentsWithArrears.filter((row:any)=>row.serviceState==="pending_vehicle_reassignment").length,
+          atRiskNextBilling: assignmentsWithArrears.filter((row:any)=>!["suspended_arrears","pending_vehicle_reassignment","terminated","completed"].includes(String(row.serviceState || "")) && amount(row.currentMonthOutstanding) > amount(organizationSettings?.minimumArrearsSuspensionBalance)).length,
+        },
       });
     } catch (error) {
       return routeError(res, error);
@@ -2240,13 +2518,14 @@ export function registerTransportRoutes(app: Express) {
       }).from(students).leftJoin(classes, eq(classes.id, students.classId)).leftJoin(parents, eq(parents.id, students.parentId))
         .where(and(eq(students.id, studentId), eq(students.schoolId, school.id)));
       if (!learner) return res.status(404).json({ message: "Learner not found" });
-      const [summary, assignments, charges, payments, adjustments, refunds, plans] = await Promise.all([
+      const [summary, assignments, charges, payments, adjustments, refunds] = await Promise.all([
         accountSummary(studentId, school.id),
         db.execute(sql`
           SELECT a.*,
                  a.student_id AS "studentId", a.route_id AS "routeId", a.service_type AS "serviceType",
                  a.start_date AS "startDate", a.end_date AS "endDate", a.is_active AS "isActive",
                  a.service_state AS "serviceState", a.financial_status AS "financialStatus", a.planning_status AS "planningStatus",
+                 a.seat_reserved_until AS "seatReservedUntil", a.suspension_reason AS "suspensionReason", a.seat_released_at AS "seatReleasedAt",
                  a.agreed_fee AS "agreedFee", a.base_monthly_fee AS "fullFee", a.vehicle_id AS "vehicleId", a.outbound_vehicle_id AS "outboundVehicleId",
                  r.name AS "destinationName", v.registration_number AS "vehicleRegistration", ov.registration_number AS "homeboundVehicleRegistration"
           FROM transport_assignments a
@@ -2284,7 +2563,6 @@ export function registerTransportRoutes(app: Express) {
         `),
         db.select().from(transportAccountAdjustments).where(and(eq(transportAccountAdjustments.schoolId, school.id), eq(transportAccountAdjustments.studentId, studentId))).orderBy(desc(transportAccountAdjustments.effectiveDate), desc(transportAccountAdjustments.id)),
         db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), eq(transportRefunds.studentId, studentId))).orderBy(desc(transportRefunds.effectiveDate), desc(transportRefunds.id)),
-        db.select().from(transportPaymentPlans).where(and(eq(transportPaymentPlans.schoolId, school.id), eq(transportPaymentPlans.studentId, studentId))).orderBy(desc(transportPaymentPlans.createdAt)),
       ]);
       const transactions: any[] = [];
       for (const row of charges.rows as any[]) transactions.push({ kind: "charge", date: row.servicePeriodStart || `${row.academicYear}-${String(row.month).padStart(2,"0")}-01`, reference: `Charge #${row.id}`, description: row.description || `${row.destinationName || "Transport"} · ${MONTH_NAMES[Number(row.month) - 1] || row.month} ${row.academicYear}`, debit: amount(row.amount), credit: 0, record: row });
@@ -2294,7 +2572,7 @@ export function registerTransportRoutes(app: Express) {
       transactions.sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.reference).localeCompare(String(b.reference)));
       let running = 0;
       for (const line of transactions) { running = rounded(running + line.debit - line.credit); line.balance = running; }
-      return res.json({ learner, summary, assignments: assignments.rows, charges: charges.rows, payments: payments.rows, adjustments, refunds, paymentPlans: plans, transactions });
+      return res.json({ learner, summary, assignments: assignments.rows, charges: charges.rows, payments: payments.rows, adjustments, refunds, transactions });
     } catch (error) { return routeError(res, error); }
   });
 
@@ -2329,6 +2607,354 @@ export function registerTransportRoutes(app: Express) {
   registerMasterCrud(app, "/api/transport/drivers", transportDrivers, driverInput, "driver", "transport.drivers.manage", "transport.drivers.manage");
   registerMasterCrud(app, "/api/transport/vehicles", transportVehicles, vehicleInput, "vehicle", "transport.vehicles.create", "transport.vehicles.edit");
 
+
+  app.post("/api/transport/vehicles/:id/change-primary-driver", requireAuth, requireAnyPermission("transport.vehicles.edit", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const vehicleId = Number(req.params.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, vehicleId, school);
+      if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
+      const input = z.object({ driverId: z.coerce.number().int().positive(), effectiveDate: dateString, reason: z.string().trim().min(3), notes: optionalText }).parse(req.body);
+      const alternatives = await db.select().from(transportVehicleAlternativeDrivers).where(and(eq(transportVehicleAlternativeDrivers.vehicleId, vehicleId), isNull(transportVehicleAlternativeDrivers.effectiveTo)));
+      if (alternatives.some((row:any)=>Number(row.driverId)===input.driverId)) return res.status(409).json({ message: "Remove this driver from Alternative Drivers before making them the Primary Driver." });
+      const validated = await validateTransportMasterValues({ entityType: "vehicle", school, previous: vehicle, values: { ...vehicle, driverId: input.driverId } });
+      const result = await db.transaction(async (tx) => {
+        await tx.update(transportVehicleDriverHistory).set({ effectiveTo: previousDay(input.effectiveDate) }).where(and(eq(transportVehicleDriverHistory.vehicleId, vehicleId), isNull(transportVehicleDriverHistory.effectiveTo)));
+        await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId, driverId: input.driverId, effectiveFrom: input.effectiveDate, reason: input.reason, createdByUserId: user.id });
+        const [activeAlternativeCover] = await tx.select().from(transportVehicleOperatingDriverHistory).where(and(eq(transportVehicleOperatingDriverHistory.vehicleId, vehicleId), eq(transportVehicleOperatingDriverHistory.operatingMode, "alternative"), isNull(transportVehicleOperatingDriverHistory.effectiveTo))).limit(1);
+        const appliesNow = input.effectiveDate <= isoDate(new Date());
+        const updateValues:any = { updatedAt: new Date() };
+        if (appliesNow) updateValues.driverId = input.driverId;
+        if (!activeAlternativeCover) {
+          const effectiveAt = new Date(`${input.effectiveDate}T00:00:00Z`);
+          await tx.update(transportVehicleOperatingDriverHistory).set({ effectiveTo: effectiveAt }).where(and(
+            eq(transportVehicleOperatingDriverHistory.vehicleId, vehicleId),
+            lte(transportVehicleOperatingDriverHistory.effectiveFrom, effectiveAt),
+            or(isNull(transportVehicleOperatingDriverHistory.effectiveTo), gte(transportVehicleOperatingDriverHistory.effectiveTo, effectiveAt)),
+          ));
+          await tx.insert(transportVehicleOperatingDriverHistory).values({ schoolId: school.id, vehicleId, driverId: input.driverId, operatingMode: "primary", effectiveFrom: effectiveAt, reason: input.reason, notes: input.notes || null, createdByUserId: user.id });
+          if (appliesNow) updateValues.currentOperatingDriverId = input.driverId;
+        }
+        const [updated] = await tx.update(transportVehicles).set(updateValues).where(eq(transportVehicles.id, vehicleId)).returning();
+        await writeAudit(tx, school.id, user.id, "vehicle", vehicleId, "change_primary_driver", vehicle, updated, input.reason, { previousDriverId: vehicle.driverId, newDriverId: input.driverId, effectiveDate: input.effectiveDate, notes: input.notes || null });
+        return updated;
+      });
+      return res.json(result);
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.post("/api/transport/vehicles/:id/activate-alternative-driver", requireAuth, requireAnyPermission("transport.vehicles.edit", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const vehicleId = Number(req.params.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, vehicleId, school);
+      if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
+      const input = z.object({ driverId: z.coerce.number().int().positive(), effectiveAt: z.string().datetime().optional(), expectedReturnAt: z.string().datetime().optional().nullable(), reason: z.string().trim().min(3), notes: optionalText }).parse(req.body);
+      const [alternative] = await db.select().from(transportVehicleAlternativeDrivers).where(and(eq(transportVehicleAlternativeDrivers.vehicleId, vehicleId), eq(transportVehicleAlternativeDrivers.driverId, input.driverId), isNull(transportVehicleAlternativeDrivers.effectiveTo))).limit(1);
+      if (!alternative) return res.status(409).json({ message: "The selected driver is not an active Alternative Driver for this vehicle." });
+      const [otherOperating] = await db.select().from(transportVehicleOperatingDriverHistory).where(and(eq(transportVehicleOperatingDriverHistory.driverId, input.driverId), eq(transportVehicleOperatingDriverHistory.operatingMode, "alternative"), isNull(transportVehicleOperatingDriverHistory.effectiveTo), ne(transportVehicleOperatingDriverHistory.vehicleId, vehicleId))).limit(1);
+      if (otherOperating) {
+        const [otherVehicle] = await db.select().from(transportVehicles).where(eq(transportVehicles.id, otherOperating.vehicleId)).limit(1);
+        return res.status(409).json({ message: `This Alternative Driver is currently operating ${otherVehicle?.registrationNumber || `vehicle #${otherOperating.vehicleId}`}. End that cover before activating another vehicle.` });
+      }
+      const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
+      const [driver] = await db.select().from(transportDrivers).where(eq(transportDrivers.id, input.driverId)).limit(1);
+      if (!driver?.isActive) return res.status(409).json({ message: "The selected Alternative Driver is inactive." });
+      const result = await db.transaction(async (tx) => {
+        await tx.update(transportVehicleOperatingDriverHistory).set({ effectiveTo: effectiveAt }).where(and(eq(transportVehicleOperatingDriverHistory.vehicleId, vehicleId), isNull(transportVehicleOperatingDriverHistory.effectiveTo)));
+        const [history] = await tx.insert(transportVehicleOperatingDriverHistory).values({ schoolId: school.id, vehicleId, driverId: input.driverId, operatingMode: "alternative", effectiveFrom: effectiveAt, expectedReturnAt: input.expectedReturnAt ? new Date(input.expectedReturnAt) : null, reason: input.reason, notes: input.notes || null, createdByUserId: user.id }).returning();
+        const [updated] = await tx.update(transportVehicles).set({ currentOperatingDriverId: input.driverId, updatedAt: new Date() }).where(eq(transportVehicles.id, vehicleId)).returning();
+        await writeAudit(tx, school.id, user.id, "vehicle", vehicleId, "activate_alternative_driver", vehicle, updated, input.reason, { operatingHistoryId: history.id, alternativeDriverId: input.driverId, effectiveAt: effectiveAt.toISOString(), expectedReturnAt: input.expectedReturnAt || null });
+        return updated;
+      });
+      return res.json(result);
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.post("/api/transport/vehicles/:id/return-primary-driver", requireAuth, requireAnyPermission("transport.vehicles.edit", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const vehicleId = Number(req.params.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, vehicleId, school);
+      if (!vehicle?.driverId) return res.status(409).json({ message: "This vehicle has no Primary Driver to return to service." });
+      const input = z.object({ effectiveAt: z.string().datetime().optional(), reason: z.string().trim().min(3).default("Primary Driver returned to service"), notes: optionalText }).parse(req.body || {});
+      const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
+      const result = await db.transaction(async (tx) => {
+        await tx.update(transportVehicleOperatingDriverHistory).set({ effectiveTo: effectiveAt }).where(and(eq(transportVehicleOperatingDriverHistory.vehicleId, vehicleId), isNull(transportVehicleOperatingDriverHistory.effectiveTo)));
+        await tx.insert(transportVehicleOperatingDriverHistory).values({ schoolId: school.id, vehicleId, driverId: vehicle.driverId!, operatingMode: "primary", effectiveFrom: effectiveAt, reason: input.reason, notes: input.notes || null, createdByUserId: user.id });
+        const [updated] = await tx.update(transportVehicles).set({ currentOperatingDriverId: vehicle.driverId, updatedAt: new Date() }).where(eq(transportVehicles.id, vehicleId)).returning();
+        await writeAudit(tx, school.id, user.id, "vehicle", vehicleId, "return_primary_driver", vehicle, updated, input.reason, { effectiveAt: effectiveAt.toISOString() });
+        return updated;
+      });
+      return res.json(result);
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.post("/api/transport/vehicles/:id/change-owner", requireAuth, requireAnyPermission("transport.vehicles.edit", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const vehicleId = Number(req.params.id);
+      const vehicle = await assertOrganizationRecord(transportVehicles, vehicleId, school);
+      if (!vehicle) return res.status(404).json({ message: "Vehicle not found" });
+      const input = z.object({ ownershipType: z.enum(["school","staff","contracted"]), ownerId: nullablePositiveInt, primaryDriverId: nullablePositiveInt, alternativeDriverIds: z.array(z.coerce.number().int().positive()).default([]), effectiveDate: dateString, reason: z.string().trim().min(3) }).parse(req.body);
+      const candidate:any = { ...vehicle, ownershipType: input.ownershipType, ownerId: input.ownerId, driverId: input.primaryDriverId };
+      const validated = await validateTransportMasterValues({ entityType: "vehicle", school, previous: vehicle, values: candidate });
+      const altIds = await validateAlternativeDriverIds({ school, vehicleId, primaryDriverId: input.primaryDriverId, ownerId: validated.ownerId, ownershipType: validated.ownershipType, alternativeDriverIds: input.alternativeDriverIds });
+      const result = await db.transaction(async (tx) => {
+        await tx.update(transportVehicleOwnerHistory).set({ effectiveTo: previousDay(input.effectiveDate) }).where(and(eq(transportVehicleOwnerHistory.vehicleId, vehicleId), isNull(transportVehicleOwnerHistory.effectiveTo)));
+        if (validated.ownerId) await tx.insert(transportVehicleOwnerHistory).values({ schoolId: school.id, vehicleId, ownerId: validated.ownerId, effectiveFrom: input.effectiveDate, reason: input.reason, createdByUserId: user.id });
+        if (Number(vehicle.driverId || 0) !== Number(input.primaryDriverId || 0)) {
+          await tx.update(transportVehicleDriverHistory).set({ effectiveTo: previousDay(input.effectiveDate) }).where(and(eq(transportVehicleDriverHistory.vehicleId, vehicleId), isNull(transportVehicleDriverHistory.effectiveTo)));
+          if (input.primaryDriverId) await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId, driverId: input.primaryDriverId, effectiveFrom: input.effectiveDate, reason: input.reason, createdByUserId: user.id });
+        }
+        await tx.update(transportVehicleAlternativeDrivers).set({ effectiveTo: previousDay(input.effectiveDate), reason: input.reason }).where(and(eq(transportVehicleAlternativeDrivers.vehicleId, vehicleId), isNull(transportVehicleAlternativeDrivers.effectiveTo)));
+        if (altIds.length) await tx.insert(transportVehicleAlternativeDrivers).values(altIds.map((driverId)=>({ vehicleId, driverId, effectiveFrom: input.effectiveDate, reason: input.reason, createdByUserId: user.id })));
+        const appliesNow = input.effectiveDate <= isoDate(new Date());
+        const vehicleChanges:any = { updatedAt: new Date() };
+        if (appliesNow) {
+          vehicleChanges.ownershipType = validated.ownershipType;
+          vehicleChanges.ownerId = validated.ownerId || null;
+          vehicleChanges.driverId = input.primaryDriverId || null;
+          vehicleChanges.currentOperatingDriverId = input.primaryDriverId || null;
+        }
+        const [updated] = await tx.update(transportVehicles).set(vehicleChanges).where(eq(transportVehicles.id, vehicleId)).returning();
+        const effectiveAt = new Date(`${input.effectiveDate}T00:00:00Z`);
+        await tx.update(transportVehicleOperatingDriverHistory).set({ effectiveTo: effectiveAt }).where(and(
+          eq(transportVehicleOperatingDriverHistory.vehicleId, vehicleId),
+          lte(transportVehicleOperatingDriverHistory.effectiveFrom, effectiveAt),
+          or(isNull(transportVehicleOperatingDriverHistory.effectiveTo), gte(transportVehicleOperatingDriverHistory.effectiveTo, effectiveAt)),
+        ));
+        if (input.primaryDriverId) await tx.insert(transportVehicleOperatingDriverHistory).values({ schoolId: school.id, vehicleId, driverId: input.primaryDriverId, operatingMode: "primary", effectiveFrom: effectiveAt, reason: input.reason, createdByUserId: user.id });
+        await writeAudit(tx, school.id, user.id, "vehicle", vehicleId, "change_owner", vehicle, updated, input.reason, { effectiveDate: input.effectiveDate, alternativeDriverIds: altIds });
+        return updated;
+      });
+      return res.json(result);
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.post("/api/transport/vehicles/:id/replace", requireAuth, requireAnyPermission("transport.vehicles.edit", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const originalVehicleId = Number(req.params.id);
+      const original = await assertOrganizationRecord(transportVehicles, originalVehicleId, school);
+      if (!original) return res.status(404).json({ message: "Vehicle not found" });
+      const input = z.object({
+        replacementVehicleId: z.coerce.number().int().positive(),
+        replacementType: z.enum(["temporary","permanent"]),
+        effectiveAt: z.string().datetime().optional(),
+        expectedReturnAt: z.string().datetime().optional().nullable(),
+        reason: z.string().trim().min(3),
+        notes: optionalText,
+        schoolIds: z.array(z.coerce.number().int().positive()).optional(),
+        carryDestinations: z.boolean().default(true),
+        carryOwner: z.boolean().default(false),
+        carryPrimaryDriver: z.boolean().default(false),
+        carryAlternativeDrivers: z.boolean().default(false),
+      }).parse(req.body);
+      if (input.replacementVehicleId === originalVehicleId) return res.status(409).json({ message: "Choose a different replacement vehicle." });
+      const replacement = await assertOrganizationRecord(transportVehicles, input.replacementVehicleId, school);
+      if (!replacement || !replacement.isActive) return res.status(409).json({ message: "Replacement vehicle is unavailable." });
+      const orgSchoolIds = await organizationSchoolIds(school);
+      const originalLinks = await db.select().from(transportVehicleSchools).where(and(
+        eq(transportVehicleSchools.vehicleId, originalVehicleId),
+        eq(transportVehicleSchools.isActive, true),
+        inArray(transportVehicleSchools.schoolId, orgSchoolIds),
+      ));
+      const linkedSchoolIds = new Set(originalLinks.map((row:any)=>Number(row.schoolId)));
+      const schoolIds = Array.from(new Set((input.schoolIds?.length ? input.schoolIds : [school.id]).map(Number)))
+        .filter((id)=>orgSchoolIds.includes(id) && linkedSchoolIds.has(id));
+      if (!schoolIds.length) return res.status(400).json({ message: "Select at least one school currently associated with the original vehicle." });
+
+      const affected = await db.select().from(transportAssignments).where(and(
+        inArray(transportAssignments.schoolId, schoolIds),
+        eq(transportAssignments.isActive, true),
+        or(eq(transportAssignments.vehicleId, originalVehicleId), eq(transportAssignments.outboundVehicleId, originalVehicleId)),
+      ));
+      const affectedStudents = new Set(affected.map((row:any)=>Number(row.studentId)));
+      if (affectedStudents.size > Number(replacement.capacity || 0)) {
+        return res.status(409).json({ message: `Replacement vehicle capacity is ${replacement.capacity}, but ${affectedStudents.size} active learner(s) would move to it.` });
+      }
+      const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
+      if (Number.isNaN(effectiveAt.getTime())) return res.status(400).json({ message: "Invalid replacement effective date/time." });
+      const appliesNow = effectiveAt.getTime() <= Date.now();
+
+      const result = await db.transaction(async (tx) => {
+        for (const sid of schoolIds) await ensureMasterAssociation("vehicle", replacement.id, sid, user.id);
+
+        if (input.carryDestinations) {
+          const destinationRows = await tx.select().from(transportVehicleDestinations).where(eq(transportVehicleDestinations.vehicleId, originalVehicleId));
+          for (const destination of destinationRows) {
+            await tx.insert(transportVehicleDestinations).values({
+              vehicleId: replacement.id,
+              routeId: destination.routeId,
+              destinationMasterId: destination.destinationMasterId || null,
+              createdByUserId: user.id,
+            }).onConflictDoNothing();
+          }
+        }
+
+        if (input.carryOwner || input.carryPrimaryDriver || input.carryAlternativeDrivers) {
+          const replacementCandidate:any = {
+            ...replacement,
+            ownershipType: input.carryOwner ? original.ownershipType : replacement.ownershipType,
+            ownerId: input.carryOwner ? original.ownerId : replacement.ownerId,
+            driverId: input.carryPrimaryDriver ? original.driverId : replacement.driverId,
+          };
+          const validated = await validateTransportMasterValues({ entityType: "vehicle", school, previous: replacement, values: replacementCandidate });
+          const altIds = input.carryAlternativeDrivers
+            ? (await tx.select().from(transportVehicleAlternativeDrivers).where(and(
+                eq(transportVehicleAlternativeDrivers.vehicleId, originalVehicleId),
+                lte(transportVehicleAlternativeDrivers.effectiveFrom, isoDate(effectiveAt)),
+                or(isNull(transportVehicleAlternativeDrivers.effectiveTo), gte(transportVehicleAlternativeDrivers.effectiveTo, isoDate(effectiveAt))),
+              ))).map((row:any)=>Number(row.driverId))
+            : (await tx.select().from(transportVehicleAlternativeDrivers).where(and(
+                eq(transportVehicleAlternativeDrivers.vehicleId, replacement.id),
+                lte(transportVehicleAlternativeDrivers.effectiveFrom, isoDate(effectiveAt)),
+                or(isNull(transportVehicleAlternativeDrivers.effectiveTo), gte(transportVehicleAlternativeDrivers.effectiveTo, isoDate(effectiveAt))),
+              ))).map((row:any)=>Number(row.driverId));
+          await validateAlternativeDriverIds({
+            school,
+            vehicleId: replacement.id,
+            primaryDriverId: validated.driverId || null,
+            ownerId: validated.ownerId || null,
+            ownershipType: validated.ownershipType,
+            alternativeDriverIds: altIds,
+          });
+          if (input.carryOwner && original.ownerId) {
+            await tx.update(transportVehicleOwnerHistory).set({ effectiveTo: previousDay(isoDate(effectiveAt)) }).where(and(eq(transportVehicleOwnerHistory.vehicleId, replacement.id), isNull(transportVehicleOwnerHistory.effectiveTo)));
+            await tx.insert(transportVehicleOwnerHistory).values({ schoolId: school.id, vehicleId: replacement.id, ownerId: original.ownerId, effectiveFrom: isoDate(effectiveAt), reason: input.reason, createdByUserId: user.id });
+          }
+          if (input.carryPrimaryDriver && original.driverId) {
+            await tx.update(transportVehicleDriverHistory).set({ effectiveTo: previousDay(isoDate(effectiveAt)) }).where(and(eq(transportVehicleDriverHistory.vehicleId, replacement.id), isNull(transportVehicleDriverHistory.effectiveTo)));
+            await tx.insert(transportVehicleDriverHistory).values({ schoolId: school.id, vehicleId: replacement.id, driverId: original.driverId, effectiveFrom: isoDate(effectiveAt), reason: input.reason, createdByUserId: user.id });
+          }
+          if (input.carryAlternativeDrivers) {
+            await tx.update(transportVehicleAlternativeDrivers).set({ effectiveTo: previousDay(isoDate(effectiveAt)), reason: input.reason }).where(and(eq(transportVehicleAlternativeDrivers.vehicleId, replacement.id), isNull(transportVehicleAlternativeDrivers.effectiveTo)));
+            if (altIds.length) await tx.insert(transportVehicleAlternativeDrivers).values(altIds.map((driverId)=>({ vehicleId: replacement.id, driverId, effectiveFrom: isoDate(effectiveAt), reason: input.reason, createdByUserId: user.id })));
+          }
+          if (appliesNow) {
+            const updateValues:any = { updatedAt: new Date() };
+            if (input.carryOwner) { updateValues.ownershipType = validated.ownershipType; updateValues.ownerId = validated.ownerId || null; }
+            if (input.carryPrimaryDriver) { updateValues.driverId = validated.driverId || null; updateValues.currentOperatingDriverId = validated.driverId || null; }
+            await tx.update(transportVehicles).set(updateValues).where(eq(transportVehicles.id, replacement.id));
+          }
+        }
+
+        const replacementRecords:any[] = [];
+        for (const sid of schoolIds) {
+          const [record] = await tx.insert(transportVehicleReplacements).values({
+            schoolId: sid,
+            originalVehicleId,
+            replacementVehicleId: replacement.id,
+            replacementType: input.replacementType,
+            effectiveFrom: effectiveAt,
+            expectedReturnAt: input.expectedReturnAt ? new Date(input.expectedReturnAt) : null,
+            reason: input.reason,
+            notes: input.notes || null,
+            createdByUserId: user.id,
+          }).returning();
+          replacementRecords.push(record);
+        }
+
+        let movedAssignments = 0;
+        if (appliesNow) {
+          for (const assignment of affected) {
+            const changes:any = { updatedAt: new Date() };
+            if (Number(assignment.vehicleId || 0) === originalVehicleId) changes.vehicleId = replacement.id;
+            if (Number(assignment.outboundVehicleId || 0) === originalVehicleId) changes.outboundVehicleId = replacement.id;
+            const [updatedAssignment] = await tx.update(transportAssignments).set(changes).where(eq(transportAssignments.id, assignment.id)).returning();
+            await tx.insert(transportAssignmentEvents).values({
+              schoolId: assignment.schoolId,
+              assignmentId: assignment.id,
+              eventType: input.replacementType === "temporary" ? "temporary_vehicle_replacement" : "vehicle_replaced",
+              effectiveDate: isoDate(effectiveAt),
+              previousValues: assignment,
+              newValues: updatedAssignment,
+              reason: input.reason,
+              createdByUserId: user.id,
+            });
+            movedAssignments += 1;
+          }
+        }
+        await writeAudit(tx, school.id, user.id, "vehicle", originalVehicleId, input.replacementType === "temporary" ? "temporary_replacement" : "permanent_replacement", original, replacement, input.reason, {
+          replacementRecordIds: replacementRecords.map((row:any)=>row.id),
+          replacementVehicleId: replacement.id,
+          schoolIds,
+          scheduled: !appliesNow,
+          affectedAssignmentIds: affected.map((row:any)=>row.id),
+          carryOwner: input.carryOwner,
+          carryPrimaryDriver: input.carryPrimaryDriver,
+          carryAlternativeDrivers: input.carryAlternativeDrivers,
+          carryDestinations: input.carryDestinations,
+        });
+        return { replacements: replacementRecords, affectedAssignments: movedAssignments, scheduledAssignments: appliesNow ? 0 : affected.length };
+      });
+      return res.status(201).json(result);
+    } catch (error) { return routeError(res, error); }
+  });
+
+
+  app.post("/api/transport/vehicle-replacements/:id/return-original", requireAuth, requireAnyPermission("transport.vehicles.edit", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const replacementId = Number(req.params.id);
+      const [record] = await db.select().from(transportVehicleReplacements).where(and(eq(transportVehicleReplacements.id, replacementId), eq(transportVehicleReplacements.schoolId, school.id))).limit(1);
+      if (!record || record.replacementType !== "temporary" || record.effectiveTo) return res.status(409).json({ message: "Active temporary replacement not found." });
+      const input = z.object({ effectiveAt: z.string().datetime().optional(), reason: z.string().trim().min(3).default("Original vehicle returned to service") }).parse(req.body || {});
+      const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
+      const affected = await db.select().from(transportAssignments).where(and(eq(transportAssignments.schoolId, school.id), eq(transportAssignments.isActive, true), or(eq(transportAssignments.vehicleId, record.replacementVehicleId), eq(transportAssignments.outboundVehicleId, record.replacementVehicleId))));
+      await db.transaction(async (tx) => {
+        for (const assignment of affected) {
+          const changes:any={ updatedAt:new Date() };
+          if (Number(assignment.vehicleId||0)===Number(record.replacementVehicleId)) changes.vehicleId=record.originalVehicleId;
+          if (Number(assignment.outboundVehicleId||0)===Number(record.replacementVehicleId)) changes.outboundVehicleId=record.originalVehicleId;
+          const [updated] = await tx.update(transportAssignments).set(changes).where(eq(transportAssignments.id,assignment.id)).returning();
+          await tx.insert(transportAssignmentEvents).values({ schoolId: school.id, assignmentId: assignment.id, eventType:"temporary_vehicle_returned", effectiveDate:isoDate(effectiveAt), previousValues:assignment, newValues:updated, reason:input.reason, createdByUserId:user.id });
+        }
+        await tx.update(transportVehicleReplacements).set({ effectiveTo: effectiveAt }).where(eq(transportVehicleReplacements.id,replacementId));
+        await writeAudit(tx, school.id,user.id,"vehicle",record.originalVehicleId,"return_original_vehicle",null,record,input.reason,{replacementRecordId:record.id});
+      });
+      return res.json({ message:"Original vehicle returned to service", affectedAssignments:affected.length });
+    } catch (error) { return routeError(res,error); }
+  });
+
+  app.get("/api/transport/organization-settings", requireAuth, requirePermission("transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      const user = userOf(req);
+      const organizationId = user?.organizationId || school?.organizationId || null;
+      if (!organizationId) return res.status(400).json({ message: "Organization context is required" });
+      return res.json(await getOrCreateOrganizationTransportSettings(Number(organizationId)));
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.put("/api/transport/organization-settings", requireAuth, requirePermission("transport.hq.settings.manage"), async (req, res) => {
+    try {
+      const user = userOf(req);
+      if (user?.role !== "org_admin") return res.status(403).json({ message: "HQ Organization Admin access is required to change the organisation Transport arrears policy." });
+      if (!user?.organizationId) return res.status(400).json({ message: "Organization context is required" });
+      const parsed = organizationTransportSettingsInput.parse(req.body);
+      const previous = await getOrCreateOrganizationTransportSettings(Number(user.organizationId));
+      const [updated] = await db.update(transportOrganizationSettings).set({
+        minimumArrearsSuspensionBalance: String(parsed.minimumArrearsSuspensionBalance),
+        suspendedSeatPolicy: parsed.suspendedSeatPolicy,
+        suspendedSeatReleaseDays: parsed.suspendedSeatReleaseDays,
+        automaticArrearsReinstatement: parsed.automaticArrearsReinstatement,
+        arrearsWarningEnabled: parsed.arrearsWarningEnabled,
+        updatedAt: new Date(),
+      }).where(eq(transportOrganizationSettings.organizationId, Number(user.organizationId))).returning();
+      const school = await schoolContext(req);
+      if (school) await writeAudit(db, school.id, user.id, "organization_transport_settings", updated.id, "update", previous, updated, "Organization Transport arrears policy updated");
+      return res.json(updated);
+    } catch (error) { return routeError(res, error); }
+  });
+
   app.put("/api/transport/settings", requireAuth, requireAnyPermission("transport.settings.manage", "transport.edit"), async (req, res) => {
     try {
       const school = await schoolContext(req);
@@ -2337,7 +2963,7 @@ export function registerTransportRoutes(app: Express) {
       const parsed = clean(settingsInput.parse(req.body));
       const previous = await getOrCreateSettings(school.id);
       const settingsValues: any = { ...parsed, currencyCode: "USD", updatedAt: new Date() };
-      for (const key of ["inboundOneWayPercent", "outboundOneWayPercent", "minimumSuspensionBalance"]) {
+      for (const key of ["inboundOneWayPercent", "outboundOneWayPercent"]) {
         if (settingsValues[key] !== undefined && settingsValues[key] !== null) settingsValues[key] = String(settingsValues[key]);
       }
       const [updated] = await db.update(transportSettings).set(settingsValues)
@@ -2674,6 +3300,7 @@ export function registerTransportRoutes(app: Express) {
         admissionNo: students.admissionNo, className: classes.className, schoolName: schools.name,
         startDate: transportAssignments.startDate, endDate: transportAssignments.endDate, isActive: transportAssignments.isActive,
         serviceState: transportAssignments.serviceState, financialStatus: transportAssignments.financialStatus,
+        seatReservedUntil: transportAssignments.seatReservedUntil, suspensionReason: transportAssignments.suspensionReason, seatReleasedAt: transportAssignments.seatReleasedAt,
         routeName: transportRoutes.name,
       }).from(transportAssignments)
         .innerJoin(students, eq(students.id, transportAssignments.studentId))
@@ -3027,7 +3654,7 @@ export function registerTransportRoutes(app: Express) {
           pickupPathNodeId: base.pickupPathNodeId,
           dropoffPathNodeId: base.dropoffPathNodeId,
           serviceType,
-          serviceState: effectiveDate <= isoDate(new Date()) ? (previous.financialStatus === "payment_plan" ? "active_payment_plan" : "active") : "pending_start",
+          serviceState: effectiveDate <= isoDate(new Date()) ? "active" : "pending_start",
           planningStatus: base.planningStatus ?? "assigned_to_path",
           financialStatus: previous.financialStatus,
           billingFrequency: "monthly",
@@ -3111,8 +3738,6 @@ export function registerTransportRoutes(app: Express) {
             changes.isActive = false;
             changes.endDate = previousDate(parsed.effectiveDate);
           }
-          if (["active_arrears", "suspension_pending"].includes(parsed.state)) changes.financialStatus = "overdue";
-          if (parsed.state === "active_payment_plan") changes.financialStatus = "payment_plan";
           [row] = await tx.update(transportAssignments).set(changes).where(eq(transportAssignments.id, id)).returning();
           await tx.insert(transportAssignmentEvents).values({ schoolId: school.id, assignmentId: id, eventType: `state_${parsed.state}`, effectiveDate: parsed.effectiveDate, previousValues: previous, newValues: row, reason: parsed.reason, createdByUserId: user.id });
 
@@ -3154,8 +3779,10 @@ export function registerTransportRoutes(app: Express) {
       if (!school) return res.status(400).json({ message: "Select a school" });
       const parsed = chargeInput.parse(req.body);
       const settings = await getOrCreateSettings(school.id);
+      const orgPolicy = school.organizationId ? await getOrCreateOrganizationTransportSettings(school.organizationId) : { minimumArrearsSuspensionBalance: "1", suspendedSeatPolicy: "release_after_days", suspendedSeatReleaseDays: 14, automaticArrearsReinstatement: true, arrearsWarningEnabled: true };
+      await reconcileArrearsSeatReleases(school.id);
       const period = periodDates(parsed.academicYear, parsed.month);
-      const filters = [eq(transportAssignments.schoolId, school.id), lte(transportAssignments.startDate, period.end), or(isNull(transportAssignments.endDate), gte(transportAssignments.endDate, period.start))];
+      const filters = [eq(transportAssignments.schoolId, school.id), lte(transportAssignments.startDate, period.end), or(isNull(transportAssignments.endDate), gte(transportAssignments.endDate, period.start)), sql`${transportAssignments.serviceState} NOT IN ('suspended_arrears','pending_vehicle_reassignment')`];
       if (parsed.assignmentIds?.length) filters.push(inArray(transportAssignments.id, parsed.assignmentIds));
       const assignments = await db.select().from(transportAssignments).where(and(...filters));
       const preview = assignments.map((assignment) => {
@@ -3183,13 +3810,18 @@ export function registerTransportRoutes(app: Express) {
       const parsed = chargeInput.parse(req.body);
       await ensureNotLocked(school.id, parsed.academicYear, parsed.month);
       const settings = await getOrCreateSettings(school.id);
+      const orgPolicy = school.organizationId ? await getOrCreateOrganizationTransportSettings(school.organizationId) : { minimumArrearsSuspensionBalance: "1", suspendedSeatPolicy: "release_after_days", suspendedSeatReleaseDays: 14, automaticArrearsReinstatement: true, arrearsWarningEnabled: true };
+      await reconcileArrearsSeatReleases(school.id);
       const period = periodDates(parsed.academicYear, parsed.month);
-      const filters = [eq(transportAssignments.schoolId, school.id), lte(transportAssignments.startDate, period.end), or(isNull(transportAssignments.endDate), gte(transportAssignments.endDate, period.start))];
+      const filters = [eq(transportAssignments.schoolId, school.id), lte(transportAssignments.startDate, period.end), or(isNull(transportAssignments.endDate), gte(transportAssignments.endDate, period.start)), sql`${transportAssignments.serviceState} NOT IN ('suspended_arrears','pending_vehicle_reassignment')`];
       if (parsed.assignmentIds?.length) filters.push(inArray(transportAssignments.id, parsed.assignmentIds));
       const assignments = await db.select().from(transportAssignments).where(and(...filters));
       let created = 0;
       let skipped = 0;
       let totalGenerated = 0;
+      let newlySuspended = 0;
+      let seatsReleasedImmediately = 0;
+      const suspendedLearners: any[] = [];
       let billingRun: any = null;
       await db.transaction(async (tx) => {
         for (const assignment of assignments) {
@@ -3230,6 +3862,20 @@ export function registerTransportRoutes(app: Express) {
             description: parsed.description || `Transport service for ${period.start.slice(0, 7)}`,
             createdByUserId: user.id,
           });
+          const arrears = await qualifyingTransportArrears(tx, school.id, assignment.studentId, period.start);
+          const threshold = amount(orgPolicy.minimumArrearsSuspensionBalance);
+          if (arrears.balance > threshold) {
+            const seatPolicy = String(orgPolicy.suspendedSeatPolicy || "release_after_days");
+            const releaseImmediately = seatPolicy === "release_immediately";
+            const seatReservedUntil = seatPolicy === "release_after_days" ? addDaysIso(period.start, Number(orgPolicy.suspendedSeatReleaseDays || 0)) : null;
+            const [suspended] = await tx.update(transportAssignments).set({
+              serviceState: "suspended_arrears", financialStatus: "overdue", suspensionReason: "arrears",
+              seatReservedUntil, seatReleasedAt: releaseImmediately ? new Date() : null, isActive: !releaseImmediately, updatedAt: new Date(),
+            }).where(eq(transportAssignments.id, assignment.id)).returning();
+            await tx.insert(transportAssignmentEvents).values({ schoolId: school.id, assignmentId: assignment.id, eventType: "suspended_arrears", effectiveDate: period.start, previousValues: assignment, newValues: suspended, reason: `Previous Transport balance ${arrears.balance.toFixed(2)} exceeded the organisation threshold ${threshold.toFixed(2)} when the next month charge was generated`, createdByUserId: user.id });
+            newlySuspended += 1; if (releaseImmediately) seatsReleasedImmediately += 1;
+            suspendedLearners.push({ studentId: assignment.studentId, assignmentId: assignment.id, arrearsBalance: arrears.balance, oldestOverdueMonth: arrears.oldestMonth, seatReservedUntil, seatReleased: releaseImmediately });
+          }
           created += 1;
           totalGenerated = rounded(totalGenerated + calculated);
         }
@@ -3238,12 +3884,12 @@ export function registerTransportRoutes(app: Express) {
           runNumber: numberCode("BILL", school.shortCode, Date.now().toString().slice(-6)),
           serviceYear: parsed.academicYear, serviceMonth: parsed.month, status: "completed",
           generatedCount: created, skippedCount: skipped, failedCount: 0, totalAmount: String(totalGenerated),
-          details: { assignmentIds: parsed.assignmentIds || null, dueDate: parsed.dueDate || null, description: parsed.description || null },
+          details: { assignmentIds: parsed.assignmentIds || null, dueDate: parsed.dueDate || null, description: parsed.description || null, newlySuspended, seatsReleasedImmediately, suspendedLearners },
           generatedByUserId: user.id,
         }).returning();
         await writeAudit(tx, school.id, user.id, "billing_run", billingRun.id, "generate", null, billingRun);
       });
-      return res.status(201).json({ created, skipped, total: totalGenerated, billingRun });
+      return res.status(201).json({ created, skipped, total: totalGenerated, newlySuspended, seatsReleasedImmediately, suspendedLearners, billingRun });
     } catch (error) {
       return routeError(res, error);
     }
@@ -3303,8 +3949,9 @@ export function registerTransportRoutes(app: Express) {
           const serviceState = activeAssignment.serviceState === "pending_start" && activeAssignment.startDate <= isoDate(new Date()) ? "active" : activeAssignment.serviceState;
           await tx.update(transportAssignments).set({ financialStatus, serviceState, updatedAt: new Date() }).where(eq(transportAssignments.id, activeAssignment.id));
         }
-        await writeAudit(tx, school.id, user.id, "payment", payment.id, "record", null, { ...payment, unallocatedCredit: remaining });
-        return { payment, unallocatedCredit: remaining };
+        const reinstatement = await reconcileArrearsAfterPayment(tx, school, parsed.studentId, user.id);
+        await writeAudit(tx, school.id, user.id, "payment", payment.id, "record", null, { ...payment, unallocatedCredit: remaining, reinstatement: reinstatement ? { assignmentId: reinstatement.id, serviceState: reinstatement.serviceState } : null });
+        return { payment, unallocatedCredit: remaining, reinstatement };
       });
       await notifyParentForStudent(parsed.studentId, school.id, user.id, "Transport payment received", `Transport payment ${result.payment.receiptNo} for ${settings.currencyCode} ${Number(parsed.amount).toFixed(2)} was recorded on ${parsed.paymentDate}.`, "success");
       return res.status(201).json(result);
@@ -3447,57 +4094,6 @@ export function registerTransportRoutes(app: Express) {
     } catch (error) { return routeError(res, error); }
   });
 
-  app.post("/api/transport/payment-plans", requireAuth, requireAnyPermission("transport.payment_plans.manage", "transport.edit"), async (req, res) => {
-    try {
-      const school = await schoolContext(req);
-      const user = userOf(req);
-      if (!school || !user) return res.status(400).json({ message: "Select a school" });
-      const parsed = paymentPlanInput.parse(req.body);
-      const previousAssignment = await assertSchoolRecord(transportAssignments, parsed.assignmentId, school.id);
-      if (!previousAssignment || previousAssignment.studentId !== parsed.studentId) return res.status(404).json({ message: "Assignment not found" });
-      if (["terminated", "completed"].includes(String(previousAssignment.serviceState))) return res.status(409).json({ message: "A payment plan cannot be created for a completed or terminated Transport service." });
-      const [existingPlan] = await db.select({ id: transportPaymentPlans.id, planNumber: transportPaymentPlans.planNumber }).from(transportPaymentPlans).where(and(eq(transportPaymentPlans.assignmentId, previousAssignment.id), inArray(transportPaymentPlans.status, ["active", "pending"]))).limit(1);
-      if (existingPlan) return res.status(409).json({ message: `This Transport registration already has payment plan ${existingPlan.planNumber}.` });
-      const created = await db.transaction(async (tx) => {
-        let assignment = previousAssignment;
-        const today = isoDate(new Date());
-        if (!previousAssignment.isActive && ["suspended", "paused"].includes(previousAssignment.serviceState)) {
-          const serviceCanStart = parsed.startDate <= today;
-          const values: any = { ...previousAssignment, id: undefined, startDate: parsed.startDate, endDate: null, isActive: serviceCanStart, serviceState: serviceCanStart ? "active_payment_plan" : "pending_start", financialStatus: "payment_plan", createdAt: undefined, updatedAt: new Date(), createdByUserId: user.id };
-          delete values.id; delete values.createdAt;
-          [assignment] = await tx.insert(transportAssignments).values(values).returning();
-          await linkAssignmentNodes(tx, school.id, assignment);
-          await tx.insert(transportAssignmentEvents).values({ schoolId: school.id, assignmentId: assignment.id, eventType: "resumed_payment_plan", effectiveDate: parsed.startDate, previousValues: previousAssignment, newValues: assignment, reason: "Approved payment plan", createdByUserId: user.id });
-        }
-        const [plan] = await tx.insert(transportPaymentPlans).values({
-          schoolId: school.id,
-          studentId: parsed.studentId,
-          assignmentId: assignment.id,
-          planNumber: numberCode("TPLAN", school.shortCode, Date.now().toString().slice(-6)),
-          coveredAmount: String(parsed.coveredAmount),
-          instalmentAmount: String(parsed.instalmentAmount),
-          frequency: parsed.frequency,
-          startDate: parsed.startDate,
-          finalDueDate: parsed.finalDueDate,
-          graceDays: parsed.graceDays,
-          payerAcknowledgement: parsed.payerAcknowledgement,
-          notes: parsed.notes,
-          approvedByUserId: user.id,
-          createdByUserId: user.id,
-        }).returning();
-        for (const instalment of parsed.instalments ?? []) {
-          await tx.insert(transportPaymentPlanInstalments).values({ planId: plan.id, dueDate: instalment.dueDate, amount: String(instalment.amount) });
-        }
-        const assignmentStart = assignment.startDate || parsed.startDate;
-        const serviceCanStart = assignmentStart <= isoDate(new Date());
-        await tx.update(transportAssignments).set({ serviceState: serviceCanStart ? "active_payment_plan" : "pending_start", financialStatus: "payment_plan", isActive: serviceCanStart, updatedAt: new Date() }).where(eq(transportAssignments.id, assignment.id));
-        await writeAudit(tx, school.id, user.id, "payment_plan", plan.id, "create", null, plan);
-        return { plan, assignmentId: assignment.id };
-      });
-      await notifyParentForStudent(parsed.studentId, school.id, user.id, "Transport payment plan approved", `Payment plan ${created.plan.planNumber} starts on ${parsed.startDate}. Instalments are ${Number(parsed.instalmentAmount).toFixed(2)} ${created.plan.frequency}.`, "info");
-      return res.status(201).json(created);
-    } catch (error) { return routeError(res, error); }
-  });
 
   app.post("/api/transport/refunds", requireAuth, requireAnyPermission("transport.refunds.request", "transport.edit"), async (req, res) => {
     try {
@@ -3862,13 +4458,17 @@ export function registerTransportRoutes(app: Express) {
         return res.status(400).json({ message: "Reverse traversal is only available on a two-way vehicle path." });
       }
 
+      const occurredAt = new Date(parsed.occurredAt);
+      const occurredOn = isoDate(occurredAt);
+      const effectiveOwnerId = await effectiveVehicleOwnerId(vehicle, occurredOn);
+      const effectiveDriverId = await effectiveOperatingDriverId(vehicle, occurredAt);
       const expected = {
         vehicleId: vehicle.id,
         registrationNumber: vehicle.registrationNumber,
         makeModel: vehicle.makeModel,
         ownershipType: vehicle.ownershipType,
-        ownerId: vehicle.ownerId,
-        driverId: vehicle.driverId,
+        ownerId: effectiveOwnerId,
+        driverId: effectiveDriverId,
         routeId: expectedPath?.routeId || null,
         pathId: expectedPath?.id || null,
         pathName: expectedPath?.name || null,
@@ -3876,8 +4476,8 @@ export function registerTransportRoutes(app: Express) {
       };
       const actual = {
         vehicleId: vehicle.id,
-        ownerId: parsed.ownerId ?? vehicle.ownerId ?? null,
-        driverId: parsed.driverId ?? vehicle.driverId ?? null,
+        ownerId: parsed.ownerId ?? effectiveOwnerId ?? null,
+        driverId: parsed.driverId ?? effectiveDriverId ?? null,
         routeId: parsed.routeId ?? expectedPath?.routeId ?? null,
         pathId: parsed.pathId ?? expectedPath?.id ?? null,
         pathTraversal: parsed.pathTraversal,
@@ -3901,7 +4501,7 @@ export function registerTransportRoutes(app: Express) {
         pathId: actual.pathId,
         expectedContext: expected,
         actualContext: actual,
-        occurredAt: new Date(parsed.occurredAt),
+        occurredAt,
         latitude: parsed.latitude == null ? null : String(parsed.latitude),
         longitude: parsed.longitude == null ? null : String(parsed.longitude),
         schoolId: school.id,

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { CreateAccountForm } from "@/components/create-account-form";
+import { LoginDetailsBulkDialog } from "@/components/login-details-bulk-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,10 +14,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Search, Trash2, Download, Bell, Users, UserCog, Send, Upload, UserCheck, Eye, Phone, Mail, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Search, Trash2, Download, Bell, Users, UserCog, Upload, UserCheck, Eye, Phone, Mail, ChevronLeft, ChevronRight } from "lucide-react";
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
 import * as XLSX from "xlsx";
+import { blobToXlsxImageDataUrl, exportXlsxWithEmbeddedImages } from "@/lib/xlsx-embedded-images";
 import { ResidentialAreaInput } from "@/components/residential-area-input";
 import type { Parent, Student, User } from "@shared/schema";
 import { useTableSort } from "@/hooks/use-table-sort";
@@ -48,7 +50,6 @@ export default function ParentsPage() {
   const [isNotifyOpen, setIsNotifyOpen] = useState(false);
   const [studentsDialogParent, setStudentsDialogParent] = useState<Parent | null>(null);
   const [userAccountParent, setUserAccountParent] = useState<Parent | null>(null);
-  const [sendAccountsOpen, setSendAccountsOpen] = useState(false);
   const [linkedStudentIds, setLinkedStudentIds] = useState<number[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -236,24 +237,35 @@ export default function ParentsPage() {
       toast({ title: "Error", description: "No parents to export", variant: "destructive" });
       return;
     }
-    const exportData = exportParents.map((p) => ({
-      "First Name": p.firstName,
-      "Last Name": p.lastName,
-      "Phone": p.phone,
-      "Email": p.email || "",
-      "Relationship": p.relationship || "",
-      "Occupation": p.occupation || "",
-      "Street Address": p.streetAddress || "",
-      "Residential Area": p.residentialArea || "",
-      "City": p.address || "",
-      "Children Count": getChildrenCount(p),
-    }));
-    const worksheet = XLSX.utils.json_to_sheet(exportData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Parents");
+    const rows: Array<Record<string, string>> = [];
+    for (const p of exportParents) {
+      let photoDataUrl = "";
+      if (p.photo) {
+        try { const response = await schoolFetch(`/api/parents/${p.id}/photo/download`); if (response.ok) photoDataUrl = await blobToXlsxImageDataUrl(await response.blob()); } catch { /* keep export usable if one photo is unavailable */ }
+      }
+      rows.push({
+        Photo: photoDataUrl,
+        "First Name": p.firstName || "",
+        "Last Name": p.lastName || "",
+        Phone: p.phone || "",
+        Email: p.email || "",
+        Relationship: p.relationship || "",
+        Occupation: p.occupation || "",
+        "Street Address": p.streetAddress || "",
+        "Residential Area": p.residentialArea || "",
+        "Address / City": p.address || "",
+        "Children Count": String(getChildrenCount(p)),
+      });
+    }
     const searchLabel = debouncedSearch ? `_search_${debouncedSearch.replace(/\s+/g, "_")}` : "";
-    XLSX.writeFile(workbook, `Parents${searchLabel}_${new Date().toISOString().split("T")[0]}.xlsx`);
-    toast({ title: "Success", description: "Parent list downloaded successfully" });
+    exportXlsxWithEmbeddedImages({
+      filename: `Parents${searchLabel}_${new Date().toISOString().split("T")[0]}.xlsx`,
+      sheetName: "Parents",
+      columns: Object.keys(rows[0]),
+      rows,
+      columnWidths: { Photo: 10, "First Name": 18, "Last Name": 18, Phone: 18, Email: 30, Relationship: 18, Occupation: 22, "Street Address": 28, "Residential Area": 24, "Address / City": 26, "Children Count": 14 },
+    });
+    toast({ title: "Success", description: "Parent list downloaded as XLSX with embedded profile photos and text-safe contact details." });
   };
 
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -362,12 +374,11 @@ export default function ParentsPage() {
             Upload
           </Button>
 
-          {selectedIds.length > 0 && (
-            <Button variant="outline" onClick={() => setSendAccountsOpen(true)} data-testid="button-send-accounts">
-              <Send className="w-4 h-4 mr-2" />
-              Send Account(s)
-            </Button>
-          )}
+          <LoginDetailsBulkDialog
+            recipientType="parent"
+            selectedIds={selectedIds}
+            search={debouncedSearch}
+          />
 
           <Dialog open={isAddOpen} onOpenChange={(open) => { setIsAddOpen(open); if (open) setLinkedStudentIds([]); }}>
             <DialogTrigger asChild>
@@ -766,31 +777,6 @@ export default function ParentsPage() {
         />
       )}
 
-      {/* Send Accounts Modal */}
-      <Dialog open={sendAccountsOpen} onOpenChange={setSendAccountsOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Send Account Details</DialogTitle>
-            <DialogDescription>
-              Send login credentials to {selectedIds.length} selected parent(s) via SMS and Email.
-            </DialogDescription>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            This will send the username and a temporary password to each parent who has a user account.
-            Parents without accounts will be skipped.
-          </p>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setSendAccountsOpen(false)}>Cancel</Button>
-            <Button onClick={() => {
-              toast({ title: "Info", description: "Send accounts feature coming soon" });
-              setSendAccountsOpen(false);
-            }}>
-              <Send className="w-4 h-4 mr-2" />
-              Send
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "./db";
 import { requireAuth, requireAnyPermission, requirePermission } from "./auth";
 import { storage } from "./storage";
+import { ensureFleetEnabledForSchool } from "./school-feature-flags";
 import {
   activityLogs,
   assetMaintenanceRecords,
@@ -586,6 +587,7 @@ export function registerFleetRoutes(app: Express) {
         notes: input.notes ?? null,
         createdByUserId: scope.userId,
       }).returning();
+      await ensureFleetEnabledForSchool(baseSchoolId);
       await logFleet(req, scope, createdAsset ? "fleet_vehicle_registered" : "fleet_vehicle_activated", `${createdAsset ? "Registered" : "Activated"} vehicle asset ${asset.assetNumber} for Fleet Management`, "fleet_vehicle", created.id, { assetId: asset.id, baseSchoolId });
       res.status(201).json(created);
     } catch (error) { fail(res, error); }
@@ -652,6 +654,7 @@ export function registerFleetRoutes(app: Express) {
         const [updated] = await tx.update(fleetVehicleProfiles).set(profileUpdate).where(eq(fleetVehicleProfiles.id, id)).returning();
         return updated;
       });
+      if (row?.schoolId) await ensureFleetEnabledForSchool(row.schoolId);
       await logFleet(req, scope, "fleet_vehicle_updated", `Updated Fleet vehicle #${id}`, "fleet_vehicle", id);
       res.json(row);
     } catch (error) { fail(res, error); }
@@ -837,7 +840,7 @@ export function registerFleetRoutes(app: Express) {
   });
 
   app.post("/api/fleet/allocations", requireAuth, requirePermission("fleet.allocations.manage"), async (req, res) => {
-    try { const scope = await scopeOf(req); const input = z.object({ vehicleId: positiveInt, allocationType: z.enum(["staff", "department", "school", "temporary", "student_transport"]), allocatedToType: z.enum(["staff", "school", "department", "student_transport"]), allocatedToStaffId: positiveInt.optional().nullable(), allocatedToSchoolId: positiveInt.optional().nullable(), allocatedToName: optionalText, primaryDriverStaffId: positiveInt.optional().nullable(), startsAt: dateTime, endsAt: dateTime.optional().nullable(), reason: optionalText }).parse(req.body); const vehicle = await assertVehicleScope(input.vehicleId, scope); if (input.allocatedToSchoolId && input.allocatedToSchoolId !== vehicle.schoolId && !(await hasPermission(scope.userId, "fleet.allocations.cross_school"))) throw new Error("Cross-school allocation permission required"); if (input.primaryDriverStaffId) await assertDriverEligible(input.primaryDriverStaffId, scope.organizationId); const [row] = await db.insert(fleetAllocations).values({ ...input, organizationId: scope.organizationId, schoolId: vehicle.schoolId, status: "active", approvedByUserId: scope.userId, createdByUserId: scope.userId }).returning(); await db.update(fleetVehicleProfiles).set({ allocationType: input.allocationType, custodianStaffId: input.allocatedToStaffId ?? vehicle.custodianStaffId, primaryDriverStaffId: input.primaryDriverStaffId ?? vehicle.primaryDriverStaffId, status: "allocated", updatedAt: new Date() }).where(eq(fleetVehicleProfiles.id, vehicle.id)); await logFleet(req, scope, "fleet_allocation_created", `Created standing allocation #${row.id}`, "fleet_allocation", row.id); res.status(201).json(row); } catch (error) { fail(res, error); }
+    try { const scope = await scopeOf(req); const input = z.object({ vehicleId: positiveInt, allocationType: z.enum(["staff", "department", "school", "temporary", "student_transport"]), allocatedToType: z.enum(["staff", "school", "department", "student_transport"]), allocatedToStaffId: positiveInt.optional().nullable(), allocatedToSchoolId: positiveInt.optional().nullable(), allocatedToName: optionalText, primaryDriverStaffId: positiveInt.optional().nullable(), startsAt: dateTime, endsAt: dateTime.optional().nullable(), reason: optionalText }).parse(req.body); const vehicle = await assertVehicleScope(input.vehicleId, scope); if (input.allocatedToSchoolId && input.allocatedToSchoolId !== vehicle.schoolId && !(await hasPermission(scope.userId, "fleet.allocations.cross_school"))) throw new Error("Cross-school allocation permission required"); if (input.primaryDriverStaffId) await assertDriverEligible(input.primaryDriverStaffId, scope.organizationId); const [row] = await db.insert(fleetAllocations).values({ ...input, organizationId: scope.organizationId, schoolId: vehicle.schoolId, status: "active", approvedByUserId: scope.userId, createdByUserId: scope.userId }).returning(); await db.update(fleetVehicleProfiles).set({ allocationType: input.allocationType, custodianStaffId: input.allocatedToStaffId ?? vehicle.custodianStaffId, primaryDriverStaffId: input.primaryDriverStaffId ?? vehicle.primaryDriverStaffId, status: "allocated", updatedAt: new Date() }).where(eq(fleetVehicleProfiles.id, vehicle.id)); if (vehicle.schoolId) await ensureFleetEnabledForSchool(vehicle.schoolId); if (input.allocatedToSchoolId) await ensureFleetEnabledForSchool(input.allocatedToSchoolId); if (input.allocatedToStaffId) { const [assignedStaff] = await db.select({ schoolId: staff.schoolId }).from(staff).where(eq(staff.id, input.allocatedToStaffId)).limit(1); if (assignedStaff?.schoolId) await ensureFleetEnabledForSchool(assignedStaff.schoolId); } await logFleet(req, scope, "fleet_allocation_created", `Created standing allocation #${row.id}`, "fleet_allocation", row.id); res.status(201).json(row); } catch (error) { fail(res, error); }
   });
 
   app.post("/api/fleet/allocations/:id/end", requireAuth, requirePermission("fleet.allocations.manage"), async (req, res) => {

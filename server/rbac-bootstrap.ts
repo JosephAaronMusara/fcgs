@@ -39,6 +39,8 @@ const RETIRED_PERMISSION_CODES = [
   "schemes.create",
   "schemes.edit",
   "schemes.delete",
+  "transport.payment_plans.manage",
+  "learning_materials.view",
 ] as const;
 
 async function removeRetiredPermissions() {
@@ -63,7 +65,7 @@ const TRANSPORT_MANAGER_PERMISSIONS = [
   "transport.documents.view", "transport.documents.manage", "transport.compliance.view", "transport.compliance.manage",
   "transport.learners.enrol", "transport.learners.edit_service", "transport.learners.transfer",
   "transport.charges.view", "transport.charges.generate", "transport.payments.view", "transport.receipts.view", "transport.receipts.verify",
-  "transport.payment_plans.manage", "transport.refunds.request", "transport.cashups.prepare",
+  "transport.refunds.request", "transport.cashups.prepare",
   "transport.incidents.manage", "transport.claims.view", "transport.claims.generate", "transport.claims.submit", "transport.claims.verify",
   "transport.advances.request", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
 ];
@@ -71,13 +73,13 @@ const TRANSPORT_MANAGER_PERMISSIONS = [
 const RECEPTIONIST_TRANSPORT_PERMISSIONS = [
   "transport.view", "transport.dashboard.view", "transport.charges.view",
   "transport.payments.view", "transport.payments.record", "transport.receipts.view",
-  "transport.payment_plans.manage", "transport.refunds.request", "transport.cashups.prepare",
+  "transport.refunds.request", "transport.cashups.prepare",
 ];
 
 const ACCOUNTANT_TRANSPORT_PERMISSIONS = [
   "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.charges.generate", "transport.charges.adjust",
   "transport.payments.view", "transport.payments.record", "transport.payments.verify", "transport.payments.reverse",
-  "transport.receipts.view", "transport.receipts.verify", "transport.payment_plans.manage",
+  "transport.receipts.view", "transport.receipts.verify",
   "transport.refunds.request", "transport.refunds.approve", "transport.refunds.pay",
   "transport.cashups.prepare", "transport.cashups.verify", "transport.claims.view", "transport.claims.verify", "transport.claims.approve",
   "transport.penalties.manage", "transport.advances.request", "transport.advances.approve", "transport.advances.disburse", "transport.payouts.view", "transport.payouts.generate", "transport.payouts.pay",
@@ -107,7 +109,7 @@ const ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS = [
   "transport.receipts.view", "transport.claims.view", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
   "transport.documents.view", "transport.compliance.view",
   "transport.organization.view", "transport.organization.reports", "transport.organization.export", "transport.organization.manage",
-  "transport.subscription.manage", "transport.hq.claims.manage", "transport.hq.payouts.manage", "transport.hq.disbursements.manage",
+  "transport.subscription.manage", "transport.hq.claims.manage", "transport.hq.payouts.manage", "transport.hq.disbursements.manage", "transport.hq.settings.manage",
 ];
 
 async function replaceAccessGroupPermissionSubset(groupName: string, prefix: string, allowedCodes: string[]) {
@@ -142,6 +144,7 @@ async function ensureTransportAccessGroupDefaults() {
     "Manages school transport operations, learner services, path setup, claims verification and transport reporting.",
   );
   await ensureAccessGroupPermissions("Quality Control Officer", ["transport.view", "transport.dashboard.view", "transport.reports.view", "transport.audit.view"]);
+  await ensureAccessGroupPermissions("School Admin", ["students.classroom.assign", "students.restore_transferred"]);
 }
 
 

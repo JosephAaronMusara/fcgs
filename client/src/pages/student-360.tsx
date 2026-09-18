@@ -45,6 +45,7 @@ interface ProfileData {
   feesBalance: string;
   feesTotalTerm: string;
   feesPaidSoFar: string;
+  financialAccessOverride?: { id: number; status: string; reason: string; effectiveFrom: string; expiresAt: string } | null;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -463,6 +464,11 @@ export default function Student360Page() {
                     {parseFloat(profile.feesBalance || "0") > 0 ? `Owing USD ${parseFloat(profile.feesBalance).toFixed(2)}` : "Cleared"}
                   </span>
                 </div>
+                {profile.financialAccessOverride && (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+                    <strong>Temporary financial Gate access:</strong> {profile.financialAccessOverride.reason} · expires {new Date(profile.financialAccessOverride.expiresAt).toLocaleString()}
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>

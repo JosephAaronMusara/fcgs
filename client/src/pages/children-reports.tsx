@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { BarChart3, Award, BookOpen, TrendingUp, GraduationCap, FileText } from "lucide-react";
+import { BarChart3, Award, BookOpen, TrendingUp, GraduationCap, FileText, Download } from "lucide-react";
 import { useState, useMemo } from "react";
 import type { Student } from "@shared/schema";
 
@@ -22,6 +23,8 @@ interface EnrichedMark {
   term: string | null;
   year: string | null;
   publicationStatus?: "Published" | "Republished";
+  examId?: number | null;
+  examName?: string | null;
 }
 
 interface ChildGrades {
@@ -173,6 +176,19 @@ export default function ChildrenReportsPage() {
               </CardContent>
             </Card>
           </div>
+
+          {Array.from(new Map(selectedChildData.marks.filter(m => m.examId).map(m => [m.examId, m])).values()).length > 0 && (
+            <Card>
+              <CardHeader><CardTitle className="text-base">Published Academic Reports</CardTitle></CardHeader>
+              <CardContent className="flex flex-wrap gap-2">
+                {Array.from(new Map(selectedChildData.marks.filter(m => m.examId).map(m => [m.examId, m])).values()).map((mark) => (
+                  <Button key={mark.examId} variant="outline" size="sm" onClick={() => window.open(`/api/report-cards/${mark.examId}/student/${selectedChildData.student.id}/download`, "_blank", "noopener,noreferrer")}>
+                    <Download className="mr-2 h-4 w-4" />{mark.examName || mark.assessmentName}
+                  </Button>
+                ))}
+              </CardContent>
+            </Card>
+          )}
 
           <div className="flex items-center gap-3 flex-wrap">
             <Select value={termFilter} onValueChange={setTermFilter}>

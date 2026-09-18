@@ -5,6 +5,8 @@ import { RBAC_PERMISSIONS_DATA } from "../server/rbac-config";
 
 const requiredTables = [
   "recruitment_settings",
+  "recruitment_departments",
+  "recruitment_examination_boards",
   "recruitment_vacancies",
   "recruitment_requirements",
   "recruitment_document_categories",
@@ -12,8 +14,15 @@ const requiredTables = [
   "recruitment_application_answers",
   "recruitment_application_documents",
   "recruitment_application_status_history",
+  "recruitment_notes",
   "recruitment_rejection_attempts",
   "recruitment_interviews",
+  "recruitment_vacancy_candidates",
+  "recruitment_talent_ranking_lists",
+  "recruitment_talent_rankings",
+  "recruitment_activity",
+  "recruitment_notification_configs",
+  "recruitment_notification_logs",
 ];
 
 const requiredColumns: Array<[string, string]> = [
@@ -23,6 +32,12 @@ const requiredColumns: Array<[string, string]> = [
   ["recruitment_settings", "high_school_minimum_a_level_points"],
   ["recruitment_settings", "high_school_teaching_qualified_minimum_a_level_points"],
   ["recruitment_settings", "high_school_teaching_qualification_exception_enabled"],
+  ["recruitment_settings", "primary_teaching_qualification_required"],
+  ["recruitment_settings", "primary_maximum_o_level_sittings"],
+  ["recruitment_settings", "primary_minimum_o_level_subjects"],
+  ["recruitment_settings", "primary_minimum_o_level_grade"],
+  ["recruitment_settings", "primary_mandatory_o_level_subjects"],
+  ["recruitment_settings", "primary_mandatory_o_level_grade"],
   ["recruitment_vacancies", "organization_id"],
   ["recruitment_vacancies", "status"],
   ["recruitment_requirements", "scope_key"],
@@ -48,6 +63,29 @@ const requiredColumns: Array<[string, string]> = [
   ["recruitment_rejection_attempts", "reason_code"],
   ["recruitment_rejection_attempts", "screening_details"],
   ["recruitment_interviews", "outcome"],
+  ["recruitment_interviews", "applicant_instructions"],
+  ["recruitment_interviews", "internal_notes"],
+  ["recruitment_interviews", "interview_link"],
+  ["recruitment_departments", "responsible_user_id"],
+  ["recruitment_departments", "applicant_contact_phone"],
+  ["recruitment_departments", "applicant_contact_email"],
+  ["recruitment_examination_boards", "is_active"],
+  ["recruitment_examination_boards", "display_order"],
+  ["recruitment_applications", "department"],
+  ["recruitment_applications", "examination_board"],
+  ["recruitment_applications", "examination_boards"],
+  ["recruitment_applications", "o_level_results"],
+  ["recruitment_applications", "o_level_sitting_count"],
+  ["recruitment_applications", "o_level_qualifying_subject_count"],
+  ["recruitment_applications", "recruiter_assigned_subjects"],
+  ["recruitment_applications", "availability_status"],
+  ["recruitment_applications", "last_contacted_at"],
+  ["recruitment_notes", "author_user_id"],
+  ["recruitment_talent_ranking_lists", "version"],
+  ["recruitment_talent_rankings", "position"],
+  ["recruitment_talent_rankings", "is_active"],
+  ["recruitment_notification_configs", "application_variant"],
+  ["recruitment_notification_logs", "status"],
 ];
 
 const requiredPermissions = RBAC_PERMISSIONS_DATA
@@ -158,6 +196,71 @@ async function main() {
             and (storage_key is null or trim(storage_key) = '')
         `)
       : 0,
+    duplicateExaminationBoardNames: presentTables.has("recruitment_examination_boards")
+      ? await count(sql`
+          select count(*) from (
+            select organization_id, lower(trim(name)) as normalized_name
+            from recruitment_examination_boards
+            group by organization_id, lower(trim(name))
+            having count(*) > 1
+          ) duplicate_rows
+        `)
+      : 0,
+    organizationsWithoutActiveExaminationBoards: presentTables.has("recruitment_examination_boards") && presentTables.has("recruitment_settings")
+      ? await count(sql`
+          select count(*)
+          from recruitment_settings settings
+          where not exists (
+            select 1 from recruitment_examination_boards boards
+            where boards.organization_id = settings.organization_id and boards.is_active = true
+          )
+        `)
+      : 0,
+    duplicateActiveTalentRankingPositions: presentTables.has("recruitment_talent_rankings")
+      ? await count(sql`
+          select count(*) from (
+            select organization_id, department, subject, position
+            from recruitment_talent_rankings
+            where is_active = true
+            group by organization_id, department, subject, position
+            having count(*) > 1
+          ) duplicate_rows
+        `)
+      : 0,
+    nonContiguousTalentRankings: presentTables.has("recruitment_talent_rankings")
+      ? await count(sql`
+          select count(*) from (
+            select organization_id, department, subject, count(*) as row_count, min(position) as min_position, max(position) as max_position
+            from recruitment_talent_rankings
+            where is_active = true
+            group by organization_id, department, subject
+            having min(position) <> 1 or max(position) <> count(*)
+          ) invalid_lists
+        `)
+      : 0,
+    inactiveCandidatesOccupyingTalentRankings: presentTables.has("recruitment_talent_rankings") && presentTables.has("recruitment_applications")
+      ? await count(sql`
+          select count(*)
+          from recruitment_talent_rankings rankings
+          join recruitment_applications applications on applications.id = rankings.application_id
+          where rankings.is_active = true
+            and (
+              applications.status in ('rejected', 'hired', 'withdrawn')
+              or coalesce(applications.availability_status, 'available') in ('not_available', 'hired', 'withdrawn', 'archived')
+            )
+        `)
+      : 0,
+    talentRankingOrganizationMismatches: presentTables.has("recruitment_talent_rankings") && presentTables.has("recruitment_applications")
+      ? await count(sql`
+          select count(*)
+          from recruitment_talent_rankings rankings
+          join recruitment_applications applications on applications.id = rankings.application_id
+          where rankings.organization_id <> applications.organization_id
+        `)
+      : 0,
+    invalidTalentRankingVersions: presentTables.has("recruitment_talent_ranking_lists")
+      ? await count(sql`select count(*) from recruitment_talent_ranking_lists where version < 0`)
+      : 0,
     invalidHighSchoolPolicies: presentColumns.has("recruitment_settings.high_school_max_age")
       ? await count(sql`
           select count(*)
@@ -166,6 +269,25 @@ async function main() {
              or high_school_minimum_a_level_points < 0
              or high_school_teaching_qualified_minimum_a_level_points < 0
              or high_school_teaching_qualified_minimum_a_level_points > high_school_minimum_a_level_points
+        `)
+      : 0,
+    invalidPrimarySchoolPolicies: presentColumns.has("recruitment_settings.primary_maximum_o_level_sittings")
+      ? await count(sql`
+          select count(*)
+          from recruitment_settings
+          where primary_maximum_o_level_sittings < 1
+             or primary_minimum_o_level_subjects < 1
+             or upper(primary_minimum_o_level_grade) not in ('A*', 'A', 'B', 'C', 'D', 'E', 'U')
+             or upper(primary_mandatory_o_level_grade) not in ('A*', 'A', 'B', 'C', 'D', 'E', 'U')
+             or jsonb_typeof(primary_mandatory_o_level_subjects) <> 'array'
+             or jsonb_array_length(primary_mandatory_o_level_subjects) = 0
+        `)
+      : 0,
+    invalidStructuredApplicationBoards: presentColumns.has("recruitment_applications.examination_boards")
+      ? await count(sql`
+          select count(*)
+          from recruitment_applications
+          where jsonb_typeof(examination_boards) <> 'array'
         `)
       : 0,
   };

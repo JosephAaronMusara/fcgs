@@ -4,7 +4,7 @@ import { setupAuth, requireAuth, requirePermission, requireAnyPermission, requir
 import { storage, PosSaleProcessingError } from "./storage";
 import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups, gradeProfileSettings, ecdAssessmentRecords, ecdAssessmentResponses } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups, accessGroupPermissions, permissions, userPermissionOverrides, notifications, studentEnrollmentEvents, gradeProfileSettings, ecdAssessmentRecords, ecdAssessmentResponses } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, isNull, count as drizzleCount } from "drizzle-orm";
@@ -15,8 +15,12 @@ import { registerTransportDocumentRoutes } from "./transport-document-routes";
 import { registerAssetsInventoryRoutes } from "./assets-inventory-routes";
 import { registerHqOperationsRoutes } from "./hq-operations-routes";
 import { registerRecruitmentRoutes } from "./recruitment-routes";
+import { registerLanguageToolsRoutes } from "./language-tools-routes";
 import { registerFleetRoutes } from "./fleet-routes";
 import { registerAccessControlRoutes } from "./access-control-routes";
+import { registerAccessControlOperations, getSchoolDaySchedule, sendAttendanceTemplate, syncSchoolAccessPolicies, syncStudentPolicy } from "./access-control-operations";
+import { registerPortalRoutes } from "./portal-routes";
+import { fleetRequirementForSchool } from "./school-feature-flags";
 import { communicationService, createInAppNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
 import { academicReportDataCacheDirectory, academicReportPdfCacheDirectory, academicReportPreparationDirectory, queueAcademicReportCacheCleanup, readBufferCache, readJsonCache, reportBrandingFingerprint, reportCacheKey, reportCommentsFingerprint, reportGradingConfigurationFingerprint, writeBufferCache, writeJsonCache } from "./academic-report-cache";
@@ -40,7 +44,7 @@ import {
   insertOrganizationSchema, insertSchoolSchema, insertLibraryResourceSchema, insertLibraryCategorySchema, insertLibraryShelfSchema, insertLibraryBookSchema, insertLibraryLoanSchema, insertLibraryFineSchema, insertLibraryReservationSchema,
   libraryBooks as libraryBooksTable, libraryBookCopies as libraryBookCopiesTable, libraryFines as libraryFinesTable, libraryReservations as libraryReservationsTable,
   insertTimetableSlotSchema, insertLogbookEntrySchema, insertStaffAttendanceLogSchema, insertPosItemSchema,
-  schools as schoolsTable, staff, parents as parentsTable,
+  schools as schoolsTable, staff, parents as parentsTable, feesImportBatches, feesImportItems, attendanceRecords, gateDevices, accessGates, accessEvents, financialAccessOverrides,
   insertNewsletterSchema,
   insertHostelSchema, insertHostelRollCallSchema, insertStudentApplicationSchema,
   hostels as hostelsTable,
@@ -56,6 +60,14 @@ function requestText(value: unknown): string {
 
 function requestId(value: unknown): number {
   return Number.parseInt(requestText(value), 10);
+}
+
+function denyPortalRoles(req: Request, res: Response, next: NextFunction) {
+  const currentUser = req.user as User | undefined;
+  if (currentUser?.role === "student" || currentUser?.role === "parent") {
+    return res.status(403).json({ message: "This administrative endpoint is not available in the parent or student portal" });
+  }
+  next();
 }
 
 function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -1961,6 +1973,402 @@ async function issuePasswordSetupLink(user: User, options?: {
   };
 }
 
+
+type AccountDistributionRecipientType = "parent" | "student" | "staff";
+
+type AccountDistributionRecipient = {
+  recipientType: AccountDistributionRecipientType;
+  id: number;
+  schoolId: number | null;
+  userId: number | null;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  phone: string | null;
+  status?: string | null;
+  archivedAt?: Date | null;
+  admissionNo?: string | null;
+  staffNo?: string | null;
+  parentEmail?: string | null;
+  parentPhone?: string | null;
+};
+
+type AccountDistributionPlanRow = {
+  recipient: AccountDistributionRecipient;
+  user?: User;
+  username: string | null;
+  action: "existing" | "create" | "exception";
+  reasonCode?: string;
+  reason?: string;
+};
+
+const accountDistributionRequestSchema = z.object({
+  recipientType: z.enum(["parent", "student", "staff"]),
+  recipientIds: z.array(z.coerce.number().int().positive()).optional().default([]),
+  search: z.string().optional().default(""),
+  classFilter: z.string().optional().default("all"),
+  statusFilter: z.string().optional().default("all"),
+});
+
+type AccountDistributionRequest = z.infer<typeof accountDistributionRequestSchema>;
+
+function accountDistributionDisplayName(recipient: AccountDistributionRecipient): string {
+  return `${recipient.firstName || ""} ${recipient.lastName || ""}`.trim() || `${recipient.recipientType} #${recipient.id}`;
+}
+
+function accountDistributionUsername(recipient: AccountDistributionRecipient): string | null {
+  if (recipient.recipientType === "student") {
+    const value = String(recipient.admissionNo || "").trim().toLowerCase();
+    return value.length >= 3 ? value : null;
+  }
+
+  if (recipient.recipientType === "parent") {
+    const normalizedPhone = String(recipient.phone || "").replace(/\D/g, "").slice(-9);
+    if (normalizedPhone.length >= 3) return normalizedPhone;
+    const email = String(recipient.email || "").trim();
+    return email.length >= 3 ? email : null;
+  }
+
+  const value = String(recipient.email || recipient.phone || recipient.staffNo || "").trim();
+  return value.length >= 3 ? value : null;
+}
+
+function accountDistributionHasContact(recipient: AccountDistributionRecipient, user?: User): boolean {
+  return Boolean(
+    user?.email?.trim() ||
+    user?.phone?.trim() ||
+    recipient.email?.trim() ||
+    recipient.phone?.trim() ||
+    recipient.parentEmail?.trim() ||
+    recipient.parentPhone?.trim(),
+  );
+}
+
+async function loadAccountDistributionRecipients(
+  schoolId: number,
+  input: AccountDistributionRequest,
+): Promise<AccountDistributionRecipient[]> {
+  const selectedIds = Array.from(new Set(input.recipientIds || [])).filter((id) => Number.isFinite(id));
+  const search = normalizeSearch(input.search);
+
+  if (input.recipientType === "parent") {
+    const conditions: any[] = [eq(parentsTable.schoolId, schoolId)];
+    if (selectedIds.length) {
+      conditions.push(inArray(parentsTable.id, selectedIds));
+    } else if (search) {
+      const q = `%${search}%`;
+      conditions.push(sql`(
+        lower(${parentsTable.firstName}) like ${q}
+        or lower(${parentsTable.lastName}) like ${q}
+        or lower(coalesce(${parentsTable.phone}, '')) like ${q}
+        or lower(coalesce(${parentsTable.email}, '')) like ${q}
+        or lower(coalesce(${parentsTable.relationship}, '')) like ${q}
+      )`);
+    }
+
+    const rows = await db.select({
+      id: parentsTable.id,
+      schoolId: parentsTable.schoolId,
+      userId: parentsTable.userId,
+      firstName: parentsTable.firstName,
+      lastName: parentsTable.lastName,
+      email: parentsTable.email,
+      phone: parentsTable.phone,
+    }).from(parentsTable).where(and(...conditions)).orderBy(desc(parentsTable.createdAt));
+
+    return rows.map((row) => ({ ...row, recipientType: "parent" as const }));
+  }
+
+  if (input.recipientType === "staff") {
+    const conditions: any[] = [eq(staffTable.schoolId, schoolId)];
+    if (selectedIds.length) {
+      conditions.push(inArray(staffTable.id, selectedIds));
+    } else {
+      conditions.push(eq(staffTable.status, "active"));
+      if (search) {
+        const q = `%${search}%`;
+        conditions.push(sql`(
+          lower(${staffTable.firstName}) like ${q}
+          or lower(${staffTable.lastName}) like ${q}
+          or lower(coalesce(${staffTable.staffNo}, '')) like ${q}
+          or lower(coalesce(${staffTable.phone}, '')) like ${q}
+          or lower(coalesce(${staffTable.email}, '')) like ${q}
+          or lower(coalesce(${staffTable.role}, '')) like ${q}
+        )`);
+      }
+    }
+
+    const rows = await db.select({
+      id: staffTable.id,
+      schoolId: staffTable.schoolId,
+      userId: staffTable.userId,
+      firstName: staffTable.firstName,
+      lastName: staffTable.lastName,
+      email: staffTable.email,
+      phone: staffTable.phone,
+      status: staffTable.status,
+      staffNo: staffTable.staffNo,
+    }).from(staffTable).where(and(...conditions)).orderBy(desc(staffTable.createdAt));
+
+    return rows.map((row) => ({ ...row, recipientType: "staff" as const }));
+  }
+
+  const conditions: any[] = [eq(studentsTable.schoolId, schoolId)];
+  if (selectedIds.length) {
+    conditions.push(inArray(studentsTable.id, selectedIds));
+  } else {
+    const status = String(input.statusFilter || "all").toLowerCase();
+    if (status === "archived") {
+      conditions.push(sql`${studentsTable.archivedAt} is not null`);
+    } else {
+      conditions.push(sql`${studentsTable.archivedAt} is null`);
+      if (status === "all" || !status) {
+        conditions.push(eq(studentsTable.status, "active"));
+      } else {
+        conditions.push(eq(studentsTable.status, status as any));
+      }
+    }
+
+    const classFilter = String(input.classFilter || "all");
+    if (classFilter === "unassigned") {
+      conditions.push(isNull(studentsTable.classId));
+    } else if (classFilter !== "all") {
+      const classId = Number.parseInt(classFilter, 10);
+      if (Number.isFinite(classId)) conditions.push(eq(studentsTable.classId, classId));
+    }
+
+    if (search) {
+      const q = `%${search}%`;
+      conditions.push(sql`(
+        lower(${studentsTable.firstName}) like ${q}
+        or lower(${studentsTable.lastName}) like ${q}
+        or lower(coalesce(${studentsTable.admissionNo}, '')) like ${q}
+        or lower(coalesce(${studentsTable.phone}, '')) like ${q}
+        or lower(coalesce(${studentsTable.email}, '')) like ${q}
+        or exists (
+          select 1 from ${parentsTable}
+          where ${parentsTable.id} = ${studentsTable.parentId}
+            and (lower(${parentsTable.firstName}) like ${q}
+              or lower(${parentsTable.lastName}) like ${q}
+              or lower(coalesce(${parentsTable.phone}, '')) like ${q}
+              or lower(coalesce(${parentsTable.email}, '')) like ${q})
+        )
+      )`);
+    }
+  }
+
+  const rows = await db.select({
+    id: studentsTable.id,
+    schoolId: studentsTable.schoolId,
+    userId: studentsTable.userId,
+    firstName: studentsTable.firstName,
+    lastName: studentsTable.lastName,
+    email: studentsTable.email,
+    phone: studentsTable.phone,
+    status: studentsTable.status,
+    archivedAt: studentsTable.archivedAt,
+    admissionNo: studentsTable.admissionNo,
+    parentEmail: parentsTable.email,
+    parentPhone: parentsTable.phone,
+  })
+    .from(studentsTable)
+    .leftJoin(parentsTable, eq(parentsTable.id, studentsTable.parentId))
+    .where(and(...conditions))
+    .orderBy(...studentFirstNameOrder);
+
+  return rows.map((row) => ({ ...row, recipientType: "student" as const }));
+}
+
+async function planAccountDistribution(recipients: AccountDistributionRecipient[]): Promise<AccountDistributionPlanRow[]> {
+  const userIds = Array.from(new Set(recipients.map((recipient) => recipient.userId).filter((id): id is number => typeof id === "number")));
+  const linkedUsers = userIds.length
+    ? await db.select().from(users).where(inArray(users.id, userIds))
+    : [];
+  const usersById = new Map(linkedUsers.map((user) => [user.id, user]));
+
+  const candidateUsernames = recipients
+    .filter((recipient) => !recipient.userId)
+    .map(accountDistributionUsername)
+    .filter((value): value is string => Boolean(value));
+  const usernameCounts = new Map<string, number>();
+  for (const username of candidateUsernames) {
+    usernameCounts.set(username, (usernameCounts.get(username) || 0) + 1);
+  }
+  const existingUsernameRows = candidateUsernames.length
+    ? await db.select({ id: users.id, username: users.username }).from(users).where(inArray(users.username, Array.from(new Set(candidateUsernames))))
+    : [];
+  const existingUsernames = new Set(existingUsernameRows.map((row) => row.username));
+
+  return recipients.map((recipient) => {
+    const user = recipient.userId ? usersById.get(recipient.userId) : undefined;
+    const username = user?.username || accountDistributionUsername(recipient);
+
+    if (recipient.recipientType === "staff" && recipient.status !== "active") {
+      return { recipient, user, username, action: "exception" as const, reasonCode: "inactive_record", reason: "Staff member is inactive" };
+    }
+    if (recipient.recipientType === "student" && (recipient.status !== "active" || recipient.archivedAt)) {
+      return { recipient, user, username, action: "exception" as const, reasonCode: "inactive_record", reason: recipient.archivedAt ? "Student record is archived" : "Student is not active" };
+    }
+    if (recipient.userId && !user) {
+      return { recipient, username, action: "exception" as const, reasonCode: "broken_account_link", reason: "The linked user account could not be found" };
+    }
+    if (user && user.isActive === false) {
+      return { recipient, user, username, action: "exception" as const, reasonCode: "inactive_account", reason: "Existing user account is inactive" };
+    }
+    if (!accountDistributionHasContact(recipient, user)) {
+      return { recipient, user, username, action: "exception" as const, reasonCode: "missing_contact", reason: "No phone number or email address is available" };
+    }
+    if (user) {
+      return { recipient, user, username: user.username, action: "existing" as const };
+    }
+    if (!username) {
+      return { recipient, username: null, action: "exception" as const, reasonCode: "username_unavailable", reason: "A username could not be generated from the available record details" };
+    }
+    if ((usernameCounts.get(username) || 0) > 1) {
+      return { recipient, username, action: "exception" as const, reasonCode: "username_collision", reason: `Generated username ${username} is shared by more than one record` };
+    }
+    if (existingUsernames.has(username)) {
+      return { recipient, username, action: "exception" as const, reasonCode: "username_collision", reason: `Generated username ${username} already belongs to another account` };
+    }
+    return { recipient, username, action: "create" as const };
+  });
+}
+
+async function createAccountForDistribution(recipient: AccountDistributionRecipient, username: string): Promise<User> {
+  const tempPwd = crypto.randomBytes(24).toString("hex");
+  const hashedPassword = await bcrypt.hash(tempPwd, 10);
+
+  if (recipient.recipientType === "parent") {
+    const uniqueError = await validateUserUniqueness(username);
+    if (uniqueError) throw new Error(uniqueError);
+    const newUser = await storage.createUser({
+      username,
+      password: hashedPassword,
+      role: "parent",
+      email: recipient.email || undefined,
+      firstName: recipient.firstName,
+      lastName: recipient.lastName,
+      phone: recipient.phone || undefined,
+      schoolId: recipient.schoolId || undefined,
+      isActive: true,
+      mustResetPassword: true,
+    });
+    await storage.updateParent(recipient.id, { userId: newUser.id });
+    return newUser;
+  }
+
+  if (recipient.recipientType === "student") {
+    const uniqueError = await validateUserUniqueness(username, recipient.email, recipient.phone);
+    if (uniqueError) throw new Error(uniqueError);
+    const newUser = await storage.createUser({
+      username,
+      password: hashedPassword,
+      role: "student",
+      firstName: recipient.firstName,
+      lastName: recipient.lastName,
+      email: recipient.email || undefined,
+      phone: recipient.phone || undefined,
+      schoolId: recipient.schoolId || undefined,
+      isActive: true,
+      mustResetPassword: true,
+    });
+    await storage.updateStudent(recipient.id, { userId: newUser.id });
+    return newUser;
+  }
+
+  const uniqueError = await validateUserUniqueness(username, recipient.email, recipient.phone);
+  if (uniqueError) throw new Error(uniqueError);
+  const staffMember = await storage.getStaff(recipient.id);
+  if (!staffMember) throw new Error("Staff member not found");
+  const accessGroup = await resolveAccessGroupForStaffRecord(staffMember);
+  const userRole = resolveUserRoleForStaffRecord(staffMember, accessGroup);
+  const newUser = await storage.createUser({
+    username,
+    password: hashedPassword,
+    email: recipient.email || undefined,
+    firstName: recipient.firstName,
+    lastName: recipient.lastName,
+    phone: recipient.phone || undefined,
+    role: userRole,
+    schoolId: recipient.schoolId || undefined,
+    isActive: true,
+    mustResetPassword: true,
+  });
+  const linkedStaff = await storage.updateStaff(recipient.id, { userId: newUser.id });
+  if (accessGroup) {
+    await replaceUserAccessGroupsWithPrimary(newUser.id, accessGroup.id);
+  } else {
+    await storage.normalizeUserBaselineAccess(newUser.id);
+  }
+  if (linkedStaff) await syncLinkedUserFromStaffRecord(linkedStaff);
+  return (await storage.getUser(newUser.id)) || newUser;
+}
+
+async function sendAccountDistributionLoginDetails(options: {
+  user: User;
+  recipient: AccountDistributionRecipient;
+  sentBy: number;
+  requestBaseUrl?: string;
+  newlyCreated: boolean;
+}) {
+  const expiresHours = 24;
+  const resetToken = crypto.randomBytes(24).toString("hex");
+  const expiresAt = new Date(Date.now() + expiresHours * 60 * 60 * 1000);
+  const requiresSetup = options.newlyCreated || options.user.mustResetPassword === true;
+
+  await storage.updateUser(options.user.id, {
+    passwordResetToken: resetToken,
+    passwordResetTokenExpiry: expiresAt,
+    ...(requiresSetup ? { mustResetPassword: true } : {}),
+  });
+
+  const systemUrl = await getSystemUrl(options.recipient.schoolId);
+  const baseUrl =
+    normalizePortalBaseUrl(options.requestBaseUrl) ||
+    normalizePortalBaseUrl(systemUrl) ||
+    normalizePortalBaseUrl(process.env.APP_BASE_URL);
+  const loginLink = baseUrl || systemUrl || "FCGS Portal";
+  const resetPath = `/reset-password?token=${encodeURIComponent(resetToken)}`;
+  const resetLink = baseUrl ? `${baseUrl}${resetPath}` : resetPath;
+  const displayName = accountDistributionDisplayName(options.recipient);
+
+  const messageText = requiresSetup
+    ? `Dear ${displayName},\nYour FCGS Portal account is ready.\nUsername: ${options.user.username}\nSet your password using this secure one-time link (valid for ${expiresHours} hours):\n${resetLink}\nLogin: ${loginLink}\n\nHardwork - Discipline - Changing Lives`
+    : `Dear ${displayName},\nYour FCGS Portal login details are:\nUsername: ${options.user.username}\nLogin: ${loginLink}\nYour current password has not been changed. If you do not remember it, use this secure one-time reset link (valid for ${expiresHours} hours):\n${resetLink}\n\nHardwork - Discipline - Changing Lives`;
+  const subject = options.newlyCreated ? "FCGS Portal Account Created" : "FCGS Portal Login Details";
+  const channels = await getUserExternalChannels(options.user);
+  const deliveries = [] as Array<{ channel: "email" | "sms"; destination: string; success: boolean; error?: string | null }>;
+
+  for (const channel of channels) {
+    const result = channel.type === "email"
+      ? await communicationService.sendEmail({
+          to: channel.value,
+          subject,
+          text: messageText,
+          html: messageText.replace(/\n/g, "<br>"),
+          schoolId: options.recipient.schoolId || undefined,
+          recipientType: options.recipient.recipientType,
+          recipientId: options.recipient.id,
+          recipientName: displayName,
+          category: "account",
+          sentBy: options.sentBy,
+        })
+      : await communicationService.sendSms({
+          to: channel.value,
+          message: messageText,
+          schoolId: options.recipient.schoolId || undefined,
+          recipientType: options.recipient.recipientType,
+          recipientId: options.recipient.id,
+          recipientName: displayName,
+          category: "account",
+          sentBy: options.sentBy,
+        });
+    deliveries.push({ channel: channel.type, destination: channel.value, success: result.success, error: result.error || null });
+  }
+
+  return deliveries;
+}
+
 async function findReusableParentForApplication(options: {
   schoolId?: number | null;
   firstName?: string | null;
@@ -3107,8 +3515,11 @@ export async function registerRoutes(
   registerAssetsInventoryRoutes(app);
   registerHqOperationsRoutes(app);
   registerRecruitmentRoutes(app);
+  registerLanguageToolsRoutes(app);
   registerFleetRoutes(app);
   registerAccessControlRoutes(app);
+  registerAccessControlOperations(app);
+  registerPortalRoutes(app);
   await ensureEcdSeedData();
 
   const readOnlyExemptPaths = [
@@ -3405,10 +3816,45 @@ export async function registerRoutes(
   });
 
 
+  async function notifyDestinationClassroomAssignees(destinationSchoolId: number, studentId: number, studentName: string, sourceSchoolName: string, effectiveDate: string) {
+    const [destinationSchool] = await db.select().from(schoolsTable).where(eq(schoolsTable.id, destinationSchoolId)).limit(1);
+    if (!destinationSchool) return;
+    const [permission] = await db.select({ id: permissions.id }).from(permissions).where(eq(permissions.code, "students.classroom.assign")).limit(1);
+    if (!permission) return;
+    const grouped = await db.selectDistinct({ userId: userAccessGroups.userId })
+      .from(userAccessGroups)
+      .innerJoin(accessGroupPermissions, eq(accessGroupPermissions.accessGroupId, userAccessGroups.accessGroupId))
+      .where(eq(accessGroupPermissions.permissionId, permission.id));
+    const direct = await db.selectDistinct({ userId: userPermissionOverrides.userId })
+      .from(userPermissionOverrides)
+      .where(and(eq(userPermissionOverrides.permissionId, permission.id), eq(userPermissionOverrides.granted, true)));
+    const denied = await db.selectDistinct({ userId: userPermissionOverrides.userId })
+      .from(userPermissionOverrides)
+      .where(and(eq(userPermissionOverrides.permissionId, permission.id), eq(userPermissionOverrides.granted, false)));
+    const deniedIds = new Set(denied.map((row) => Number(row.userId)));
+    const ids = Array.from(new Set([...grouped, ...direct].map((row) => Number(row.userId)))).filter((id) => !deniedIds.has(id));
+    if (!ids.length) return;
+    const recipients = await db.select({ id: users.id, schoolId: users.schoolId, organizationId: users.organizationId, isActive: users.isActive })
+      .from(users).where(inArray(users.id, ids));
+    const eligible = recipients.filter((candidate) => candidate.isActive && Number(candidate.schoolId) === destinationSchoolId);
+    if (!eligible.length) return;
+    await db.insert(notifications).values(eligible.map((recipient) => ({
+      organizationId: destinationSchool.organizationId || null,
+      schoolId: destinationSchoolId,
+      userId: recipient.id,
+      type: "classroom_assignment_required",
+      title: "Classroom assignment required",
+      message: `${studentName} transferred from ${sourceSchoolName} effective ${effectiveDate} and needs a classroom assignment.`,
+      severity: "warning",
+      channel: "in_app",
+      link: `/students?studentId=${studentId}&assignClassroom=1`,
+      actorUserId: null,
+    })));
+  }
+
   const internalTransferStudentSchema = z.object({
     studentId: z.coerce.number().int().positive(),
     destinationSchoolId: z.coerce.number().int().positive(),
-    destinationClassId: z.coerce.number().int().positive(),
     effectiveDate: z.string().min(4),
     reason: z.string().trim().min(3),
     notes: z.string().trim().optional().nullable(),
@@ -3532,27 +3978,6 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/internal-transfers/destinations/:schoolId/classes", requireAuth, requirePermission("internal_transfers.view"), async (req, res, next) => {
-    try {
-      const currentUser = req.user as User;
-      const destinationSchoolId = Number(req.params.schoolId);
-      if (!Number.isInteger(destinationSchoolId) || destinationSchoolId <= 0) {
-        return res.status(400).json({ message: "Valid destination school is required" });
-      }
-
-      const destinationSchool = await storage.getSchool(destinationSchoolId);
-      const allowedSchools = await getInternalTransferSchools(req, getSchoolContext(req) || currentUser.schoolId || null);
-      if (!destinationSchool || !allowedSchools.some((school) => school.id === destinationSchoolId)) {
-        return res.status(403).json({ message: "Destination school is outside your organisation" });
-      }
-
-      const destinationClasses = await storage.getClassesBySchool(destinationSchoolId);
-      res.json(destinationClasses.sort((a, b) => String(a.className || "").localeCompare(String(b.className || ""))));
-    } catch (error) {
-      next(error);
-    }
-  });
-
   async function buildTransferReferenceMaps(transfers: any[]) {
     const schoolIds = Array.from(new Set(transfers.flatMap((t) => [t.sourceSchoolId, t.destinationSchoolId]).filter(Boolean)));
     const classIds = Array.from(new Set(transfers.flatMap((t) => [t.sourceClassId, t.destinationClassId]).filter(Boolean)));
@@ -3603,10 +4028,18 @@ export async function registerRoutes(
         return res.status(403).json({ message: "You can only transfer students from your current school" });
       }
       await ensureInternalTransferSchoolLinkage(req, Number(student.schoolId), data.destinationSchoolId);
+      const sourceSchool = await storage.getSchool(Number(student.schoolId));
       const result = await storage.transferStudentWithinOrganization({
         ...data,
         userId: currentUser.id,
       });
+      await notifyDestinationClassroomAssignees(
+        data.destinationSchoolId,
+        result.student.id,
+        `${result.student.firstName} ${result.student.lastName}`.trim(),
+        sourceSchool?.name || "the source school",
+        data.effectiveDate,
+      );
       logActivity(req, {
         action: "transfer",
         category: "students",
@@ -5036,6 +5469,11 @@ export async function registerRoutes(
 
   app.get("/api/students", requireAuth, async (req, res, next) => {
     try {
+      const portalUser = req.user as User;
+      if (portalUser.role === "parent" || portalUser.role === "student") {
+        logActivity(req, { action: "access_denied", category: "security", description: "Portal user attempted to access the administrative student directory", targetType: "students" });
+        return res.status(403).json({ message: "Use your portal dashboard for student information" });
+      }
       const schoolId = getSchoolContext(req);
       const status = String(req.query.status || "").toLowerCase();
 
@@ -5053,7 +5491,8 @@ export async function registerRoutes(
 
       const { page, pageSize, offset } = parsePagination(req);
       const search = normalizeSearch(req.query.search);
-      const classId = req.query.classId && req.query.classId !== "all" ? Number.parseInt(String(req.query.classId), 10) : null;
+      const classFilter = req.query.classId && req.query.classId !== "all" ? String(req.query.classId) : null;
+      const classId = classFilter && classFilter !== "unassigned" ? Number.parseInt(classFilter, 10) : null;
       const streamId = req.query.streamId && req.query.streamId !== "all" ? Number.parseInt(String(req.query.streamId), 10) : null;
       const conditions: any[] = [];
       if (schoolId) conditions.push(eq(studentsTable.schoolId, schoolId));
@@ -5065,7 +5504,8 @@ export async function registerRoutes(
           conditions.push(eq(studentsTable.status, status as any));
         }
       }
-      if (Number.isFinite(classId)) conditions.push(eq(studentsTable.classId, classId as number));
+      if (classFilter === "unassigned") conditions.push(isNull(studentsTable.classId));
+      else if (Number.isFinite(classId)) conditions.push(eq(studentsTable.classId, classId as number));
       if (Number.isFinite(streamId)) conditions.push(eq(studentsTable.streamId, streamId as number));
       if (search) {
         const q = `%${search}%`;
@@ -5097,6 +5537,11 @@ export async function registerRoutes(
           phone: parentsTable.phone,
           email: parentsTable.email,
           relationship: parentsTable.relationship,
+          address: parentsTable.address,
+          streetAddress: parentsTable.streetAddress,
+          residentialArea: parentsTable.residentialArea,
+          occupation: parentsTable.occupation,
+          photo: parentsTable.photo,
         }).from(parentsTable).where(inArray(parentsTable.id, parentIds))
         : [];
       const parentsById = new Map(parentRows.map((parent) => [parent.id, parent]));
@@ -5108,6 +5553,11 @@ export async function registerRoutes(
           parentPhone: parent.phone,
           parentEmail: parent.email,
           parentRelationship: parent.relationship,
+          parentAddress: parent.address,
+          parentStreetAddress: parent.streetAddress,
+          parentResidentialArea: parent.residentialArea,
+          parentOccupation: parent.occupation,
+          parentPhoto: parent.photo,
         } : student;
       });
       return res.json(toPaginatedResult(itemsWithParentDetails, Number(totalCount), page, pageSize));
@@ -5118,6 +5568,11 @@ export async function registerRoutes(
 
   app.get("/api/students/search", requireAuth, async (req, res, next) => {
     try {
+      const requestUser = req.user as User;
+      if (requestUser.role === "parent" || requestUser.role === "student") {
+        logActivity(req, { action: "access_denied", category: "security", description: "Portal user attempted to search the administrative student directory", targetType: "students" });
+        return res.status(403).json({ message: "Student search is not available in the portal" });
+      }
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
 
@@ -5175,6 +5630,7 @@ export async function registerRoutes(
   app.get("/api/students/next-admission-no", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
+      if (currentUser.role === "parent" || currentUser.role === "student") return res.status(403).json({ message: "Access denied" });
       const schoolId = getSchoolContext(req) || currentUser.schoolId;
       if (!schoolId) return res.status(400).json({ message: "School context is required to preview an admission number" });
       const admissionNo = await storage.getNextAdmissionNo({ schoolId, referenceDate: new Date() });
@@ -5186,6 +5642,8 @@ export async function registerRoutes(
 
   app.get("/api/students/by-class/:classId", requireAuth, async (req, res, next) => {
     try {
+      const currentUser = req.user as User;
+      if (currentUser.role === "parent" || currentUser.role === "student") return res.status(403).json({ message: "Access denied" });
       const studentList = await storage.getStudentsByClass(parseIdParam(req.params.classId));
       res.json(studentList);
     } catch (error) {
@@ -5198,17 +5656,24 @@ export async function registerRoutes(
       const requestedParentId = parseIdParam(req.params.parentId);
       const user = req.user as User;
 
+      if (user.role === "student") {
+        logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to enumerate children for a parent", targetType: "students" });
+        return res.status(403).json({ message: "Access denied" });
+      }
       if (user.role === "parent") {
-        if (user.id !== requestedParentId) {
+        const allParents = await storage.getAllParents();
+        const parentRecord = allParents.find((parent) => parent.userId === user.id);
+        if (!parentRecord || parentRecord.id !== requestedParentId) {
+          logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access another parent's linked children", targetType: "students" });
           return res.status(403).json({ message: "Access denied" });
         }
-        const allParents = await storage.getAllParents();
-        const parentRecord = allParents.find(p => p.userId === user.id);
-        if (!parentRecord) {
-          return res.json([]);
-        }
-        const studentList = await storage.getStudentsByParent(parentRecord.id);
-        return res.json(studentList);
+        const linkedStudents = await storage.getStudentsByParent(parentRecord.id);
+        return res.json(linkedStudents.map((student) => ({
+          id: student.id, schoolId: student.schoolId, admissionNo: student.admissionNo,
+          firstName: student.firstName, lastName: student.lastName, photo: student.photo,
+          status: student.status, classId: student.classId, streamId: student.streamId,
+          isBoarding: student.isBoarding === true, isDayScholar: student.isDayScholar === true, hostelId: student.hostelId,
+        })));
       }
 
       const studentList = await storage.getStudentsByParent(requestedParentId);
@@ -5230,10 +5695,31 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Access denied" });
       }
 
-      const parent = student.parentId ? await storage.getParent(student.parentId) : undefined;
-      if (!parent) {
-        return res.json(student);
+      const user = req.user as User;
+      if (user.role === "student" && student.userId !== user.id) {
+        logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to access another student's record", targetType: "student", targetId: String(student.id) });
+        return res.status(403).json({ message: "Access denied" });
       }
+      if (user.role === "parent") {
+        const parentRows = await storage.getAllParents();
+        const currentParent = parentRows.find((row) => row.userId === user.id);
+        if (!currentParent || student.parentId !== currentParent.id) {
+          logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access an unlinked student record", targetType: "student", targetId: String(student.id) });
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+
+      if (user.role === "student" || user.role === "parent") {
+        return res.json({
+          id: student.id, schoolId: student.schoolId, admissionNo: student.admissionNo,
+          firstName: student.firstName, lastName: student.lastName, photo: student.photo,
+          status: student.status, classId: student.classId, streamId: student.streamId,
+          isBoarding: student.isBoarding === true, isDayScholar: student.isDayScholar === true, hostelId: student.hostelId,
+        });
+      }
+
+      const parent = student.parentId ? await storage.getParent(student.parentId) : undefined;
+      if (!parent) return res.json(student);
 
       res.json({
         ...student,
@@ -5388,6 +5874,30 @@ export async function registerRoutes(
     }
   });
 
+  app.put("/api/students/:id/classroom", requireAuth, requirePermission("students.classroom.assign"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req);
+      const id = parseIdParam(req.params.id);
+      const classId = Number(req.body?.classId);
+      if (!Number.isInteger(classId) || classId <= 0) return res.status(400).json({ message: "A valid classroom is required" });
+      const student = await storage.getStudent(id);
+      if (!student || student.archivedAt) return res.status(404).json({ message: "Student not found" });
+      if (!student.schoolId) return res.status(400).json({ message: "Student has no school context" });
+      if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      const classroom = await storage.getClass(classId);
+      if (!classroom || classroom.archivedAt || classroom.schoolId !== student.schoolId) return res.status(400).json({ message: "Classroom must be an existing classroom at the student's current school" });
+      const updated = await storage.updateStudent(id, { classId: classroom.id, streamId: classroom.streamId || null });
+      await db.update(notifications).set({ readAt: new Date() }).where(and(
+        eq(notifications.schoolId, student.schoolId),
+        eq(notifications.type, "classroom_assignment_required"),
+        eq(notifications.link, `/students?studentId=${id}&assignClassroom=1`),
+      ));
+      logActivity(req, { action: "assign_classroom", category: "students", description: `Assigned ${student.firstName} ${student.lastName} to classroom ${classroom.className}`, targetType: "student", targetId: id, targetName: `${student.firstName} ${student.lastName}`, schoolId: student.schoolId });
+      res.json({ message: "Classroom assigned successfully", student: updated });
+    } catch (error) { next(error); }
+  });
+
   app.post("/api/students/:id/transfer", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
@@ -5400,7 +5910,21 @@ export async function registerRoutes(
       if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
+      const effectiveDate = String(req.body?.effectiveDate || new Date().toISOString().slice(0, 10));
+      const reason = String(req.body?.reason || "Transferred out").trim() || "Transferred out";
+      const notes = req.body?.notes ? String(req.body.notes).trim() : null;
       const updated = await storage.updateStudent(id, { status: "transferred" });
+      await db.insert(studentEnrollmentEvents).values({
+        studentId: id,
+        schoolId: student.schoolId,
+        eventType: "transfer_out",
+        effectiveDate,
+        reason,
+        notes,
+        previousStatus: student.status || null,
+        newStatus: "transferred",
+        createdByUserId: currentUser.id,
+      });
       if (student.userId) {
         await storage.updateUser(student.userId, { isActive: false });
       }
@@ -5410,7 +5934,49 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/students/:id/subjects", requireAuth, async (req, res, next) => {
+  app.post("/api/students/:id/restore", requireAuth, requirePermission("students.restore_transferred"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req);
+      const id = parseIdParam(req.params.id);
+      const student = await storage.getStudent(id);
+      if (!student || student.archivedAt) return res.status(404).json({ message: "Student not found" });
+      if (student.status !== "transferred") return res.status(400).json({ message: "Only externally transferred students can be restored" });
+      if (currentUser.role !== "org_admin" && schoolId && student.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      const effectiveDate = String(req.body?.effectiveDate || new Date().toISOString().slice(0, 10));
+      const reason = String(req.body?.reason || "Student returned after external transfer").trim() || "Student returned after external transfer";
+      const notes = req.body?.notes ? String(req.body.notes).trim() : null;
+      const updated = await storage.updateStudent(id, { status: "active", classId: null, streamId: null });
+      await db.insert(studentEnrollmentEvents).values({
+        studentId: id,
+        schoolId: student.schoolId,
+        eventType: "restored",
+        effectiveDate,
+        reason,
+        notes,
+        previousStatus: student.status || null,
+        newStatus: "active",
+        createdByUserId: currentUser.id,
+      });
+      if (student.userId) await storage.updateUser(student.userId, { isActive: true });
+      const school = student.schoolId ? await storage.getSchool(student.schoolId) : undefined;
+      if (student.schoolId) {
+        await notifyDestinationClassroomAssignees(student.schoolId, id, `${student.firstName} ${student.lastName}`.trim(), school?.name || "the school", effectiveDate);
+      }
+      logActivity(req, {
+        action: "restore",
+        category: "students",
+        description: `Restored transferred student ${student.firstName} ${student.lastName}`,
+        targetType: "student",
+        targetId: id,
+        targetName: `${student.firstName} ${student.lastName}`,
+        schoolId: student.schoolId ?? undefined,
+      });
+      res.json({ message: "Student restored successfully. Classroom assignment is required.", student: updated });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/students/:id/subjects", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
@@ -5533,7 +6099,7 @@ export async function registerRoutes(
     return res.download(absolutePath, safeProfileFileName(record, entity, extension));
   }
 
-  app.post("/api/students/:id/photo", requireAuth, requireAnyPermission("students.edit", "students.manage_photo"), photoUpload.single("photo"), async (req, res, next) => {
+  app.post("/api/students/:id/photo", requireAuth, denyPortalRoles, requireAnyPermission("students.edit", "students.manage_photo"), photoUpload.single("photo"), async (req, res, next) => {
     try {
       const record = await storage.getStudent(parseIdParam(req.params.id));
       if (!record) return res.status(404).json({ message: "Student not found" });
@@ -5542,7 +6108,7 @@ export async function registerRoutes(
     } catch (error) { next(error); }
   });
 
-  app.get("/api/students/:id/photo/download", requireAuth, requireAnyPermission("students.view", "students.edit", "students.manage_photo"), async (req, res, next) => {
+  app.get("/api/students/:id/photo/download", requireAuth, denyPortalRoles, requireAnyPermission("students.view", "students.edit", "students.manage_photo"), async (req, res, next) => {
     try {
       const record = await storage.getStudent(parseIdParam(req.params.id));
       if (!record) return res.status(404).json({ message: "Student not found" });
@@ -5826,7 +6392,7 @@ export async function registerRoutes(
     isActive: z.boolean(),
   });
 
-  app.get("/api/students/:id/user", requireAuth, async (req, res, next) => {
+  app.get("/api/students/:id/user", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
@@ -6373,6 +6939,8 @@ export async function registerRoutes(
 
   app.get("/api/attendance/by-class/:classId/:date", requireAuth, async (req, res, next) => {
     try {
+      const user = req.user as User;
+      if (user.role === "parent" || user.role === "student") return res.status(403).json({ message: "Access denied" });
       const date = routeParam(req.params.date) || new Date().toISOString().split('T')[0];
       const records = await storage.getAttendanceByClass(parseIdParam(req.params.classId), date);
       res.json(records);
@@ -6383,7 +6951,17 @@ export async function registerRoutes(
 
   app.get("/api/attendance/by-student/:studentId", requireAuth, async (req, res, next) => {
     try {
-      const records = await storage.getAttendanceByStudent(parseIdParam(req.params.studentId));
+      const studentId = parseIdParam(req.params.studentId);
+      const student = await storage.getStudent(studentId);
+      if (!student) return res.status(404).json({ message: "Student not found" });
+      const user = req.user as User;
+      if (user.role === "student" && student.userId !== user.id) return res.status(403).json({ message: "Access denied" });
+      if (user.role === "parent") {
+        const parentRows = await storage.getAllParents();
+        const parent = parentRows.find((row) => row.userId === user.id);
+        if (!parent || student.parentId !== parent.id) return res.status(403).json({ message: "Access denied" });
+      }
+      const records = await storage.getAttendanceByStudent(studentId);
       res.json(records);
     } catch (error) {
       next(error);
@@ -6393,7 +6971,11 @@ export async function registerRoutes(
   app.post("/api/attendance", requireAuth, requireRole("school_admin", "teacher"), async (req, res, next) => {
     try {
       const data = insertAttendanceRecordSchema.parse(req.body);
-      const newRecord = await storage.createAttendance(data);
+      const existing = await db.select().from(attendanceRecords).where(and(eq(attendanceRecords.studentId, data.studentId), eq(attendanceRecords.classId, data.classId), eq(attendanceRecords.date, data.date))).limit(1).then(rows => rows[0]);
+      if (existing?.gateEvidenceLocked && existing.status !== data.status) {
+        return res.status(409).json({ message: `Gate-confirmed attendance is ${existing.status.toUpperCase()} and cannot be changed through normal attendance entry.`, attendanceId: existing.id });
+      }
+      const [newRecord] = await db.insert(attendanceRecords).values(data).onConflictDoUpdate({ target: [attendanceRecords.studentId, attendanceRecords.classId, attendanceRecords.date], set: data }).returning();
       res.status(201).json(newRecord);
     } catch (error) {
       next(error);
@@ -6441,7 +7023,7 @@ export async function registerRoutes(
         }
       }
 
-      const absentSlugs = ['absent', 'sick', 'fees', 'suspended', 'absconding', 'excused', 'late'];
+      const absentSlugs = ['absent', 'sick', 'fees', 'suspended', 'absconding', 'excused'];
       const unknownReasons = ['', 'no reason'];
 
       const previousBaselines: Record<number, { notifiedStatus: string | null; notifiedReason: string | null }> = {};
@@ -6463,6 +7045,25 @@ export async function registerRoutes(
               notifiedReason: prev?.notifiedReason ?? null,
             };
           }
+        }
+      }
+
+      // Gate-confirmed school presence is authoritative. Normal register editing may not turn
+      // a confirmed Present/Late record into an absent-like status. The exceptional audited
+      // correction endpoint is protected by access_control.attendance_correction.
+      for (const rec of parsed) {
+        const existing = await db.select().from(attendanceRecords).where(and(
+          eq(attendanceRecords.studentId, rec.studentId),
+          eq(attendanceRecords.classId, rec.classId),
+          eq(attendanceRecords.date, rec.date),
+        )).limit(1).then(rows => rows[0]);
+        if (existing?.gateEvidenceLocked && existing.status !== rec.status) {
+          return res.status(409).json({
+            message: `This learner has Gate-confirmed school attendance (${existing.status.toUpperCase()}) and cannot be changed through the normal class register. Use the audited Gate Attendance correction action if the Gate evidence is genuinely wrong.`,
+            attendanceId: existing.id,
+            studentId: existing.studentId,
+            gateStatus: existing.status,
+          });
         }
       }
 
@@ -6514,11 +7115,14 @@ export async function registerRoutes(
 
           const studentName = `${student.firstName} ${student.lastName}`;
           let msg = '';
+          let templateKey = '';
 
           if (changed && baselineAbsentLike && newSlug === 'present' && !firstTimeNotify) {
             msg = `FCGS Attendance: ${studentName} was initially marked ABSENT, this has been amended to PRESENT. We apologise for any inconvenience caused. Thank you.`;
+            templateKey = 'absence_amended_present';
           } else if (changed && baselineAbsentLike && newAbsentLike && !firstTimeNotify) {
             msg = `FCGS Attendance: ${studentName} reason for absence has been updated; reason: ${(newReason || 'No Reason').toUpperCase()}. Please contact our Call Centre for any enquiries you may have.`;
+            templateKey = 'absence_reason_updated';
           } else if (newAbsentLike) {
             const classInfo = await storage.getClass(rec.classId);
             const className = classInfo?.shortCode || classInfo?.className || 'Class';
@@ -6570,42 +7174,15 @@ export async function registerRoutes(
             msg = contactLine
               ? `${line1}\n${line2}\n${contactLine}`
               : `${line1}\n${line2}`;
+            templateKey = 'absence_initial';
           }
           if (msg) {
             const senderId = (req.user as any).id;
             console.log(`[FCGS Attendance Notify] Sending to parent of student ${rec.studentId}: baseline=${baselineStatus}→new=${newSlug}, changed=${changed}, firstTimeNotify=${firstTimeNotify}`);
 
-            if (parent.phone) {
-              communicationService.sendSms({
-                to: parent.phone,
-                message: msg,
-                schoolId: schoolId || undefined,
-                recipientType: "parent",
-                recipientId: parent.id,
-                sentBy: senderId,
-                category: "attendance",
-                recipientName: `${parent.firstName} ${parent.lastName}`,
-              }).catch((err) => {
-                console.error(`[FCGS Attendance Notify] SMS send failed for student ${rec.studentId}:`, err);
-              });
-            }
-
-            if (parent.email) {
-              communicationService.sendEmail({
-                to: parent.email,
-                subject: "FCGS Attendance Notification",
-                text: msg,
-                html: msg.replace(/\n/g, '<br>'),
-                schoolId: schoolId || undefined,
-                recipientType: "parent",
-                recipientId: parent.id,
-                sentBy: senderId,
-                category: "attendance",
-                recipientName: `${parent.firstName} ${parent.lastName}`,
-              }).catch((err) => {
-                console.error(`[FCGS Attendance Notify] Email send failed for student ${rec.studentId}:`, err);
-              });
-            }
+            sendAttendanceTemplate(rec.studentId, templateKey || 'absence_initial', rec, senderId).catch((err) => {
+              console.error(`[FCGS Attendance Notify] Template notification failed for student ${rec.studentId}:`, err);
+            });
           } else {
             console.log(`[FCGS Attendance Notify] No notification for student ${rec.studentId}: baseline=${baselineStatus}(absent=${baselineAbsentLike}) → new=${newSlug}(absent=${newAbsentLike}), changed=${changed}, firstTimeNotify=${firstTimeNotify}`);
           }
@@ -6618,7 +7195,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/attendance/grid/:classId/:from/:to", requireAuth, async (req, res, next) => {
+  app.get("/api/attendance/grid/:classId/:from/:to", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const classParam = routeParam(req.params.classId);
       const showAllClasses = classParam === "all";
@@ -6643,16 +7220,78 @@ export async function registerRoutes(
       const recordGroups = await Promise.all(targetClasses.map((classItem) => storage.getAttendanceByClassRange(classItem.id, from, to)));
       const students = studentGroups.flat();
       const records = recordGroups.flat();
+      const gateIds = Array.from(new Set(records.map((record: any) => record.gateId).filter((id: any): id is number => Number.isFinite(Number(id))).map(Number)));
+      const deviceIds = Array.from(new Set(records.map((record: any) => record.gateDeviceId).filter((id: any): id is number => Number.isFinite(Number(id))).map(Number)));
+      const [gateRows, deviceRows] = await Promise.all([
+        gateIds.length ? db.select({ id: accessGates.id, name: accessGates.name }).from(accessGates).where(inArray(accessGates.id, gateIds)) : [],
+        deviceIds.length ? db.select({ id: gateDevices.id, name: gateDevices.name, direction: gateDevices.direction }).from(gateDevices).where(inArray(gateDevices.id, deviceIds)) : [],
+      ]);
+      const gateNames = new Map(gateRows.map((row) => [row.id, row.name]));
+      const deviceNames = new Map(deviceRows.map((row) => [row.id, row]));
+      const correctionUserIds = Array.from(new Set(
+        records
+          .map((record: any) => Number(record.gateCorrectedByUserId))
+          .filter((id: number) => Number.isFinite(id) && id > 0),
+      ));
+      const correctionUsers = correctionUserIds.length
+        ? await db.select({ id: users.id, firstName: users.firstName, lastName: users.lastName, email: users.email })
+          .from(users)
+          .where(inArray(users.id, correctionUserIds))
+        : [];
+      const correctionUsersById = new Map(correctionUsers.map((user) => [user.id, user]));
 
       const dates: string[] = [];
       const d = new Date(from);
       const end = new Date(to);
       while (d <= end) {
-        const day = d.getDay();
-        if (day !== 0 && day !== 6) {
-          dates.push(d.toISOString().split('T')[0]);
-        }
+        dates.push(d.toISOString().split('T')[0]);
         d.setDate(d.getDate() + 1);
+      }
+
+      const studentIds = students.map((student) => student.id);
+      const fromAt = new Date(`${from}T00:00:00+02:00`);
+      const toExclusive = new Date(`${to}T00:00:00+02:00`);
+      toExclusive.setDate(toExclusive.getDate() + 1);
+      const gateEventsForRange = schoolId && studentIds.length ? await db.select().from(accessEvents).where(and(
+        eq(accessEvents.schoolId, schoolId),
+        inArray(accessEvents.studentId, studentIds),
+        sql`${accessEvents.occurredAt} >= ${fromAt}`,
+        sql`${accessEvents.occurredAt} < ${toExclusive}`,
+      )).orderBy(accessEvents.occurredAt) : [];
+      const eventGateIds = Array.from(new Set(gateEventsForRange.map((event: any) => event.gateId).filter((id: any): id is number => Number.isFinite(Number(id))).map(Number))).filter((id) => !gateNames.has(id));
+      const eventDeviceIds = Array.from(new Set(gateEventsForRange.map((event: any) => event.deviceId).filter((id: any): id is number => Number.isFinite(Number(id))).map(Number))).filter((id) => !deviceNames.has(id));
+      if (eventGateIds.length) {
+        const rows = await db.select({ id: accessGates.id, name: accessGates.name }).from(accessGates).where(inArray(accessGates.id, eventGateIds));
+        rows.forEach((row) => gateNames.set(row.id, row.name));
+      }
+      if (eventDeviceIds.length) {
+        const rows = await db.select({ id: gateDevices.id, name: gateDevices.name, direction: gateDevices.direction }).from(gateDevices).where(inArray(gateDevices.id, eventDeviceIds));
+        rows.forEach((row) => deviceNames.set(row.id, row));
+      }
+      const gateActivityIndex: Record<number, Record<string, any>> = {};
+      const eventDateKey = (value: Date | string) => {
+        const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Harare", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(value));
+        const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+        return `${get("year")}-${get("month")}-${get("day")}`;
+      };
+      for (const event of gateEventsForRange) {
+        if (!event.studentId) continue;
+        const dateKey = eventDateKey(event.occurredAt);
+        if (!gateActivityIndex[event.studentId]) gateActivityIndex[event.studentId] = {};
+        const current = gateActivityIndex[event.studentId][dateKey] || { eventCount: 0, firstArrivalAt: null, latestEventAt: null, latestDecision: null, latestReason: null, latestGateName: null, latestDeviceName: null, latestDirection: null, entryDenied: false, admitted: false };
+        current.eventCount += 1;
+        current.latestEventAt = event.occurredAt;
+        current.latestDecision = event.accessDecision;
+        current.latestReason = event.decisionReason;
+        current.latestGateName = event.gateId ? gateNames.get(Number(event.gateId)) || null : null;
+        current.latestDeviceName = event.deviceId ? deviceNames.get(Number(event.deviceId))?.name || null : null;
+        current.latestDirection = event.direction || null;
+        if (event.direction === "entry") {
+          if (!current.firstArrivalAt || new Date(event.occurredAt) < new Date(current.firstArrivalAt)) current.firstArrivalAt = event.occurredAt;
+          if (event.accessDecision === "denied") current.entryDenied = true;
+          if (event.accessDecision === "allowed") current.admitted = true;
+        }
+        gateActivityIndex[event.studentId][dateKey] = current;
       }
 
       const statusIndex: Record<number, Record<string, string>> = {};
@@ -6661,14 +7300,32 @@ export async function registerRoutes(
         if (!statusIndex[r.studentId]) statusIndex[r.studentId] = {};
         if (!recordIndex[r.studentId]) recordIndex[r.studentId] = {};
         statusIndex[r.studentId][r.date] = r.status;
-        recordIndex[r.studentId][r.date] = r;
+        const deviceInfo = r.gateDeviceId ? deviceNames.get(Number(r.gateDeviceId)) : null;
+        const correctedBy = r.gateCorrectedByUserId
+          ? correctionUsersById.get(Number(r.gateCorrectedByUserId)) || null
+          : null;
+        recordIndex[r.studentId][r.date] = {
+          ...r,
+          gateName: r.gateId ? gateNames.get(Number(r.gateId)) || null : null,
+          gateDeviceName: deviceInfo?.name || null,
+          gateDirection: deviceInfo?.direction || null,
+          gateCorrectedBy: correctedBy
+            ? {
+                id: correctedBy.id,
+                firstName: correctedBy.firstName || null,
+                lastName: correctedBy.lastName || null,
+                name: `${correctedBy.firstName || ""} ${correctedBy.lastName || ""}`.trim() || correctedBy.email || `User ${correctedBy.id}`,
+                email: correctedBy.email || null,
+              }
+            : null,
+        };
       }
 
       let presentCount = 0;
       let absentCount = 0;
       for (const r of records) {
         if (r.date === new Date().toISOString().split('T')[0]) {
-          if (r.status === 'present') presentCount++;
+          if (r.status === 'present' || r.status === 'late') presentCount++;
           else absentCount++;
         }
       }
@@ -6688,6 +7345,7 @@ export async function registerRoutes(
               className: classInfo?.shortCode || classInfo?.className || '',
               statuses: statusIndex[s.id] || {},
               records: recordIndex[s.id] || {},
+              gateActivity: gateActivityIndex[s.id] || {},
             };
           })
           .sort(compareStudentsByFirstName),
@@ -6700,7 +7358,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/attendance/export/:classId/:from/:to", requireAuth, async (req, res, next) => {
+  app.get("/api/attendance/export/:classId/:from/:to", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const classId = parseIdParam(req.params.classId);
       const isValidDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime());
@@ -6716,10 +7374,7 @@ export async function registerRoutes(
       const d = new Date(from);
       const end = new Date(to);
       while (d <= end) {
-        const day = d.getDay();
-        if (day !== 0 && day !== 6) {
-          dates.push(d.toISOString().split('T')[0]);
-        }
+        dates.push(d.toISOString().split('T')[0]);
         d.setDate(d.getDate() + 1);
       }
 
@@ -6757,7 +7412,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/discipline", requireAuth, async (req, res, next) => {
+  app.get("/api/discipline", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const studentId = req.query.studentId ? parseInt(req.query.studentId as string) : undefined;
       const records = await storage.getDisciplineRecords(studentId);
@@ -6777,7 +7432,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/clinic", requireAuth, async (req, res, next) => {
+  app.get("/api/clinic", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const studentId = req.query.studentId ? parseInt(req.query.studentId as string) : undefined;
       const records = await storage.getClinicRecords(studentId);
@@ -6836,8 +7491,24 @@ export async function registerRoutes(
 
   app.get("/api/fees", requireAuth, async (req, res, next) => {
     try {
-      const studentId = req.query.studentId ? parseInt(req.query.studentId as string) : undefined;
-      const payments = await storage.getFeesPayments(studentId);
+      const user = req.user as User;
+      const requestedStudentId = req.query.studentId ? parseInt(req.query.studentId as string) : undefined;
+      if (user.role === "student") {
+        logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to access payment history", targetType: "fees" });
+        return res.status(403).json({ message: "Payment history is not available in the student portal" });
+      }
+      if (user.role === "parent") {
+        const parentRows = await storage.getAllParents();
+        const parent = parentRows.find((row) => row.userId === user.id);
+        if (!parent) return res.json([]);
+        const children = await storage.getStudentsByParent(parent.id);
+        const allowedIds = new Set(children.map((child) => child.id));
+        if (requestedStudentId !== undefined && !allowedIds.has(requestedStudentId)) return res.status(403).json({ message: "Access denied" });
+        if (requestedStudentId !== undefined) return res.json(await storage.getFeesPayments(requestedStudentId));
+        const paymentGroups = await Promise.all(children.map((child) => storage.getFeesPayments(child.id)));
+        return res.json(paymentGroups.flat());
+      }
+      const payments = await storage.getFeesPayments(requestedStudentId);
       res.json(payments);
     } catch (error) {
       next(error);
@@ -6863,6 +7534,113 @@ export async function registerRoutes(
 
   // Student Fees Management - CSV Import
   const feesUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+  type FeesCsvPreviewRow = {
+    rowNumber: number;
+    customer: string;
+    name: string;
+    group: string;
+    area: string;
+    balanceDue: number;
+    matchedStudent: any | null;
+    matchMethod: "customer_code" | "exact_name" | "fuzzy_name" | "unmatched";
+    calculatedStatus: string | null;
+  };
+
+  async function parseAndMatchFeesCsv(file: Express.Multer.File, schoolId: number, termMaxBalance: number): Promise<FeesCsvPreviewRow[]> {
+    const csvContent = file.buffer.toString("utf-8");
+    let records: string[][];
+    try { records = csvParse(csvContent, { relax_column_count: true, skip_empty_lines: true, trim: true }); }
+    catch { throw new Error("Invalid CSV format. Please ensure it is a valid comma-delimited file."); }
+    if (records.length < 2) throw new Error("CSV file is empty or has no data rows");
+    const header = records[0].map(h => h.toLowerCase().trim());
+    const colMap: Record<string, number | null> = { customer: null, name: null, group: null, area: null, balance: null };
+    header.forEach((col, index) => {
+      if (["customer", "customer id", "customer code"].includes(col)) colMap.customer = index;
+      else if (["name", "student", "student name"].includes(col)) colMap.name = index;
+      else if (["group", "form", "stream"].includes(col)) colMap.group = index;
+      else if (["area", "class", "class name"].includes(col)) colMap.area = index;
+      else if (["balance", "balance due", "fees balance"].includes(col)) colMap.balance = index;
+    });
+    if (colMap.name === null || colMap.balance === null) throw new Error('CSV must contain at least "Name" and "Balance" / "Balance due" columns.');
+    const allStudents = await storage.getStudentsBySchool(schoolId);
+    const output: FeesCsvPreviewRow[] = [];
+    for (let i = 1; i < records.length; i++) {
+      const row = records[i];
+      const name = colMap.name !== null && row[colMap.name] ? row[colMap.name].trim() : "";
+      if (!name) continue;
+      let balanceRaw = colMap.balance !== null && row[colMap.balance] ? row[colMap.balance].trim() : "0";
+      balanceRaw = balanceRaw.replace(/[, ]/g, "");
+      const balanceDue = parseFloat(balanceRaw) || 0;
+      const customer = colMap.customer !== null && row[colMap.customer] ? row[colMap.customer].trim() : "";
+      const group = colMap.group !== null && row[colMap.group] ? row[colMap.group].trim() : "";
+      const area = colMap.area !== null && row[colMap.area] ? row[colMap.area].trim() : "";
+      let matchedStudent: any = null;
+      let matchMethod: FeesCsvPreviewRow["matchMethod"] = "unmatched";
+      // IMPORTANT: intentionally preserves the existing matcher exactly. Accuracy hardening is a later build.
+      if (customer) { matchedStudent = allStudents.find(st => st.feesCustomerId === customer); if (matchedStudent) matchMethod = "customer_code"; }
+      if (!matchedStudent) {
+        const nameLower = name.toLowerCase();
+        matchedStudent = allStudents.find(st => `${st.firstName} ${st.lastName}`.toLowerCase() === nameLower);
+        if (matchedStudent) matchMethod = "exact_name";
+      }
+      if (!matchedStudent) {
+        const nameLower = name.toLowerCase();
+        matchedStudent = allStudents.find(st => { const fullName = `${st.firstName} ${st.lastName}`.toLowerCase(); return fullName.includes(nameLower) || nameLower.includes(fullName); });
+        if (matchedStudent) matchMethod = "fuzzy_name";
+      }
+      output.push({ rowNumber: i + 1, customer, name, group, area, balanceDue, matchedStudent, matchMethod, calculatedStatus: matchedStudent ? computeFeesStatusKey(balanceDue, termMaxBalance) : null });
+    }
+    return output;
+  }
+
+  app.post("/api/fees/import-csv/preview", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), feesUpload.single("fees_csv"), async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      if (!schoolId) return res.status(400).json({ message: "No school context" });
+      if (!req.file) return res.status(400).json({ message: "No CSV file uploaded" });
+      const termTotalFee = parseFloat(req.body.term_total_fee || "0");
+      const termMaxBalance = parseFloat(req.body.term_max_balance || "0");
+      const rows = await parseAndMatchFeesCsv(req.file, schoolId, termMaxBalance);
+      const school = await storage.getSchool(schoolId);
+      const stats = {
+        totalRows: rows.length, matchedRows: rows.filter(r => r.matchedStudent).length,
+        customerCodeMatches: rows.filter(r => r.matchMethod === "customer_code").length,
+        exactNameMatches: rows.filter(r => r.matchMethod === "exact_name").length,
+        fuzzyNameMatches: rows.filter(r => r.matchMethod === "fuzzy_name").length,
+        unmatchedRows: rows.filter(r => r.matchMethod === "unmatched").length,
+      };
+      const [batch] = await db.insert(feesImportBatches).values({ schoolId, organizationId: school?.organizationId || null, fileName: req.file.originalname, termTotalFee: termTotalFee.toFixed(2), termMaxBalance: termMaxBalance.toFixed(2), status: "preview", ...stats, uploadedByUserId: (req.user as any)?.id || null }).returning();
+      if (rows.length) await db.insert(feesImportItems).values(rows.map(r => ({ batchId: batch.id, rowNumber: r.rowNumber, csvCustomerCode: r.customer || null, csvName: r.name, csvGroup: r.group || null, csvArea: r.area || null, balanceDue: r.balanceDue.toFixed(2), matchedStudentId: r.matchedStudent?.id || null, matchedAdmissionNo: r.matchedStudent?.admissionNo || null, matchedStudentName: r.matchedStudent ? `${r.matchedStudent.firstName} ${r.matchedStudent.lastName}` : null, matchMethod: r.matchMethod, calculatedStatus: r.calculatedStatus })));
+      res.json({ success: true, batch, stats, items: rows.map(r => ({ rowNumber: r.rowNumber, csvCustomerCode: r.customer, csvName: r.name, csvGroup: r.group, csvArea: r.area, balanceDue: r.balanceDue, matchedStudentId: r.matchedStudent?.id || null, matchedAdmissionNo: r.matchedStudent?.admissionNo || null, matchedStudentName: r.matchedStudent ? `${r.matchedStudent.firstName} ${r.matchedStudent.lastName}` : null, matchMethod: r.matchMethod, calculatedStatus: r.calculatedStatus })) });
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/fees/import-csv/:batchId/commit", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req); if (!schoolId) return res.status(400).json({ message: "No school context" });
+      const batchId = Number(req.params.batchId);
+      const [batch] = await db.select().from(feesImportBatches).where(and(eq(feesImportBatches.id, batchId), eq(feesImportBatches.schoolId, schoolId))).limit(1);
+      if (!batch) return res.status(404).json({ message: "Fees import preview not found" });
+      if (batch.status === "committed") return res.status(409).json({ message: "This fees import has already been committed" });
+      const items = await db.select().from(feesImportItems).where(eq(feesImportItems.batchId, batch.id));
+      const snapshotAt = new Date(); let updated = 0;
+      for (const item of items) {
+        if (!item.matchedStudentId) continue;
+        const balanceDue = parseFloat(item.balanceDue || "0") || 0;
+        const termTotalFee = parseFloat(batch.termTotalFee || "0") || 0;
+        const termMaxBalance = parseFloat(batch.termMaxBalance || "0") || 0;
+        const paid = Math.max(0, termTotalFee - balanceDue);
+        const updateData: Record<string, any> = { feesTotalTerm: termTotalFee.toFixed(2), feesPaidSoFar: paid.toFixed(2), feesBalance: balanceDue.toFixed(2), feesMaxBalance: termMaxBalance.toFixed(2), feesStatus: item.calculatedStatus || computeFeesStatusKey(balanceDue, termMaxBalance), feesSource: "student_payments_csv", feesSnapshotAt: snapshotAt, feesImportBatchId: batch.id };
+        if (item.csvCustomerCode) updateData.feesCustomerId = item.csvCustomerCode;
+        await db.update(studentsTable).set(updateData).where(and(eq(studentsTable.id, item.matchedStudentId), eq(studentsTable.schoolId, schoolId)));
+        await syncStudentPolicy(item.matchedStudentId, (req.user as any)?.id || null, `Student Payments CSV import #${batch.id}`).catch(() => undefined);
+        updated++;
+      }
+      await db.update(feesImportBatches).set({ status: "committed", committedAt: snapshotAt }).where(eq(feesImportBatches.id, batch.id));
+      res.json({ success: true, batchId: batch.id, updated, not_found: Number(batch.unmatchedRows || 0), snapshotAt });
+    } catch (error) { next(error); }
+  });
 
   app.post("/api/fees/import-csv", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), feesUpload.single("fees_csv"), async (req, res, next) => {
     try {
@@ -6951,10 +7729,13 @@ export async function registerRoutes(
           feesBalance: balanceDue.toFixed(2),
           feesMaxBalance: termMaxBalance.toFixed(2),
           feesStatus: statusKey,
+          feesSource: "student_payments_csv",
+          feesSnapshotAt: new Date(),
         };
         if (customer) updateData.feesCustomerId = customer;
 
         await db.update(studentsTable).set(updateData).where(eq(studentsTable.id, matchedStudent.id));
+        await syncStudentPolicy(matchedStudent.id, (req.user as any)?.id || null, "Student Payments CSV direct import").catch(() => undefined);
         updated++;
       }
 
@@ -7120,7 +7901,7 @@ ${schoolName}`;
 
   // Student Fees Management - Get students present but in arrears (for attendance register popup)
   // Matches PHP fcgs_att_fees_arrears_list: cross-references attendance records with fee balances
-  app.post("/api/fees/arrears-for-class", requireAuth, async (req, res, next) => {
+  app.post("/api/fees/arrears-for-class", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });
@@ -7193,6 +7974,8 @@ ${schoolName}`;
   // Student Fees Management - Get fees summary for all students
   app.get("/api/fees/summary", requireAuth, async (req, res, next) => {
     try {
+      const user = req.user as User;
+      if (user.role === "parent" || user.role === "student") return res.status(403).json({ message: "Access denied" });
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });
 
@@ -7211,6 +7994,12 @@ ${schoolName}`;
           }
         }
 
+        const [financialAccessOverride] = await db.select().from(financialAccessOverrides).where(and(
+          eq(financialAccessOverrides.studentId, student.id),
+          inArray(financialAccessOverrides.status, ["active", "scheduled"]),
+          sql`${financialAccessOverrides.expiresAt} > now()`
+        )).orderBy(desc(financialAccessOverrides.createdAt)).limit(1);
+
         return {
           id: student.id,
           name: `${student.firstName} ${student.lastName}`,
@@ -7222,6 +8011,10 @@ ${schoolName}`;
           balance: parseFloat(student.feesBalance || "0"),
           maxBalance: parseFloat(student.feesMaxBalance || "0"),
           feesStatus: student.feesStatus || "n/a",
+          financialAccessOverride: financialAccessOverride ? {
+            id: financialAccessOverride.id, status: financialAccessOverride.status, reason: financialAccessOverride.reason,
+            effectiveFrom: financialAccessOverride.effectiveFrom, expiresAt: financialAccessOverride.expiresAt,
+          } : null,
           hasParentContact: !!(parentPhone || parentEmail),
         };
       }));
@@ -7382,13 +8175,54 @@ ${schoolName}`;
 
   app.put("/api/schools/:id", requireAuth, requireRole("org_admin", "school_admin"), async (req, res, next) => {
     try {
-      const updated = await storage.updateSchool(parseIdParam(req.params.id), req.body);
+      const schoolId = parseIdParam(req.params.id);
+      const before = await storage.getSchool(schoolId);
+      if (!before) return res.status(404).json({ message: "School not found" });
+
+      if (req.body?.enableFleetManagement === false) {
+        const requirement = await fleetRequirementForSchool(schoolId);
+        if (requirement.required) {
+          return res.status(409).json({
+            message: `Fleet Management cannot be disabled while this school has active Fleet vehicles or staff/school allocations.`,
+            fleetRequirement: requirement,
+          });
+        }
+      }
+
+      if (before.enableAccessControl === true && req.body?.enableAccessControl === false) {
+        const missingPhotoRestricted = await db.execute(sql`
+          select ai.id, ai.identity_no
+          from access_identities ai
+          where ai.school_id = ${schoolId}
+            and ai.is_active = true
+            and ai.desired_entry_access = 'deny'
+            and (ai.photo_path is null or btrim(ai.photo_path) = '')
+          limit 5
+        `);
+        if ((missingPhotoRestricted as any)?.rows?.length) {
+          return res.status(409).json({ message: "Access Control cannot be disabled safely because one or more currently restricted enrolled identities no longer have an FCGS photo available for unrestricted re-synchronization." });
+        }
+      }
+
+      const updated = await storage.updateSchool(schoolId, req.body);
       if (!updated) return res.status(404).json({ message: "School not found" });
+      if (before.enableAccessControl !== updated.enableAccessControl) {
+        await syncSchoolAccessPolicies(schoolId, (req.user as User).id, updated.enableAccessControl ? "Access Control enabled for school" : "Access Control disabled: keep enrolled people locally permitted");
+      }
       logActivity(req, { action: "update", category: "schools", description: `Updated school settings: ${updated.name}`, targetType: "school", targetId: updated.id, targetName: updated.name });
       res.json(updated);
     } catch (error) {
       next(error);
     }
+  });
+
+  app.get("/api/schools/:id/fleet-requirement", requireAuth, requirePermission("settings.view"), async (req, res, next) => {
+    try {
+      const schoolId = parseIdParam(req.params.id);
+      const school = await storage.getSchool(schoolId);
+      if (!school) return res.status(404).json({ message: "School not found" });
+      res.json(await fleetRequirementForSchool(schoolId));
+    } catch (error) { next(error); }
   });
 
   app.delete("/api/schools/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
@@ -7567,7 +8401,17 @@ ${schoolName}`;
 
   app.post("/api/notifications/:id/read", requireAuth, async (req, res, next) => {
     try {
-      const updated = await storage.markNotificationRead(parseIdParam(req.params.id));
+      const notificationId = parseIdParam(req.params.id);
+      const currentUser = req.user as User;
+      const [owned] = await db.select({ id: notifications.id }).from(notifications).where(and(
+        eq(notifications.id, notificationId),
+        eq(notifications.userId, currentUser.id),
+      )).limit(1);
+      if (!owned) {
+        logActivity(req, { action: "access_denied", category: "security", description: "User attempted to mark another user's notification as read", targetType: "notification", targetId: String(notificationId) });
+        return res.status(404).json({ message: "Notification not found" });
+      }
+      const updated = await storage.markNotificationRead(notificationId);
       res.json(updated);
     } catch (error) {
       next(error);
@@ -9021,10 +9865,8 @@ ${schoolName}`;
     return school?.schoolRadiusMeters && school.schoolRadiusMeters > 0 ? school.schoolRadiusMeters : 100;
   }
 
-  function expectedEndForAttendanceDate(date: string): { hour: number; minute: number } | null {
-    const day = new Date(`${date}T00:00:00`).getDay();
-    if (day === 0 || day === 6) return null;
-    return { hour: 16, minute: 0 };
+  async function attendancePolicyForDate(schoolId: number, date: string) {
+    return getSchoolDaySchedule(schoolId, new Date(`${date}T12:00:00+02:00`));
   }
 
   async function findStaffByRegisteredDeviceId(deviceId: string) {
@@ -9145,7 +9987,7 @@ ${schoolName}`;
     if (reasonType === 'early_clock_out') {
       return {
         title: 'Early Clock-Out Reason Required',
-        message: 'You clocked out before 16:00 on a weekday. Enter the reason before continuing.',
+        message: "You clocked out before your school\'s configured expected end time. Enter the reason before continuing.",
       };
     }
     return {
@@ -9216,6 +10058,43 @@ ${schoolName}`;
     } catch (error) {
       next(error);
     }
+  });
+
+  app.post("/api/staff-attendance/:id/admin-submit-reason", requireAuth, async (req, res, next) => {
+    try {
+      await storage.autoClockOutOverdueStaffAttendanceLogs();
+      const user = req.user as User;
+      const canManage = await hasAnyAttendancePermission(user.id, ["staff_attendance.view_all"]);
+      if (!canManage) return res.status(403).json({ message: "Access denied" });
+      const attendanceId = parseIdParam(req.params.id);
+      if (Number.isNaN(attendanceId)) return res.status(400).json({ message: "Invalid attendance record" });
+      const existing = await storage.getStaffAttendanceLogById(attendanceId);
+      const schoolId = getSchoolContext(req) || user.schoolId;
+      if (!existing || !schoolId || existing.schoolId !== schoolId) return res.status(404).json({ message: "Attendance record not found" });
+      if (!existing.reasonRequired || !existing.reasonType) return res.status(400).json({ message: "No pending reason is required for this record" });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+      if (reason.length < 3) return res.status(400).json({ message: "A reason of at least 3 characters is required" });
+      const updates: Partial<InsertStaffAttendanceLog> = { reasonRequired: false, reasonSubmittedAt: new Date() };
+      if (existing.reasonType === "early_clock_out") {
+        updates.earlyClockOutReason = reason;
+        updates.notes = combineAttendanceReasons({ lateReason: existing.lateReason, earlyClockOutReason: reason });
+      } else {
+        updates.lateReason = reason;
+        updates.notes = combineAttendanceReasons({ lateReason: reason, earlyClockOutReason: existing.earlyClockOutReason });
+      }
+      const updated = await storage.updateStaffAttendanceLog(existing.id, updates);
+      logActivity(req, {
+        action: "attendance_reason_admin_captured",
+        category: "staff_attendance",
+        description: `Attendance administrator captured ${existing.reasonType === "early_clock_out" ? "an early departure" : "a late arrival"} reason`,
+        targetType: "staff_attendance",
+        targetId: existing.id,
+        targetName: `Attendance ${existing.id}`,
+        schoolId: existing.schoolId,
+        metadata: { attendanceId: existing.id, staffId: existing.staffId, reasonType: existing.reasonType, reason },
+      });
+      res.json(updated);
+    } catch (error) { next(error); }
   });
 
   app.get("/api/staff-attendance", requireAuth, async (req, res, next) => {
@@ -9380,12 +10259,11 @@ ${schoolName}`;
       }
 
       const now = new Date();
-      const day = now.getDay();
-      const weekend = day === 0 || day === 6;
-      const startHour = weekend ? 8 : 7;
-      const startMinute = weekend ? 0 : 20;
+      const policy = await attendancePolicyForDate(user.schoolId, today);
+      const [startHour, startMinute] = String(policy.staffStartTime || "07:20").split(":").map(Number);
+      const graceMinutes = Number(policy.staffLateGraceMinutes || 0);
       const startTime = new Date(now);
-      startTime.setHours(startHour, startMinute, 0, 0);
+      startTime.setHours(startHour, startMinute + graceMinutes, 0, 0);
       const status = now > startTime ? "late" : "on_time";
       const reasonRequired = status === "late";
 
@@ -9419,7 +10297,8 @@ ${schoolName}`;
           accuracy: locationCheck.accuracy,
           attemptCount: locationCheck.attemptCount,
           deviceSignature: locationCheck.deviceSignature,
-          weekend,
+          configuredStaffStartTime: policy.staffStartTime,
+          staffLateGraceMinutes: policy.staffLateGraceMinutes,
           reasonRequired,
         },
       });
@@ -9480,8 +10359,9 @@ ${schoolName}`;
       }
 
       const now = new Date();
-      const weekdayExpectedEnd = expectedEndForAttendanceDate(today);
-      const requiresEarlyClockOutReason = !!weekdayExpectedEnd && now.getHours() * 60 + now.getMinutes() < weekdayExpectedEnd.hour * 60 + weekdayExpectedEnd.minute;
+      const policy = await attendancePolicyForDate(user.schoolId, today);
+      const [expectedEndHour, expectedEndMinute] = String(policy.staffEndTime || "16:00").split(":").map(Number);
+      const requiresEarlyClockOutReason = policy.isSchoolDay && now.getHours() * 60 + now.getMinutes() < expectedEndHour * 60 + expectedEndMinute;
 
       const updated = await storage.updateStaffAttendanceLog(existing.id, {
         clockOut: now,
@@ -9508,6 +10388,7 @@ ${schoolName}`;
           attemptCount: locationCheck.attemptCount,
           deviceSignature: locationCheck.deviceSignature,
           reasonRequired: requiresEarlyClockOutReason,
+          configuredStaffEndTime: policy.staffEndTime,
         },
       });
 
@@ -9565,20 +10446,34 @@ ${schoolName}`;
         dates.push(`${year}-${month}-${day}`);
       }
 
+      const schedules: Record<string, any> = {};
+      for (const date of dates) {
+        const policy = await attendancePolicyForDate(schoolId, date);
+        schedules[date] = {
+          isSchoolDay: policy.isSchoolDay,
+          staffStartTime: policy.staffStartTime,
+          staffLateGraceMinutes: policy.staffLateGraceMinutes,
+          staffEndTime: policy.staffEndTime,
+        };
+      }
+
       const staffGrid = scopedStaffMembers.map(s => {
         const staffLogs = logs.filter(l => l.staffId === s.id);
         const statuses: Record<string, string> = {};
+        const records: Record<string, any> = {};
         staffLogs.forEach(l => {
           statuses[l.date] = l.status;
+          records[l.date] = l;
         });
         return {
           id: s.id,
           name: `${s.firstName} ${s.lastName}`,
           statuses,
+          records,
         };
       });
 
-      res.json({ dates, staff: staffGrid });
+      res.json({ dates, staff: staffGrid, schedules });
     } catch (error) {
       next(error);
     }
@@ -11055,6 +11950,299 @@ ${schoolName}`;
     }
   });
 
+  // Bulk login-details distribution for parents, students and staff.
+  // Uses communicationJobs.metadata for persistent recipient-level history without adding a second job system.
+  app.post("/api/account-distribution/preview", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "Select a school before sending login details" });
+
+      const input = accountDistributionRequestSchema.parse(req.body || {});
+      const recipients = await loadAccountDistributionRecipients(schoolId, input);
+      const plan = await planAccountDistribution(recipients);
+      const missingContactCount = plan.filter((row) => row.reasonCode === "missing_contact").length;
+      const attentionCount = plan.filter((row) => row.action === "exception" && row.reasonCode !== "missing_contact").length;
+
+      res.json({
+        totalCount: recipients.length,
+        existingCount: plan.filter((row) => row.action === "existing").length,
+        createCount: plan.filter((row) => row.action === "create").length,
+        missingContactCount,
+        attentionCount,
+        exceptionCount: missingContactCount + attentionCount,
+        scope: input.recipientIds.length ? "selected" : "filtered",
+        channels: {
+          emailConfigured: communicationService.isEmailConfigured(),
+          smsConfigured: communicationService.isSmsConfigured(),
+          communicationsDisabled: communicationService.communicationsDisabled,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/account-distribution/send", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "Select a school before sending login details" });
+
+      const input = accountDistributionRequestSchema.parse(req.body || {});
+      const recipients = await loadAccountDistributionRecipients(schoolId, input);
+      if (!recipients.length) {
+        return res.status(400).json({ message: "No records were found in the selected scope" });
+      }
+
+      const plan = await planAccountDistribution(recipients);
+      const requestBaseUrl = getRequestBaseUrl(req);
+      const recipientLabel = input.recipientType === "staff" ? "Staff" : input.recipientType === "student" ? "Student" : "Parent";
+      const scope = input.recipientIds.length ? "selected" : "filtered";
+      const previewCounts = {
+        existingCount: plan.filter((row) => row.action === "existing").length,
+        createCount: plan.filter((row) => row.action === "create").length,
+        missingContactCount: plan.filter((row) => row.reasonCode === "missing_contact").length,
+        attentionCount: plan.filter((row) => row.action === "exception" && row.reasonCode !== "missing_contact").length,
+      };
+
+      const job = await queueCommunicationBackgroundJob({
+        schoolId,
+        requestedBy: currentUser.id,
+        jobType: "login_details_distribution",
+        title: `${recipientLabel} login details distribution`,
+        totalCount: plan.length,
+        metadata: {
+          recipientType: input.recipientType,
+          scope,
+          previewCounts,
+        },
+      }, async (jobId) => {
+        const outcomes: Array<{
+          recipientId: number;
+          recipientName: string;
+          username?: string | null;
+          status: "sent" | "failed";
+          accountAction: "existing" | "created" | "none";
+          reasonCode?: string | null;
+          reason?: string | null;
+          deliveries?: Array<{ channel: "email" | "sms"; destination: string; success: boolean; error?: string | null }>;
+        }> = [];
+        let successCount = 0;
+        let failedCount = 0;
+        let createdCount = 0;
+        let existingSentCount = 0;
+
+        for (const row of plan) {
+          const recipientName = accountDistributionDisplayName(row.recipient);
+          let outcome: (typeof outcomes)[number];
+
+          if (row.action === "exception") {
+            outcome = {
+              recipientId: row.recipient.id,
+              recipientName,
+              username: row.username,
+              status: "failed",
+              accountAction: "none",
+              reasonCode: row.reasonCode || "exception",
+              reason: row.reason || "This record requires attention before login details can be sent",
+              deliveries: [],
+            };
+            failedCount += 1;
+          } else {
+            try {
+              let account: User;
+              let accountAction: "existing" | "created";
+
+              if (row.action === "existing") {
+                if (!row.user) throw new Error("Linked user account could not be found");
+                const currentAccount = await storage.getUser(row.user.id);
+                if (!currentAccount) throw new Error("Linked user account could not be found");
+                if (currentAccount.isActive === false) throw new Error("Existing user account is inactive");
+                account = currentAccount;
+                accountAction = "existing";
+              } else {
+                if (!row.username) throw new Error("A username could not be generated");
+                account = await createAccountForDistribution(row.recipient, row.username);
+                accountAction = "created";
+                createdCount += 1;
+              }
+
+              const deliveries = await sendAccountDistributionLoginDetails({
+                user: account,
+                recipient: row.recipient,
+                sentBy: currentUser.id,
+                requestBaseUrl,
+                newlyCreated: accountAction === "created",
+              });
+              const delivered = deliveries.some((delivery) => delivery.success);
+
+              if (delivered) {
+                successCount += 1;
+                if (accountAction === "existing") existingSentCount += 1;
+                const deliveryWarnings = deliveries.filter((delivery) => !delivery.success);
+                outcome = {
+                  recipientId: row.recipient.id,
+                  recipientName,
+                  username: account.username,
+                  status: "sent",
+                  accountAction,
+                  reasonCode: deliveryWarnings.length ? "partial_delivery" : null,
+                  reason: deliveryWarnings.length
+                    ? `Sent through ${deliveries.filter((delivery) => delivery.success).map((delivery) => delivery.channel.toUpperCase()).join(", ")}; ${deliveryWarnings.length} other channel${deliveryWarnings.length === 1 ? "" : "s"} failed`
+                    : null,
+                  deliveries,
+                };
+              } else {
+                failedCount += 1;
+                const details = deliveries.length
+                  ? deliveries.map((delivery) => `${delivery.channel.toUpperCase()}: ${delivery.error || "delivery failed"}`).join("; ")
+                  : "No email address or phone number was available at send time";
+                outcome = {
+                  recipientId: row.recipient.id,
+                  recipientName,
+                  username: account.username,
+                  status: "failed",
+                  accountAction,
+                  reasonCode: "delivery_failed",
+                  reason: accountAction === "created" ? `Account was created, but login details could not be delivered. ${details}` : details,
+                  deliveries,
+                };
+              }
+            } catch (error) {
+              failedCount += 1;
+              const reason = error instanceof Error ? error.message : String(error);
+              outcome = {
+                recipientId: row.recipient.id,
+                recipientName,
+                username: row.username,
+                status: "failed",
+                accountAction: "none",
+                reasonCode: "processing_failed",
+                reason,
+                deliveries: [],
+              };
+            }
+          }
+
+          outcomes.push(outcome);
+          await updateCommunicationJobProgress(jobId, {
+            processedCount: outcomes.length,
+            successCount,
+            failedCount,
+            skippedCount: 0,
+          });
+        }
+
+        const failures = outcomes.filter((outcome) => outcome.status === "failed");
+        return {
+          processedCount: outcomes.length,
+          successCount,
+          failedCount,
+          skippedCount: 0,
+          errorSummary: failures.length
+            ? failures.slice(0, 20).map((failure) => `${failure.recipientName}: ${failure.reason || "failed"}`).join("; ")
+            : null,
+          metadata: {
+            recipientType: input.recipientType,
+            scope,
+            createdCount,
+            existingSentCount,
+            outcomes,
+          },
+        };
+      });
+
+      logActivity(req, {
+        action: "create",
+        category: "communication",
+        description: `Queued login details distribution for ${plan.length} ${input.recipientType}${plan.length === 1 ? "" : "s"}`,
+        targetType: "communication_job",
+        targetId: job.id,
+        schoolId,
+        metadata: { jobType: "login_details_distribution", recipientType: input.recipientType, recipientCount: plan.length, scope },
+      });
+
+      res.status(202).json({
+        success: true,
+        queued: true,
+        jobId: job.id,
+        message: `${plan.length} ${input.recipientType}${plan.length === 1 ? "" : "s"} queued. Sending will continue in the background.`,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/account-distribution/history", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "Select a school to view login distribution history" });
+      const recipientType = z.enum(["parent", "student", "staff"]).parse(req.query.recipientType);
+
+      const jobs = await db.select()
+        .from(communicationJobs)
+        .where(and(
+          eq(communicationJobs.schoolId, schoolId),
+          eq(communicationJobs.jobType, "login_details_distribution"),
+          sql`${communicationJobs.metadata}->>'recipientType' = ${recipientType}`,
+        ))
+        .orderBy(desc(communicationJobs.createdAt))
+        .limit(50);
+
+      const requestedByIds = Array.from(new Set(jobs.map((job) => job.requestedBy).filter((id): id is number => typeof id === "number")));
+      const requesters = requestedByIds.length
+        ? await db.select({ id: users.id, username: users.username, firstName: users.firstName, lastName: users.lastName }).from(users).where(inArray(users.id, requestedByIds))
+        : [];
+      const requesterById = new Map(requesters.map((user) => [user.id, user]));
+
+      res.json(jobs.map((job) => {
+        const requester = job.requestedBy ? requesterById.get(job.requestedBy) : undefined;
+        const metadata = (job.metadata && typeof job.metadata === "object") ? job.metadata as Record<string, any> : {};
+        const { outcomes: _outcomes, ...summaryMetadata } = metadata;
+        return {
+          ...job,
+          metadata: summaryMetadata,
+          requestedByName: requester
+            ? ([requester.firstName, requester.lastName].filter(Boolean).join(" ").trim() || requester.username)
+            : null,
+        };
+      }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/account-distribution/history/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "Select a school to view login distribution history" });
+      const jobId = parseIdParam(req.params.id);
+      if (!Number.isFinite(jobId)) return res.status(400).json({ message: "Invalid distribution id" });
+
+      const [job] = await db.select().from(communicationJobs).where(and(
+        eq(communicationJobs.id, jobId),
+        eq(communicationJobs.schoolId, schoolId),
+        eq(communicationJobs.jobType, "login_details_distribution"),
+      )).limit(1);
+      if (!job) return res.status(404).json({ message: "Login distribution run not found" });
+
+      let requestedByName: string | null = null;
+      if (job.requestedBy) {
+        const [requester] = await db.select({ username: users.username, firstName: users.firstName, lastName: users.lastName })
+          .from(users).where(eq(users.id, job.requestedBy)).limit(1);
+        if (requester) requestedByName = [requester.firstName, requester.lastName].filter(Boolean).join(" ").trim() || requester.username;
+      }
+
+      res.json({ ...job, requestedByName });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+
   // Communication routes
   app.get("/api/communication/status", requireAuth, async (req, res) => {
     res.json({
@@ -12494,8 +13682,8 @@ ${schoolName}`;
       ))
       .orderBy(desc(reportComments.id));
 
-    const trimmed = args.commentText.trim();
-    if (!trimmed) {
+    const isEmpty = args.commentText.trim().length === 0;
+    if (isEmpty) {
       const ids = existingRows.map((row: any) => Number(row.id));
       if (ids.length) await executor.delete(reportComments).where(inArray(reportComments.id, ids));
       return null;
@@ -12508,7 +13696,7 @@ ${schoolName}`;
       gradeLevel: null,
       subjectId: null,
       classId: args.commentType === "class_teacher" ? args.classId : null,
-      commentText: trimmed,
+      commentText: args.commentText,
       commentType: args.commentType,
     } as any;
     const canonical = existingRows[0];
@@ -12519,10 +13707,10 @@ ${schoolName}`;
     }
     const duplicateIds = existingRows.slice(1).map((row: any) => Number(row.id));
     if (duplicateIds.length) await executor.delete(reportComments).where(inArray(reportComments.id, duplicateIds));
-    return trimmed;
+    return args.commentText;
   }
 
-  app.get("/api/report-comments", requireAuth, async (req, res, next) => {
+  app.get("/api/report-comments", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });
@@ -12749,7 +13937,7 @@ ${schoolName}`;
     }
   });
 
-  app.post("/api/report-card-subject-comments", requireAuth, async (req, res, next) => {
+  app.post("/api/report-card-subject-comments", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
@@ -12824,11 +14012,10 @@ ${schoolName}`;
         }
       }
 
-      const trimmed = commentText.trim();
-      const usePool = trimmed.length === 0;
+      const usePool = commentText.trim().length === 0;
       const updated = await storage.updateAssessmentMark(existingMark.id, {
         commentId: usePool ? poolCommentId : null,
-        customCommentText: usePool ? null : trimmed,
+        customCommentText: usePool ? null : commentText,
         autoCommentSnapshot: poolCommentText,
         commentSource: usePool ? "pool" : "custom",
       });
@@ -12840,7 +14027,7 @@ ${schoolName}`;
       return res.json({
         ok: true,
         assessmentId: Number(assessment.id),
-        commentText: usePool ? (poolCommentText || "") : trimmed,
+        commentText: usePool ? (poolCommentText || "") : commentText,
         commentPool: poolCommentText || "",
         commentSource: usePool ? "pool" : "custom",
       });
@@ -12849,7 +14036,7 @@ ${schoolName}`;
     }
   });
 
-  app.post("/api/report-card-comment-overrides", requireAuth, async (req, res, next) => {
+  app.post("/api/report-card-comment-overrides", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "No school context" });
@@ -12906,7 +14093,7 @@ ${schoolName}`;
     })).max(5_000).default([]),
   });
 
-  app.post("/api/report-card-comments/bulk", requireAuth, async (req, res, next) => {
+  app.post("/api/report-card-comments/bulk", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const schoolId = await requireSchoolScope(req, res);
       if (!schoolId) return;
@@ -13004,11 +14191,10 @@ ${schoolName}`;
           const mark = markMap.get(`${row.studentId}:${row.assessmentId}`)!;
           const poolKey = mark.gradeId ? `${assessment.classId}:${assessment.subjectId}:${mark.gradeId}` : "";
           const poolComment = poolKey ? poolCache.get(poolKey) || null : null;
-          const trimmed = row.commentText.trim();
-          const usePool = trimmed.length === 0;
+          const usePool = row.commentText.trim().length === 0;
           await tx.update(assessmentMarksSchema).set({
             commentId: usePool ? poolComment?.id ?? null : null,
-            customCommentText: usePool ? null : trimmed,
+            customCommentText: usePool ? null : row.commentText,
             autoCommentSnapshot: poolComment?.commentText ?? null,
             commentSource: usePool ? "pool" : "custom",
             updatedAt: new Date(),
@@ -13020,7 +14206,7 @@ ${schoolName}`;
             studentId: row.studentId,
             assessmentId: row.assessmentId,
             subjectId: row.subjectId,
-            commentText: usePool ? poolComment?.commentText || "" : trimmed,
+            commentText: usePool ? poolComment?.commentText || "" : row.commentText,
             commentPool: poolComment?.commentText || "",
           });
         }
@@ -15919,7 +17105,7 @@ async function buildReportCardMessage(
   // =============================================
 
   // Get streams for report hub (filtered to those with classes in current school)
-  app.get("/api/report-hub/streams", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/streams", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
@@ -16172,8 +17358,10 @@ async function buildReportCardMessage(
     });
   }
 
-  app.get("/api/report-hub/publication-status/:examId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/publication-status/:examId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
+      const user = req.user as User;
+      if (user.role === "parent" || user.role === "student") return res.status(403).json({ message: "Access denied" });
       const examId = Number(req.params.examId);
       const currentUser = await storage.getUser((req.user as any).id);
       const schoolId = getSchoolContext(req) || currentUser?.schoolId;
@@ -16209,7 +17397,7 @@ async function buildReportCardMessage(
     }
   });
 
-  app.post("/api/report-hub/publication/class", requireAuth, async (req, res, next) => {
+  app.post("/api/report-hub/publication/class", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const data = publicationActionSchema.parse(req.body);
       if (!data.classId) return res.status(400).json({ message: "classId is required" });
@@ -16291,7 +17479,7 @@ async function buildReportCardMessage(
     }
   });
 
-  app.post("/api/report-hub/publication/stream", requireAuth, async (req, res, next) => {
+  app.post("/api/report-hub/publication/stream", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const data = publicationActionSchema.parse(req.body);
       if (!data.streamId) return res.status(400).json({ message: "streamId is required" });
@@ -16409,7 +17597,7 @@ async function buildReportCardMessage(
   });
 
   // Get stream-level stats for an exam (all offered subjects and expected learner-subject entries)
-  app.get("/api/report-hub/stream-stats/:examId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/stream-stats/:examId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
       const currentUser = await storage.getUser((req.user as any).id);
@@ -16488,7 +17676,7 @@ async function buildReportCardMessage(
 
   // Get class-level subject progress for an exam. Subjects are driven by the class offering,
   // not by the assessments that happen to have been created.
-  app.get("/api/report-hub/class-progress/:examId/:classId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/class-progress/:examId/:classId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
       const classId = parseIdParam(req.params.classId);
@@ -16563,7 +17751,7 @@ async function buildReportCardMessage(
   });
 
   // Missing marks for a class (grouped by every subject offered by the class)
-  app.get("/api/report-hub/missing-marks/:examId/:classId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/missing-marks/:examId/:classId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
       const classId = parseIdParam(req.params.classId);
@@ -16673,7 +17861,7 @@ async function buildReportCardMessage(
   // Class merit list. Primary and Secondary Forms 1-2 rank by average percentage.
   // Secondary Forms 3-6 use configured grade points/direction/distribution, then percentage.
   // ECD is intentionally not ranked. Missing expected marks count as 0 for merit calculations.
-  app.get("/api/report-hub/class-merit/:examId/:classId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/class-merit/:examId/:classId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
       const classId = parseIdParam(req.params.classId);
@@ -16797,7 +17985,7 @@ async function buildReportCardMessage(
             rankingMode: academicRankingMode,
           })
           : unresolvedAcademicPositionMap(studentIds, "position_stream_unrecognized");
-      const showPointsColumn = academicRankingMode === "average_grade_points";
+      const showPointsColumn = true;
       const showPositionColumn = academicRankingMode !== "none";
       const rows = (students as any[]).map((student) => {
         const candidate = candidateByStudent.get(Number(student.id))!;
@@ -16816,8 +18004,8 @@ async function buildReportCardMessage(
           totalDisplay: expectedCount ? `${Math.round(display.totalPercentage)}/${expectedCount * 100}` : "-",
           avg: averagePercentage === null || averagePercentage === undefined ? null : Math.round(averagePercentage * 10) / 10,
           avgDisplay: averagePercentage === null || averagePercentage === undefined ? "-" : `${Math.round(averagePercentage)}%`,
-          points: showPointsColumn ? record?.totalPoints ?? null : null,
-          pointsDisplay: showPointsColumn && record?.totalPoints !== null && record?.totalPoints !== undefined ? formatMeritPoints(record.totalPoints) : "-",
+          points: record?.totalPoints ?? candidate.results.reduce((sum, result) => sum + getMeritGradePoints(result.grade), 0),
+          pointsDisplay: formatMeritPoints(record?.totalPoints ?? candidate.results.reduce((sum, result) => sum + getMeritGradePoints(result.grade), 0)),
           subjectsWithMarks: display.recordedCount,
           eligibleSubjectCount: expectedCount,
           position,
@@ -17101,7 +18289,7 @@ async function buildReportCardMessage(
   }
 
   // Class analytics
-  app.get("/api/report-hub/class-analytics/:examId/:classId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/class-analytics/:examId/:classId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
       const classId = parseIdParam(req.params.classId);
@@ -17291,7 +18479,7 @@ async function buildReportCardMessage(
   });
 
   // Stream merit list
-  app.get("/api/report-hub/stream-merit/:examId/:streamId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/stream-merit/:examId/:streamId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
       const streamId = parseIdParam(req.params.streamId);
@@ -17310,7 +18498,7 @@ async function buildReportCardMessage(
       const streamClasses = allClasses.filter(c => c.schoolId === schoolId && c.streamId === streamId);
       const streamName = stream?.name || streamClasses[0]?.className || "";
       const streamRankingMode = resolveAcademicPositionRankingMode({ schoolType: school?.schoolType, streamName });
-      const showPointsColumn = shouldShowMeritPointsColumn({ schoolType: school?.schoolType, streamName });
+      const showPointsColumn = true;
       const showPositionColumn = streamRankingMode !== "none";
       const classIds = streamClasses.map(c => c.id);
       if (classIds.length === 0) return res.json({
@@ -17499,7 +18687,7 @@ async function buildReportCardMessage(
           const average = record?.averagePercentage ?? (data?.eligibleCount ? data.sum / data.eligibleCount : null);
           return average === null || average === undefined ? "-" : `${Math.round(average)}%`;
         })(),
-        points: showPointsColumn && record?.totalPoints !== null && record?.totalPoints !== undefined ? formatMeritPoints(record.totalPoints) : "-",
+        points: formatMeritPoints(record?.totalPoints ?? data?.points ?? 0),
         position,
         positionStatus: !showPositionColumn ? "NOT_RANKED" : position ? "READY" : "UNRESOLVED",
         positionIssues: streamRanking.unresolved.get(Number(student.id)) || [],
@@ -17535,7 +18723,7 @@ async function buildReportCardMessage(
   });
 
   // Stream analytics
-  app.get("/api/report-hub/stream-analytics/:examId/:streamId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/stream-analytics/:examId/:streamId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const examId = parseIdParam(req.params.examId);
       const streamId = parseIdParam(req.params.streamId);
@@ -17720,7 +18908,7 @@ async function buildReportCardMessage(
   });
 
   // Classes for a stream (for the Reports dropdown)
-  app.get("/api/report-hub/stream-classes/:streamId", requireAuth, async (req, res, next) => {
+  app.get("/api/report-hub/stream-classes/:streamId", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
       const streamId = parseIdParam(req.params.streamId);
       const currentUser = await storage.getUser((req.user as any).id);
@@ -18425,6 +19613,31 @@ async function buildReportCardMessage(
         });
       }
 
+      // Real assessment-type performance series for QC charts. Do not collapse the school's
+      // configured assessment types into generic buckets: the report should show the actual
+      // current-term types (Fortnight Test, Monthly Test, Mock Exam, etc.) that have marks.
+      const usedTypeIds = Array.from(new Set(classAssessments
+        .filter((assessment) => studentMarks.some((mark) => mark.assessmentId === assessment.id && mark.percentage !== null))
+        .map((assessment) => assessment.assessmentTypeId)
+        .filter((value): value is number => Number.isInteger(value))));
+      const assessmentPerformanceSeries = {
+        assessmentTypes: usedTypeIds.map((id) => ({ key: `type_${id}`, label: typeMap.get(id) || `Assessment Type ${id}` })),
+        rows: studentSubjectList.map((subj) => {
+          const values: Record<string, number | null> = {};
+          for (const typeId of usedTypeIds) {
+            const relevantAssessmentIds = classAssessments.filter((assessment) => assessment.subjectId === subj.id && assessment.assessmentTypeId === typeId).map((assessment) => assessment.id);
+            const valuesForType = studentMarks
+              .filter((mark) => relevantAssessmentIds.includes(mark.assessmentId) && mark.percentage !== null)
+              .map((mark) => Number.parseFloat(mark.percentage || "0"))
+              .filter((value) => Number.isFinite(value));
+            values[`type_${typeId}`] = valuesForType.length
+              ? Math.round((valuesForType.reduce((sum, value) => sum + value, 0) / valuesForType.length) * 100) / 100
+              : null;
+          }
+          return { subject: subj.name, subjectId: subj.id, values };
+        }).filter((row) => Object.values(row.values).some((value) => value !== null)),
+      };
+
       // 3. QC Report data
       const existingReports = await db.select().from(qcReports).where(
         and(
@@ -18444,6 +19657,7 @@ async function buildReportCardMessage(
           lastName: student.lastName,
           admissionNo: student.admissionNo,
           photo: student.photo,
+          gender: student.gender,
         },
         className: cls?.className || "Unknown",
         classId: activeClassId,
@@ -18468,6 +19682,7 @@ async function buildReportCardMessage(
         writtenWork,
         performance,
         perfSeries,
+        assessmentPerformanceSeries,
         qcReport: qcReport ? {
           id: qcReport.id,
           qcStatus: qcReport.qcStatus,
@@ -18596,112 +19811,260 @@ async function buildReportCardMessage(
       const classId = req.query.classId ? parseInt(req.query.classId as string) : null;
       const termNumber = req.query.term ? parseInt(req.query.term as string) : null;
       const year = req.query.year as string || null;
-
       const school = await storage.getSchool(schoolId);
       if (!school) return res.status(404).json({ message: "School not found" });
-
       const activeTerm = termNumber || parseTermNumber(school.currentTerm);
       const activeYear = year || school.currentAcademicYear || new Date().getFullYear().toString();
-
       const student = await storage.getStudent(studentId);
       if (!student || student.schoolId !== schoolId) return res.status(404).json({ message: "Student not found" });
-
       const activeClassId = classId || student.classId;
-      const cls = activeClassId ? await storage.getClass(activeClassId) : null;
+      if (!activeClassId) return res.status(400).json({ message: "Class context required" });
+      const cls = await storage.getClass(activeClassId);
 
-      const existingReports = await db.select().from(qcReports).where(
-        and(
-          eq(qcReports.studentId, studentId),
-          ...(activeClassId ? [eq(qcReports.classId, activeClassId)] : []),
-          eq(qcReports.termNumber, activeTerm),
-          eq(qcReports.year, activeYear),
-          eq(qcReports.schoolId, schoolId)
-        )
+      const termKey = `term${activeTerm}` as const;
+      const termStart = String(school[`${termKey}StartDate` as keyof typeof school] || "");
+      const termEnd = String(school[`${termKey}EndDate` as keyof typeof school] || "");
+      const allAttendance = await storage.getAttendanceByStudent(studentId);
+      const termAttendance = allAttendance.filter((row) => row.classId === activeClassId && (!termStart || !termEnd || (row.date >= termStart && row.date <= termEnd)));
+      const attendanceByDate = new Map(termAttendance.map((row) => [row.date, String(row.status || "present")]));
+      const attendanceCounts = termAttendance.reduce<Record<string, number>>((counts, row) => {
+        const status = String(row.status || "present"); counts[status] = (counts[status] || 0) + 1; return counts;
+      }, {});
+
+      const [existingReports, allSubjects, studentSubjectRows, classAssessments, assessmentTypesList, studentMarks] = await Promise.all([
+        db.select().from(qcReports).where(and(eq(qcReports.studentId, studentId), eq(qcReports.classId, activeClassId), eq(qcReports.termNumber, activeTerm), eq(qcReports.year, activeYear), eq(qcReports.schoolId, schoolId))),
+        storage.getAllSubjects(),
+        storage.getStudentSubjects(studentId),
+        db.select().from(assessmentsSchema).where(and(eq(assessmentsSchema.schoolId, schoolId), eq(assessmentsSchema.classId, activeClassId), eq(assessmentsSchema.termId, activeTerm), eq(assessmentsSchema.year, parseInt(activeYear)))),
+        db.select().from(assessmentTypesSchema).where(eq(assessmentTypesSchema.schoolId, schoolId)),
+        db.select().from(assessmentMarksSchema).where(and(eq(assessmentMarksSchema.studentId, studentId), eq(assessmentMarksSchema.classId, activeClassId), eq(assessmentMarksSchema.schoolId, schoolId))),
+      ]);
+      const qcReport = existingReports[0] || null;
+      const studentSubjectIds = new Set(studentSubjectRows.map((row) => row.subjectId));
+      const studentSubjects = allSubjects.filter((subject) => subject.schoolId === schoolId && studentSubjectIds.has(subject.id));
+      const subjectMap = new Map(studentSubjects.map((subject) => [subject.id, subject.name]));
+      const typeMap = new Map(assessmentTypesList.map((type) => [type.id, type.name]));
+      const markByAssessmentId = new Map(
+        studentMarks
+          .filter((mark) => mark.percentage !== null)
+          .map((mark) => [mark.assessmentId, mark]),
       );
-      const qcReport = existingReports.length > 0 ? existingReports[0] : null;
+      const performanceEvents = classAssessments
+        .map((assessment) => {
+          const mark = markByAssessmentId.get(assessment.id);
+          if (!mark || mark.percentage === null) return null;
+          const percentage = Number.parseFloat(mark.percentage || "");
+          if (!Number.isFinite(percentage)) return null;
+          const typeId = Number.isInteger(assessment.assessmentTypeId) ? Number(assessment.assessmentTypeId) : 0;
+          const typeName = typeId ? (typeMap.get(typeId) || `Assessment Type ${typeId}`) : "Assessment";
+          const subject = subjectMap.get(assessment.subjectId)
+            || allSubjects.find((row) => row.id === assessment.subjectId)?.name
+            || `Subject ${assessment.subjectId}`;
+          const rawDate = assessment.assessmentDate
+            ? String(assessment.assessmentDate)
+            : assessment.createdAt
+              ? new Date(assessment.createdAt).toISOString().slice(0, 10)
+              : "";
+          return {
+            assessmentId: assessment.id,
+            assessmentName: assessment.name,
+            subject,
+            typeId,
+            typeName,
+            date: rawDate,
+            percentage: Math.max(0, Math.min(100, percentage)),
+          };
+        })
+        .filter((row): row is NonNullable<typeof row> => Boolean(row))
+        .sort((a, b) => (a.date || "9999-99-99").localeCompare(b.date || "9999-99-99") || a.assessmentId - b.assessmentId);
+      const performanceTypeIds = Array.from(new Set(performanceEvents.map((event) => event.typeId)));
+
 
       const PDFDocument = (await import("pdfkit")).default;
-      const doc = new PDFDocument({ size: "A4", margin: 50 });
-
+      const doc = new PDFDocument({ size: "A4", margin: 42, bufferPages: true });
       res.setHeader("Content-Type", "application/pdf");
       const qcClassName = cls?.className?.replace(/\s+/g, "_") || "Class";
       res.setHeader("Content-Disposition", `attachment; filename="QC_Report_${student.firstName}_${student.lastName}_${qcClassName}_Term${activeTerm}_${activeYear}.pdf"`);
-
       doc.pipe(res);
 
-      doc.fontSize(18).font("Helvetica-Bold").text(school.name || "School", { align: "center" });
-      doc.fontSize(12).font("Helvetica").text("Quality Control Report", { align: "center" });
-      doc.moveDown(0.5);
-      doc.fontSize(10).text(`Term ${activeTerm}, ${activeYear}`, { align: "center" });
-      doc.moveDown(1);
+      const PAGE_LEFT = 42;
+      const PAGE_RIGHT = 553;
+      const CONTENT_WIDTH = PAGE_RIGHT - PAGE_LEFT;
+      const NAVY = "#1f3157";
+      const MUTED = "#666666";
+      const LIGHT = "#eef2f7";
+      const TYPE_COLORS = ["#1f4e79", "#b23a48", "#b7791f", "#2f6f4e", "#6b4f9b", "#0f766e", "#8b5e3c"];
+      const ATT_COLORS: Record<string, string> = { present: "#2f855a", absent: "#c53030", sick: "#805ad5", fees: "#1a365d", suspended: "#718096", absconding: "#dd6b20", excused: "#3182ce", late: "#b7791f" };
 
-      doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-      doc.moveDown(0.5);
-
-      doc.fontSize(11).font("Helvetica-Bold").text("Student Information");
-      doc.moveDown(0.3);
-      doc.fontSize(10).font("Helvetica");
-      doc.text(`Name: ${student.firstName} ${student.lastName}`);
-      if (student.admissionNo) doc.text(`Admission No: ${student.admissionNo}`);
-      if (cls) doc.text(`Class: ${cls.className}`);
-      doc.moveDown(1);
-
-      if (qcReport) {
-        if (qcReport.behaviourRating) {
-          doc.font("Helvetica-Bold").text("Behaviour Rating: ", { continued: true });
-          doc.font("Helvetica").text(qcReport.behaviourRating.charAt(0).toUpperCase() + qcReport.behaviourRating.slice(1));
-          doc.moveDown(0.3);
-        }
-
-        if (qcReport.attendanceComment) {
-          doc.font("Helvetica-Bold").text("Attendance Comment:");
-          doc.font("Helvetica").text(qcReport.attendanceComment);
-          doc.moveDown(0.3);
-        }
-
-        if (qcReport.behaviourComment) {
-          doc.font("Helvetica-Bold").text("Behaviour Comment:");
-          doc.font("Helvetica").text(qcReport.behaviourComment);
-          doc.moveDown(0.3);
-        }
-
-        if (qcReport.studyHabitsComment) {
-          doc.font("Helvetica-Bold").text("Study Habits:");
-          doc.font("Helvetica").text(qcReport.studyHabitsComment);
-          doc.moveDown(0.3);
-        }
-
-        if (qcReport.subjectComments && typeof qcReport.subjectComments === "object") {
-          const allSubjects = await storage.getAllSubjects();
-          const subjMap = new Map(allSubjects.map(s => [String(s.id), s.name]));
-          const comments = qcReport.subjectComments as Record<string, string>;
-          const entries = Object.entries(comments).filter(([_, v]) => v);
-          if (entries.length > 0) {
-            doc.moveDown(0.5);
-            doc.font("Helvetica-Bold").text("Subject Comments:");
-            doc.moveDown(0.3);
-            for (const [subjectId, comment] of entries) {
-              const subjName = subjMap.get(subjectId) || `Subject ${subjectId}`;
-              doc.font("Helvetica-Bold").text(`${subjName}: `, { continued: true });
-              doc.font("Helvetica").text(comment);
-            }
+      async function imageBuffer(ref: unknown): Promise<Buffer | null> {
+        const value = String(ref || "").trim();
+        if (!value) return null;
+        try {
+          if (value.startsWith("data:image/")) return Buffer.from(value.split(",")[1] || "", "base64");
+          if (value.startsWith("/objects/")) {
+            const root = path.resolve(process.env.LOCAL_OBJECT_DIR || "/var/lib/fcgs/object_storage");
+            const file = path.resolve(root, value.slice("/objects/".length));
+            if (!file.startsWith(root + path.sep)) return null;
+            return await fs.readFile(file);
           }
-        }
-
-        if (qcReport.notes) {
-          doc.moveDown(0.5);
-          doc.font("Helvetica-Bold").text("Additional Notes:");
-          doc.font("Helvetica").text(qcReport.notes);
-        }
-      } else {
-        doc.text("No QC report data has been entered for this student yet.");
+          if (value.startsWith("http://") || value.startsWith("https://")) {
+            const response = await fetch(value); if (!response.ok) return null; return Buffer.from(await response.arrayBuffer());
+          }
+          const candidates = [path.resolve(process.cwd(), value.replace(/^\/+/, "")), path.resolve(process.cwd(), "client/public", value.replace(/^\/+/, ""))];
+          for (const candidate of candidates) { try { return await fs.readFile(candidate); } catch { /* try next */ } }
+        } catch { /* image is optional */ }
+        return null;
       }
 
-      doc.moveDown(2);
-      doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-      doc.moveDown(0.5);
-      doc.fontSize(8).text(`Generated on ${new Date().toLocaleDateString()} | ${school.name}`, { align: "center" });
+      const [logoBuffer, photoBuffer] = await Promise.all([imageBuffer(school.logo), imageBuffer(student.photo)]);
+      const ensureSpace = (needed: number) => { if (doc.y + needed > 790) doc.addPage(); };
+      const divider = () => { doc.save().strokeColor("#a0a0a0").dash(3, { space: 2 }).moveTo(PAGE_LEFT, doc.y).lineTo(PAGE_RIGHT, doc.y).stroke().undash().restore(); doc.moveDown(0.55); };
+      const sectionTitle = (title: string) => { ensureSpace(34); doc.moveDown(0.35); doc.save().fillColor(LIGHT).rect(PAGE_LEFT, doc.y, CONTENT_WIDTH, 22).fill().restore(); doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(10.5).text(title.toUpperCase(), PAGE_LEFT + 6, doc.y + 6, { width: CONTENT_WIDTH - 12 }); doc.y += 14; doc.moveDown(0.55); };
+      const bodyText = (label: string, value: unknown) => { if (!String(value || "").trim()) return; ensureSpace(35); doc.fillColor("#111111").font("Helvetica-Bold").fontSize(9).text(label, PAGE_LEFT); doc.font("Helvetica").fontSize(9).text(String(value), PAGE_LEFT, doc.y + 2, { width: CONTENT_WIDTH, lineGap: 2 }); doc.moveDown(0.55); };
 
+      // Academic-report-style header: logo left, school identity centered, learner photo right.
+      const headerTop = 42;
+      if (logoBuffer) { try { doc.image(logoBuffer, PAGE_LEFT, headerTop, { fit: [70, 70], align: "center", valign: "center" }); } catch {} }
+      else { doc.save().strokeColor("#aaaaaa").rect(PAGE_LEFT, headerTop, 70, 70).stroke().restore(); }
+      if (photoBuffer) { try { doc.image(photoBuffer, PAGE_RIGHT - 70, headerTop, { fit: [70, 70], align: "center", valign: "center" }); } catch {} }
+      else { doc.save().strokeColor("#aaaaaa").rect(PAGE_RIGHT - 70, headerTop, 70, 70).stroke().restore(); doc.fillColor(MUTED).fontSize(8).text("PHOTO", PAGE_RIGHT - 70, headerTop + 31, { width: 70, align: "center" }); }
+      doc.fillColor("#111111").font("Helvetica-Bold").fontSize(14).text(school.name || "School", PAGE_LEFT + 80, headerTop + 4, { width: CONTENT_WIDTH - 160, align: "center" });
+      doc.font("Helvetica").fontSize(8.5);
+      const schoolLines = [school.phone ? `Call Centre: ${school.phone}` : null, school.email ? `Email: ${school.email}` : null, school.address ? `Address: ${school.address}` : null].filter(Boolean);
+      let schoolY = headerTop + 25;
+      for (const line of schoolLines) { doc.text(String(line), PAGE_LEFT + 80, schoolY, { width: CONTENT_WIDTH - 160, align: "center" }); schoolY += 11; }
+      doc.y = headerTop + 80;
+      divider();
+      doc.fillColor("#111111").font("Helvetica-Bold").fontSize(13).text("QUALITY CONTROL REPORT", PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
+      doc.font("Helvetica").fontSize(9).text(`Name: ${student.firstName} ${student.lastName}    (Reg No: ${student.admissionNo || "-"})`, PAGE_LEFT, doc.y + 3, { width: CONTENT_WIDTH });
+      doc.text(`Class: ${cls?.className || "-"}     Term: ${activeTerm}     Year: ${activeYear}`, PAGE_LEFT, doc.y + 2, { width: CONTENT_WIDTH });
+      doc.moveDown(0.8);
+      divider();
+
+      sectionTitle("Attendance");
+      const totalDays = Object.values(attendanceCounts).reduce((sum, value) => sum + value, 0);
+      doc.fillColor("#111111").font("Helvetica").fontSize(9).text(`Attended ${attendanceCounts.present || 0} out of ${totalDays} recorded school days.`, PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
+      doc.moveDown(0.4);
+      const legendStatuses = ["present", "absent", "sick", "fees", "suspended", "absconding", "excused", "late"];
+      let legendX = PAGE_LEFT;
+      for (const status of legendStatuses) {
+        const count = attendanceCounts[status] || 0; const label = `${status.charAt(0).toUpperCase()} ${status}(${count})`;
+        doc.save().fillColor(ATT_COLORS[status]).circle(legendX + 4, doc.y + 4, 3).fill().restore();
+        doc.fillColor("#333333").fontSize(7).text(label, legendX + 10, doc.y, { width: 56 }); legendX += 63;
+      }
+      doc.y += 13;
+
+      // Attendance calendars across the full configured term.
+      if (termStart && termEnd) {
+        const start = new Date(`${termStart}T00:00:00`); const endDate = new Date(`${termEnd}T00:00:00`);
+        const monthCursor = new Date(start.getFullYear(), start.getMonth(), 1);
+        const months: Date[] = [];
+        while (monthCursor <= endDate && months.length < 12) { months.push(new Date(monthCursor)); monthCursor.setMonth(monthCursor.getMonth() + 1); }
+        const boxGap = 8; const cols = Math.min(4, Math.max(1, months.length)); const boxW = (CONTENT_WIDTH - boxGap * (cols - 1)) / cols; const boxH = 94;
+        for (let i = 0; i < months.length; i += cols) {
+          ensureSpace(boxH + 12); const rowY = doc.y;
+          for (let j = 0; j < cols && i + j < months.length; j++) {
+            const month = months[i + j]; const x = PAGE_LEFT + j * (boxW + boxGap);
+            doc.save().strokeColor("#bbbbbb").rect(x, rowY, boxW, boxH).stroke().restore();
+            doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(8).text(month.toLocaleDateString("en-GB", { month: "short", year: "numeric" }), x + 3, rowY + 4, { width: boxW - 6, align: "center" });
+            const weekdays = ["Su","Mo","Tu","We","Th","Fr","Sa"]; const cellW = (boxW - 8) / 7;
+            weekdays.forEach((day, idx) => doc.fillColor(MUTED).font("Helvetica-Bold").fontSize(5.7).text(day, x + 4 + idx * cellW, rowY + 17, { width: cellW, align: "center" }));
+            const firstDay = new Date(month.getFullYear(), month.getMonth(), 1).getDay(); const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+            for (let day = 1; day <= days; day++) {
+              const slot = firstDay + day - 1; const col = slot % 7; const row = Math.floor(slot / 7); const cx = x + 4 + col * cellW; const cy = rowY + 29 + row * 10;
+              const key = `${month.getFullYear()}-${String(month.getMonth()+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`; const status = attendanceByDate.get(key);
+              if (status) { doc.save().fillColor(ATT_COLORS[status] || "#777777").circle(cx + cellW / 2, cy + 3.5, 4).fill().restore(); doc.fillColor("#ffffff"); } else doc.fillColor("#333333");
+              doc.font("Helvetica").fontSize(5.5).text(String(day), cx, cy + 0.7, { width: cellW, align: "center" });
+            }
+          }
+          doc.y = rowY + boxH + 8;
+        }
+      }
+      bodyText("Attendance Comment", qcReport?.attendanceComment);
+
+      sectionTitle("Behaviour & Discipline");
+      if (qcReport?.behaviourRating) { doc.fillColor("#111111").font("Helvetica-Bold").fontSize(9).text("Behaviour Rating: ", PAGE_LEFT, doc.y, { continued: true }); doc.font("Helvetica").text(String(qcReport.behaviourRating).replace(/^./, (c) => c.toUpperCase())); doc.moveDown(0.4); }
+      bodyText("Behaviour Comment", qcReport?.behaviourComment);
+
+      sectionTitle("Study Habits");
+      bodyText("Study Habits", qcReport?.studyHabitsComment || "No study-habits comment recorded.");
+
+      if (performanceEvents.length) {
+        sectionTitle("Current-Term Academic Performance Over Time");
+        const colorByType = new Map(performanceTypeIds.map((typeId, index) => [typeId, TYPE_COLORS[index % TYPE_COLORS.length]]));
+        const legendY = doc.y;
+        let lx = PAGE_LEFT;
+        let ly = legendY;
+        for (const typeId of performanceTypeIds) {
+          const label = performanceEvents.find((event) => event.typeId === typeId)?.typeName || `Type ${typeId}`;
+          const labelWidth = Math.min(150, Math.max(80, label.length * 5 + 24));
+          if (lx + labelWidth > PAGE_RIGHT) {
+            lx = PAGE_LEFT;
+            ly += 13;
+          }
+          doc.save().fillColor(colorByType.get(typeId) || TYPE_COLORS[0]).rect(lx, ly + 1, 7, 7).fill().restore();
+          doc.fillColor("#333333").font("Helvetica").fontSize(7).text(label, lx + 10, ly, { width: labelWidth - 10 });
+          lx += labelWidth;
+        }
+        doc.y = ly + 16;
+
+        const chunks = Array.from(
+          { length: Math.ceil(performanceEvents.length / 10) },
+          (_, index) => performanceEvents.slice(index * 10, index * 10 + 10),
+        );
+        for (const events of chunks) {
+          const chartH = 175;
+          ensureSpace(chartH + 18);
+          const chartTop = doc.y + 5;
+          const chartLeft = PAGE_LEFT + 28;
+          const chartW = CONTENT_WIDTH - 36;
+          const plotH = 115;
+          doc.save().strokeColor("#bbbbbb");
+          [0, 25, 50, 75, 100].forEach((tick) => {
+            const y = chartTop + plotH - (tick / 100) * plotH;
+            doc.moveTo(chartLeft, y).lineTo(chartLeft + chartW, y).strokeOpacity(0.35).stroke();
+            doc.fillColor(MUTED).fontSize(6).text(String(tick), PAGE_LEFT, y - 3, { width: 23, align: "right" });
+          });
+          doc.restore();
+
+          const groupW = chartW / events.length;
+          const barW = Math.min(26, Math.max(8, groupW * 0.55));
+          events.forEach((event, eventIndex) => {
+            const groupX = chartLeft + eventIndex * groupW;
+            const h = Math.max(1, (event.percentage / 100) * plotH);
+            const x = groupX + (groupW - barW) / 2;
+            const y = chartTop + plotH - h;
+            doc.save().fillColor(colorByType.get(event.typeId) || TYPE_COLORS[0]).rect(x, y, barW, h).fill().restore();
+            doc.fillColor("#333333").font("Helvetica-Bold").fontSize(5.8).text(`${Math.round(event.percentage)}%`, groupX, Math.max(chartTop - 1, y - 9), { width: groupW, align: "center" });
+            const dateLabel = event.date
+              ? new Date(`${event.date}T00:00:00`).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })
+              : "";
+            doc.fillColor("#333333").font("Helvetica").fontSize(5.4).text(event.subject, groupX, chartTop + plotH + 5, { width: groupW, align: "center", height: 15, ellipsis: true });
+            if (dateLabel) doc.fillColor(MUTED).fontSize(5.2).text(dateLabel, groupX, chartTop + plotH + 19, { width: groupW, align: "center" });
+          });
+          doc.y = chartTop + chartH;
+        }
+      }
+
+
+      sectionTitle("Subject QC Comments");
+      const comments = (qcReport?.subjectComments && typeof qcReport.subjectComments === "object" ? qcReport.subjectComments : {}) as Record<string, string>;
+      const commentEntries = Object.entries(comments).filter(([, comment]) => String(comment || "").trim());
+      if (!commentEntries.length) doc.fillColor(MUTED).font("Helvetica").fontSize(9).text("No subject QC comments have been entered.", PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
+      for (const [subjectIdText, comment] of commentEntries) {
+        const subjectName = subjectMap.get(Number(subjectIdText)) || allSubjects.find((subject) => String(subject.id) === subjectIdText)?.name || `Subject ${subjectIdText}`;
+        const estimated = Math.max(48, doc.heightOfString(String(comment), { width: CONTENT_WIDTH - 12, fontSize: 9 }) + 34); ensureSpace(estimated);
+        doc.save().strokeColor("#b8bec9").moveTo(PAGE_LEFT, doc.y).lineTo(PAGE_RIGHT, doc.y).stroke().restore(); doc.moveDown(0.35);
+        doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(9.5).text(subjectName, PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
+        doc.fillColor("#111111").font("Helvetica").fontSize(9).text(String(comment), PAGE_LEFT, doc.y + 3, { width: CONTENT_WIDTH, lineGap: 2 }); doc.moveDown(0.7);
+      }
+      if (qcReport?.notes) { sectionTitle("Additional Notes"); bodyText("Notes", qcReport.notes); }
+
+      // Keep the footer deliberately minimal; do not invent parent comments, slogans or contact blocks.
+      const pages = doc.bufferedPageRange();
+      for (let i = pages.start; i < pages.start + pages.count; i++) {
+        doc.switchToPage(i); doc.save().strokeColor("#cccccc").moveTo(PAGE_LEFT, 808).lineTo(PAGE_RIGHT, 808).stroke().restore(); doc.fillColor(MUTED).font("Helvetica").fontSize(7).text(`Generated ${new Date().toLocaleDateString("en-GB")} · ${school.name}`, PAGE_LEFT, 815, { width: CONTENT_WIDTH, align: "center" });
+      }
       doc.end();
     } catch (error) {
       next(error);
@@ -18722,7 +20085,14 @@ async function buildReportCardMessage(
       if (!student) return res.status(404).json({ message: "Student record not found" });
       const classInfo = student.classId ? await storage.getClass(student.classId) : null;
       const parentInfo = student.parentId ? await storage.getParent(student.parentId) : null;
-      res.json({ ...student, className: classInfo?.className, parentName: parentInfo ? `${parentInfo.firstName} ${parentInfo.lastName}` : null });
+      res.json({
+        id: student.id, admissionNo: student.admissionNo, firstName: student.firstName, lastName: student.lastName,
+        email: student.email, phone: student.phone, address: student.address, streetAddress: student.streetAddress, residentialArea: student.residentialArea,
+        gender: student.gender, dateOfBirth: student.dateOfBirth, enrollmentDate: student.enrollmentDate,
+        photo: student.photo, status: student.status, classId: student.classId, className: classInfo?.className || null,
+        isBoarding: student.isBoarding === true, isDayScholar: student.isDayScholar === true,
+        parentName: parentInfo ? `${parentInfo.firstName} ${parentInfo.lastName}` : null,
+      });
     } catch (error) { next(error); }
   });
 
@@ -18752,7 +20122,7 @@ async function buildReportCardMessage(
       const mySubjects = allSubjects.filter(s => subjects.some(ss => ss.subjectId === s.id));
       const allStaff = await storage.getAllStaff();
       res.json({
-        student,
+        student: { id: student.id, firstName: student.firstName, lastName: student.lastName, admissionNo: student.admissionNo, classId: student.classId },
         class: classInfo,
         subjects: mySubjects.map(sub => ({
           ...sub,
@@ -18887,7 +20257,7 @@ async function buildReportCardMessage(
       const children = await storage.getStudentsByParent(parent.id);
       const result = await Promise.all(children.map(async child => {
         const records = await storage.getAttendanceByStudent(child.id);
-        return { student: child, records };
+        return { student: { id: child.id, admissionNo: child.admissionNo, firstName: child.firstName, lastName: child.lastName, photo: child.photo }, records };
       }));
       res.json(result);
     } catch (error) { next(error); }
@@ -18902,7 +20272,7 @@ async function buildReportCardMessage(
       if (!parent) return res.status(404).json({ message: "Parent record not found" });
       const children = await storage.getStudentsByParent(parent.id);
       const result = await Promise.all(children.map(async (child: any) => ({
-        student: child,
+        student: { id: child.id, admissionNo: child.admissionNo, firstName: child.firstName, lastName: child.lastName, photo: child.photo },
         marks: await getPublishedPortalGradesForStudent(child),
       })));
       res.json(result);
@@ -18938,10 +20308,27 @@ async function buildReportCardMessage(
     try {
       const studentId = parseIdParam(req.params.studentId);
       const currentUser = await storage.getUser((req.user as any).id);
+      if (currentUser?.role === "student" || currentUser?.role === "parent") {
+        logActivity(req, { action: "access_denied", category: "security", description: "Portal user attempted to access the administrative Student 360 endpoint", targetType: "student", targetId: String(studentId) });
+        return res.status(403).json({ message: "Use the portal self-service pages for student information" });
+      }
       let schoolId = getSchoolContext(req) || currentUser?.schoolId;
 
       const student = await storage.getStudent(studentId);
       if (!student) return res.status(404).json({ message: "Student not found" });
+
+      if (currentUser?.role === "student" && student.userId !== currentUser.id) {
+        logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to access another student's 360 profile", targetType: "student", targetId: String(student.id) });
+        return res.status(403).json({ message: "Access denied" });
+      }
+      if (currentUser?.role === "parent") {
+        const parentRows = await storage.getAllParents();
+        const parentRecord = parentRows.find((row) => row.userId === currentUser.id);
+        if (!parentRecord || student.parentId !== parentRecord.id) {
+          logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access an unlinked student's 360 profile", targetType: "student", targetId: String(student.id) });
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
 
       if (!schoolId && currentUser?.organizationId && student.schoolId) {
         const orgSchools = await storage.getSchoolsByOrganization(currentUser.organizationId);
@@ -19285,6 +20672,11 @@ async function buildReportCardMessage(
       const disciplineRecords = await storage.getDisciplineRecords(studentId);
 
       const feesPayments = await storage.getFeesPayments(studentId);
+      const [financialAccessOverride] = await db.select().from(financialAccessOverrides).where(and(
+        eq(financialAccessOverrides.studentId, studentId),
+        inArray(financialAccessOverrides.status, ["active", "scheduled"]),
+        sql`${financialAccessOverrides.expiresAt} > now()`
+      )).orderBy(desc(financialAccessOverrides.createdAt)).limit(1);
 
       res.json({
         student: {
@@ -19320,6 +20712,10 @@ async function buildReportCardMessage(
         feesBalance: student.feesBalance,
         feesTotalTerm: student.feesTotalTerm,
         feesPaidSoFar: student.feesPaidSoFar,
+        financialAccessOverride: financialAccessOverride ? {
+          id: financialAccessOverride.id, status: financialAccessOverride.status, reason: financialAccessOverride.reason,
+          effectiveFrom: financialAccessOverride.effectiveFrom, expiresAt: financialAccessOverride.expiresAt,
+        } : null,
       });
     } catch (error) { next(error); }
   });

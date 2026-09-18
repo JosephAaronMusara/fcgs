@@ -107,13 +107,17 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
   const primaryImage = activeDocuments.find((item: any) => item.isPrimary && String(item.mimeType || "").startsWith("image/")) || activeDocuments.find((item: any) => entityType === "driver" && item.categoryCode === "driver_photo") || activeDocuments.find((item: any) => String(item.mimeType || "").startsWith("image/"));
   const relationships = payload?.relationships || {};
   const historyRows = [
-    ...(Array.isArray(relationships.ownerHistory) ? relationships.ownerHistory : []),
-    ...(Array.isArray(relationships.driverHistory) ? relationships.driverHistory : []),
-    ...(Array.isArray(relationships.vehicleHistory) ? relationships.vehicleHistory : []),
-  ];
+    ...(Array.isArray(relationships.ownerHistory) ? relationships.ownerHistory.map((row:any)=>({ ...row, historyType:"Owner change" })) : []),
+    ...(Array.isArray(relationships.driverHistory) ? relationships.driverHistory.map((row:any)=>({ ...row, historyType:"Primary Driver change" })) : []),
+    ...(Array.isArray(relationships.vehicleHistory) ? relationships.vehicleHistory.map((row:any)=>({ ...row, historyType:"Vehicle history" })) : []),
+    ...(Array.isArray(relationships.alternativeDriverHistory) ? relationships.alternativeDriverHistory.map((row:any)=>({ ...row, historyType:"Alternative Driver" })) : []),
+    ...(Array.isArray(relationships.operatingDriverHistory) ? relationships.operatingDriverHistory.map((row:any)=>({ ...row, historyType: row.operatingMode === "alternative" ? "Alternative Driver cover" : "Operating Driver" })) : []),
+    ...(Array.isArray(relationships.replacementHistory) ? relationships.replacementHistory.map((row:any)=>({ ...row, historyType: row.replacementType === "temporary" ? "Temporary vehicle replacement" : "Vehicle replacement" })) : []),
+    ...(Array.isArray(relationships.schoolAssociations) ? relationships.schoolAssociations.map((row:any)=>({ ...row, historyType:"School association" })) : []),
+  ].sort((a:any,b:any)=>String(b.effectiveFrom || b.createdAt || "").localeCompare(String(a.effectiveFrom || a.createdAt || "")));
   const incidents = Array.isArray(relationships.incidents) ? relationships.incidents : [];
   const relationshipEntries = Object.entries(relationships).filter(([key]) => ![
-    "ownerHistory", "driverHistory", "vehicleHistory", "incidents",
+    "ownerHistory", "driverHistory", "vehicleHistory", "alternativeDriverHistory", "operatingDriverHistory", "replacementHistory", "schoolAssociations", "incidents",
   ].includes(key));
 
   const openDocument = async (documentId: number) => {
@@ -159,7 +163,13 @@ export default function TransportRecordDetails({ entityType, entityId, canManage
       {canManageCompliance && <div className="grid gap-3 rounded-md border p-4 md:grid-cols-3"><div className="space-y-2 md:col-span-2"><Label>Override reason</Label><Textarea value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} placeholder="Explain the operational exception and corrective action."/></div><div className="space-y-2"><Label>Override expires</Label><Input type="date" value={overrideExpiry} onChange={(event) => setOverrideExpiry(event.target.value)}/><Button className="mt-2 w-full" disabled={overrideReason.trim().length < 3 || !overrideExpiry || override.isPending} onClick={() => override.mutate()}>Record override</Button></div></div>}
     </CardContent></Card></TabsContent>
 
-    <TabsContent value="history"><Card><CardHeader><CardTitle className="flex items-center gap-2"><History className="h-5 w-5"/>Relationship and audit history</CardTitle></CardHeader><CardContent><div className="space-y-2">{historyRows.length ? historyRows.map((item: any, index: number) => <div key={item.id || index} className="rounded-md border p-3 text-sm"><div className="font-medium">{titleCase(item.action || item.reason || "Change")}</div><div className="text-xs text-muted-foreground">{item.effectiveFrom || item.createdAt || ""}{item.effectiveTo ? ` – ${item.effectiveTo}` : ""}</div></div>) : <div className="text-sm text-muted-foreground">No history recorded.</div>}</div></CardContent></Card></TabsContent>
+    <TabsContent value="history"><Card><CardHeader><CardTitle className="flex items-center gap-2"><History className="h-5 w-5"/>Relationship and operating history</CardTitle></CardHeader><CardContent><div className="space-y-2">{historyRows.length ? historyRows.map((item: any, index: number) => {
+      const person = `${item.firstName || ""} ${item.lastName || ""}`.trim();
+      const replacement = item.originalRegistration && item.replacementRegistration ? `${item.originalRegistration} → ${item.replacementRegistration}` : "";
+      const schoolName = item.schoolName || "";
+      const detail = person || replacement || schoolName || (item.driverId ? `Driver #${item.driverId}` : item.ownerId ? `Owner #${item.ownerId}` : "");
+      return <div key={`${item.historyType}-${item.id || index}`} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div className="font-medium">{item.historyType || titleCase(item.action || "Change")}{detail ? ` · ${detail}` : ""}</div>{item.operatingMode && <Badge variant="outline">{titleCase(item.operatingMode)}</Badge>}{item.replacementType && <Badge variant="outline">{titleCase(item.replacementType)}</Badge>}</div><div className="mt-1 text-xs text-muted-foreground">{item.effectiveFrom || item.createdAt || ""}{item.effectiveTo ? ` – ${item.effectiveTo}` : " – Current"}{item.expectedReturnAt ? ` · Expected return ${item.expectedReturnAt}` : ""}</div>{item.reason && <div className="mt-1 text-xs">{item.reason}</div>}{item.notes && <div className="mt-1 text-xs text-muted-foreground">{item.notes}</div>}</div>;
+    }) : <div className="text-sm text-muted-foreground">No history recorded.</div>}</div></CardContent></Card></TabsContent>
 
     <TabsContent value="incidents"><Card><CardHeader><CardTitle>Linked incidents</CardTitle></CardHeader><CardContent><div className="space-y-2">{incidents.length ? incidents.map((item: any) => <div key={item.id} className="rounded-md border p-3 text-sm"><div className="flex items-center justify-between"><b>{item.incidentNumber}</b><Badge variant={item.severity === "critical" ? "destructive" : "secondary"}>{titleCase(item.severity)}</Badge></div><div>{item.description}</div><div className="text-xs text-muted-foreground">Incident: {new Date(item.occurredAt).toLocaleString()} · Logged: {new Date(item.createdAt).toLocaleString()}</div></div>) : <div className="text-sm text-muted-foreground">No linked incidents.</div>}</div></CardContent></Card></TabsContent>
   </Tabs>;

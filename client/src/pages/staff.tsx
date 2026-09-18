@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { CreateAccountForm } from "@/components/create-account-form";
+import { LoginDetailsBulkDialog } from "@/components/login-details-bulk-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,6 +20,7 @@ import type { Staff, Subject, Class as ClassType, User, Permission, AccessGroup,
 import { NotifyModal } from "@/components/notify-modal";
 import { useAuth } from "@/lib/auth";
 import * as XLSX from "xlsx";
+import { blobToXlsxImageDataUrl, exportXlsxWithEmbeddedImages } from "@/lib/xlsx-embedded-images";
 import { ResidentialAreaInput } from "@/components/residential-area-input";
 import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
@@ -260,28 +262,54 @@ export default function StaffPage() {
       toast({ title: "No data", description: "No staff members to export", variant: "destructive" });
       return;
     }
-
-    const exportData = exportStaff.map(s => ({
-      "First Name": s.firstName,
-      "Last Name": s.lastName,
-      "Email": s.email || "",
-      "phone": s.phone || "",
-      "Gender": s.gender?.toUpperCase() || "",
-      "Street Address": s.streetAddress || "",
-      "Residential Area": s.residentialArea || "",
-      "City": s.address || "",
-      "Role": s.role || "",
-      "Status": s.status || "active",
-      "Staff No": s.staffNo,
-    }));
-
-    const worksheet = XLSX.utils.json_to_sheet(exportData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Staff");
-    const datePart = new Date().toISOString().split('T')[0];
+    const rows: Array<Record<string, string>> = [];
+    for (const s of exportStaff) {
+      let photoDataUrl = "";
+      if (s.photo) {
+        try { const response = await schoolFetch(`/api/staff/${s.id}/photo/download`); if (response.ok) photoDataUrl = await blobToXlsxImageDataUrl(await response.blob()); } catch { /* keep export usable if one photo is unavailable */ }
+      }
+      rows.push({
+        Photo: photoDataUrl,
+        "Staff No": s.staffNo || "",
+        "First Name": s.firstName || "",
+        "Last Name": s.lastName || "",
+        "National ID": s.nationalIdNumber || "",
+        "Passport No": s.passportNumber || "",
+        Email: s.email || "",
+        Phone: s.phone || "",
+        Gender: s.gender?.toUpperCase() || "",
+        "Street Address": s.streetAddress || "",
+        "Residential Area": s.residentialArea || "",
+        "Address / City": s.address || "",
+        Role: s.role || "",
+        Status: s.status || "active",
+      });
+    }
+    const datePart = new Date().toISOString().split("T")[0];
     const searchLabel = debouncedSearch ? `_${debouncedSearch.replace(/\s+/g, "_")}` : "";
-    XLSX.writeFile(workbook, `Staff${searchLabel}_${datePart}.xlsx`);
-    toast({ title: "Success", description: "Staff list downloaded successfully" });
+    exportXlsxWithEmbeddedImages({
+      filename: `Staff${searchLabel}_${datePart}.xlsx`,
+      sheetName: "Staff",
+      columns: Object.keys(rows[0]),
+      rows,
+      columnWidths: {
+        Photo: 10,
+        "Staff No": 18,
+        "First Name": 18,
+        "Last Name": 18,
+        "National ID": 22,
+        "Passport No": 18,
+        Email: 30,
+        Phone: 18,
+        Gender: 12,
+        "Street Address": 28,
+        "Residential Area": 24,
+        "Address / City": 26,
+        Role: 20,
+        Status: 14,
+      },
+    });
+    toast({ title: "Success", description: "Staff list downloaded as XLSX with embedded profile photos and text-safe contact details." });
   };
 
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -400,6 +428,12 @@ export default function StaffPage() {
             <Upload className="w-4 h-4 mr-2" />
             Upload
           </Button>
+
+          <LoginDetailsBulkDialog
+            recipientType="staff"
+            selectedIds={selectedStaffIds}
+            search={debouncedSearch}
+          />
 
           <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
             <DialogTrigger asChild>

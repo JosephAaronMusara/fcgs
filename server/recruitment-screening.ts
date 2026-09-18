@@ -1,8 +1,10 @@
 import {
   A_LEVEL_GRADE_POINTS,
   A_LEVEL_GRADES,
+  O_LEVEL_GRADES,
   type ALevelGrade,
   type ALevelResultInput,
+  type OLevelResultInput,
 } from "@shared/recruitment";
 
 export type RecruitmentRequirementForEvaluation = {
@@ -32,6 +34,23 @@ export type HighSchoolEligibilityEvaluation = {
   age: number | null;
   aLevelPoints: number | null;
   route: "standard" | "teaching_qualification_exception" | null;
+  failedCodes: string[];
+};
+
+export type PrimarySchoolEligibilityPolicy = {
+  teachingQualificationRequired: boolean;
+  maximumOLevelSittings: number;
+  minimumOLevelSubjects: number;
+  minimumOLevelGrade: string;
+  mandatoryOLevelSubjects: string[];
+  mandatoryOLevelGrade: string;
+};
+
+export type PrimarySchoolEligibilityEvaluation = {
+  passed: boolean;
+  oLevelSittingCount: number;
+  oLevelQualifyingSubjectCount: number;
+  route: "primary_policy" | null;
   failedCodes: string[];
 };
 
@@ -217,11 +236,127 @@ export function evaluateHighSchoolEligibility(input: {
   return { passed: false, age, aLevelPoints, route: null, failedCodes };
 }
 
+function normalizedOLevelGrade(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function oLevelGradeIndex(value: unknown): number {
+  return O_LEVEL_GRADES.indexOf(normalizedOLevelGrade(value) as (typeof O_LEVEL_GRADES)[number]);
+}
+
+export function oLevelGradeMeetsMinimum(grade: unknown, minimumGrade: unknown): boolean {
+  const gradeIndex = oLevelGradeIndex(grade);
+  const minimumIndex = oLevelGradeIndex(minimumGrade);
+  return gradeIndex >= 0 && minimumIndex >= 0 && gradeIndex <= minimumIndex;
+}
+
+function canonicalOLevelSubject(value: unknown): string {
+  const compact = String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+  if (["math", "maths", "mathematics"].includes(compact)) return "mathematics";
+  if (["english", "englishlanguage"].includes(compact)) return "english";
+  if (["science", "generalscience", "integratedscience", "combinedscience"].includes(compact)) return "science";
+  return compact;
+}
+
+function oLevelFailureCodeForMandatorySubject(subject: string): string {
+  const code = canonicalOLevelSubject(subject) || "subject";
+  return `core:o_level_${code}_required_or_below_minimum`;
+}
+
+export function evaluatePrimarySchoolEligibility(input: {
+  oLevelResults: OLevelResultInput[];
+  holdsTeachingQualification: boolean;
+  policy: PrimarySchoolEligibilityPolicy;
+}): PrimarySchoolEligibilityEvaluation {
+  const failedCodes: string[] = [];
+  const results = Array.isArray(input.oLevelResults) ? input.oLevelResults : [];
+
+  if (input.policy.teachingQualificationRequired && !input.holdsTeachingQualification) {
+    failedCodes.push("core:primary_teaching_qualification_required");
+  }
+
+  if (!results.length) {
+    failedCodes.push("core:o_level_results_required");
+    return { passed: false, oLevelSittingCount: 0, oLevelQualifyingSubjectCount: 0, route: null, failedCodes };
+  }
+
+  const seenWithinSitting = new Set<string>();
+  const sittings = new Set<number>();
+  const bestGradeBySubject = new Map<string, string>();
+  let invalid = false;
+  for (const result of results) {
+    const subject = canonicalOLevelSubject(result?.subject);
+    const grade = normalizedOLevelGrade(result?.grade);
+    const sitting = Number(result?.sitting);
+    if (!subject || !O_LEVEL_GRADES.includes(grade as (typeof O_LEVEL_GRADES)[number]) || !Number.isInteger(sitting) || sitting < 1) {
+      invalid = true;
+      continue;
+    }
+    const sittingSubjectKey = `${sitting}:${subject}`;
+    if (seenWithinSitting.has(sittingSubjectKey)) {
+      invalid = true;
+      continue;
+    }
+    seenWithinSitting.add(sittingSubjectKey);
+    sittings.add(sitting);
+    const existing = bestGradeBySubject.get(subject);
+    if (!existing || oLevelGradeIndex(grade) < oLevelGradeIndex(existing)) bestGradeBySubject.set(subject, grade);
+  }
+
+  if (invalid) failedCodes.push("core:o_level_results_invalid");
+  const oLevelSittingCount = sittings.size;
+  if (oLevelSittingCount > input.policy.maximumOLevelSittings || Array.from(sittings).some((sitting) => sitting > input.policy.maximumOLevelSittings)) {
+    failedCodes.push("core:o_level_too_many_sittings");
+  }
+
+  const minimumGrade = normalizedOLevelGrade(input.policy.minimumOLevelGrade);
+  const oLevelQualifyingSubjectCount = Array.from(bestGradeBySubject.values())
+    .filter((grade) => oLevelGradeMeetsMinimum(grade, minimumGrade)).length;
+  if (oLevelQualifyingSubjectCount < input.policy.minimumOLevelSubjects) {
+    failedCodes.push("core:o_level_insufficient_qualifying_subjects");
+  }
+
+  const mandatoryMinimum = normalizedOLevelGrade(input.policy.mandatoryOLevelGrade);
+  for (const mandatorySubject of input.policy.mandatoryOLevelSubjects || []) {
+    const key = canonicalOLevelSubject(mandatorySubject);
+    const grade = key ? bestGradeBySubject.get(key) : undefined;
+    if (!grade || !oLevelGradeMeetsMinimum(grade, mandatoryMinimum)) {
+      failedCodes.push(oLevelFailureCodeForMandatorySubject(mandatorySubject));
+    }
+  }
+
+  const uniqueFailedCodes = Array.from(new Set(failedCodes));
+  return {
+    passed: uniqueFailedCodes.length === 0,
+    oLevelSittingCount,
+    oLevelQualifyingSubjectCount,
+    route: uniqueFailedCodes.length === 0 ? "primary_policy" : null,
+    failedCodes: uniqueFailedCodes,
+  };
+}
+
 export function publicHighSchoolEligibilityPolicy(policy: HighSchoolEligibilityPolicy) {
   return {
     maxAge: policy.maxAge,
     minimumALevelPoints: policy.minimumALevelPoints,
     gradeOptions: A_LEVEL_GRADES,
     gradePoints: A_LEVEL_GRADE_POINTS,
+  };
+}
+
+export function publicPrimarySchoolEligibilityPolicy(policy: PrimarySchoolEligibilityPolicy) {
+  return {
+    teachingQualificationRequired: policy.teachingQualificationRequired,
+    maximumOLevelSittings: policy.maximumOLevelSittings,
+    minimumOLevelSubjects: policy.minimumOLevelSubjects,
+    minimumOLevelGrade: normalizedOLevelGrade(policy.minimumOLevelGrade),
+    mandatoryOLevelSubjects: policy.mandatoryOLevelSubjects,
+    mandatoryOLevelGrade: normalizedOLevelGrade(policy.mandatoryOLevelGrade),
+    gradeOptions: O_LEVEL_GRADES,
   };
 }

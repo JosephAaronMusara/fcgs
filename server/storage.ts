@@ -71,6 +71,7 @@ import {
   notifications,
   activityLogs,
   internalTransfers,
+  studentEnrollmentEvents, transportAssignments, transportAssignmentEvents,
   calendarEvents,
   calendarEventAttendees,
   qcReports,
@@ -114,7 +115,7 @@ export interface IStorage {
 
   getInternalTransfers(filters?: { organizationId?: number | null; schoolId?: number | null; personType?: string | null }): Promise<InternalTransfer[]>;
   createInternalTransfer(data: InsertInternalTransfer): Promise<InternalTransfer>;
-  transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }>;
+  transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }>;
   transferStaffWithinOrganization(args: { staffId: number; destinationSchoolId: number; destinationRole: string; destinationAccessGroupId?: number | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ staff: Staff; transfer: InternalTransfer }>;
 
   getAllStreams(): Promise<Stream[]>;
@@ -838,7 +839,7 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
-  async transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; destinationClassId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }> {
+  async transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }> {
     return db.transaction(async (tx) => {
       const [existing] = await tx.select().from(students).where(eq(students.id, args.studentId));
       if (!existing || existing.archivedAt) throw new Error("Student not found");
@@ -850,8 +851,8 @@ export class DatabaseStorage implements IStorage {
       if (!sourceSchool || !destinationSchool) throw new Error("Source or destination school not found");
       if (!sourceSchool.organizationId || sourceSchool.organizationId !== destinationSchool.organizationId) throw new Error("Transfers are only allowed within the same organization");
 
-      const [destinationClass] = await tx.select().from(classes).where(and(eq(classes.id, args.destinationClassId), isNull(classes.archivedAt)));
-      if (!destinationClass || destinationClass.schoolId !== args.destinationSchoolId) throw new Error("Destination class does not belong to the destination school");
+      // Destination classroom assignment is deliberately a receiving-school task.
+      // Internal transfers must never infer, copy, or create a classroom at the destination.
 
       // Admission numbers are permanent person identifiers. Internal transfers move the
       // record but never issue or accept a replacement number.
@@ -861,8 +862,8 @@ export class DatabaseStorage implements IStorage {
 
       const [updated] = await tx.update(students).set({
         schoolId: args.destinationSchoolId,
-        classId: destinationClass.id,
-        streamId: destinationClass.streamId || null,
+        classId: null,
+        streamId: null,
         admissionNo: nextAdmissionNo,
         hostelId: null,
         isBoarding: false,
@@ -894,6 +895,45 @@ export class DatabaseStorage implements IStorage {
         await tx.update(users).set({ schoolId: args.destinationSchoolId, organizationId: sourceSchool.organizationId, isActive: true }).where(eq(users.id, existing.userId));
       }
 
+      // End the old-school Transport registration on the day before the transfer effective date.
+      // Future-dated transfers therefore schedule the service end without rewriting Transport history.
+      const effective = new Date(`${args.effectiveDate}T00:00:00Z`);
+      if (Number.isNaN(effective.getTime())) throw new Error("Invalid transfer effective date");
+      effective.setUTCDate(effective.getUTCDate() - 1);
+      const transportEndDate = effective.toISOString().slice(0, 10);
+      const activeTransport = await tx.select().from(transportAssignments).where(and(
+        eq(transportAssignments.studentId, existing.id),
+        eq(transportAssignments.schoolId, existing.schoolId),
+        or(isNull(transportAssignments.endDate), gte(transportAssignments.endDate, args.effectiveDate)),
+      ));
+      for (const assignment of activeTransport) {
+        const [closedAssignment] = await tx.update(transportAssignments).set({
+          endDate: transportEndDate,
+        }).where(eq(transportAssignments.id, assignment.id)).returning();
+        await tx.insert(transportAssignmentEvents).values({
+          schoolId: existing.schoolId,
+          assignmentId: assignment.id,
+          eventType: "internal_transfer_service_end_scheduled",
+          effectiveDate: args.effectiveDate,
+          previousValues: assignment,
+          newValues: closedAssignment,
+          reason: `Transport service scheduled to end ${transportEndDate} because of internal transfer effective ${args.effectiveDate}`,
+          createdByUserId: args.userId || null,
+        });
+      }
+
+      await tx.insert(studentEnrollmentEvents).values({
+        studentId: existing.id,
+        schoolId: args.destinationSchoolId,
+        eventType: "internal_transfer_in",
+        effectiveDate: args.effectiveDate,
+        reason: args.reason,
+        notes: args.notes || null,
+        previousStatus: existing.status || null,
+        newStatus: "active",
+        createdByUserId: args.userId || null,
+      });
+
       const [transfer] = await tx.insert(internalTransfers).values({
         organizationId: sourceSchool.organizationId,
         personType: "student",
@@ -902,9 +942,9 @@ export class DatabaseStorage implements IStorage {
         sourceSchoolId: existing.schoolId,
         destinationSchoolId: args.destinationSchoolId,
         sourceClassId: existing.classId || null,
-        destinationClassId: destinationClass.id,
+        destinationClassId: null,
         sourceStreamId: existing.streamId || null,
-        destinationStreamId: destinationClass.streamId || null,
+        destinationStreamId: null,
         sourceAdmissionNo: existing.admissionNo,
         destinationAdmissionNo: nextAdmissionNo,
         effectiveDate: args.effectiveDate,
@@ -2708,23 +2748,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async autoClockOutOverdueStaffAttendanceLogs(): Promise<number> {
-    const today = new Date().toISOString().split("T")[0];
-    const overdueLogs = await db.select().from(staffAttendanceLogs).where(and(isNull(staffAttendanceLogs.clockOut), lte(staffAttendanceLogs.date, today)));
-
-    let updatedCount = 0;
-    for (const log of overdueLogs) {
-      const logDate = new Date(`${log.date}T00:00:00`);
-      const autoClockOutAt = new Date(logDate);
-      autoClockOutAt.setHours(23, 59, 0, 0);
-      if (autoClockOutAt.getTime() > Date.now()) continue;
-
-      await db.update(staffAttendanceLogs)
-        .set({ clockOut: autoClockOutAt, autoClockedOut: true })
-        .where(eq(staffAttendanceLogs.id, log.id));
-      updatedCount += 1;
-    }
-
-    return updatedCount;
+    // Legacy compatibility hook. Gate-aware attendance reconciliation is now handled by
+    // runAccessControlSchedulers(), which never fabricates a 23:59 clock-out.
+    return 0;
   }
 
   // POS methods

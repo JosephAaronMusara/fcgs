@@ -181,13 +181,11 @@ async function cleanupTransportSchool(schoolId: number) {
     await tx.execute(sql`DELETE FROM transport_cashup_payments WHERE cashup_id IN (SELECT id FROM transport_cashups WHERE school_id=${schoolId})`);
     await tx.execute(sql`DELETE FROM transport_receipt_events WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_payment_allocations WHERE payment_id IN (SELECT id FROM transport_payments WHERE school_id=${schoolId})`);
-    await tx.execute(sql`DELETE FROM transport_payment_plan_instalments WHERE plan_id IN (SELECT id FROM transport_payment_plans WHERE school_id=${schoolId})`);
     await tx.execute(sql`DELETE FROM transport_compliance_notification_log WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_compliance_overrides WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_documents WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_account_adjustments WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_cashups WHERE school_id=${schoolId}`);
-    await tx.execute(sql`DELETE FROM transport_payment_plans WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_refunds WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_payments WHERE school_id=${schoolId}`);
     await tx.execute(sql`DELETE FROM transport_charges WHERE school_id=${schoolId}`);
@@ -425,7 +423,6 @@ async function main() {
     suspensionEligibilityDays: 30,
     suspensionNoticeDays: 3,
     minimumSuspensionBalance: "0.00",
-    paymentPlanMissedInstalmentsToDefault: 1,
     receiptPrefix: "TT",
     receiptSequenceLength: 6,
     receiptResetYearly: true,

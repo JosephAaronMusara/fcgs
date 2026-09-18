@@ -13,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { AccessGroup, Class, School, Staff, Student } from "@shared/schema";
+import type { AccessGroup, School, Staff, Student } from "@shared/schema";
 
 type TransferRecord = {
   id: number;
@@ -80,7 +80,6 @@ export default function InternalTransfersPage() {
   const [studentForm, setStudentForm] = useState({
     studentId: "",
     destinationSchoolId: "",
-    destinationClassId: "",
     effectiveDate: todayIso(),
     reason: "",
     notes: "",
@@ -99,7 +98,6 @@ export default function InternalTransfersPage() {
   const canTransferStudents = hasPermission("internal_transfers.transfer.student");
   const canTransferStaff = hasPermission("internal_transfers.transfer.staff");
 
-  const { data: classes = [] } = useQuery<Class[]>({ queryKey: ["/api/classes"] });
   const { data: directorySchools = [] } = useQuery<School[]>({ queryKey: ["/api/schools"] });
   const { data: students = [], isLoading: studentsLoading } = useQuery<Student[]>({ queryKey: ["/api/students"] });
   const { data: staff = [], isLoading: staffLoading } = useQuery<Staff[]>({ queryKey: ["/api/staff"] });
@@ -124,25 +122,17 @@ export default function InternalTransfersPage() {
     isError: schoolsError,
     error: schoolsQueryError,
   } = useQuery<School[]>({ queryKey: [destinationSchoolsUrl] });
-  const {
-    data: destinationClasses = [],
-    isLoading: destinationClassesLoading,
-  } = useQuery<Class[]>({
-    queryKey: ["/api/internal-transfers/destinations", studentForm.destinationSchoolId, "classes"],
-    enabled: Boolean(studentForm.destinationSchoolId),
-  });
+
 
   const schoolById = useMemo(
     () => new Map([...directorySchools, ...schools].map((school) => [Number(school.id), school])),
     [directorySchools, schools],
   );
-  const classById = useMemo(() => new Map(classes.map((item) => [item.id, item])), [classes]);
   const getSchoolName = (schoolId?: number | null) => {
     if (!schoolId) return "No school";
     return schoolById.get(Number(schoolId))?.name || `School #${schoolId}`;
   };
 
-  const destinationStudentClasses = destinationClasses;
   const destinationSchoolsForStudent = schools.filter((school) => sourceStudent?.schoolId !== school.id);
   const destinationSchoolsForStaff = schools.filter((school) => sourceStaff?.schoolId !== school.id);
 
@@ -168,7 +158,6 @@ export default function InternalTransfersPage() {
         ...studentForm,
         studentId: Number(studentForm.studentId),
         destinationSchoolId: Number(studentForm.destinationSchoolId),
-        destinationClassId: Number(studentForm.destinationClassId),
         notes: studentForm.notes.trim() || null,
       });
       return res.json();
@@ -176,7 +165,7 @@ export default function InternalTransfersPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/students"] });
       queryClient.invalidateQueries({ queryKey: ["/api/internal-transfers"] });
-      setStudentForm({ studentId: "", destinationSchoolId: "", destinationClassId: "", effectiveDate: todayIso(), reason: "", notes: "" });
+      setStudentForm({ studentId: "", destinationSchoolId: "", effectiveDate: todayIso(), reason: "", notes: "" });
       toast({
         title: "Student transferred",
         description: data?.warnings?.length ? data.warnings.join(" ") : "The student has been moved to the destination school.",
@@ -205,7 +194,7 @@ export default function InternalTransfersPage() {
     onError: (error) => toast({ title: "Transfer failed", description: parseError(error), variant: "destructive" }),
   });
 
-  const canSubmitStudent = studentForm.studentId && studentForm.destinationSchoolId && studentForm.destinationClassId && studentForm.effectiveDate && studentForm.reason.trim().length >= 3;
+  const canSubmitStudent = studentForm.studentId && studentForm.destinationSchoolId && studentForm.effectiveDate && studentForm.reason.trim().length >= 3;
   const canSubmitStaff = staffForm.staffId && staffForm.destinationSchoolId && staffForm.destinationRole && staffForm.destinationAccessGroupId && staffForm.effectiveDate && staffForm.reason.trim().length >= 3;
 
   return (
@@ -275,7 +264,7 @@ export default function InternalTransfersPage() {
           <Card>
             <CardHeader>
               <CardTitle>Transfer student</CardTitle>
-              <CardDescription>Select the current student, destination school and destination class.</CardDescription>
+              <CardDescription>Select the current student and destination school. Classroom assignment is completed by the receiving school.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-6 lg:grid-cols-[1fr_1.1fr]">
               <div className="space-y-3">
@@ -294,7 +283,7 @@ export default function InternalTransfersPage() {
                         key={student.id}
                         type="button"
                         className={`w-full text-left p-3 hover:bg-muted/60 ${selected ? "bg-primary/10" : ""}`}
-                        onClick={() => setStudentForm((prev) => ({ ...prev, studentId: String(student.id), destinationSchoolId: "", destinationClassId: "" }))}
+                        onClick={() => setStudentForm((prev) => ({ ...prev, studentId: String(student.id), destinationSchoolId: "" }))}
                       >
                         <div className="flex items-center justify-between gap-3">
                           <div>
@@ -317,7 +306,7 @@ export default function InternalTransfersPage() {
                       <p className="font-semibold">{fullName(sourceStudent)}</p>
                       <p className="text-sm text-muted-foreground">
                         {getSchoolName(sourceStudent.schoolId)}
-                        {sourceStudent.classId ? ` • ${classById.get(sourceStudent.classId)?.className || "Class"}` : ""}
+                        {sourceStudent.classId ? " • Classroom currently assigned" : " • Classroom unassigned"}
                       </p>
                     </CardContent>
                   </Card>
@@ -326,7 +315,7 @@ export default function InternalTransfersPage() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label>Destination school</Label>
-                    <Select value={studentForm.destinationSchoolId} onValueChange={(value) => setStudentForm((prev) => ({ ...prev, destinationSchoolId: value, destinationClassId: "" }))} disabled={!sourceStudent || schoolsLoading || schoolsError}>
+                    <Select value={studentForm.destinationSchoolId} onValueChange={(value) => setStudentForm((prev) => ({ ...prev, destinationSchoolId: value }))} disabled={!sourceStudent || schoolsLoading || schoolsError}>
                       <SelectTrigger>
                         <SelectValue placeholder={schoolsLoading ? "Loading schools..." : schoolsError ? "Unable to load schools" : "Choose school"} />
                       </SelectTrigger>
@@ -344,26 +333,8 @@ export default function InternalTransfersPage() {
                     </Select>
                     {schoolsError && <p className="text-xs text-destructive">{parseError(schoolsQueryError)}</p>}
                   </div>
-                  <div className="space-y-2">
-                    <Label>Destination class</Label>
-                    <Select
-                      value={studentForm.destinationClassId}
-                      onValueChange={(value) => setStudentForm((prev) => ({ ...prev, destinationClassId: value }))}
-                      disabled={!studentForm.destinationSchoolId || destinationClassesLoading}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder={destinationClassesLoading ? "Loading destination classes..." : "Choose class"} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {destinationStudentClasses.length ? destinationStudentClasses.map((item) => (
-                          <SelectItem key={item.id} value={String(item.id)}>{item.className}</SelectItem>
-                        )) : (
-                          <div className="px-2 py-3 text-sm text-muted-foreground">
-                            {studentForm.destinationSchoolId ? "No classes are configured for this school." : "Choose a destination school first."}
-                          </div>
-                        )}
-                      </SelectContent>
-                    </Select>
+                  <div className="md:col-span-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+                    The receiving school will assign the learner to an existing classroom. Internal transfers never copy, infer, or create destination classrooms.
                   </div>
                   <div className="space-y-2">
                     <Label>Admission number</Label>

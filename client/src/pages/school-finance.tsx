@@ -214,6 +214,7 @@ interface FeesSummaryStudent {
   balance: number;
   maxBalance: number;
   feesStatus: string;
+  financialAccessOverride?: { id: number; status: string; reason: string; effectiveFrom: string; expiresAt: string } | null;
   hasParentContact: boolean;
 }
 
@@ -675,6 +676,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
                           <SortableTableHead sortKey="name" sortConfig={summarySortConfig} onSort={requestSummarySort}>Student</SortableTableHead>
                           <SortableTableHead sortKey="classLabel" sortConfig={summarySortConfig} onSort={requestSummarySort}>Class</SortableTableHead>
                           <SortableTableHead sortKey="feesStatus" sortConfig={summarySortConfig} onSort={requestSummarySort}>Status</SortableTableHead>
+                          <TableHead>Gate Override</TableHead>
                           <SortableTableHead sortKey="total" sortConfig={summarySortConfig} onSort={requestSummarySort} className="text-right">Total Fees</SortableTableHead>
                           <SortableTableHead sortKey="paid" sortConfig={summarySortConfig} onSort={requestSummarySort} className="text-right">Paid So Far</SortableTableHead>
                           <SortableTableHead sortKey="balance" sortConfig={summarySortConfig} onSort={requestSummarySort} className="text-right">Balance Due</SortableTableHead>
@@ -709,6 +711,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
                             </TableCell>
                             <TableCell className="text-sm">{s.classLabel}</TableCell>
                             <TableCell>{getStatusBadge(s.feesStatus)}</TableCell>
+                            <TableCell>{s.financialAccessOverride ? <Badge variant="outline" title={s.financialAccessOverride.reason}>Until {new Date(s.financialAccessOverride.expiresAt).toLocaleDateString()}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
                             <TableCell className="text-right text-sm font-mono">{formatCurrency(s.total)}</TableCell>
                             <TableCell className="text-right text-sm font-mono">{formatCurrency(s.paid)}</TableCell>
                             <TableCell className="text-right text-sm font-mono font-semibold">

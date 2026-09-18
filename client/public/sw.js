@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fcgs-portal-v1';
+const CACHE_NAME = 'fcgs-portal-v3';
 const STATIC_ASSETS = [
   '/',
   '/manifest.json',
@@ -42,7 +42,14 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(request)
       .then((response) => {
-        if (response.ok && (url.pathname.match(/\.(js|css|png|jpg|svg|woff2?)$/) || url.pathname === '/')) {
+        const isStaticAsset = Boolean(url.pathname.match(/\.(js|css|wasm|png|jpg|jpeg|webp|svg|woff2?)$/)) || url.pathname === '/';
+        const isWasm = url.pathname.endsWith('.wasm');
+        const contentType = response.headers.get('content-type') || '';
+        // Never cache an SPA HTML fallback under a .wasm URL. A cached HTML
+        // response there makes WebAssembly fail with the `<!DO` magic bytes.
+        const hasValidWasmContentType = !isWasm || contentType.includes('application/wasm');
+
+        if (response.ok && isStaticAsset && hasValidWasmContentType) {
           const responseClone = response.clone();
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(request, responseClone);

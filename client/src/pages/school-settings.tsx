@@ -19,6 +19,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Building2, Settings, Save, School, Shield, Plus, Pencil, Trash2, Users, Lock, ChevronDown, ChevronRight, ChevronLeft, Calendar, Clock, Upload, ImageIcon, Stamp, User, Mail, Phone, MapPin, FileText, GraduationCap, BookOpen, Download, Filter, ClipboardList, Search, ArrowLeft, ArrowRight, AlertTriangle } from "lucide-react";
 import type { School as SchoolType, ActivityLog } from "@shared/schema";
+import AttendanceSchoolDaySettings from "@/components/attendance-school-day-settings";
 
 function normalizeSchoolType(value?: string | null): "primary" | "secondary" {
   const normalized = (value ?? "").toString().trim().toLowerCase();
@@ -72,10 +73,18 @@ export default function SchoolSettingsPage() {
     enableELogbook: false,
     enableHostel: false,
     enableTransport: false,
+    enableFleetManagement: false,
+    enableAccessControl: false,
   });
 
   const { data: schools = [], isLoading } = useQuery<SchoolType[]>({
     queryKey: ["/api/schools"],
+  });
+
+  const { data: fleetRequirement } = useQuery<{required:boolean; vehicleCount:number; allocationCount:number}>({
+    queryKey: ["/api/schools", school?.id, "fleet-requirement"],
+    queryFn: async () => { if(!school?.id) return {required:false,vehicleCount:0,allocationCount:0}; const r=await schoolFetch(`/api/schools/${school.id}/fleet-requirement`); if(!r.ok) return {required:false,vehicleCount:0,allocationCount:0}; return r.json(); },
+    enabled: !!school?.id,
   });
 
   // Auto-select the current school
@@ -119,6 +128,8 @@ export default function SchoolSettingsPage() {
         enableELogbook: school.enableELogbook || false,
         enableHostel: school.enableHostel || false,
         enableTransport: school.enableTransport || false,
+        enableFleetManagement: school.enableFleetManagement || false,
+        enableAccessControl: school.enableAccessControl || false,
       });
     }
   }, [school]);
@@ -159,6 +170,8 @@ export default function SchoolSettingsPage() {
       enableELogbook: featureValues.enableELogbook,
       enableHostel: featureValues.enableHostel,
       enableTransport: featureValues.enableTransport,
+      enableFleetManagement: featureValues.enableFleetManagement,
+      enableAccessControl: featureValues.enableAccessControl,
     });
     setIsEditingFeatures(false);
   };
@@ -172,6 +185,8 @@ export default function SchoolSettingsPage() {
         enableELogbook: school.enableELogbook || false,
         enableHostel: school.enableHostel || false,
         enableTransport: school.enableTransport || false,
+        enableFleetManagement: school.enableFleetManagement || false,
+        enableAccessControl: school.enableAccessControl || false,
       });
     }
     setIsEditingFeatures(false);
@@ -291,6 +306,10 @@ export default function SchoolSettingsPage() {
           <TabsTrigger value="features" data-testid="tab-features">
             <Settings className="h-4 w-4 mr-1" />
             Features
+          </TabsTrigger>
+          <TabsTrigger value="attendance-day" data-testid="tab-attendance-day">
+            <Clock className="h-4 w-4 mr-1" />
+            Attendance & School Day
           </TabsTrigger>
           <TabsTrigger value="academic" data-testid="tab-academic">
             <GraduationCap className="h-4 w-4 mr-1" />
@@ -699,6 +718,15 @@ export default function SchoolSettingsPage() {
                 />
               </div>
               
+              <div className="flex items-center justify-between gap-4">
+                <div><Label>Fleet Management</Label><p className="text-sm text-muted-foreground">Vehicle fleet operations. Automatically enabled and locked while this school or its staff have active fleet assignments.</p>{fleetRequirement?.required && <p className="text-xs text-amber-700 mt-1">Required by {fleetRequirement.vehicleCount} active vehicle(s) / {fleetRequirement.allocationCount} active allocation(s).</p>}</div>
+                <Switch checked={featureValues.enableFleetManagement || !!fleetRequirement?.required} onCheckedChange={(checked)=>handleToggle("enableFleetManagement",checked)} disabled={!isEditingFeatures || !!fleetRequirement?.required} data-testid="switch-fleet-management"/>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <div><Label>Access Control</Label><p className="text-sm text-muted-foreground">Face-terminal Gate access, Gate-derived attendance and access-policy synchronization.</p></div>
+                <Switch checked={featureValues.enableAccessControl} onCheckedChange={(checked)=>handleToggle("enableAccessControl",checked)} disabled={!isEditingFeatures} data-testid="switch-access-control"/>
+              </div>
+
               {isEditingFeatures && (
                 <div className="pt-4 border-t flex gap-2">
                   <Button onClick={handleSaveFeatures} disabled={updateSchool.isPending} data-testid="button-save-features">
@@ -718,6 +746,10 @@ export default function SchoolSettingsPage() {
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="attendance-day">
+          <AttendanceSchoolDaySettings />
         </TabsContent>
 
         <TabsContent value="academic">

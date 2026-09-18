@@ -12,6 +12,7 @@ import {
   staff,
   students,
   parents,
+  schoolDayOverrides,
 } from "../shared/schema";
 import { requireAuth } from "./auth";
 import { storage } from "./storage";
@@ -59,6 +60,29 @@ async function getOrganizationIdBySchoolId(schoolId: number) {
     .from(schools)
     .where(eq(schools.id, schoolId));
   return row?.organizationId ?? null;
+}
+
+
+function toHarareDateText(date: Date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Africa/Harare",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function calendarDateRange(start: Date, end: Date) {
+  const startText = toHarareDateText(start);
+  const endText = toHarareDateText(end);
+  const dates: string[] = [];
+  const cursor = new Date(`${startText}T12:00:00+02:00`);
+  const last = new Date(`${endText}T12:00:00+02:00`);
+  while (cursor <= last) {
+    dates.push(toHarareDateText(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
 }
 
 async function getEventClassIds(eventId: number): Promise<number[]> {
@@ -338,6 +362,7 @@ export function registerCalendarRoutes(app: Express) {
       includeStudents,
       includeParents,
       staffViewerIds,
+      attendanceExpectation,
     } = req.body ?? {};
 
     if (!scope || typeof scope !== "string") {
@@ -470,26 +495,48 @@ export function registerCalendarRoutes(app: Express) {
 
       const organizationId = await getOrganizationIdBySchoolId(schoolIdCtx);
 
-      const [created] = await db
-        .insert(calendarEvents)
-        .values({
-          scope: "school",
-          organizationId,
-          schoolId: schoolIdCtx,
-          classId: null,
-          ownerUserId: null,
-          createdByUserId: user.id,
-          title: String(title),
-          description: description ? String(description) : null,
-          location: location ? String(location) : null,
-          startAt: start,
-          endAt: end,
-          allDay: !!allDay,
-          timezone: tz,
-          includeStudents: incStudents, // default true
-          includeParents: incParents,   // checkbox controls parent visibility
-        })
-        .returning();
+      const expectation = attendanceExpectation === "no_regular_attendance" ? "no_regular_attendance" : "normal";
+      const created = await db.transaction(async (tx) => {
+        const [event] = await tx
+          .insert(calendarEvents)
+          .values({
+            scope: "school",
+            organizationId,
+            schoolId: schoolIdCtx,
+            classId: null,
+            ownerUserId: null,
+            createdByUserId: user.id,
+            title: String(title),
+            description: description ? String(description) : null,
+            location: location ? String(location) : null,
+            startAt: start,
+            endAt: end,
+            allDay: !!allDay,
+            timezone: tz,
+            includeStudents: incStudents,
+            includeParents: incParents,
+            attendanceExpectation: expectation,
+          })
+          .returning();
+
+        if (expectation === "no_regular_attendance") {
+          for (const overrideDate of calendarDateRange(start, end)) {
+            await tx.insert(schoolDayOverrides).values({
+              schoolId: schoolIdCtx,
+              calendarEventId: event.id,
+              overrideDate,
+              isSchoolDay: false,
+              reason: String(title),
+              createdByUserId: user.id,
+            }).onConflictDoUpdate({
+              target: [schoolDayOverrides.schoolId, schoolDayOverrides.overrideDate],
+              set: { calendarEventId: event.id, isSchoolDay: false, reason: String(title), createdByUserId: user.id, updatedAt: new Date() },
+            });
+          }
+        }
+
+        return event;
+      });
 
       return res.status(201).json({ event: created });
     }
@@ -644,6 +691,7 @@ export function registerCalendarRoutes(app: Express) {
       includeParents,
       classIds,
       staffViewerIds,
+      attendanceExpectation,
     } = req.body ?? {};
 
     const nextStart = startAt ? new Date(startAt) : (ev.startAt as unknown as Date);
@@ -729,6 +777,7 @@ export function registerCalendarRoutes(app: Express) {
     if (timezone !== undefined) patch.timezone = timezone ? String(timezone) : "Africa/Harare";
     if (includeStudents !== undefined) patch.includeStudents = includeStudents !== false;
     if (includeParents !== undefined) patch.includeParents = !!includeParents;
+    if (ev.scope === "school" && attendanceExpectation !== undefined) patch.attendanceExpectation = attendanceExpectation === "no_regular_attendance" ? "no_regular_attendance" : "normal";
 
     // If scope is org/school, enforce same org/school context on edit (extra safety)
     if (ev.scope === "school" && ev.schoolId && schoolIdCtx && ev.schoolId !== schoolIdCtx && !(isOrgAdmin && sameOrg)) {
@@ -748,6 +797,25 @@ export function registerCalendarRoutes(app: Express) {
         })
         .where(eq(calendarEvents.id, eventId))
         .returning();
+
+      if (ev.scope === "school" && ev.schoolId) {
+        await tx.delete(schoolDayOverrides).where(eq(schoolDayOverrides.calendarEventId, eventId));
+        if (updatedEvent.attendanceExpectation === "no_regular_attendance") {
+          for (const overrideDate of calendarDateRange(nextStart, nextEnd)) {
+            await tx.insert(schoolDayOverrides).values({
+              schoolId: ev.schoolId,
+              calendarEventId: eventId,
+              overrideDate,
+              isSchoolDay: false,
+              reason: String(updatedEvent.title),
+              createdByUserId: user.id,
+            }).onConflictDoUpdate({
+              target: [schoolDayOverrides.schoolId, schoolDayOverrides.overrideDate],
+              set: { calendarEventId: eventId, isSchoolDay: false, reason: String(updatedEvent.title), createdByUserId: user.id, updatedAt: new Date() },
+            });
+          }
+        }
+      }
 
       if (ev.scope === "class" && newClassIds) {
         // Replace class links
@@ -835,6 +903,7 @@ export function registerCalendarRoutes(app: Express) {
       await tx.delete(calendarEventClasses).where(eq(calendarEventClasses.eventId, eventId));
       await tx.delete(calendarEventReminders).where(eq(calendarEventReminders.eventId, eventId));
       await tx.delete(calendarEventAttendees).where(eq(calendarEventAttendees.eventId, eventId));
+      await tx.delete(schoolDayOverrides).where(eq(schoolDayOverrides.calendarEventId, eventId));
 
       await tx.delete(calendarEvents).where(eq(calendarEvents.id, eventId));
     });

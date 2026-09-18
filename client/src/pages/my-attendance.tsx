@@ -60,7 +60,7 @@ export default function MyAttendancePage() {
     const absent = source.filter(r => r.status === "absent").length;
     const late = source.filter(r => r.status === "late").length;
     const other = total - present - absent - late;
-    const rate = total > 0 ? Math.round((present / total) * 100) : 0;
+    const rate = total > 0 ? Math.round(((present + late) / total) * 100) : 0;
     return { total, present, absent, late, other, rate };
   }, [filteredRecords]);
 
@@ -157,6 +157,9 @@ export default function MyAttendancePage() {
                 <TableRow>
                   <TableHead>Date</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Gate Arrival</TableHead>
+                  <TableHead>Gate Exit</TableHead>
+                  <TableHead>Source</TableHead>
                   <TableHead>Reason</TableHead>
                 </TableRow>
               </TableHeader>
@@ -176,8 +179,11 @@ export default function MyAttendancePage() {
                         {record.status.charAt(0).toUpperCase() + record.status.slice(1)}
                       </Badge>
                     </TableCell>
+                    <TableCell className="text-muted-foreground">{record.firstGateArrivalAt ? new Date(record.firstGateArrivalAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</TableCell>
+                    <TableCell className="text-muted-foreground">{record.lastGateExitAt ? new Date(record.lastGateExitAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</TableCell>
+                    <TableCell><Badge variant={record.gateEvidenceLocked ? "outline" : "secondary"}>{record.gateEvidenceLocked ? "Gate verified" : (record.source || "Teacher")}</Badge></TableCell>
                     <TableCell className="text-muted-foreground">
-                      {record.reason || "—"}
+                      {record.reason || "—"}{record.gateCorrectionReason ? ` · Corrected: ${record.gateCorrectionReason}` : ""}
                     </TableCell>
                   </TableRow>
                 ))}

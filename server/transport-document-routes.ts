@@ -25,9 +25,13 @@ import {
   transportPathNodes,
   transportRoutes,
   transportSettings,
+  transportVehicleAlternativeDrivers,
   transportVehicleDriverHistory,
+  transportVehicleOperatingDriverHistory,
   transportVehicleOwnerHistory,
   transportVehiclePaths,
+  transportVehicleReplacements,
+  transportVehicleSchools,
   transportVehicles,
   users,
 } from "@shared/schema";
@@ -308,16 +312,71 @@ export function registerTransportDocumentRoutes(app: Express): void {
         ]);
         relationships = { owner: owner[0] || null, vehicles, ownerHistory, vehicleHistory, incidents };
       } else {
-        const [owner, driver, paths, ownerHistory, driverHistory, incidents, assignments] = await Promise.all([
+        const [owner, driver, paths, ownerHistory, driverHistory, alternativeDriverHistory, operatingDriverHistory, replacementHistoryResult, schoolAssociations, incidents, assignments] = await Promise.all([
           record.ownerId ? db.select().from(transportOwners).where(eq(transportOwners.id, record.ownerId)).limit(1) : Promise.resolve([]),
           record.driverId ? db.select().from(transportDrivers).where(eq(transportDrivers.id, record.driverId)).limit(1) : Promise.resolve([]),
           db.select().from(transportVehiclePaths).where(and(inArray(transportVehiclePaths.schoolId, orgSchoolIds), eq(transportVehiclePaths.vehicleId, entityId))).orderBy(desc(transportVehiclePaths.createdAt)),
           db.select().from(transportVehicleOwnerHistory).where(eq(transportVehicleOwnerHistory.vehicleId, entityId)).orderBy(desc(transportVehicleOwnerHistory.effectiveFrom)),
           db.select().from(transportVehicleDriverHistory).where(eq(transportVehicleDriverHistory.vehicleId, entityId)).orderBy(desc(transportVehicleDriverHistory.effectiveFrom)),
+          db.select({
+            id: transportVehicleAlternativeDrivers.id,
+            driverId: transportVehicleAlternativeDrivers.driverId,
+            firstName: transportDrivers.firstName,
+            lastName: transportDrivers.lastName,
+            effectiveFrom: transportVehicleAlternativeDrivers.effectiveFrom,
+            effectiveTo: transportVehicleAlternativeDrivers.effectiveTo,
+            reason: transportVehicleAlternativeDrivers.reason,
+            createdAt: transportVehicleAlternativeDrivers.createdAt,
+          }).from(transportVehicleAlternativeDrivers).innerJoin(transportDrivers, eq(transportDrivers.id, transportVehicleAlternativeDrivers.driverId)).where(eq(transportVehicleAlternativeDrivers.vehicleId, entityId)).orderBy(desc(transportVehicleAlternativeDrivers.effectiveFrom)),
+          db.select({
+            id: transportVehicleOperatingDriverHistory.id,
+            driverId: transportVehicleOperatingDriverHistory.driverId,
+            firstName: transportDrivers.firstName,
+            lastName: transportDrivers.lastName,
+            operatingMode: transportVehicleOperatingDriverHistory.operatingMode,
+            effectiveFrom: transportVehicleOperatingDriverHistory.effectiveFrom,
+            effectiveTo: transportVehicleOperatingDriverHistory.effectiveTo,
+            expectedReturnAt: transportVehicleOperatingDriverHistory.expectedReturnAt,
+            reason: transportVehicleOperatingDriverHistory.reason,
+            notes: transportVehicleOperatingDriverHistory.notes,
+            createdAt: transportVehicleOperatingDriverHistory.createdAt,
+          }).from(transportVehicleOperatingDriverHistory).innerJoin(transportDrivers, eq(transportDrivers.id, transportVehicleOperatingDriverHistory.driverId)).where(eq(transportVehicleOperatingDriverHistory.vehicleId, entityId)).orderBy(desc(transportVehicleOperatingDriverHistory.effectiveFrom)),
+          db.execute(sql`
+            SELECT vr.*, vr.original_vehicle_id AS "originalVehicleId", vr.replacement_vehicle_id AS "replacementVehicleId",
+                   ov.registration_number AS "originalRegistration", rv.registration_number AS "replacementRegistration",
+                   sc.name AS "schoolName"
+            FROM transport_vehicle_replacements vr
+            JOIN transport_vehicles ov ON ov.id=vr.original_vehicle_id
+            JOIN transport_vehicles rv ON rv.id=vr.replacement_vehicle_id
+            LEFT JOIN schools sc ON sc.id=vr.school_id
+            WHERE vr.original_vehicle_id=${entityId} OR vr.replacement_vehicle_id=${entityId}
+            ORDER BY vr.effective_from DESC
+          `),
+          db.select({
+            id: transportVehicleSchools.id,
+            schoolId: transportVehicleSchools.schoolId,
+            schoolName: schools.name,
+            isActive: transportVehicleSchools.isActive,
+            effectiveFrom: transportVehicleSchools.effectiveFrom,
+            effectiveTo: transportVehicleSchools.effectiveTo,
+            notes: transportVehicleSchools.notes,
+          }).from(transportVehicleSchools).innerJoin(schools, eq(schools.id, transportVehicleSchools.schoolId)).where(eq(transportVehicleSchools.vehicleId, entityId)).orderBy(desc(transportVehicleSchools.effectiveFrom)),
           db.select().from(transportIncidents).where(and(inArray(transportIncidents.schoolId, orgSchoolIds), eq(transportIncidents.vehicleId, entityId))).orderBy(desc(transportIncidents.occurredAt)),
           db.select().from(transportAssignments).where(and(inArray(transportAssignments.schoolId, orgSchoolIds), or(eq(transportAssignments.vehicleId, entityId), eq(transportAssignments.outboundVehicleId, entityId)))).orderBy(desc(transportAssignments.createdAt)),
         ]);
-        relationships = { owner: owner[0] || null, driver: driver[0] || null, paths, ownerHistory, driverHistory, incidents, assignments };
+        relationships = {
+          owner: owner[0] || null,
+          driver: driver[0] || null,
+          paths,
+          schoolAssociations,
+          ownerHistory,
+          driverHistory,
+          alternativeDriverHistory,
+          operatingDriverHistory,
+          replacementHistory: replacementHistoryResult.rows,
+          incidents,
+          assignments,
+        };
       }
       const documents = await db.select().from(transportDocuments).where(and(eq(transportDocuments.schoolId, entitySchoolId), eq(transportDocuments.entityType, entityType), eq(transportDocuments.entityId, entityId))).orderBy(desc(transportDocuments.isActive), desc(transportDocuments.uploadedAt));
       const compliance = await calculateTransportCompliance({ schoolId: entitySchoolId, entityType: entityType as "owner" | "driver" | "vehicle", entityId, ownerType: record.ownerType });

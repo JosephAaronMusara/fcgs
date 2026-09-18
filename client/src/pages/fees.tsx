@@ -37,6 +37,12 @@ interface FeesSummaryStudent {
   hasParentContact: boolean;
 }
 
+interface FeesImportPreview {
+  batch: { id: number; fileName?: string | null };
+  stats: { totalRows: number; matchedRows: number; customerCodeMatches: number; exactNameMatches: number; fuzzyNameMatches: number; unmatchedRows: number };
+  items: Array<{ rowNumber: number; csvCustomerCode?: string; csvName: string; balanceDue: number; matchedAdmissionNo?: string | null; matchedStudentName?: string | null; matchMethod: string; calculatedStatus?: string | null }>;
+}
+
 function getStatusBadge(status: string) {
   switch (status) {
     case "fully_paid":
@@ -62,6 +68,7 @@ export default function FeesPage() {
   const [selectedStudent, setSelectedStudent] = useState<FeesSummaryStudent | null>(null);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [importPreview, setImportPreview] = useState<FeesImportPreview | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: feesSummary, isLoading: summaryLoading } = useQuery<FeesSummaryStudent[]>({
@@ -76,30 +83,29 @@ export default function FeesPage() {
     queryKey: ["/api/students"],
   });
 
-  const importMutation = useMutation({
+  const previewImportMutation = useMutation({
     mutationFn: async (formData: FormData) => {
-      const res = await schoolFetch("/api/fees/import-csv", {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message || "Import failed");
-      }
+      const res = await schoolFetch("/api/fees/import-csv/preview", { method: "POST", body: formData });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.message || "Import preview failed"); }
+      return res.json() as Promise<FeesImportPreview>;
+    },
+    onSuccess: (data) => setImportPreview(data),
+    onError: (error: Error) => toast({ title: "Import Preview Failed", description: error.message, variant: "destructive" }),
+  });
+
+  const commitImportMutation = useMutation({
+    mutationFn: async (batchId: number) => {
+      const res = await schoolFetch(`/api/fees/import-csv/${batchId}/commit`, { method: "POST" });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.message || "Import failed"); }
       return res.json();
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/fees/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/students"] });
-      setIsImportOpen(false);
-      toast({
-        title: "Import Complete",
-        description: `${data.updated} student(s) updated. ${data.not_found} not matched.`,
-      });
+      setImportPreview(null); setIsImportOpen(false);
+      toast({ title: "Import Complete", description: `${data.updated} student(s) updated. ${data.not_found} not matched.` });
     },
-    onError: (error: Error) => {
-      toast({ title: "Import Failed", description: error.message, variant: "destructive" });
-    },
+    onError: (error: Error) => toast({ title: "Import Failed", description: error.message, variant: "destructive" }),
   });
 
   const notifyMutation = useMutation({
@@ -176,7 +182,7 @@ export default function FeesPage() {
   const handleImportSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    importMutation.mutate(formData);
+    previewImportMutation.mutate(formData);
   };
 
   const handleNotifySelected = () => {
@@ -273,14 +279,14 @@ export default function FeesPage() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
+          <Dialog open={isImportOpen} onOpenChange={(open) => { setIsImportOpen(open); if (!open) setImportPreview(null); }}>
             <DialogTrigger asChild>
               <Button variant="outline" data-testid="button-import-csv">
                 <Upload className="w-4 h-4 mr-2" />
                 Upload from CSV
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
+            <DialogContent className="max-w-5xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
               <DialogHeader>
                 <DialogTitle>Upload / Update from Excel (CSV)</DialogTitle>
                 <DialogDescription>
@@ -326,10 +332,45 @@ export default function FeesPage() {
                     data-testid="input-csv-file"
                   />
                 </div>
-                <Button type="submit" className="w-full" disabled={importMutation.isPending} data-testid="button-submit-import">
-                  {importMutation.isPending ? "Uploading..." : "Upload / Update Balances"}
-                </Button>
+                {!importPreview && (
+                  <Button type="submit" className="w-full" disabled={previewImportMutation.isPending} data-testid="button-submit-import">
+                    {previewImportMutation.isPending ? "Preparing Review..." : "Review Import"}
+                  </Button>
+                )}
               </form>
+              {importPreview && (
+                <div className="space-y-4 border-t pt-4">
+                  <div>
+                    <h3 className="font-semibold">Import Review</h3>
+                    <p className="text-sm text-muted-foreground">Review how the current matching logic resolved this CSV before updating balances.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+                    {[
+                      ["Rows", importPreview.stats.totalRows], ["Matched", importPreview.stats.matchedRows], ["Customer Code", importPreview.stats.customerCodeMatches],
+                      ["Exact Name", importPreview.stats.exactNameMatches], ["Fuzzy Name", importPreview.stats.fuzzyNameMatches], ["Unmatched", importPreview.stats.unmatchedRows],
+                    ].map(([label, value]) => <Card key={String(label)}><CardContent className="p-3"><div className="text-xs text-muted-foreground">{label}</div><div className="text-xl font-semibold">{value}</div></CardContent></Card>)}
+                  </div>
+                  <div className="max-h-72 overflow-auto rounded-md border">
+                    <Table>
+                      <TableHeader><TableRow><TableHead>Row</TableHead><TableHead>CSV Name</TableHead><TableHead>Customer</TableHead><TableHead>Matched Student</TableHead><TableHead>Admission No.</TableHead><TableHead>Method</TableHead><TableHead className="text-right">Balance</TableHead><TableHead>Status</TableHead></TableRow></TableHeader>
+                      <TableBody>
+                        {importPreview.items.map((item) => <TableRow key={item.rowNumber}>
+                          <TableCell>{item.rowNumber}</TableCell><TableCell>{item.csvName}</TableCell><TableCell>{item.csvCustomerCode || "-"}</TableCell>
+                          <TableCell>{item.matchedStudentName || <span className="text-destructive">Not matched</span>}</TableCell><TableCell>{item.matchedAdmissionNo || "-"}</TableCell>
+                          <TableCell><Badge variant={item.matchMethod === "unmatched" ? "destructive" : item.matchMethod === "fuzzy_name" ? "secondary" : "outline"}>{item.matchMethod.replaceAll("_", " ")}</Badge></TableCell>
+                          <TableCell className="text-right">{formatCurrency(Number(item.balanceDue || 0))}</TableCell><TableCell>{item.calculatedStatus ? getStatusBadge(item.calculatedStatus) : "-"}</TableCell>
+                        </TableRow>)}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                    <Button variant="outline" onClick={() => setImportPreview(null)}>Choose Another File</Button>
+                    <Button onClick={() => commitImportMutation.mutate(importPreview.batch.id)} disabled={commitImportMutation.isPending}>
+                      {commitImportMutation.isPending ? "Applying Import..." : "Confirm Import"}
+                    </Button>
+                  </div>
+                </div>
+              )}
             </DialogContent>
           </Dialog>
           <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>

@@ -15,6 +15,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import type { School, Staff, StaffAttendanceLog } from "@shared/schema";
 
 const GPS_ACCURACY_THRESHOLD_METERS = 150;
@@ -44,12 +46,21 @@ interface WorkdayConfig extends Pick<School,
   | "term3EndDate"
 > {}
 
+interface StaffDaySchedule {
+  isSchoolDay: boolean;
+  staffStartTime: string;
+  staffLateGraceMinutes: number;
+  staffEndTime: string;
+}
+
 interface StaffGridData {
   dates: string[];
+  schedules?: Record<string, StaffDaySchedule>;
   staff: Array<{
     id: number;
     name: string;
     statuses: Record<string, string>;
+    records?: Record<string, StaffAttendanceLog>;
   }>;
 }
 
@@ -101,11 +112,20 @@ function isWeekend(dateStr: string): boolean {
   return day === 0 || day === 6;
 }
 
-function expectedStart(dateStr: string): { hour: number; minute: number } {
+function parseScheduleTime(value: string | null | undefined, fallbackHour: number, fallbackMinute: number) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return { hour: fallbackHour, minute: fallbackMinute };
+  return { hour: Number(match[1]), minute: Number(match[2]) };
+}
+
+function expectedStart(dateStr: string, schedule?: StaffDaySchedule | null): { hour: number; minute: number } {
+  if (schedule) return parseScheduleTime(schedule.staffStartTime, 7, 20);
   return isWeekend(dateStr) ? { hour: 8, minute: 0 } : { hour: 7, minute: 20 };
 }
 
-function expectedEnd(dateStr: string): { hour: number; minute: number } | null {
+function expectedEnd(dateStr: string, schedule?: StaffDaySchedule | null): { hour: number; minute: number } | null {
+  if (schedule && !schedule.isSchoolDay) return null;
+  if (schedule) return parseScheduleTime(schedule.staffEndTime, 16, 0);
   return isWeekend(dateStr) ? null : { hour: 16, minute: 0 };
 }
 
@@ -242,6 +262,8 @@ export default function LogbookPage() {
   const [lastLocation, setLastLocation] = useState<{ latitude: number; longitude: number; accuracy: number; attemptCount: number } | null>(null);
   const [selectedStaffId, setSelectedStaffId] = useState<string>("all");
   const [selectedFocus, setSelectedFocus] = useState<SelectedAttendanceFocus | null>(null);
+  const [adminReasonTarget, setAdminReasonTarget] = useState<StaffAttendanceLog | null>(null);
+  const [adminReason, setAdminReason] = useState("");
   const [dateFrom, setDateFrom] = useState(() => {
     const d = new Date();
     return toLocalIsoDate(new Date(d.getFullYear(), d.getMonth(), 1));
@@ -280,6 +302,8 @@ export default function LogbookPage() {
     queryKey: [`/api/staff-attendance/grid?dateFrom=${dateFrom}&dateTo=${dateTo}${selectedStaffIdNumber ? `&staffId=${selectedStaffIdNumber}` : ""}`],
     enabled: canViewOverview,
   });
+
+  const scheduleForDate = (date: string) => gridData?.schedules?.[date] || null;
 
   const { data: logs = [], isLoading: logsLoading } = useQuery<StaffAttendanceLog[]>({
     queryKey: [`/api/staff-attendance?dateFrom=${dateFrom}&dateTo=${dateTo}${selectedStaffIdNumber ? `&staffId=${selectedStaffIdNumber}` : ""}`],
@@ -356,6 +380,21 @@ export default function LogbookPage() {
     onError: (error: any) => {
       toast({ title: error?.message || "Failed to clock out", variant: "destructive" });
     },
+  });
+
+  const adminReasonMutation = useMutation({
+    mutationFn: async () => {
+      if (!adminReasonTarget) throw new Error("Attendance record not selected");
+      const res = await apiRequest("POST", `/api/staff-attendance/${adminReasonTarget.id}/admin-submit-reason`, { reason: adminReason.trim() });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("/api/staff-attendance") });
+      toast({ title: "Reason saved", description: "The attendance review item has been resolved and audited." });
+      setAdminReasonTarget(null);
+      setAdminReason("");
+    },
+    onError: (error: any) => toast({ title: error?.message || "Failed to save reason", variant: "destructive" }),
   });
 
   useEffect(() => {
@@ -521,7 +560,7 @@ export default function LogbookPage() {
 
   const isClockOutBeforeExpected = (log: StaffAttendanceLog) => {
     if (!log.clockOut) return false;
-    const end = expectedEnd(log.date);
+    const end = expectedEnd(log.date, scheduleForDate(log.date));
     if (!end) return false;
     const actual = new Date(log.clockOut);
     const reference = new Date(actual);
@@ -530,7 +569,7 @@ export default function LogbookPage() {
   };
 
   const getClockOutDifferenceLabel = (log: StaffAttendanceLog) => {
-    const end = expectedEnd(log.date);
+    const end = expectedEnd(log.date, scheduleForDate(log.date));
     if (!log.clockOut) return "";
     if (!end) return "Open";
     return formatTimeDifference(log.clockOut, end.hour, end.minute);
@@ -539,7 +578,7 @@ export default function LogbookPage() {
   const exportLogsExcel = () => {
     const headerRow = ["ID", "Date", "School Staff", "Clock In", "Clock-in Time Dif", "Clock Out", "Clock-out Time Dif", "Status", "Auto Clocked Out", "Note / Reason"];
     const rows = [headerRow, ...safeSortedLogs.map((log) => {
-      const start = expectedStart(log.date);
+      const start = expectedStart(log.date, scheduleForDate(log.date));
       return [
         log.id,
         formatDate(log.date),
@@ -668,6 +707,13 @@ export default function LogbookPage() {
                         <Badge className="bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-400"><CheckCircle2 className="h-3 w-3 mr-1" />On Time</Badge>
                       ) : null}
                       {attendanceStripState.log?.notes ? <span className="text-muted-foreground">Reason: {attendanceStripState.log.notes}</span> : null}
+                      {attendanceStripState.log?.source ? <Badge variant="outline">Source: {attendanceStripState.log.source}</Badge> : null}
+                      {attendanceStripState.log?.firstGateEntryAt ? <span><span className="text-muted-foreground">First Gate Entry:</span> <span className="font-medium">{formatTime(attendanceStripState.log.firstGateEntryAt)}</span></span> : null}
+                      {attendanceStripState.log?.lastGateExitAt ? <span><span className="text-muted-foreground">Last Gate Exit:</span> <span className="font-medium">{formatTime(attendanceStripState.log.lastGateExitAt)}</span></span> : null}
+                      {attendanceStripState.log?.currentlyOnCampus !== null && attendanceStripState.log?.currentlyOnCampus !== undefined ? <Badge variant={attendanceStripState.log.currentlyOnCampus ? "default" : "secondary"}>{attendanceStripState.log.currentlyOnCampus ? "On Campus" : "Off Campus"}</Badge> : null}
+                      {attendanceStripState.log?.missingClockOut ? <Badge variant="destructive">Review Required · Missing Clock Out</Badge> : null}
+                      {attendanceStripState.log?.reasonRequired ? <Badge className="bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">Reason Required</Badge> : null}
+                      {canViewAll && attendanceStripState.log?.reasonRequired ? <Button size="sm" variant="outline" onClick={() => { setAdminReasonTarget(attendanceStripState.log || null); setAdminReason(""); }}>Capture Reason</Button> : null}
                     </div>
                   )}
                 </div>
@@ -757,6 +803,8 @@ export default function LogbookPage() {
                               <td className="sticky left-0 bg-card z-10 px-3 py-2 font-medium text-sm whitespace-nowrap">{staffMember.name}</td>
                               {gridData.dates.map((date) => {
                                 const status = getOverviewStatus(staffMember.statuses[date], date, todayDate, firstClockInByStaff[staffMember.id], currentSchool);
+                                const attendanceRecord = staffMember.records?.[date];
+                                const gateBacked = Boolean(attendanceRecord && (attendanceRecord.firstGateEntryAt || attendanceRecord.lastGateExitAt || String(attendanceRecord.source || "").includes("gate")));
                                 const weekendColumn = isWeekend(date);
                                 const selectedColumn = selectedFocus?.date === date;
                                 const selectedCell = selectedFocus?.date === date && selectedFocus?.staffId === staffMember.id;
@@ -782,7 +830,7 @@ export default function LogbookPage() {
                                       className="inline-flex items-center justify-center rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                                       data-testid={`button-overview-cell-${staffMember.id}-${date}`}
                                     >
-                                      {inner}
+                                      <span className="relative inline-flex">{inner}{gateBacked && <span className="absolute -right-1 -top-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background text-primary ring-1 ring-primary"><ShieldAlert className="h-2.5 w-2.5" /></span>}</span>
                                     </button>
                                   </td>
                                 );
@@ -821,12 +869,14 @@ export default function LogbookPage() {
                           <TableHead className="font-bold text-xs uppercase tracking-wider">Clock-in Time Dif</TableHead>
                           <SortableTableHead sortKey="clockOut" sortConfig={logsSortConfig} onSort={requestLogsSort} className="font-bold text-xs uppercase tracking-wider">Clock Out</SortableTableHead>
                           <TableHead className="font-bold text-xs uppercase tracking-wider">Clock-out Time Dif</TableHead>
+                          <TableHead className="font-bold text-xs uppercase tracking-wider">Gate Evidence</TableHead>
+                          <TableHead className="font-bold text-xs uppercase tracking-wider">Campus / Review</TableHead>
                         <TableHead className="font-bold text-xs uppercase tracking-wider">Note / Reason</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {safeSortedLogs.map((log) => {
-                          const start = expectedStart(log.date);
+                          const start = expectedStart(log.date, scheduleForDate(log.date));
                           const clockInDiff = formatTimeDifference(log.clockIn, start.hour, start.minute);
                           const clockOutDiff = getClockOutDifferenceLabel(log);
                           const weekend = isWeekend(log.date);
@@ -855,6 +905,23 @@ export default function LogbookPage() {
                                   </span>
                                 ) : null}
                               </TableCell>
+                              <TableCell className="text-xs">
+                                {log.firstGateEntryAt || log.lastGateExitAt ? (
+                                  <div className="space-y-1">
+                                    {log.firstGateEntryAt ? <div>Entry {formatTime(log.firstGateEntryAt)}</div> : null}
+                                    {log.lastGateExitAt ? <div>Exit {formatTime(log.lastGateExitAt)}</div> : null}
+                                    <Badge variant="outline">{log.source || "gate"}</Badge>
+                                  </div>
+                                ) : <span className="text-muted-foreground">-</span>}
+                              </TableCell>
+                              <TableCell className="text-xs">
+                                <div className="flex flex-col items-start gap-1">
+                                  {log.currentlyOnCampus !== null && log.currentlyOnCampus !== undefined ? <Badge variant={log.currentlyOnCampus ? "default" : "secondary"}>{log.currentlyOnCampus ? "On Campus" : "Off Campus"}</Badge> : null}
+                                  {log.missingClockOut ? <Badge variant="destructive">Missing Clock Out</Badge> : null}
+                                  {log.reasonRequired ? <Badge className="bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">Reason Required</Badge> : null}
+                                  {canViewAll && log.reasonRequired ? <Button size="sm" variant="outline" onClick={() => { setAdminReasonTarget(log); setAdminReason(""); }}>Capture Reason</Button> : null}
+                                </div>
+                              </TableCell>
                               <TableCell className="text-sm">{log.notes || <span className="text-muted-foreground text-xs">-</span>}</TableCell>
                             </TableRow>
                           );
@@ -868,6 +935,24 @@ export default function LogbookPage() {
           </TabsContent>
         )}
       </Tabs>
+
+      <Dialog open={Boolean(adminReasonTarget)} onOpenChange={(open) => { if (!open) { setAdminReasonTarget(null); setAdminReason(""); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Capture Attendance Reason</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="text-sm text-muted-foreground">
+              {adminReasonTarget?.reasonType === "early_clock_out" ? "Record the reason for this staff member's early final departure." : "Record the reason for this staff member's late arrival."}
+            </div>
+            <Textarea value={adminReason} onChange={(event) => setAdminReason(event.target.value)} placeholder="Mandatory reason" />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => { setAdminReasonTarget(null); setAdminReason(""); }}>Cancel</Button>
+              <Button disabled={adminReason.trim().length < 3 || adminReasonMutation.isPending} onClick={() => adminReasonMutation.mutate()}>Save Reason</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

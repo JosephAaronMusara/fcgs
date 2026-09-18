@@ -19,6 +19,7 @@ import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 import { useAuth } from "@/lib/auth";
 import type { Assessment, Subject, Class as ClassType, AssessmentType, Exam, Grade, AssessmentComment, School } from "@shared/schema";
+import { LanguageCheckButton } from "@/features/language-tools";
 import { filterItemsByStrictGradeProfileKey, getGradingProfilesForSchool, gradeProfileMatchesStrict, normalizeExamBoard, normalizeSchoolType, profileMatchesStreamName, subjectMatchesGradeProfile } from "@shared/academic-profiles";
 
 interface AssessmentPaper {
@@ -1684,6 +1685,9 @@ function CommentsDialog({
               className="flex-1"
               data-testid="input-comment-text"
             />
+            <LanguageCheckButton
+              fields={[{ id: "assessment-comment-new", label: "Assessment comment", text: commentText, onChange: setCommentText }]}
+            />
             <Button
               onClick={handleSubmit}
               disabled={createMutation.isPending}
@@ -1752,6 +1756,9 @@ function CommentsDialog({
             onChange={(e) => setEditText(e.target.value)}
             placeholder="Update comment text"
             data-testid="input-edit-comment"
+          />
+          <LanguageCheckButton
+            fields={[{ id: "assessment-comment-edit", label: "Assessment comment", text: editText, onChange: setEditText }]}
           />
           <DialogFooter>
             <Button variant="outline" onClick={() => { setEditingId(null); setEditText(""); }}>Cancel</Button>

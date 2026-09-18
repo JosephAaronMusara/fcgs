@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, type ReactNode, type CSSProperties } from 
 import QRCode from "qrcode";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { LanguageCheckButton } from "@/features/language-tools";
 import { Download, Send, ArrowRight, TrendingUp, TrendingDown, School, Loader2 } from "lucide-react";
 import type { Exam, Class, Subject } from "@shared/schema";
 
@@ -1231,8 +1232,20 @@ export function ReportCardSlip({
                     className="min-h-[56px] text-[10px] leading-snug resize-none bg-white"
                     data-testid={`textarea-class-teacher-comment-${student.id}`}
                   />
-                  <div className="text-[10px] text-gray-500 mt-1 text-right min-h-[14px]">
-                    {getSaveStateLabel(commentSaveStates?.class_teacher)}
+                  <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                    <LanguageCheckButton
+                      fields={[{
+                        id: `report-language-class-teacher-${student.id}`,
+                        label: "Class Teacher comment",
+                        text: displayedClassTeacherComment,
+                        onChange: (value) => onCommentChange?.(student.id, "class_teacher", value),
+                        student: { id: student.id, firstName: student.firstName, lastName: student.lastName, gender: student.gender },
+                      }]}
+                      size="sm"
+                    />
+                    <div className="text-[10px] text-gray-500 text-right min-h-[14px]">
+                      {getSaveStateLabel(commentSaveStates?.class_teacher)}
+                    </div>
                   </div>
                 </>
               ) : (
@@ -1253,8 +1266,20 @@ export function ReportCardSlip({
                     className="min-h-[56px] text-[10px] leading-snug resize-none bg-white"
                     data-testid={`textarea-principal-comment-${student.id}`}
                   />
-                  <div className="text-[10px] text-gray-500 mt-1 text-right min-h-[14px]">
-                    {getSaveStateLabel(commentSaveStates?.principal)}
+                  <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                    <LanguageCheckButton
+                      fields={[{
+                        id: `report-language-principal-${student.id}`,
+                        label: "Head/Principal comment",
+                        text: displayedPrincipalComment,
+                        onChange: (value) => onCommentChange?.(student.id, "principal", value),
+                        student: { id: student.id, firstName: student.firstName, lastName: student.lastName, gender: student.gender },
+                      }]}
+                      size="sm"
+                    />
+                    <div className="text-[10px] text-gray-500 text-right min-h-[14px]">
+                      {getSaveStateLabel(commentSaveStates?.principal)}
+                    </div>
                   </div>
                 </>
               ) : (

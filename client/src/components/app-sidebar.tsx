@@ -52,7 +52,6 @@ import {
   Bell,
   Package,
   ArrowRightLeft,
-  BriefcaseBusiness,
   CarFront,
   DoorOpen,
 } from "lucide-react";
@@ -92,15 +91,14 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Applications", url: "/applications", icon: FileText, requiredPermissions: ["applications.view"] },
       { title: "Internal Transfers", url: "/internal-transfers", icon: ArrowRightLeft, requiredPermissions: ["internal_transfers.view"] },
       { title: "Transport", url: "/transport", icon: Bus, requiredPermissions: ["transport.view"], featureKey: "enableTransport" },
-      { title: "Fleet Management", url: "/fleet-management", icon: CarFront, requiredPermissions: ["fleet.view"] },
-      { title: "Access Control", url: "/access-control", icon: DoorOpen, requiredPermissions: ["access_control.view"] },
+      { title: "Fleet Management", url: "/fleet-management", icon: CarFront, requiredPermissions: ["fleet.view"], featureKey: "enableFleetManagement" },
+      { title: "Access Control", url: "/access-control", icon: DoorOpen, requiredPermissions: ["access_control.view"], featureKey: "enableAccessControl" },
     ],
   },
   {
     label: "Human Resources",
     items: [
       { title: "School Staff", url: "/staff", icon: Users, requiredPermissions: ["staff.view"] },
-      { title: "Recruitment", url: "/recruitment", icon: BriefcaseBusiness, requiredPermissions: ["recruitment.view"] },
       { title: "Timetable", url: "/timetable", icon: Calendar, requiredPermissions: ["timetable.view"] },
       { title: "Staff Attendance", url: "/logbook", icon: Clock, requiredPermissions: ["staff_attendance.view_own", "staff_attendance.view_all", "staff_attendance.view_logs", "staff_attendance.view_overview", "staff_attendance.clock_in", "staff_attendance.clock_out", "logbook.view"], featureKey: "enableELogbook" },
     ],
@@ -110,7 +108,6 @@ const staffMenuGroups: MenuGroup[] = [
     items: [
       { title: "Kund-Ai", url: "/kundai", icon: Bot, requiredPermissions: ["kundai.view"], comingSoon: true },
       { title: "Library", url: "/library", icon: Library, requiredPermissions: ["library.view"], featureKey: "enableELibrary" },
-      { title: "Learning Materials", url: "/learning-materials", icon: BookMarked, requiredPermissions: ["learning_materials.view"], comingSoon: true  },
     ],
   },
   {
@@ -167,31 +164,19 @@ const studentMenuGroups: MenuGroup[] = [
     label: "Learning",
     items: [
       { title: "My Classes", url: "/my-classes", icon: School },
-      { title: "Timetable", url: "#", icon: Calendar },
-      { title: "Learning Materials", url: "#", icon: BookMarked, comingSoon: true },
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
-      { title: "AI Study Helper", url: "#", icon: Bot, comingSoon: true },
-    ],
-  },
-  {
-    label: "Assessments",
-    items: [
-      { title: "My Grades", url: "/my-grades", icon: FileText },
-      { title: "Assignments", url: "#", icon: ClipboardList, comingSoon: true },
-      { title: "Reports", url: "#", icon: BarChart3, comingSoon: true },
+      { title: "My Grades & Reports", url: "/my-grades", icon: BarChart3 },
     ],
   },
   {
     label: "Records",
     items: [
       { title: "My Attendance", url: "/my-attendance", icon: ClipboardCheck },
-      { title: "Discipline", url: "#", icon: Shield, comingSoon: true },
     ],
   },
   {
     label: "Finance",
     items: [
-      { title: "Fees & Payments", url: "#", icon: CreditCard, featureKey: "enableFinance", comingSoon: true },
+      { title: "Finance & Access", url: "/my-finance", icon: CreditCard, featureKey: "enableFinance" },
     ],
   },
   {
@@ -222,32 +207,18 @@ const parentMenuGroups: MenuGroup[] = [
       { title: "Profiles", url: "/children", icon: GraduationCap },
       { title: "Attendance", url: "/children-attendance", icon: ClipboardCheck },
       { title: "Results & Reports", url: "/children-reports", icon: BarChart3 },
-      { title: "Discipline", url: "#", icon: Shield, comingSoon: true },
-      { title: "Timetable", url: "#", icon: Calendar },
-      { title: "Homework", url: "#", icon: ClipboardList, comingSoon: true },
     ],
   },
   {
     label: "Communication",
     items: [
       { title: "Newsletters", url: "/my-newsletters", icon: Megaphone },
-      { title: "Notices", url: "#", icon: Bell, comingSoon: true },
-      { title: "Events / Calendar", url: "#", icon: Calendar, comingSoon: true },
     ],
   },
   {
     label: "Finance",
     items: [
       { title: "Fees & Payments", url: "/fees", icon: CreditCard, featureKey: "enableFinance" },
-      { title: "Arrears", url: "#", icon: Banknote, featureKey: "enableFinance", comingSoon: true },
-      { title: "Statements & Invoices", url: "#", icon: Receipt, featureKey: "enableFinance", comingSoon: true },
-    ],
-  },
-  {
-    label: "Learning Support",
-    items: [
-      { title: "Library", url: "/library", icon: Library, featureKey: "enableELibrary", badge: "In Production" },
-      { title: "AI Assistant", url: "#", icon: Bot, comingSoon: true },
     ],
   },
   {
@@ -255,7 +226,6 @@ const parentMenuGroups: MenuGroup[] = [
     items: [
       { title: "My Profile", url: "/my-profile", icon: User },
       { title: "Notifications", url: "/my-notifications", icon: Bell },
-      { title: "Settings", url: "#", icon: Settings, comingSoon: true },
     ],
   },
 ];
@@ -398,7 +368,9 @@ export function AppSidebar() {
           type="button"
           className="mb-3 flex w-full items-center gap-3 rounded-md p-1 text-left transition-colors hover:bg-sidebar-accent"
           onClick={() => {
-            const target = selfStaffProfile?.id ? `/staff?staffId=${selfStaffProfile.id}&edit=1` : "/staff";
+            const target = user?.role === "student" || user?.role === "parent"
+              ? "/my-profile"
+              : selfStaffProfile?.id ? `/staff?staffId=${selfStaffProfile.id}&edit=1` : "/staff";
             setLocation(target);
             if (isMobile) setOpenMobile(false);
           }}

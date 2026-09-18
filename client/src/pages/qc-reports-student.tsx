@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation, useParams, useSearch } from "wouter";
-import { queryClient, apiRequest } from "@/lib/queryClient";
+import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { LanguageCheckButton } from "@/features/language-tools";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Chart as ChartJS,
@@ -10,17 +11,18 @@ import {
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   Title,
   Tooltip,
   Legend,
 } from "chart.js";
-import { Line } from "react-chartjs-2";
+import { Bar } from "react-chartjs-2";
 import {
   ArrowLeft, Save, CheckCircle2, Clock, Loader2, Download,
   CalendarDays, BookOpen, TrendingUp, MessageSquare, Smile, Meh, Frown, FileText, Info
 } from "lucide-react";
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend);
 
 interface MonthCalendar {
   key: string;
@@ -61,6 +63,11 @@ interface PerfSeriesRow {
   fortnight: number;
 }
 
+interface AssessmentPerformanceSeries {
+  assessmentTypes: Array<{ key: string; label: string }>;
+  rows: Array<{ subject: string; subjectId: number; values: Record<string, number | null> }>;
+}
+
 interface QcReportData {
   id?: number;
   qcStatus: string;
@@ -73,7 +80,7 @@ interface QcReportData {
 }
 
 interface StudentReportData {
-  student: { id: number; firstName: string; lastName: string; admissionNo: string | null; photo: string | null };
+  student: { id: number; firstName: string; lastName: string; admissionNo: string | null; photo: string | null; gender?: string | null };
   className: string;
   classId: number;
   term: number;
@@ -85,6 +92,7 @@ interface StudentReportData {
   writtenWork: WrittenWorkRow[];
   performance: PerformanceRow[];
   perfSeries: PerfSeriesRow[];
+  assessmentPerformanceSeries?: AssessmentPerformanceSeries;
   qcReport: QcReportData | null;
 }
 
@@ -180,6 +188,61 @@ export default function QCReportsStudentPage() {
   const term = searchParams.get("term") || "";
   const year = searchParams.get("year") || "";
   const { toast } = useToast();
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+
+  const handleDownloadPdf = useCallback(async () => {
+    if (!studentId || !classId || !term || !year || isDownloadingPdf) return;
+
+    // Open the tab synchronously so browsers do not treat the eventual PDF
+    // navigation as an unsolicited popup after the authenticated fetch awaits.
+    const previewWindow = window.open("about:blank", "_blank");
+    setIsDownloadingPdf(true);
+
+    try {
+      const pdfUrl = `/api/qc-reports/pdf/${studentId}?classId=${encodeURIComponent(classId)}&term=${encodeURIComponent(term)}&year=${encodeURIComponent(year)}`;
+      const response = await schoolFetch(pdfUrl);
+
+      if (!response.ok) {
+        let message = `Failed to generate QC report (${response.status})`;
+        try {
+          const payload = await response.json();
+          if (payload?.message) message = payload.message;
+        } catch {
+          // Keep the status-based message when the error is not JSON.
+        }
+        throw new Error(message);
+      }
+
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.toLowerCase().includes("application/pdf")) {
+        throw new Error("The QC report endpoint did not return a PDF.");
+      }
+
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
+      if (previewWindow && !previewWindow.closed) {
+        previewWindow.location.replace(blobUrl);
+      } else {
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.click();
+      }
+
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    } catch (error: any) {
+      if (previewWindow && !previewWindow.closed) previewWindow.close();
+      toast({
+        title: "Unable to open QC report",
+        description: error?.message || "Failed to generate the QC report PDF.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  }, [studentId, classId, term, year, isDownloadingPdf, toast]);
 
   const [attendanceComment, setAttendanceComment] = useState("");
   const [behaviourComment, setBehaviourComment] = useState("");
@@ -192,6 +255,12 @@ export default function QCReportsStudentPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reportIdRef = useRef<number | null>(null);
+  const initializedContextRef = useRef("");
+  const draftRef = useRef({
+    attendanceComment: "", behaviourComment: "", behaviourRating: "", studyHabitsComment: "",
+    subjectComments: {} as Record<string, string>, notes: "", qcStatus: "not_started",
+  });
 
   const queryUrl = `/api/qc-reports/student/${studentId}?classId=${classId}&term=${term}&year=${year}`;
 
@@ -200,49 +269,63 @@ export default function QCReportsStudentPage() {
   });
 
   useEffect(() => {
-    if (data?.qcReport) {
-      setAttendanceComment(data.qcReport.attendanceComment || "");
-      setBehaviourComment(data.qcReport.behaviourComment || "");
-      setBehaviourRating(data.qcReport.behaviourRating || "");
-      setStudyHabitsComment(data.qcReport.studyHabitsComment || "");
-      setSubjectComments(data.qcReport.subjectComments || {});
-      setNotes(data.qcReport.notes || "");
-      setQcStatus(data.qcReport.qcStatus || "not_started");
-      setReportId(data.qcReport.id || null);
-    }
-  }, [data]);
+    if (!data) return;
+    const contextKey = `${studentId}:${classId}:${term}:${year}`;
+    if (initializedContextRef.current === contextKey) return;
+    initializedContextRef.current = contextKey;
+    const next = {
+      attendanceComment: data.qcReport?.attendanceComment || "",
+      behaviourComment: data.qcReport?.behaviourComment || "",
+      behaviourRating: data.qcReport?.behaviourRating || "",
+      studyHabitsComment: data.qcReport?.studyHabitsComment || "",
+      subjectComments: data.qcReport?.subjectComments || {},
+      notes: data.qcReport?.notes || "",
+      qcStatus: data.qcReport?.qcStatus || "not_started",
+    };
+    draftRef.current = next;
+    setAttendanceComment(next.attendanceComment);
+    setBehaviourComment(next.behaviourComment);
+    setBehaviourRating(next.behaviourRating);
+    setStudyHabitsComment(next.studyHabitsComment);
+    setSubjectComments(next.subjectComments);
+    setNotes(next.notes);
+    setQcStatus(next.qcStatus);
+    const nextReportId = data.qcReport?.id || null;
+    reportIdRef.current = nextReportId;
+    setReportId(nextReportId);
+  }, [data, studentId, classId, term, year]);
+
+  useEffect(() => { reportIdRef.current = reportId; }, [reportId]);
 
   const doAutosave = useCallback(async () => {
     if (!data) return;
+    const draft = draftRef.current;
     try {
       setIsSaving(true);
       const payload = {
-        attendanceComment,
-        behaviourComment,
-        behaviourRating: behaviourRating || null,
-        studyHabitsComment,
-        subjectComments,
-        notes,
-        qcStatus: qcStatus || "in_progress",
+        attendanceComment: draft.attendanceComment,
+        behaviourComment: draft.behaviourComment,
+        behaviourRating: draft.behaviourRating || null,
+        studyHabitsComment: draft.studyHabitsComment,
+        subjectComments: draft.subjectComments,
+        notes: draft.notes,
+        qcStatus: draft.qcStatus || "in_progress",
       };
-      if (reportId) {
-        await apiRequest("PATCH", `/api/qc-reports/autosave/${reportId}`, payload);
+      if (reportIdRef.current) {
+        await apiRequest("PATCH", `/api/qc-reports/autosave/${reportIdRef.current}`, payload);
       } else {
         const res = await apiRequest("POST", "/api/qc-reports/save", {
-          ...payload,
-          studentId: parseInt(studentId),
-          classId: parseInt(classId),
-          termNumber: parseInt(term),
-          year,
+          ...payload, studentId: parseInt(studentId), classId: parseInt(classId), termNumber: parseInt(term), year,
         });
         const result = await res.json();
+        reportIdRef.current = result.id;
         setReportId(result.id);
       }
       setLastSaved(new Date());
-    } catch { /* silent */ } finally {
+    } catch { /* autosave must never interrupt typing */ } finally {
       setIsSaving(false);
     }
-  }, [reportId, studentId, classId, term, year, attendanceComment, behaviourComment, behaviourRating, studyHabitsComment, subjectComments, notes, qcStatus, data]);
+  }, [data, studentId, classId, term, year]);
 
   const scheduleAutosave = useCallback(() => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
@@ -277,7 +360,11 @@ export default function QCReportsStudentPage() {
       return res.json();
     },
     onSuccess: (result: any) => {
-      setReportId(result.id);
+      const savedId = result?.id ?? result?.report?.id ?? reportIdRef.current;
+      if (savedId) {
+        reportIdRef.current = Number(savedId);
+        setReportId(Number(savedId));
+      }
       setLastSaved(new Date());
       toast({ title: "Report saved", description: "QC report has been saved successfully." });
       queryClient.invalidateQueries({ queryKey: ["/api/qc-reports"] });
@@ -287,27 +374,42 @@ export default function QCReportsStudentPage() {
     },
   });
 
-  const handleField = useCallback((setter: (v: string) => void, value: string) => {
+  const handleField = useCallback((field: "attendanceComment" | "behaviourComment" | "behaviourRating" | "studyHabitsComment" | "notes" | "qcStatus", setter: (v: string) => void, value: string) => {
+    draftRef.current = { ...draftRef.current, [field]: value };
     setter(value);
     scheduleAutosave();
   }, [scheduleAutosave]);
 
   const handleSubjectComment = useCallback((subjectId: string, value: string) => {
-    setSubjectComments(prev => ({ ...prev, [subjectId]: value }));
+    const next = { ...draftRef.current.subjectComments, [subjectId]: value };
+    draftRef.current = { ...draftRef.current, subjectComments: next };
+    setSubjectComments(next);
     scheduleAutosave();
   }, [scheduleAutosave]);
 
   const chartData = useMemo(() => {
+    const series = data?.assessmentPerformanceSeries;
+    if (series?.rows?.length && series.assessmentTypes?.length) {
+      const palette = ["#1b2a5c", "#c62828", "#b7791f", "#2f855a", "#6b46c1", "#0f766e"];
+      return {
+        labels: series.rows.map((row) => row.subject),
+        datasets: series.assessmentTypes.map((type, index) => ({
+          label: type.label,
+          data: series.rows.map((row) => row.values[type.key] ?? null),
+          backgroundColor: palette[index % palette.length],
+        })),
+      };
+    }
     if (!data?.perfSeries?.length) return null;
     return {
       labels: data.perfSeries.map(r => r.subject),
       datasets: [
-        { label: "Tests", data: data.perfSeries.map(r => r.tests), borderColor: "#0b4dff", tension: 0.35, pointRadius: 3 },
-        { label: "Exercise", data: data.perfSeries.map(r => r.exercises), borderColor: "#16a34a", tension: 0.35, pointRadius: 3 },
-        { label: "Fortnights", data: data.perfSeries.map(r => r.fortnight), borderColor: "#fbbf24", tension: 0.35, pointRadius: 3 },
+        { label: "Tests", data: data.perfSeries.map(r => r.tests), backgroundColor: "#1b2a5c" },
+        { label: "Exercises", data: data.perfSeries.map(r => r.exercises), backgroundColor: "#2f855a" },
+        { label: "Fortnight", data: data.perfSeries.map(r => r.fortnight), backgroundColor: "#b7791f" },
       ],
     };
-  }, [data?.perfSeries]);
+  }, [data?.assessmentPerformanceSeries, data?.perfSeries]);
 
   const chartOptions = useMemo(() => ({
     responsive: true,
@@ -317,7 +419,7 @@ export default function QCReportsStudentPage() {
       y: { beginAtZero: true, max: 100, title: { display: true, text: "Marks (%)", font: { size: 10 } } },
     },
     plugins: {
-      legend: { display: false },
+      legend: { display: true, labels: { boxWidth: 10, font: { size: 10 } } },
     },
   }), []);
 
@@ -378,13 +480,12 @@ export default function QCReportsStudentPage() {
             )}
             <button
               className="qc-btn qc-btn-dl"
-              onClick={() => {
-                const pdfUrl = `/api/qc-reports/pdf/${studentId}?classId=${classId}&term=${term}&year=${year}`;
-                window.open(pdfUrl, "_blank");
-              }}
+              onClick={handleDownloadPdf}
+              disabled={isDownloadingPdf}
               data-testid="button-download-pdf"
             >
-              <Download className="h-3 w-3" /> Download PDF
+              {isDownloadingPdf ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+              {isDownloadingPdf ? " Opening PDF..." : " Download PDF"}
             </button>
             <button
               className="qc-btn"
@@ -473,11 +574,12 @@ export default function QCReportsStudentPage() {
                 <textarea
                   className="qc-perf-input"
                   value={attendanceComment}
-                  onChange={e => handleField(setAttendanceComment, e.target.value)}
+                  onChange={e => handleField("attendanceComment", setAttendanceComment, e.target.value)}
                   placeholder="Type attendance comment..."
                   data-testid="input-attendance-comment"
                   style={{ minHeight: "90px", resize: "vertical" }}
                 />
+                <div className="mt-2"><LanguageCheckButton fields={[{ id: "qc-language-attendance", label: "Attendance comment", text: attendanceComment, onChange: (value) => handleField("attendanceComment", setAttendanceComment, value), student: { id: data.student.id, firstName: data.student.firstName, lastName: data.student.lastName, gender: data.student.gender } }]} /></div>
               </div>
 
               <div>
@@ -486,11 +588,12 @@ export default function QCReportsStudentPage() {
                   <textarea
                     className="qc-perf-input"
                     value={behaviourComment}
-                    onChange={e => handleField(setBehaviourComment, e.target.value)}
+                    onChange={e => handleField("behaviourComment", setBehaviourComment, e.target.value)}
                     placeholder="Type behaviour comment..."
                     data-testid="input-behaviour-comment"
                     style={{ minHeight: "90px", resize: "vertical" }}
                   />
+                  <div className="mt-2"><LanguageCheckButton fields={[{ id: "qc-language-behaviour", label: "Behaviour comment", text: behaviourComment, onChange: (value) => handleField("behaviourComment", setBehaviourComment, value), student: { id: data.student.id, firstName: data.student.firstName, lastName: data.student.lastName, gender: data.student.gender } }]} /></div>
                 </div>
 
                 <div className="qc-field" style={{ marginTop: "8px" }}>
@@ -501,7 +604,7 @@ export default function QCReportsStudentPage() {
                         key={key}
                         type="button"
                         className={`qc-beh-pill ${behaviourRating === key ? "qc-beh-pill-active" : ""}`}
-                        onClick={() => handleField(setBehaviourRating, key)}
+                        onClick={() => handleField("behaviourRating", setBehaviourRating, key)}
                         data-testid={`button-rating-${key}`}
                       >
                         <Icon className={`h-5 w-5 qc-beh-icon ${colorClass}`} />
@@ -553,22 +656,11 @@ export default function QCReportsStudentPage() {
 
               <div>
                 <div className="qc-ww-chart-title">Subject Performance</div>
-                <div className="qc-ww-chart-legend">
-                  <span className="qc-ww-legend-pill">
-                    <span className="qc-ww-legend-box" style={{ background: "#0b4dff" }} /> Tests
-                  </span>
-                  <span className="qc-ww-legend-pill">
-                    <span className="qc-ww-legend-box" style={{ background: "#16a34a" }} /> Exercise
-                  </span>
-                  <span className="qc-ww-legend-pill">
-                    <span className="qc-ww-legend-box" style={{ background: "#fbbf24" }} /> Fortnights
-                  </span>
-                </div>
                 <div className="qc-ww-chart-wrap">
                   <div className="qc-ww-y-label">Marks(%)</div>
                   {chartData ? (
                     <div style={{ height: "230px" }}>
-                      <Line data={chartData} options={chartOptions as any} />
+                      <Bar data={chartData} options={chartOptions as any} />
                     </div>
                   ) : (
                     <div style={{ height: "230px", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--qc-muted)", fontSize: "12px" }}>
@@ -609,14 +701,16 @@ export default function QCReportsStudentPage() {
                         </td>
                         <td style={{ fontWeight: 700 }}>{row.grade || "-"}</td>
                         <td>
-                          <input
-                            className="qc-perf-input"
-                            type="text"
+                          <textarea
+                            className="qc-perf-input qc-subject-comment-input"
+                            rows={3}
                             value={subjectComments[String(row.subjectId)] ?? row.comment ?? ""}
                             onChange={e => handleSubjectComment(String(row.subjectId), e.target.value)}
                             placeholder="Type comment for this subject..."
                             data-testid={`input-subject-comment-${row.subjectId}`}
+                            style={{ minHeight: "72px", resize: "vertical", whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}
                           />
+                          <div className="mt-2"><LanguageCheckButton fields={[{ id: `qc-language-subject-${row.subjectId}`, label: `${row.subject} comment`, text: subjectComments[String(row.subjectId)] ?? row.comment ?? "", onChange: (value) => handleSubjectComment(String(row.subjectId), value), student: { id: data.student.id, firstName: data.student.firstName, lastName: data.student.lastName, gender: data.student.gender } }]} /></div>
                         </td>
                       </tr>
                     );
@@ -632,7 +726,7 @@ export default function QCReportsStudentPage() {
                   <label>QC Status</label>
                   <select
                     value={qcStatus}
-                    onChange={e => { setQcStatus(e.target.value); scheduleAutosave(); }}
+                    onChange={e => handleField("qcStatus", setQcStatus, e.target.value)}
                     data-testid="select-qc-status"
                   >
                     <option value="not_started">Not started</option>
@@ -644,11 +738,12 @@ export default function QCReportsStudentPage() {
                   <label>Study Habits</label>
                   <textarea
                     value={studyHabitsComment}
-                    onChange={e => handleField(setStudyHabitsComment, e.target.value)}
+                    onChange={e => handleField("studyHabitsComment", setStudyHabitsComment, e.target.value)}
                     placeholder="Comment on study habits..."
                     data-testid="input-study-habits"
                     style={{ minHeight: "60px" }}
                   />
+                  <div className="mt-2"><LanguageCheckButton fields={[{ id: "qc-language-study-habits", label: "Study habits", text: studyHabitsComment, onChange: (value) => handleField("studyHabitsComment", setStudyHabitsComment, value), student: { id: data.student.id, firstName: data.student.firstName, lastName: data.student.lastName, gender: data.student.gender } }]} /></div>
                 </div>
               </div>
 
@@ -663,13 +758,12 @@ export default function QCReportsStudentPage() {
                 </button>
                 <button
                   className="qc-btn qc-btn-dl"
-                  onClick={() => {
-                    const pdfUrl = `/api/qc-reports/pdf/${studentId}?classId=${classId}&term=${term}&year=${year}`;
-                    window.open(pdfUrl, "_blank");
-                  }}
+                  onClick={handleDownloadPdf}
+                  disabled={isDownloadingPdf}
                   data-testid="button-download-pdf-bottom"
                 >
-                  <Download className="h-3 w-3" /> Download PDF
+                  {isDownloadingPdf ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                  {isDownloadingPdf ? " Opening PDF..." : " Download PDF"}
                 </button>
               </div>
             </div>

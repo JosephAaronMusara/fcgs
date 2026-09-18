@@ -126,6 +126,8 @@ export const schools = pgTable("schools", {
   enableELibrary: boolean("enable_e_library").default(true),
   enableELogbook: boolean("enable_e_logbook").default(true),
   enableTransport: boolean("enable_transport").default(false),
+  enableFleetManagement: boolean("enable_fleet_management").default(false),
+  enableAccessControl: boolean("enable_access_control").default(false),
   enableESchemes: boolean("enable_e_schemes").default(true),
   currentAcademicYear: text("current_academic_year"),
   currentTerm: text("current_term").default("term1"),
@@ -310,6 +312,9 @@ export const students = pgTable("students", {
   feesMaxBalance: decimal("fees_max_balance", { precision: 10, scale: 2 }).default("0"),
   feesCustomerId: text("fees_customer_id"),
   feesStatus: text("fees_status").default("n/a"),
+  feesSource: text("fees_source").default("student_payments_csv"),
+  feesSnapshotAt: timestamp("fees_snapshot_at"),
+  feesImportBatchId: integer("fees_import_batch_id"),
   archivedAt: timestamp("archived_at"),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => ({
@@ -395,6 +400,20 @@ export const internalTransfers = pgTable("internal_transfers", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const studentEnrollmentEvents = pgTable("student_enrollment_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id),
+  eventType: text("event_type").notNull(),
+  effectiveDate: date("effective_date").notNull(),
+  reason: text("reason"),
+  notes: text("notes"),
+  previousStatus: text("previous_status"),
+  newStatus: text("new_status"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // The first three values are dormant legacy labels retained because historical
 // rows still use them. Active grading logic is restricted to the exact profile
 // keys by the grading integrity constraints and shared/academic-profiles.ts.
@@ -475,8 +494,39 @@ export const attendanceRecords = pgTable("attendance_records", {
   notifiedStatus: text("notified_status"),
   notifiedReason: text("notified_reason"),
   markedBy: integer("marked_by").references(() => staff.id),
+  source: text("source").notNull().default("teacher"),
+  gateEvidenceLocked: boolean("gate_evidence_locked").notNull().default(false),
+  firstGateArrivalAt: timestamp("first_gate_arrival_at"),
+  admittedAt: timestamp("admitted_at"),
+  lastGateExitAt: timestamp("last_gate_exit_at"),
+  gateId: integer("gate_id"),
+  gateDeviceId: integer("gate_device_id"),
+  gateCorrectionReason: text("gate_correction_reason"),
+  gateCorrectedByUserId: integer("gate_corrected_by_user_id").references(() => users.id),
+  gateCorrectedAt: timestamp("gate_corrected_at"),
+  reconciliationAt: timestamp("reconciliation_at"),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  studentClassDateUniqueIdx: uniqueIndex("attendance_student_class_date_uidx").on(table.studentId, table.classId, table.date),
+  studentDateIdx: index("attendance_student_date_idx").on(table.studentId, table.date),
+}));
+
+export const attendanceGateEvidenceCorrections = pgTable("attendance_gate_evidence_corrections", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  attendanceRecordId: integer("attendance_record_id").references(() => attendanceRecords.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  previousStatus: text("previous_status").notNull(),
+  newStatus: text("new_status").notNull(),
+  previousReason: text("previous_reason"),
+  correctionReason: text("correction_reason").notNull(),
+  previousSource: text("previous_source"),
+  correctedByUserId: integer("corrected_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  attendanceIdx: index("attendance_gate_corrections_attendance_idx").on(table.attendanceRecordId, table.createdAt),
+  studentIdx: index("attendance_gate_corrections_student_idx").on(table.studentId, table.createdAt),
+}));
 
 export const disciplineRecords = pgTable("discipline_records", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -644,6 +694,7 @@ export const transportVehicles = pgTable("transport_vehicles", {
   ownershipType: text("ownership_type").notNull().default("school"),
   ownerId: integer("owner_id").references(() => transportOwners.id),
   driverId: integer("driver_id").references(() => transportDrivers.id),
+  currentOperatingDriverId: integer("current_operating_driver_id").references(() => transportDrivers.id),
   registrationExpiry: date("registration_expiry"),
   insuranceExpiry: date("insurance_expiry"),
   fitnessExpiry: date("fitness_expiry"),
@@ -685,6 +736,18 @@ export const transportOwnerSchools = pgTable("transport_owner_schools", {
   associatedByUserId: integer("associated_by_user_id").references(() => users.id),
 }, (table) => ({ ownerSchoolUnique: uniqueIndex("transport_owner_schools_owner_school_uidx").on(table.ownerId, table.schoolId) }));
 
+export const transportOrganizationSettings = pgTable("transport_organization_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  minimumArrearsSuspensionBalance: decimal("minimum_arrears_suspension_balance", { precision: 12, scale: 2 }).notNull().default("1"),
+  suspendedSeatPolicy: text("suspended_seat_policy").notNull().default("release_after_days"),
+  suspendedSeatReleaseDays: integer("suspended_seat_release_days").notNull().default(14),
+  automaticArrearsReinstatement: boolean("automatic_arrears_reinstatement").notNull().default(true),
+  arrearsWarningEnabled: boolean("arrears_warning_enabled").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({ organizationUnique: uniqueIndex("transport_organization_settings_organization_uidx").on(table.organizationId) }));
+
 export const transportSettings = pgTable("transport_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
@@ -697,11 +760,6 @@ export const transportSettings = pgTable("transport_settings", {
   refundNoCreditRemainingDays: integer("refund_no_credit_remaining_days").notNull().default(5),
   pendingSeatReservationEnabled: boolean("pending_seat_reservation_enabled").notNull().default(true),
   pendingSeatReservationDays: integer("pending_seat_reservation_days").notNull().default(7),
-  overdueWarningDays: integer("overdue_warning_days").notNull().default(7),
-  suspensionEligibilityDays: integer("suspension_eligibility_days").notNull().default(30),
-  suspensionNoticeDays: integer("suspension_notice_days").notNull().default(3),
-  minimumSuspensionBalance: decimal("minimum_suspension_balance", { precision: 12, scale: 2 }).notNull().default("0"),
-  paymentPlanMissedInstalmentsToDefault: integer("payment_plan_missed_instalments_to_default").notNull().default(1),
   receiptPrefix: text("receipt_prefix").notNull().default("TR"),
   receiptSequenceLength: integer("receipt_sequence_length").notNull().default(6),
   receiptResetYearly: boolean("receipt_reset_yearly").notNull().default(true),
@@ -812,6 +870,8 @@ export const transportAssignments = pgTable("transport_assignments", {
   startDate: date("start_date").notNull(),
   endDate: date("end_date"),
   seatReservedUntil: date("seat_reserved_until"),
+  suspensionReason: text("suspension_reason"),
+  seatReleasedAt: timestamp("seat_released_at"),
   isActive: boolean("is_active").notNull().default(true),
   notes: text("notes"),
   createdByUserId: integer("created_by_user_id").references(() => users.id),
@@ -843,7 +903,7 @@ export const transportAssignmentEvents = pgTable("transport_assignment_events", 
   previousValues: jsonb("previous_values"),
   newValues: jsonb("new_values"),
   reason: text("reason").notNull(),
-  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -971,36 +1031,6 @@ export const transportReceiptEvents = pgTable("transport_receipt_events", {
   reason: text("reason"),
   metadata: jsonb("metadata"),
   createdByUserId: integer("created_by_user_id").references(() => users.id),
-  createdAt: timestamp("created_at").defaultNow(),
-});
-
-export const transportPaymentPlans = pgTable("transport_payment_plans", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  schoolId: integer("school_id").references(() => schools.id).notNull(),
-  studentId: integer("student_id").references(() => students.id).notNull(),
-  assignmentId: integer("assignment_id").references(() => transportAssignments.id).notNull(),
-  planNumber: text("plan_number").notNull().unique(),
-  coveredAmount: decimal("covered_amount", { precision: 12, scale: 2 }).notNull(),
-  instalmentAmount: decimal("instalment_amount", { precision: 12, scale: 2 }).notNull(),
-  frequency: text("frequency").notNull(),
-  startDate: date("start_date").notNull(),
-  finalDueDate: date("final_due_date"),
-  graceDays: integer("grace_days").notNull().default(0),
-  status: text("status").notNull().default("active"),
-  payerAcknowledgement: text("payer_acknowledgement"),
-  notes: text("notes"),
-  approvedByUserId: integer("approved_by_user_id").references(() => users.id).notNull(),
-  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
-});
-
-export const transportPaymentPlanInstalments = pgTable("transport_payment_plan_instalments", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  planId: integer("plan_id").references(() => transportPaymentPlans.id).notNull(),
-  dueDate: date("due_date").notNull(),
-  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
-  paidAmount: decimal("paid_amount", { precision: 12, scale: 2 }).notNull().default("0"),
-  status: text("status").notNull().default("due"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -1524,6 +1554,47 @@ export const transportVehicleDriverHistory = pgTable("transport_vehicle_driver_h
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const transportVehicleAlternativeDrivers = pgTable("transport_vehicle_alternative_drivers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  driverId: integer("driver_id").references(() => transportDrivers.id).notNull(),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  reason: text("reason"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({ activeAlternativeUnique: uniqueIndex("transport_vehicle_alternative_active_uidx").on(table.vehicleId, table.driverId).where(sql`${table.effectiveTo} IS NULL`) }));
+
+export const transportVehicleOperatingDriverHistory = pgTable("transport_vehicle_operating_driver_history", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  vehicleId: integer("vehicle_id").references(() => transportVehicles.id).notNull(),
+  driverId: integer("driver_id").references(() => transportDrivers.id).notNull(),
+  operatingMode: text("operating_mode").notNull().default("primary"),
+  effectiveFrom: timestamp("effective_from").notNull().defaultNow(),
+  effectiveTo: timestamp("effective_to"),
+  expectedReturnAt: timestamp("expected_return_at"),
+  reason: text("reason"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const transportVehicleReplacements = pgTable("transport_vehicle_replacements", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  originalVehicleId: integer("original_vehicle_id").references(() => transportVehicles.id).notNull(),
+  replacementVehicleId: integer("replacement_vehicle_id").references(() => transportVehicles.id).notNull(),
+  replacementType: text("replacement_type").notNull().default("permanent"),
+  effectiveFrom: timestamp("effective_from").notNull().defaultNow(),
+  effectiveTo: timestamp("effective_to"),
+  expectedReturnAt: timestamp("expected_return_at"),
+  reason: text("reason").notNull(),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const transportAuditEvents = pgTable("transport_audit_events", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
@@ -1708,11 +1779,16 @@ export const staffAttendanceLogs = pgTable("staff_attendance_logs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
   staffId: integer("staff_id").references(() => staff.id).notNull(),
-  userId: integer("user_id").references(() => users.id).notNull(),
+  userId: integer("user_id").references(() => users.id),
   date: date("date").notNull(),
   clockIn: timestamp("clock_in"),
   clockOut: timestamp("clock_out"),
   status: text("status").notNull().default("on_time"),
+  source: text("source").notNull().default("manual"),
+  firstGateEntryAt: timestamp("first_gate_entry_at"),
+  lastGateExitAt: timestamp("last_gate_exit_at"),
+  currentlyOnCampus: boolean("currently_on_campus"),
+  missingClockOut: boolean("missing_clock_out").notNull().default(false),
   autoClockedOut: boolean("auto_clocked_out").default(false),
   reasonRequired: boolean("reason_required").default(false),
   reasonType: text("reason_type"),
@@ -1728,7 +1804,10 @@ export const staffAttendanceLogs = pgTable("staff_attendance_logs", {
   clockOutLongitude: text("clock_out_longitude"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  schoolStaffDateUniqueIdx: uniqueIndex("staff_attendance_school_staff_date_uidx").on(table.schoolId, table.staffId, table.date),
+  schoolDateIdx: index("staff_attendance_school_date_idx").on(table.schoolId, table.date),
+}));
 
 export const posItems = pgTable("pos_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -1854,6 +1933,23 @@ export const studentApplications = pgTable("student_applications", {
 });
 
 // Staff recruitment is intentionally separate from student admissions.
+export const languageToolSettings = pgTable("language_tool_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  primaryProvider: text("primary_provider"),
+  fallbackProvider: text("fallback_provider").default("harper"),
+  mode: text("mode").notNull().default("balanced"),
+  dialect: text("dialect").notNull().default("en-GB"),
+  studentNamePersonalization: boolean("student_name_personalization").notNull().default(true),
+  genderPronounCheck: boolean("gender_pronoun_check").notNull().default(true),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationUnique: uniqueIndex("language_tool_settings_org_uidx").on(table.organizationId),
+}));
+
 export const recruitmentSettings = pgTable("recruitment_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   organizationId: integer("organization_id").references(() => organizations.id).notNull(),
@@ -1868,9 +1964,45 @@ export const recruitmentSettings = pgTable("recruitment_settings", {
   highSchoolMinimumALevelPoints: integer("high_school_minimum_a_level_points").notNull().default(13),
   highSchoolTeachingQualifiedMinimumALevelPoints: integer("high_school_teaching_qualified_minimum_a_level_points").notNull().default(10),
   highSchoolTeachingQualificationExceptionEnabled: boolean("high_school_teaching_qualification_exception_enabled").notNull().default(true),
+  primaryTeachingQualificationRequired: boolean("primary_teaching_qualification_required").notNull().default(true),
+  primaryMaximumOLevelSittings: integer("primary_maximum_o_level_sittings").notNull().default(2),
+  primaryMinimumOLevelSubjects: integer("primary_minimum_o_level_subjects").notNull().default(5),
+  primaryMinimumOLevelGrade: text("primary_minimum_o_level_grade").notNull().default("C"),
+  primaryMandatoryOLevelSubjects: jsonb("primary_mandatory_o_level_subjects").notNull().default(sql`'["Mathematics","Science","English"]'::jsonb`),
+  primaryMandatoryOLevelGrade: text("primary_mandatory_o_level_grade").notNull().default("C"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({ organizationUnique: uniqueIndex("recruitment_settings_org_uidx").on(table.organizationId) }));
+
+export const recruitmentDepartments = pgTable("recruitment_departments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  name: text("name").notNull(),
+  applicationCategory: text("application_category").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  displayOrder: integer("display_order").notNull().default(100),
+  responsibleUserId: integer("responsible_user_id").references(() => users.id),
+  applicantContactPhone: text("applicant_contact_phone"),
+  applicantContactEmail: text("applicant_contact_email"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationNameUnique: uniqueIndex("recruitment_departments_org_name_uidx").on(table.organizationId, table.name),
+  organizationOrderIdx: index("recruitment_departments_org_order_idx").on(table.organizationId, table.displayOrder),
+}));
+
+export const recruitmentExaminationBoards = pgTable("recruitment_examination_boards", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  name: text("name").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  displayOrder: integer("display_order").notNull().default(100),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationNameUnique: uniqueIndex("recruitment_examination_boards_org_name_uidx").on(table.organizationId, table.name),
+  organizationOrderIdx: index("recruitment_examination_boards_org_order_idx").on(table.organizationId, table.displayOrder),
+}));
 
 export const recruitmentVacancies = pgTable("recruitment_vacancies", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -1879,6 +2011,11 @@ export const recruitmentVacancies = pgTable("recruitment_vacancies", {
   code: text("code").notNull(),
   title: text("title").notNull(),
   employmentCategory: text("employment_category").notNull(),
+  department: text("department"),
+  examinationBoard: text("examination_board"),
+  subjects: jsonb("subjects").notNull().default(sql`'[]'::jsonb`),
+  minimumYearsExperience: decimal("minimum_years_experience", { precision: 6, scale: 2 }),
+  teachingQualificationRequired: boolean("teaching_qualification_required").notNull().default(false),
   description: text("description").notNull(),
   locationText: text("location_text"),
   positionsAvailable: integer("positions_available").notNull().default(1),
@@ -1944,6 +2081,11 @@ export const recruitmentApplications = pgTable("recruitment_applications", {
   vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id),
   applicationType: text("application_type").notNull(),
   employmentCategory: text("employment_category").notNull(),
+  department: text("department"),
+  examinationBoard: text("examination_board"), // legacy compatibility for historical single-value records
+  examinationBoards: jsonb("examination_boards").notNull().default(sql`'[]'::jsonb`),
+  declaredSubjects: jsonb("declared_subjects").notNull().default(sql`'[]'::jsonb`),
+  recruiterAssignedSubjects: jsonb("recruiter_assigned_subjects").notNull().default(sql`'[]'::jsonb`),
   firstName: text("first_name").notNull(),
   lastName: text("last_name").notNull(),
   email: text("email").notNull(),
@@ -1960,6 +2102,9 @@ export const recruitmentApplications = pgTable("recruitment_applications", {
   ageAtSubmission: integer("age_at_submission"),
   aLevelResults: jsonb("a_level_results").notNull().default(sql`'[]'::jsonb`),
   aLevelPoints: integer("a_level_points"),
+  oLevelResults: jsonb("o_level_results").notNull().default(sql`'[]'::jsonb`),
+  oLevelSittingCount: integer("o_level_sitting_count"),
+  oLevelQualifyingSubjectCount: integer("o_level_qualifying_subject_count"),
   holdsTeachingQualification: boolean("holds_teaching_qualification").notNull().default(false),
   eligibilityRoute: text("eligibility_route"),
   normalizedEmail: text("normalized_email").notNull(),
@@ -1969,6 +2114,9 @@ export const recruitmentApplications = pgTable("recruitment_applications", {
   failedRequirementCodes: jsonb("failed_requirement_codes").notNull().default(sql`'[]'::jsonb`),
   status: text("status").notNull().default("submitted"),
   recruiterNotes: text("recruiter_notes"),
+  availabilityStatus: text("availability_status").notNull().default("available"),
+  availabilityNotes: text("availability_notes"),
+  lastContactedAt: timestamp("last_contacted_at"),
   reviewedByUserId: integer("reviewed_by_user_id").references(() => users.id),
   reviewedAt: timestamp("reviewed_at"),
   submittedAt: timestamp("submitted_at").defaultNow(),
@@ -1976,9 +2124,9 @@ export const recruitmentApplications = pgTable("recruitment_applications", {
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
   organizationStatusIdx: index("recruitment_applications_org_status_idx").on(table.organizationId, table.status, table.submittedAt),
-  emailUnique: uniqueIndex("recruitment_applications_normalized_email_uidx").on(table.organizationId, table.normalizedEmail),
-  phoneUnique: uniqueIndex("recruitment_applications_normalized_phone_uidx").on(table.organizationId, table.normalizedPhone),
-  nationalIdUnique: uniqueIndex("recruitment_applications_normalized_national_id_uidx").on(table.organizationId, table.normalizedNationalId),
+  emailIdx: index("recruitment_applications_normalized_email_idx").on(table.organizationId, table.normalizedEmail),
+  phoneIdx: index("recruitment_applications_normalized_phone_idx").on(table.organizationId, table.normalizedPhone),
+  nationalIdIdx: index("recruitment_applications_normalized_national_id_idx").on(table.organizationId, table.normalizedNationalId),
 }));
 
 export const recruitmentApplicationAnswers = pgTable("recruitment_application_answers", {
@@ -2002,6 +2150,10 @@ export const recruitmentApplicationDocuments = pgTable("recruitment_application_
   mimeType: text("mime_type").notNull(),
   fileSize: integer("file_size").notNull(),
   isActive: boolean("is_active").notNull().default(true),
+  reviewStatus: text("review_status"),
+  reviewNotes: text("review_notes"),
+  reviewedByUserId: integer("reviewed_by_user_id").references(() => users.id),
+  reviewedAt: timestamp("reviewed_at"),
   uploadedAt: timestamp("uploaded_at").defaultNow(),
   archivedAt: timestamp("archived_at"),
 }, (table) => ({ applicationIdx: index("recruitment_application_documents_application_idx").on(table.applicationId, table.isActive) }));
@@ -2017,6 +2169,17 @@ export const recruitmentApplicationStatusHistory = pgTable("recruitment_applicat
   actorLabel: text("actor_label"),
   changedAt: timestamp("changed_at").defaultNow(),
 });
+
+export const recruitmentNotes = pgTable("recruitment_notes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id).notNull(),
+  note: text("note").notNull(),
+  authorUserId: integer("author_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  applicationIdx: index("recruitment_notes_application_idx").on(table.applicationId, table.createdAt),
+}));
 
 export const recruitmentRejectionAttempts = pgTable("recruitment_rejection_attempts", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -2044,10 +2207,104 @@ export const recruitmentInterviews = pgTable("recruitment_interviews", {
   interviewType: text("interview_type").notNull().default("in_person"),
   panelUserIds: jsonb("panel_user_ids").notNull().default(sql`'[]'::jsonb`),
   notes: text("notes"),
+  applicantInstructions: text("applicant_instructions"),
+  internalNotes: text("internal_notes"),
+  interviewLink: text("interview_link"),
+  status: text("status").notNull().default("scheduled"),
   outcome: text("outcome"),
   createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const recruitmentVacancyCandidates = pgTable("recruitment_vacancy_candidates", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id).notNull(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id).notNull(),
+  stage: text("stage").notNull().default("suggested"),
+  matchReasons: jsonb("match_reasons").notNull().default(sql`'[]'::jsonb`),
+  finalRank: integer("final_rank"),
+  shortlistedAt: timestamp("shortlisted_at"),
+  rankedAt: timestamp("ranked_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  vacancyApplicationUnique: uniqueIndex("recruitment_vacancy_candidates_uidx").on(table.vacancyId, table.applicationId),
+  vacancyStageIdx: index("recruitment_vacancy_candidates_stage_idx").on(table.vacancyId, table.stage),
+}));
+
+export const recruitmentTalentRankingLists = pgTable("recruitment_talent_ranking_lists", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  department: text("department").notNull(),
+  subject: text("subject").notNull(),
+  version: integer("version").notNull().default(0),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  listUnique: uniqueIndex("recruitment_talent_ranking_lists_uidx").on(table.organizationId, table.department, table.subject),
+}));
+
+export const recruitmentTalentRankings = pgTable("recruitment_talent_rankings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id).notNull(),
+  department: text("department").notNull(),
+  subject: text("subject").notNull(),
+  position: integer("position").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  addedAt: timestamp("added_at").defaultNow(),
+  removedAt: timestamp("removed_at"),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  candidateListUnique: uniqueIndex("recruitment_talent_rankings_candidate_list_uidx").on(table.organizationId, table.applicationId, table.department, table.subject),
+  listPositionIdx: index("recruitment_talent_rankings_list_position_idx").on(table.organizationId, table.department, table.subject, table.isActive, table.position),
+  applicationIdx: index("recruitment_talent_rankings_application_idx").on(table.applicationId, table.isActive),
+}));
+
+export const recruitmentActivity = pgTable("recruitment_activity", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id),
+  vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id),
+  activityType: text("activity_type").notNull(),
+  summary: text("summary").notNull(),
+  details: jsonb("details").notNull().default(sql`'{}'::jsonb`),
+  actorUserId: integer("actor_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  applicationIdx: index("recruitment_activity_application_idx").on(table.applicationId, table.createdAt),
+  vacancyIdx: index("recruitment_activity_vacancy_idx").on(table.vacancyId, table.createdAt),
+}));
+
+export const recruitmentNotificationConfigs = pgTable("recruitment_notification_configs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  eventKey: text("event_key").notNull(),
+  applicationVariant: text("application_variant").notNull().default("any"),
+  enabled: boolean("enabled").notNull().default(false),
+  channel: text("channel").notNull().default("none"),
+  emailSubject: text("email_subject"),
+  emailTemplate: text("email_template"),
+  smsTemplate: text("sms_template"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationEventVariantUnique: uniqueIndex("recruitment_notification_configs_uidx").on(table.organizationId, table.eventKey, table.applicationVariant),
+}));
+
+export const recruitmentNotificationLogs = pgTable("recruitment_notification_logs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  applicationId: integer("application_id").references(() => recruitmentApplications.id),
+  vacancyId: integer("vacancy_id").references(() => recruitmentVacancies.id),
+  interviewId: integer("interview_id").references(() => recruitmentInterviews.id),
+  eventKey: text("event_key").notNull(),
+  channel: text("channel").notNull(),
+  destination: text("destination"),
+  status: text("status").notNull(),
+  errorMessage: text("error_message"),
+  sentAt: timestamp("sent_at"),
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const permissions = pgTable("permissions", {
@@ -2113,6 +2370,7 @@ export const insertSubjectSchema = omitInsertFields(createInsertSchema(subjects)
 export const insertStaffSubjectSchema = omitInsertFields(createInsertSchema(staffSubjects), { id: true });
 export const insertStudentSubjectSchema = omitInsertFields(createInsertSchema(studentSubjects), { id: true });
 export const insertInternalTransferSchema = omitInsertFields(createInsertSchema(internalTransfers), { id: true, createdAt: true, completedAt: true });
+export const insertStudentEnrollmentEventSchema = omitInsertFields(createInsertSchema(studentEnrollmentEvents), { id: true, createdAt: true });
 export const insertClassSubjectSchema = omitInsertFields(createInsertSchema(classSubjects), { id: true });
 export const insertGradeSchema = omitInsertFields(createInsertSchema(grades), { id: true });
 export const insertGradeProfileSettingSchema = omitInsertFields(createInsertSchema(gradeProfileSettings), { id: true, createdAt: true, updatedAt: true });
@@ -2127,6 +2385,7 @@ export const insertTransportPickupPointSchema = omitInsertFields(createInsertSch
 export const insertTransportOwnerSchema = omitInsertFields(createInsertSchema(transportOwners), { id: true, createdAt: true, updatedAt: true });
 export const insertTransportDriverSchema = omitInsertFields(createInsertSchema(transportDrivers), { id: true, createdAt: true, updatedAt: true });
 export const insertTransportVehicleSchema = omitInsertFields(createInsertSchema(transportVehicles), { id: true, createdAt: true, updatedAt: true });
+export const insertTransportOrganizationSettingSchema = omitInsertFields(createInsertSchema(transportOrganizationSettings), { id: true, createdAt: true, updatedAt: true });
 export const insertTransportSettingSchema = omitInsertFields(createInsertSchema(transportSettings), { id: true, createdAt: true, updatedAt: true });
 export const insertTransportServicePointSchema = omitInsertFields(createInsertSchema(transportServicePoints), { id: true, createdAt: true });
 export const insertTransportVehiclePathSchema = omitInsertFields(createInsertSchema(transportVehiclePaths), { id: true, createdAt: true, updatedAt: true, activatedAt: true });
@@ -2140,8 +2399,6 @@ export const insertTransportProviderAdjustmentSchema = omitInsertFields(createIn
 export const insertTransportPaymentSchema = omitInsertFields(createInsertSchema(transportPayments), { id: true, createdAt: true, reversedAt: true, reversedByUserId: true, reversalReason: true, verifiedAt: true, verifiedByUserId: true, reconciledAt: true, reconciledByUserId: true });
 export const insertTransportPaymentAllocationSchema = omitInsertFields(createInsertSchema(transportPaymentAllocations), { id: true, createdAt: true });
 export const insertTransportReceiptEventSchema = omitInsertFields(createInsertSchema(transportReceiptEvents), { id: true, createdAt: true });
-export const insertTransportPaymentPlanSchema = omitInsertFields(createInsertSchema(transportPaymentPlans), { id: true, createdAt: true });
-export const insertTransportPaymentPlanInstalmentSchema = omitInsertFields(createInsertSchema(transportPaymentPlanInstalments), { id: true, createdAt: true });
 export const insertTransportRefundSchema = omitInsertFields(createInsertSchema(transportRefunds), { id: true, createdAt: true, approvedAt: true, paidAt: true });
 export const insertTransportCashupSchema = omitInsertFields(createInsertSchema(transportCashups), { id: true, createdAt: true, submittedAt: true, verifiedAt: true });
 export const insertTransportCashupPaymentSchema = omitInsertFields(createInsertSchema(transportCashupPayments), { id: true, createdAt: true });
@@ -2156,6 +2413,9 @@ export const insertTransportPayoutSchema = omitInsertFields(createInsertSchema(t
 export const insertTransportPeriodLockSchema = omitInsertFields(createInsertSchema(transportPeriodLocks), { id: true, lockedAt: true, reopenedAt: true });
 export const insertTransportVehicleOwnerHistorySchema = omitInsertFields(createInsertSchema(transportVehicleOwnerHistory), { id: true, createdAt: true });
 export const insertTransportVehicleDriverHistorySchema = omitInsertFields(createInsertSchema(transportVehicleDriverHistory), { id: true, createdAt: true });
+export const insertTransportVehicleAlternativeDriverSchema = omitInsertFields(createInsertSchema(transportVehicleAlternativeDrivers), { id: true, createdAt: true });
+export const insertTransportVehicleOperatingDriverHistorySchema = omitInsertFields(createInsertSchema(transportVehicleOperatingDriverHistory), { id: true, createdAt: true });
+export const insertTransportVehicleReplacementSchema = omitInsertFields(createInsertSchema(transportVehicleReplacements), { id: true, createdAt: true });
 export const insertTransportAuditEventSchema = omitInsertFields(createInsertSchema(transportAuditEvents), { id: true, createdAt: true });
 export const insertTransportDriverOwnerHistorySchema = omitInsertFields(createInsertSchema(transportDriverOwnerHistory), { id: true, createdAt: true });
 export const insertTransportDocumentRequirementSchema = omitInsertFields(createInsertSchema(transportDocumentRequirements), { id: true, createdAt: true, updatedAt: true });
@@ -2182,7 +2442,10 @@ export const insertNewsletterSchema = omitInsertFields(createInsertSchema(newsle
 export const insertHostelSchema = omitInsertFields(createInsertSchema(hostels), { id: true, createdAt: true });
 export const insertHostelRollCallSchema = omitInsertFields(createInsertSchema(hostelRollCall), { id: true, createdAt: true });
 export const insertStudentApplicationSchema = omitInsertFields(createInsertSchema(studentApplications), { id: true, createdAt: true });
+export const insertLanguageToolSettingSchema = omitInsertFields(createInsertSchema(languageToolSettings), { id: true, createdAt: true, updatedAt: true });
 export const insertRecruitmentSettingSchema = omitInsertFields(createInsertSchema(recruitmentSettings), { id: true, createdAt: true, updatedAt: true });
+export const insertRecruitmentDepartmentSchema = omitInsertFields(createInsertSchema(recruitmentDepartments), { id: true, createdAt: true, updatedAt: true });
+export const insertRecruitmentExaminationBoardSchema = omitInsertFields(createInsertSchema(recruitmentExaminationBoards), { id: true, createdAt: true, updatedAt: true });
 export const insertRecruitmentVacancySchema = omitInsertFields(createInsertSchema(recruitmentVacancies), { id: true, createdAt: true, updatedAt: true, publishedAt: true });
 export const insertRecruitmentRequirementSchema = omitInsertFields(createInsertSchema(recruitmentRequirements), { id: true, createdAt: true, updatedAt: true });
 export const insertRecruitmentDocumentCategorySchema = omitInsertFields(createInsertSchema(recruitmentDocumentCategories), { id: true, createdAt: true, updatedAt: true });
@@ -2190,7 +2453,14 @@ export const insertRecruitmentApplicationSchema = omitInsertFields(createInsertS
 export const insertRecruitmentApplicationAnswerSchema = omitInsertFields(createInsertSchema(recruitmentApplicationAnswers), { id: true, createdAt: true });
 export const insertRecruitmentApplicationDocumentSchema = omitInsertFields(createInsertSchema(recruitmentApplicationDocuments), { id: true, uploadedAt: true, archivedAt: true });
 export const insertRecruitmentApplicationStatusHistorySchema = omitInsertFields(createInsertSchema(recruitmentApplicationStatusHistory), { id: true, changedAt: true });
+export const insertRecruitmentNoteSchema = omitInsertFields(createInsertSchema(recruitmentNotes), { id: true, createdAt: true });
 export const insertRecruitmentRejectionAttemptSchema = omitInsertFields(createInsertSchema(recruitmentRejectionAttempts), { id: true, attemptedAt: true });
+export const insertRecruitmentVacancyCandidateSchema = omitInsertFields(createInsertSchema(recruitmentVacancyCandidates), { id: true, createdAt: true, updatedAt: true });
+export const insertRecruitmentTalentRankingListSchema = omitInsertFields(createInsertSchema(recruitmentTalentRankingLists), { id: true, updatedAt: true });
+export const insertRecruitmentTalentRankingSchema = omitInsertFields(createInsertSchema(recruitmentTalentRankings), { id: true, addedAt: true, removedAt: true, updatedAt: true });
+export const insertRecruitmentActivitySchema = omitInsertFields(createInsertSchema(recruitmentActivity), { id: true, createdAt: true });
+export const insertRecruitmentNotificationConfigSchema = omitInsertFields(createInsertSchema(recruitmentNotificationConfigs), { id: true, createdAt: true, updatedAt: true });
+export const insertRecruitmentNotificationLogSchema = omitInsertFields(createInsertSchema(recruitmentNotificationLogs), { id: true, createdAt: true });
 export const insertRecruitmentInterviewSchema = omitInsertFields(createInsertSchema(recruitmentInterviews), { id: true, createdAt: true, updatedAt: true });
 export const insertPermissionSchema = omitInsertFields(createInsertSchema(permissions), { id: true, createdAt: true });
 export const insertAccessGroupSchema = omitInsertFields(createInsertSchema(accessGroups), { id: true, createdAt: true });
@@ -2237,6 +2507,7 @@ export type InsertMark = z.infer<typeof insertMarkSchema>;
 export type Mark = typeof marks.$inferSelect;
 export type InsertAttendanceRecord = z.infer<typeof insertAttendanceRecordSchema>;
 export type AttendanceRecord = typeof attendanceRecords.$inferSelect;
+export type AttendanceGateEvidenceCorrection = typeof attendanceGateEvidenceCorrections.$inferSelect;
 export type InsertDisciplineRecord = z.infer<typeof insertDisciplineRecordSchema>;
 export type DisciplineRecord = typeof disciplineRecords.$inferSelect;
 export type InsertClinicRecord = z.infer<typeof insertClinicRecordSchema>;
@@ -2282,6 +2553,9 @@ export type HostelRollCall = typeof hostelRollCall.$inferSelect;
 export type InsertStudentApplication = z.infer<typeof insertStudentApplicationSchema>;
 export type StudentApplication = typeof studentApplications.$inferSelect;
 export type RecruitmentSetting = typeof recruitmentSettings.$inferSelect;
+export type LanguageToolSetting = typeof languageToolSettings.$inferSelect;
+export type RecruitmentDepartment = typeof recruitmentDepartments.$inferSelect;
+export type RecruitmentExaminationBoard = typeof recruitmentExaminationBoards.$inferSelect;
 export type RecruitmentVacancy = typeof recruitmentVacancies.$inferSelect;
 export type RecruitmentRequirement = typeof recruitmentRequirements.$inferSelect;
 export type RecruitmentDocumentCategory = typeof recruitmentDocumentCategories.$inferSelect;
@@ -2289,7 +2563,14 @@ export type RecruitmentApplication = typeof recruitmentApplications.$inferSelect
 export type RecruitmentApplicationAnswer = typeof recruitmentApplicationAnswers.$inferSelect;
 export type RecruitmentApplicationDocument = typeof recruitmentApplicationDocuments.$inferSelect;
 export type RecruitmentApplicationStatusHistory = typeof recruitmentApplicationStatusHistory.$inferSelect;
+export type RecruitmentNote = typeof recruitmentNotes.$inferSelect;
 export type RecruitmentRejectionAttempt = typeof recruitmentRejectionAttempts.$inferSelect;
+export type RecruitmentVacancyCandidate = typeof recruitmentVacancyCandidates.$inferSelect;
+export type RecruitmentTalentRankingList = typeof recruitmentTalentRankingLists.$inferSelect;
+export type RecruitmentTalentRanking = typeof recruitmentTalentRankings.$inferSelect;
+export type RecruitmentActivity = typeof recruitmentActivity.$inferSelect;
+export type RecruitmentNotificationConfig = typeof recruitmentNotificationConfigs.$inferSelect;
+export type RecruitmentNotificationLog = typeof recruitmentNotificationLogs.$inferSelect;
 export type RecruitmentInterview = typeof recruitmentInterviews.$inferSelect;
 export type InsertPermission = z.infer<typeof insertPermissionSchema>;
 export type Permission = typeof permissions.$inferSelect;
@@ -2520,6 +2801,10 @@ export const calendarEvents = pgTable("calendar_events", {
   includeStudents: boolean("include_students").default(true),
   includeParents: boolean("include_parents").default(false),
 
+  // School-level calendar events may suppress normal attendance expectations
+  // without affecting gate access permissions. Values: normal | no_regular_attendance.
+  attendanceExpectation: text("attendance_expectation").notNull().default("normal"),
+
   // Recurrence (RRULE + exceptions)
   rrule: text("rrule"),
   recurrenceUntil: timestamp("recurrence_until"),
@@ -2681,6 +2966,98 @@ export const activityLogs = pgTable("activity_logs", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// School-day attendance configuration
+export const schoolDaySchedules = pgTable("school_day_schedules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  dayOfWeek: integer("day_of_week").notNull(), // 0 Sunday ... 6 Saturday
+  isSchoolDay: boolean("is_school_day").notNull().default(false),
+  studentStartTime: text("student_start_time").notNull().default("07:30"),
+  studentLateGraceMinutes: integer("student_late_grace_minutes").notNull().default(0),
+  studentEndTime: text("student_end_time").notNull().default("15:30"),
+  studentDismissalGraceMinutes: integer("student_dismissal_grace_minutes").notNull().default(0),
+  staffStartTime: text("staff_start_time").notNull().default("07:20"),
+  staffLateGraceMinutes: integer("staff_late_grace_minutes").notNull().default(0),
+  staffEndTime: text("staff_end_time").notNull().default("16:00"),
+  breakStartTime: text("break_start_time"),
+  breakEndTime: text("break_end_time"),
+  lunchStartTime: text("lunch_start_time"),
+  lunchEndTime: text("lunch_end_time"),
+  reconciliationTime: text("reconciliation_time").notNull().default("09:00"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolDayUniqueIdx: uniqueIndex("school_day_schedules_school_day_uidx").on(table.schoolId, table.dayOfWeek),
+  schoolIdx: index("school_day_schedules_school_idx").on(table.schoolId),
+  dayCheck: check("school_day_schedules_day_chk", sql`${table.dayOfWeek} BETWEEN 0 AND 6`),
+}));
+
+export type SchoolDaySchedule = typeof schoolDaySchedules.$inferSelect;
+
+// Date-specific exceptions to the weekly school-day pattern. These are used for
+// holidays, exceptional closures, make-up school days and other academic-calendar
+// changes without mutating the recurring weekly timetable.
+export const schoolDayOverrides = pgTable("school_day_overrides", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  calendarEventId: integer("calendar_event_id").references(() => calendarEvents.id),
+  overrideDate: date("override_date").notNull(),
+  isSchoolDay: boolean("is_school_day").notNull(),
+  reason: text("reason").notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolDateUniqueIdx: uniqueIndex("school_day_overrides_school_date_uidx").on(table.schoolId, table.overrideDate),
+  schoolDateIdx: index("school_day_overrides_school_date_idx").on(table.schoolId, table.overrideDate),
+  calendarEventIdx: index("school_day_overrides_calendar_event_idx").on(table.calendarEventId),
+}));
+
+export type SchoolDayOverride = typeof schoolDayOverrides.$inferSelect;
+
+// Student Payments CSV import review/snapshots. This deliberately does not alter fees_payments.
+export const feesImportBatches = pgTable("fees_import_batches", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  organizationId: integer("organization_id").references(() => organizations.id),
+  fileName: text("file_name"),
+  source: text("source").notNull().default("student_payments_csv"),
+  termTotalFee: decimal("term_total_fee", { precision: 10, scale: 2 }).notNull().default("0"),
+  termMaxBalance: decimal("term_max_balance", { precision: 10, scale: 2 }).notNull().default("0"),
+  status: text("status").notNull().default("preview"),
+  totalRows: integer("total_rows").notNull().default(0),
+  matchedRows: integer("matched_rows").notNull().default(0),
+  customerCodeMatches: integer("customer_code_matches").notNull().default(0),
+  exactNameMatches: integer("exact_name_matches").notNull().default(0),
+  fuzzyNameMatches: integer("fuzzy_name_matches").notNull().default(0),
+  unmatchedRows: integer("unmatched_rows").notNull().default(0),
+  uploadedByUserId: integer("uploaded_by_user_id").references(() => users.id),
+  previewedAt: timestamp("previewed_at").defaultNow(),
+  committedAt: timestamp("committed_at"),
+});
+
+export const feesImportItems = pgTable("fees_import_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  batchId: integer("batch_id").references(() => feesImportBatches.id).notNull(),
+  rowNumber: integer("row_number").notNull(),
+  csvCustomerCode: text("csv_customer_code"),
+  csvName: text("csv_name").notNull(),
+  csvGroup: text("csv_group"),
+  csvArea: text("csv_area"),
+  balanceDue: decimal("balance_due", { precision: 10, scale: 2 }).notNull().default("0"),
+  matchedStudentId: integer("matched_student_id").references(() => students.id),
+  matchedAdmissionNo: text("matched_admission_no"),
+  matchedStudentName: text("matched_student_name"),
+  matchMethod: text("match_method").notNull(),
+  calculatedStatus: text("calculated_status"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  batchRowUniqueIdx: uniqueIndex("fees_import_items_batch_row_uidx").on(table.batchId, table.rowNumber),
+}));
+
+export type FeesImportBatch = typeof feesImportBatches.$inferSelect;
+export type FeesImportItem = typeof feesImportItems.$inferSelect;
+
 // Access Control / Gate integration
 export const gateBridges = pgTable("gate_bridges", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -2689,6 +3066,9 @@ export const gateBridges = pgTable("gate_bridges", {
   name: text("name").notNull(),
   bridgeKeyHash: text("bridge_key_hash").notNull().unique(),
   isActive: boolean("is_active").default(true).notNull(),
+  configurationRevision: integer("configuration_revision").default(1).notNull(),
+  lastSyncedRevision: integer("last_synced_revision"),
+  lastConfigSyncAt: timestamp("last_config_sync_at"),
   lastHeartbeatAt: timestamp("last_heartbeat_at"),
   lastIpAddress: text("last_ip_address"),
   softwareVersion: text("software_version"),
@@ -2701,13 +3081,34 @@ export const gateBridges = pgTable("gate_bridges", {
   schoolNameUniqueIdx: uniqueIndex("gate_bridges_school_name_uidx").on(table.schoolId, table.name),
 }));
 
+export const accessGates = pgTable("access_gates", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  bridgeId: integer("bridge_id").references(() => gateBridges.id).notNull(),
+  name: text("name").notNull(),
+  description: text("description"),
+  gateTemplate: text("gate_template").notNull().default("standard_4_lane"),
+  expectedTerminalCount: integer("expected_terminal_count").notNull().default(4),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolIdx: index("access_gates_school_idx").on(table.schoolId),
+  bridgeIdx: index("access_gates_bridge_idx").on(table.bridgeId),
+  schoolNameUniqueIdx: uniqueIndex("access_gates_school_name_uidx").on(table.schoolId, table.name),
+}));
+
 export const gateDevices = pgTable("gate_devices", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   organizationId: integer("organization_id").references(() => organizations.id).notNull(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
   bridgeId: integer("bridge_id").references(() => gateBridges.id).notNull(),
+  gateId: integer("gate_id").references(() => accessGates.id),
   deviceKey: text("device_key").notNull().unique(),
   name: text("name").notNull(),
+  lanePosition: text("lane_position"),
   location: text("location"),
   direction: text("direction").notNull().default("entry"),
   protocol: text("protocol").notNull().default("http"),
@@ -2725,8 +3126,9 @@ export const gateDevices = pgTable("gate_devices", {
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
   bridgeIdx: index("gate_devices_bridge_idx").on(table.bridgeId),
+  gateIdx: index("gate_devices_gate_idx").on(table.gateId),
   schoolIdx: index("gate_devices_school_idx").on(table.schoolId),
-  bridgeNameUniqueIdx: uniqueIndex("gate_devices_bridge_name_uidx").on(table.bridgeId, table.name),
+  gateLaneUniqueIdx: uniqueIndex("gate_devices_gate_lane_uidx").on(table.gateId, table.lanePosition),
 }));
 
 export const gateCommands = pgTable("gate_commands", {
@@ -2751,9 +3153,264 @@ export const gateCommands = pgTable("gate_commands", {
   deviceIdx: index("gate_commands_device_idx").on(table.deviceId, table.requestedAt),
 }));
 
+export const gateLogs = pgTable("gate_logs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  bridgeId: integer("bridge_id").references(() => gateBridges.id),
+  gateId: integer("gate_id").references(() => accessGates.id),
+  deviceId: integer("device_id").references(() => gateDevices.id),
+  severity: text("severity").notNull().default("info"),
+  sourceType: text("source_type").notNull().default("system"),
+  eventType: text("event_type").notNull(),
+  message: text("message").notNull(),
+  details: jsonb("details"),
+  occurredAt: timestamp("occurred_at").defaultNow().notNull(),
+}, (table) => ({
+  schoolOccurredIdx: index("gate_logs_school_occurred_idx").on(table.schoolId, table.occurredAt),
+  bridgeIdx: index("gate_logs_bridge_idx").on(table.bridgeId),
+  gateIdx: index("gate_logs_gate_idx").on(table.gateId),
+  deviceIdx: index("gate_logs_device_idx").on(table.deviceId),
+}));
+
+export const accessIdentities = pgTable("access_identities", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  personType: text("person_type").notNull(), // student | staff
+  studentId: integer("student_id").references(() => students.id),
+  staffId: integer("staff_id").references(() => staff.id),
+  identityNo: text("identity_no").notNull(), // admissionNo / staffNo
+  displayName: text("display_name").notNull(),
+  photoPath: text("photo_path"),
+  isActive: boolean("is_active").notNull().default(true),
+  enrollmentRemovedAt: timestamp("enrollment_removed_at"),
+  enrollmentRemovalReason: text("enrollment_removal_reason"),
+  enrollmentRemovedByUserId: integer("enrollment_removed_by_user_id").references(() => users.id),
+  manualRestrictionActive: boolean("manual_restriction_active").notNull().default(false),
+  manualRestrictionReason: text("manual_restriction_reason"),
+  manualRestrictedByUserId: integer("manual_restricted_by_user_id").references(() => users.id),
+  manualRestrictedAt: timestamp("manual_restricted_at"),
+  desiredEntryAccess: text("desired_entry_access").notNull().default("allow"),
+  lastPolicyReason: text("last_policy_reason"),
+  lastPolicyEvaluatedAt: timestamp("last_policy_evaluated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  identityNoUniqueIdx: uniqueIndex("access_identities_identity_no_uidx").on(table.identityNo),
+  studentUniqueIdx: uniqueIndex("access_identities_student_uidx").on(table.studentId).where(sql`${table.studentId} IS NOT NULL`),
+  staffUniqueIdx: uniqueIndex("access_identities_staff_uidx").on(table.staffId).where(sql`${table.staffId} IS NOT NULL`),
+  schoolIdx: index("access_identities_school_idx").on(table.schoolId),
+}));
+
+export const gateIdentitySync = pgTable("gate_identity_sync", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  identityId: integer("identity_id").references(() => accessIdentities.id).notNull(),
+  deviceId: integer("device_id").references(() => gateDevices.id).notNull(),
+  desiredListType: text("desired_list_type").notNull().default("white"),
+  desiredEnabled: boolean("desired_enabled").notNull().default(true),
+  desiredTimeGroup: integer("desired_time_group").notNull().default(0),
+  terminalReportedIdentityNo: text("terminal_reported_identity_no"),
+  syncStatus: text("sync_status").notNull().default("pending"),
+  lastCommandId: integer("last_command_id").references(() => gateCommands.id),
+  lastSyncedAt: timestamp("last_synced_at"),
+  lastError: text("last_error"),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  identityDeviceUniqueIdx: uniqueIndex("gate_identity_sync_identity_device_uidx").on(table.identityId, table.deviceId),
+  deviceStatusIdx: index("gate_identity_sync_device_status_idx").on(table.deviceId, table.syncStatus),
+  deviceTerminalIdentityIdx: index("gate_identity_sync_device_terminal_identity_idx").on(table.deviceId, table.terminalReportedIdentityNo),
+}));
+
+export const financialAccessOverrides = pgTable("financial_access_overrides", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  academicYear: text("academic_year").notNull(),
+  term: text("term").notNull(),
+  reason: text("reason").notNull(),
+  effectiveFrom: timestamp("effective_from").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  status: text("status").notNull().default("scheduled"), // scheduled | active | expired | revoked | blocked
+  activatedAt: timestamp("activated_at"),
+  grantedByUserId: integer("granted_by_user_id").references(() => users.id).notNull(),
+  revokedByUserId: integer("revoked_by_user_id").references(() => users.id),
+  revokedAt: timestamp("revoked_at"),
+  revocationReason: text("revocation_reason"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  studentTermIdx: index("financial_access_overrides_student_term_idx").on(table.studentId, table.academicYear, table.term),
+  schoolStatusIdx: index("financial_access_overrides_school_status_idx").on(table.schoolId, table.status, table.effectiveFrom),
+}));
+
+export const studentEarlyReleaseAuthorizations = pgTable("student_early_release_authorizations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  releaseType: text("release_type").notNull().default("early_dismissal"), // early_dismissal | temporary_off_campus
+  validFrom: timestamp("valid_from").notNull(),
+  validUntil: timestamp("valid_until").notNull(),
+  returnExpected: boolean("return_expected").notNull().default(false),
+  reason: text("reason").notNull(),
+  status: text("status").notNull().default("scheduled"), // scheduled | active | expired | revoked
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id).notNull(),
+  revokedByUserId: integer("revoked_by_user_id").references(() => users.id),
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  studentTimeIdx: index("student_early_release_student_time_idx").on(table.studentId, table.validFrom, table.validUntil),
+  schoolStatusIdx: index("student_early_release_school_status_idx").on(table.schoolId, table.status, table.validFrom),
+}));
+
+export const staffEarlyDepartureApprovals = pgTable("staff_early_departure_approvals", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  staffId: integer("staff_id").references(() => staff.id).notNull(),
+  attendanceDate: date("attendance_date").notNull(),
+  allowedFrom: timestamp("allowed_from").notNull(),
+  validUntil: timestamp("valid_until"),
+  returnExpected: boolean("return_expected").notNull().default(false),
+  reason: text("reason").notNull(),
+  status: text("status").notNull().default("active"),
+  approvedByUserId: integer("approved_by_user_id").references(() => users.id).notNull(),
+  revokedByUserId: integer("revoked_by_user_id").references(() => users.id),
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  staffDateIdx: index("staff_early_departure_staff_date_idx").on(table.staffId, table.attendanceDate),
+}));
+
+export const accessEvents = pgTable("access_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  bridgeId: integer("bridge_id").references(() => gateBridges.id).notNull(),
+  gateId: integer("gate_id").references(() => accessGates.id),
+  deviceId: integer("device_id").references(() => gateDevices.id).notNull(),
+  identityId: integer("identity_id").references(() => accessIdentities.id),
+  eventUuid: text("event_uuid").notNull(),
+  terminalIdentityNo: text("terminal_identity_no"),
+  identityNo: text("identity_no"),
+  identityMappingSource: text("identity_mapping_source"),
+  personType: text("person_type"),
+  studentId: integer("student_id").references(() => students.id),
+  staffId: integer("staff_id").references(() => staff.id),
+  direction: text("direction").notNull(),
+  recognized: boolean("recognized").notNull().default(false),
+  accessDecision: text("access_decision").notNull().default("unknown"),
+  decisionReason: text("decision_reason"),
+  financialStatus: text("financial_status"),
+  financialSource: text("financial_source"),
+  financialSnapshotAt: timestamp("financial_snapshot_at"),
+  financialImportBatchId: integer("financial_import_batch_id"),
+  overrideId: integer("override_id").references(() => financialAccessOverrides.id),
+  attendanceRecordId: integer("attendance_record_id").references(() => attendanceRecords.id),
+  staffAttendanceLogId: integer("staff_attendance_log_id").references(() => staffAttendanceLogs.id),
+  attendanceEffect: text("attendance_effect"),
+  occurredAt: timestamp("occurred_at").notNull(),
+  rawData: jsonb("raw_data"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  deviceEventUniqueIdx: uniqueIndex("access_events_device_uuid_uidx").on(table.deviceId, table.eventUuid),
+  schoolOccurredIdx: index("access_events_school_occurred_idx").on(table.schoolId, table.occurredAt),
+  studentOccurredIdx: index("access_events_student_occurred_idx").on(table.studentId, table.occurredAt),
+  staffOccurredIdx: index("access_events_staff_occurred_idx").on(table.staffId, table.occurredAt),
+}));
+
+export const attendanceMessageTemplates = pgTable("attendance_message_templates", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  templateKey: text("template_key").notNull(),
+  smsTemplate: text("sms_template").notNull(),
+  emailSubjectTemplate: text("email_subject_template"),
+  emailBodyTemplate: text("email_body_template"),
+  isDefaultCustomized: boolean("is_default_customized").notNull().default(false),
+  updatedByUserId: integer("updated_by_user_id").references(() => users.id),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolTemplateUniqueIdx: uniqueIndex("attendance_message_templates_school_key_uidx").on(table.schoolId, table.templateKey),
+}));
+
+// Immutable audit trail for every attendance-template change or default restore.
+// The live template remains in attendance_message_templates; this table records
+// the exact previous/new content and the actor for later review.
+export const attendanceMessageTemplateVersions = pgTable("attendance_message_template_versions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  templateId: integer("template_id").references(() => attendanceMessageTemplates.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  templateKey: text("template_key").notNull(),
+  action: text("action").notNull().default("updated"), // updated | restored_default
+  previousSmsTemplate: text("previous_sms_template").notNull(),
+  previousEmailSubjectTemplate: text("previous_email_subject_template"),
+  previousEmailBodyTemplate: text("previous_email_body_template"),
+  newSmsTemplate: text("new_sms_template").notNull(),
+  newEmailSubjectTemplate: text("new_email_subject_template"),
+  newEmailBodyTemplate: text("new_email_body_template"),
+  changedByUserId: integer("changed_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  templateHistoryIdx: index("attendance_message_template_versions_template_idx").on(table.templateId, table.createdAt),
+  schoolHistoryIdx: index("attendance_message_template_versions_school_idx").on(table.schoolId, table.createdAt),
+}));
+
+export type AccessIdentity = typeof accessIdentities.$inferSelect;
+export type GateIdentitySync = typeof gateIdentitySync.$inferSelect;
+export type FinancialAccessOverride = typeof financialAccessOverrides.$inferSelect;
+export type StudentEarlyReleaseAuthorization = typeof studentEarlyReleaseAuthorizations.$inferSelect;
+export type StaffEarlyDepartureApproval = typeof staffEarlyDepartureApprovals.$inferSelect;
+export type AccessEvent = typeof accessEvents.$inferSelect;
+export type AttendanceMessageTemplate = typeof attendanceMessageTemplates.$inferSelect;
+export type AttendanceMessageTemplateVersion = typeof attendanceMessageTemplateVersions.$inferSelect;
+
+// Organisation-owned attendance notification templates. These are the source of
+// truth for every school in an organisation; school-specific template tables are
+// retained only for backwards compatibility with earlier test builds.
+export const organizationAttendanceMessageTemplates = pgTable("organization_attendance_message_templates", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  templateKey: text("template_key").notNull(),
+  smsTemplate: text("sms_template").notNull(),
+  emailSubjectTemplate: text("email_subject_template"),
+  emailBodyTemplate: text("email_body_template"),
+  isDefaultCustomized: boolean("is_default_customized").notNull().default(false),
+  updatedByUserId: integer("updated_by_user_id").references(() => users.id),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  organizationTemplateUniqueIdx: uniqueIndex("organization_attendance_message_templates_org_key_uidx").on(table.organizationId, table.templateKey),
+}));
+
+export const organizationAttendanceMessageTemplateVersions = pgTable("organization_attendance_message_template_versions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  templateId: integer("template_id").references(() => organizationAttendanceMessageTemplates.id).notNull(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  templateKey: text("template_key").notNull(),
+  action: text("action").notNull().default("updated"),
+  previousSmsTemplate: text("previous_sms_template").notNull(),
+  previousEmailSubjectTemplate: text("previous_email_subject_template"),
+  previousEmailBodyTemplate: text("previous_email_body_template"),
+  newSmsTemplate: text("new_sms_template").notNull(),
+  newEmailSubjectTemplate: text("new_email_subject_template"),
+  newEmailBodyTemplate: text("new_email_body_template"),
+  changedByUserId: integer("changed_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  templateHistoryIdx: index("organization_attendance_message_versions_template_idx").on(table.templateId, table.createdAt),
+  organizationHistoryIdx: index("organization_attendance_message_versions_org_idx").on(table.organizationId, table.createdAt),
+}));
+
+export type OrganizationAttendanceMessageTemplate = typeof organizationAttendanceMessageTemplates.$inferSelect;
+export type OrganizationAttendanceMessageTemplateVersion = typeof organizationAttendanceMessageTemplateVersions.$inferSelect;
+
 export type GateBridge = typeof gateBridges.$inferSelect;
+export type AccessGate = typeof accessGates.$inferSelect;
 export type GateDevice = typeof gateDevices.$inferSelect;
 export type GateCommand = typeof gateCommands.$inferSelect;
+export type GateLog = typeof gateLogs.$inferSelect;
 
 export const insertActivityLogSchema = omitInsertFields(createInsertSchema(activityLogs), { id: true, createdAt: true });
 export type InsertActivityLog = z.infer<typeof insertActivityLogSchema>;

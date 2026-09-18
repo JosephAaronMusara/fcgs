@@ -10,7 +10,7 @@ const PERMISSIONS_DATA = RBAC_PERMISSIONS_DATA;
 const ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS = new Set([
   "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.payments.view",
   "transport.receipts.view", "transport.claims.view", "transport.payouts.view", "transport.reports.view", "transport.audit.view",
-  "transport.organization.view", "transport.organization.reports", "transport.organization.export",
+  "transport.organization.view", "transport.organization.reports", "transport.organization.export", "transport.hq.settings.manage",
 ]);
 
 const ORG_HQ_PERMISSIONS = PERMISSIONS_DATA
@@ -166,7 +166,7 @@ const ACCESS_GROUPS_DATA = [
       "reports.view",
       "transport.view", "transport.dashboard.view", "transport.charges.view", "transport.charges.generate", "transport.charges.adjust",
       "transport.payments.view", "transport.payments.record", "transport.payments.verify", "transport.payments.reverse",
-      "transport.receipts.view", "transport.receipts.verify", "transport.payment_plans.manage",
+      "transport.receipts.view", "transport.receipts.verify",
       "transport.refunds.request", "transport.refunds.approve", "transport.refunds.pay",
       "transport.cashups.prepare", "transport.cashups.verify", "transport.claims.view", "transport.claims.verify", "transport.claims.approve",
       "transport.penalties.manage", "transport.advances.request", "transport.advances.approve", "transport.advances.disburse", "transport.payouts.view", "transport.payouts.generate", "transport.payouts.pay",
@@ -186,7 +186,7 @@ const ACCESS_GROUPS_DATA = [
       "dashboard.view", "students.view", "parents.view", "classes.view", "fees.view",
       "transport.view", "transport.dashboard.view", "transport.charges.view",
       "transport.payments.view", "transport.payments.record", "transport.receipts.view",
-      "transport.payment_plans.manage", "transport.refunds.request", "transport.cashups.prepare",
+      "transport.refunds.request", "transport.cashups.prepare",
       "calendar.view", "staff_attendance.view_own", "staff_attendance.clock_in", "staff_attendance.clock_out",
     ],
   },
@@ -201,7 +201,7 @@ const ACCESS_GROUPS_DATA = [
       "transport.documents.view", "transport.documents.manage", "transport.compliance.view", "transport.compliance.manage",
       "transport.learners.enrol", "transport.learners.edit_service", "transport.learners.transfer",
       "transport.charges.view", "transport.charges.generate", "transport.payments.view",
-      "transport.receipts.view", "transport.receipts.verify", "transport.payment_plans.manage", "transport.refunds.request",
+      "transport.receipts.view", "transport.receipts.verify", "transport.refunds.request",
       "transport.cashups.prepare", "transport.incidents.manage",
       "transport.claims.view", "transport.claims.generate", "transport.claims.submit", "transport.claims.verify",
       "transport.advances.request", "transport.payouts.view", "transport.reports.view", "transport.audit.view",

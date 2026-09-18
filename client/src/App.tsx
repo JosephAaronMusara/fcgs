@@ -22,9 +22,11 @@ import NotFound from "@/pages/not-found";
 
 const ApplyPage = lazy(() => import("@/pages/apply"));
 const CareersPage = lazy(() => import("@/pages/careers"));
-const RecruitmentPage = lazy(() => import("@/pages/recruitment"));
 const ReportCardPdfRenderPage = lazy(() => import("@/pages/report-card-pdf-render"));
 const Dashboard = lazy(() => import("@/pages/dashboard"));
+const PortalDashboardPage = lazy(() => import("@/pages/portal-dashboard"));
+const ParentFinancePage = lazy(() => import("@/pages/parent-finance"));
+const StudentFinancePage = lazy(() => import("@/pages/student-finance"));
 const OrgDashboard = lazy(() => import("@/pages/org-dashboard"));
 const StaffPage = lazy(() => import("@/pages/staff"));
 const StudentsPage = lazy(() => import("@/pages/students"));
@@ -72,7 +74,6 @@ const KundAiPage = lazy(() => import("@/pages/kundai"));
 const TransportPage = lazy(() => import("@/pages/transport"));
 const FleetManagementPage = lazy(() => import("@/pages/fleet-management"));
 const InternalTransfersPage = lazy(() => import("@/pages/internal-transfers"));
-const LearningMaterialsPage = lazy(() => import("@/pages/learning-materials"));
 const AccessControlPage = lazy(() => import("@/pages/access-control"));
 
 
@@ -94,7 +95,7 @@ const ASSETS_INVENTORY_ROUTE_PERMISSIONS = ["assets.view", "inventory.view", "da
 const FLEET_ROUTE_PERMISSIONS = ["fleet.view"];
 
 const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
-  { pattern: /^\/dashboard$/, permissions: ["dashboard.view"] },
+  { pattern: /^\/dashboard$/, permissions: ["dashboard.view"], allowRoles: ["parent", "student"] },
   { pattern: /^\/student-360$/, permissions: ["students.view"] },
   { pattern: /^\/staff-360$/, permissions: ["staff.view"] },
   { pattern: /^\/staff$/, permissions: ["staff.view"] },
@@ -125,7 +126,6 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/school-incomes$/, permissions: ["school_incomes.view"] },
   { pattern: /^\/products$/, permissions: POS_ROUTE_PERMISSIONS },
   { pattern: /^\/financial-statements$/, permissions: ["financial_statements.view"] },
-  { pattern: /^\/learning-materials$/, permissions: ["learning_materials.view"] },
   { pattern: /^\/settings$/, permissions: ["settings.view"] },
   { pattern: /^\/library$/, permissions: ["library.view"] },
   { pattern: /^\/calendar$/, permissions: ["calendar.view"] },
@@ -141,6 +141,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/my-classes$/, allowRoles: ["student"] },
   { pattern: /^\/my-attendance$/, allowRoles: ["student"] },
   { pattern: /^\/my-grades$/, allowRoles: ["student"] },
+  { pattern: /^\/my-finance$/, allowRoles: ["student"] },
   { pattern: /^\/my-profile$/, allowRoles: ["student", "parent"] },
   { pattern: /^\/my-notifications$/, allowRoles: ["student", "parent"] },
   { pattern: /^\/my-newsletters$/, allowRoles: ["student", "parent", "teacher", "assistant_teacher", "quality_control_officer", "librarian", "school_admin", "org_admin"] },
@@ -190,7 +191,9 @@ function ProtectedRoute({
   const permissionRule = getPermissionRuleForPath(location);
   const roleAllowed = permissionRule?.allowRoles ? permissionRule.allowRoles.includes(user.role) : false;
   const permissionAllowed = permissionRule?.permissions?.length ? hasAnyPermission(...permissionRule.permissions) : true;
-  if ((permissionRule && !roleAllowed && !permissionAllowed) || !permissionRule) {
+  const isPortalRole = user.role === "student" || user.role === "parent";
+  const portalRoleBlocked = isPortalRole && !!permissionRule && !roleAllowed;
+  if (portalRoleBlocked || (permissionRule && !roleAllowed && !permissionAllowed) || !permissionRule) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
@@ -206,12 +209,14 @@ function ProtectedRoute({
 
 function FeesRoutePage() {
   const { user } = useAuth();
-
-  if (user?.role === "parent") {
-    return <FeesPage />;
-  }
-
+  if (user?.role === "parent") return <ParentFinancePage />;
   return <Redirect to="/school-finance?tab=student-payments" />;
+}
+
+function DashboardRoutePage() {
+  const { user } = useAuth();
+  if (user?.role === "parent" || user?.role === "student") return <PortalDashboardPage />;
+  return <Dashboard />;
 }
 
 function ParentsWithArrearsRedirectPage() {
@@ -837,7 +842,7 @@ function AuthenticatedRoutes() {
   return (
     <AppLayout>
       <Switch>
-        <Route path="/dashboard"><ProtectedRoute component={Dashboard} /></Route>
+        <Route path="/dashboard"><ProtectedRoute component={DashboardRoutePage} /></Route>
         <Route path="/student-360"><ProtectedRoute component={Student360Page} /></Route>
         <Route path="/staff-360"><ProtectedRoute component={Staff360Page} /></Route>
         <Route path="/staff"><ProtectedRoute component={StaffPage} /></Route>
@@ -870,7 +875,6 @@ function AuthenticatedRoutes() {
         <Route path="/products"><ProtectedRoute component={ProductsRedirectPage} /></Route>
         <Route path="/assets-inventory"><ProtectedRoute component={AssetsInventoryPage} /></Route>
         <Route path="/financial-statements"><ProtectedRoute component={FinancialStatementsRedirectPage} /></Route>
-        <Route path="/learning-materials"><ProtectedRoute component={LearningMaterialsPage} /></Route>
         <Route path="/children"><ProtectedRoute component={MyChildrenPage} /></Route>
         <Route path="/settings"><ProtectedRoute component={SchoolSettingsPage} /></Route>
         <Route path="/library"><ProtectedRoute component={LibraryPage} /></Route>
@@ -882,11 +886,11 @@ function AuthenticatedRoutes() {
         <Route path="/hostel"><ProtectedRoute component={HostelPage} /></Route>
         <Route path="/hostels"><ProtectedRoute component={HostelsPage} /></Route>
         <Route path="/applications"><ProtectedRoute component={ApplicationsPage} /></Route>
-        <Route path="/recruitment"><ProtectedRoute component={RecruitmentPage} /></Route>
         <Route path="/messages"><ProtectedRoute component={MessagesPage} /></Route>
         <Route path="/my-classes"><ProtectedRoute component={MyClassesPage} /></Route>
         <Route path="/my-attendance"><ProtectedRoute component={MyAttendancePage} /></Route>
         <Route path="/my-grades"><ProtectedRoute component={MyGradesPage} /></Route>
+        <Route path="/my-finance"><ProtectedRoute component={StudentFinancePage} /></Route>
         <Route path="/my-profile"><ProtectedRoute component={MyProfilePage} /></Route>
         <Route path="/my-notifications"><ProtectedRoute component={MyNotificationsPage} /></Route>
         <Route path="/my-newsletters"><ProtectedRoute component={MyNewslettersPage} /></Route>

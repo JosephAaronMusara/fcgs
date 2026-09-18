@@ -448,6 +448,7 @@ export default function CalendarPage() {
   const [allDay, setAllDay] = useState(false);
   const [includeStudents, setIncludeStudents] = useState(true);
   const [includeParents, setIncludeParents] = useState(false);
+  const [attendanceExpectation, setAttendanceExpectation] = useState<"normal" | "no_regular_attendance">("normal");
 
   const [selectedSchoolId, setSelectedSchoolId] = useState<number | null>(null);
   const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
@@ -471,6 +472,7 @@ export default function CalendarPage() {
   const [editAllDay, setEditAllDay] = useState(false);
   const [editIncludeStudents, setEditIncludeStudents] = useState(true);
   const [editIncludeParents, setEditIncludeParents] = useState(false);
+  const [editAttendanceExpectation, setEditAttendanceExpectation] = useState<"normal" | "no_regular_attendance">("normal");
   const [editClassIds, setEditClassIds] = useState<number[]>([]);
   const [editStaffViewerIds, setEditStaffViewerIds] = useState<number[]>([]);
 
@@ -653,6 +655,10 @@ export default function CalendarPage() {
         payload.includeParents = includeParents;
       }
 
+      if (scope === "school") {
+        payload.attendanceExpectation = attendanceExpectation;
+      }
+
       const response = await fetch("/api/calendar/events", {
         method: "POST",
         credentials: "include",
@@ -738,6 +744,10 @@ export default function CalendarPage() {
       if (editScope === "school" || editScope === "org") {
         payload.includeStudents = editIncludeStudents;
         payload.includeParents = editIncludeParents;
+      }
+
+      if (editScope === "school") {
+        payload.attendanceExpectation = editAttendanceExpectation;
       }
 
       const response = await fetch(`/api/calendar/events/${eventBeingEdited.id}`, {
@@ -917,6 +927,7 @@ export default function CalendarPage() {
     setAllDay(false);
     setIncludeStudents(true);
     setIncludeParents(false);
+    setAttendanceExpectation("normal");
     setSelectedSchoolId(null);
     setSelectedClassIds([]);
     setSelectedStaffViewerIds([]);
@@ -968,6 +979,7 @@ export default function CalendarPage() {
     setEditAllDay(Boolean(event?.all_day ?? event?.allDay ?? false));
     setEditIncludeStudents(Boolean(event?.include_students ?? event?.includeStudents ?? true));
     setEditIncludeParents(Boolean(event?.include_parents ?? event?.includeParents ?? false));
+    setEditAttendanceExpectation((event?.attendance_expectation ?? event?.attendanceExpectation) === "no_regular_attendance" ? "no_regular_attendance" : "normal");
     setEditClassIds(normalizeNumberArray(event?.class_ids ?? event?.classIds ?? []));
     setEditStaffViewerIds(
       normalizeNumberArray(event?.staff_viewer_ids ?? event?.staffViewerIds ?? [])
@@ -1812,6 +1824,32 @@ export default function CalendarPage() {
               </div>
             )}
 
+            {scope === "school" && (
+              <div className="rounded-lg border p-4 space-y-3">
+                <div>
+                  <p className="text-sm font-semibold">School Operations</p>
+                  <p className="text-xs text-muted-foreground">Choose whether this calendar event changes the normal attendance expectation for its date(s).</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="calendar-attendance-expectation">Attendance expectation</Label>
+                  <Select value={attendanceExpectation} onValueChange={(value) => setAttendanceExpectation(value as "normal" | "no_regular_attendance")}>
+                    <SelectTrigger id="calendar-attendance-expectation" data-testid="select-calendar-attendance-expectation">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="normal">Normal schedule</SelectItem>
+                      <SelectItem value="no_regular_attendance">No regular attendance expected</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {attendanceExpectation === "no_regular_attendance" && (
+                  <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+                    Students and staff will not be treated as expected for normal attendance on these event date(s). Lateness, absence reconciliation and related attendance alerts will not run. Existing gate access permissions are not affected; authorised people may still enter and their gate activity will still be recorded.
+                  </div>
+                )}
+              </div>
+            )}
+
             {scope === "org" && (
               <div className="space-y-4">
                 <div className="rounded-lg border p-4 space-y-3">
@@ -2355,6 +2393,32 @@ export default function CalendarPage() {
                         ? editStaffViewerIds.join(", ")
                         : "None"}
                     </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {editScope === "school" && (
+              <div className="rounded-lg border p-4 space-y-3">
+                <div>
+                  <p className="text-sm font-semibold">School Operations</p>
+                  <p className="text-xs text-muted-foreground">Choose whether this calendar event changes the normal attendance expectation for its date(s).</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-calendar-attendance-expectation">Attendance expectation</Label>
+                  <Select value={editAttendanceExpectation} onValueChange={(value) => setEditAttendanceExpectation(value as "normal" | "no_regular_attendance")}>
+                    <SelectTrigger id="edit-calendar-attendance-expectation" data-testid="select-edit-calendar-attendance-expectation">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="normal">Normal schedule</SelectItem>
+                      <SelectItem value="no_regular_attendance">No regular attendance expected</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {editAttendanceExpectation === "no_regular_attendance" && (
+                  <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+                    Students and staff will not be treated as expected for normal attendance on these event date(s). Lateness, absence reconciliation and related attendance alerts will not run. Existing gate access permissions are not affected; authorised people may still enter and their gate activity will still be recorded.
                   </div>
                 )}
               </div>
