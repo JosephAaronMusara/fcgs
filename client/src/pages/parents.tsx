@@ -964,6 +964,7 @@ function ParentUserAccountModal({
   onCorrectPhone: () => void;
 }) {
   const { toast } = useToast();
+  const { hasPermission } = useAuth();
   const [isCreating, setIsCreating] = useState(false);
 
   const { data: accountData, isLoading, refetch } = useQuery<{ user: User | null; existingIdentityAccount?: { user: User; match: any } | null }>({
@@ -1049,6 +1050,7 @@ function ParentUserAccountModal({
 
   const user = accountData?.user;
   const existingIdentityAccount = accountData?.existingIdentityAccount || null;
+  const canLinkExistingAccount = hasPermission("parents.edit") && hasPermission("users.create");
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -1105,7 +1107,16 @@ function ParentUserAccountModal({
               <p className="mt-1">This phone number is already linked to <strong>{existingIdentityAccount.match?.firstName} {existingIdentityAccount.match?.lastName}</strong>. Use the existing account so the parent keeps one login across schools.</p>
               <div className="mt-3 space-y-2">{(existingIdentityAccount.match?.schools || []).map((school: any) => <div key={school.parentId} className="rounded-md border bg-background/70 p-2 text-foreground"><div className="font-medium">{school.schoolName}</div><div className="text-muted-foreground">{school.children?.length ? `Parent of ${school.children.map((child: any) => `${child.firstName} ${child.lastName}`).join(", ")}` : "Parent record"}</div></div>)}</div>
             </div>
-            <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={onCorrectPhone}>Correct Phone Number</Button><Button onClick={() => linkExistingMutation.mutate()} disabled={linkExistingMutation.isPending}>{linkExistingMutation.isPending ? "Linking..." : "Use Existing Account"}</Button></div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button variant="outline" onClick={onCorrectPhone}>Correct Phone Number</Button>
+              {canLinkExistingAccount ? (
+                <Button onClick={() => linkExistingMutation.mutate()} disabled={linkExistingMutation.isPending}>
+                  {linkExistingMutation.isPending ? "Linking..." : "Use Existing Account"}
+                </Button>
+              ) : (
+                <p className="w-full text-right text-xs text-muted-foreground">You need Parent Edit and User Create permissions to link an existing account.</p>
+              )}
+            </div>
           </div>
         ) : isCreating ? (
           <CreateAccountForm

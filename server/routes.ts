@@ -5424,7 +5424,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/parents/:id/user/link-existing", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/parents/:id/user/link-existing", requireAuth, requireAllPermissions("parents.edit", "users.create"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       const parentId = parseIdParam(req.params.id);
