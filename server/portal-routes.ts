@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { db } from "./db";
 import { requireAuth } from "./auth";
 import { storage } from "./storage";
+import { getChildrenForParentUser, getParentRecordsForUser } from "./parent-identity";
 import {
   accessEvents,
   accessIdentities,
@@ -10,7 +11,7 @@ import {
   feesPayments,
   financialAccessOverrides,
   hostels,
-  parents,
+  schools,
   studentEarlyReleaseAuthorizations,
   students,
   transportAssignments,
@@ -30,15 +31,6 @@ function money(value: string | number | null | undefined) {
 async function currentStudent(userId: number) {
   const [student] = await db.select().from(students).where(eq(students.userId, userId)).limit(1);
   return student || null;
-}
-
-async function currentParent(userId: number) {
-  const [parent] = await db.select().from(parents).where(eq(parents.userId, userId)).limit(1);
-  return parent || null;
-}
-
-async function linkedChildren(parentId: number) {
-  return db.select().from(students).where(eq(students.parentId, parentId));
 }
 
 async function transportSnapshot(studentId: number) {
@@ -145,9 +137,10 @@ async function accessSnapshot(studentId: number) {
 }
 
 async function studentSummary(student: typeof students.$inferSelect, includePayments = false) {
-  const [classInfo, hostel, attendance, finance, access, transport] = await Promise.all([
+  const [classInfo, hostel, school, attendance, finance, access, transport] = await Promise.all([
     student.classId ? db.select().from(classes).where(eq(classes.id, student.classId)).limit(1).then((r) => r[0] || null) : null,
     student.hostelId ? db.select().from(hostels).where(eq(hostels.id, student.hostelId)).limit(1).then((r) => r[0] || null) : null,
+    student.schoolId ? db.select({ id: schools.id, name: schools.name, shortCode: schools.shortCode }).from(schools).where(eq(schools.id, student.schoolId)).limit(1).then((r) => r[0] || null) : null,
     storage.getAttendanceByStudent(student.id),
     financeSnapshot(student, includePayments),
     accessSnapshot(student.id),
@@ -166,6 +159,9 @@ async function studentSummary(student: typeof students.$inferSelect, includePaym
       classId: student.classId,
       className: classInfo?.className || null,
       classShortCode: classInfo?.shortCode || null,
+      schoolId: student.schoolId,
+      schoolName: school?.name || null,
+      schoolShortCode: school?.shortCode || null,
       isBoarding: student.isBoarding === true,
       isDayScholar: student.isDayScholar === true,
     },
@@ -216,25 +212,30 @@ export function registerPortalRoutes(app: Express) {
 
   app.get("/api/me/parent-dashboard", requireAuth, requirePortalRole("parent"), async (req, res) => {
     const user = req.user as User;
-    const parent = await currentParent(user.id);
-    if (!parent) return res.status(404).json({ message: "Parent record not found" });
-    const children = await linkedChildren(parent.id);
+    const parentRecords = await getParentRecordsForUser(user.id);
+    if (!parentRecords.length) return res.status(404).json({ message: "Parent record not found" });
+    const children = await getChildrenForParentUser(user.id);
     const summaries = await Promise.all(children.map((student) => studentSummary(student, false)));
+    const primary = parentRecords[0];
     return res.json({
-      parent: { id: parent.id, firstName: parent.firstName, lastName: parent.lastName, photo: parent.photo },
+      parent: { id: primary.id, firstName: primary.firstName, lastName: primary.lastName, photo: primary.photo },
+      parentRecords: parentRecords.map((row) => ({ id: row.id, schoolId: row.schoolId })),
       children: summaries,
     });
   });
 
   app.get("/api/me/parent-finance", requireAuth, requirePortalRole("parent"), async (req, res) => {
     const user = req.user as User;
-    const parent = await currentParent(user.id);
-    if (!parent) return res.status(404).json({ message: "Parent record not found" });
-    const children = await linkedChildren(parent.id);
-    const rows = await Promise.all(children.map(async (student) => ({
-      student: { id: student.id, admissionNo: student.admissionNo, firstName: student.firstName, lastName: student.lastName, photo: student.photo },
-      finance: await financeSnapshot(student, true),
-    })));
+    const parentRecords = await getParentRecordsForUser(user.id);
+    if (!parentRecords.length) return res.status(404).json({ message: "Parent record not found" });
+    const children = await getChildrenForParentUser(user.id);
+    const rows = await Promise.all(children.map(async (student) => {
+      const [school] = student.schoolId ? await db.select({ id: schools.id, name: schools.name, shortCode: schools.shortCode }).from(schools).where(eq(schools.id, student.schoolId)).limit(1) : [];
+      return {
+        student: { id: student.id, schoolId: student.schoolId, schoolName: school?.name || null, schoolShortCode: school?.shortCode || null, admissionNo: student.admissionNo, firstName: student.firstName, lastName: student.lastName, photo: student.photo },
+        finance: await financeSnapshot(student, true),
+      };
+    }));
     return res.json({ children: rows });
   });
 

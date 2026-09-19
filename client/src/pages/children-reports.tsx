@@ -1,280 +1,161 @@
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Download, FileText, GraduationCap } from "lucide-react";
+import { schoolFetch } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { BarChart3, Award, BookOpen, TrendingUp, GraduationCap, FileText, Download } from "lucide-react";
-import { useState, useMemo } from "react";
-import type { Student } from "@shared/schema";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { ReportCardSlip, type ReportCardData } from "@/components/academic-reports/report-card-document";
 
-interface EnrichedMark {
-  id: number;
-  percentage: string | null;
-  grade: string | null;
-  comment: string | null;
-  assessmentName: string;
-  assessmentType: string;
-  subjectName: string;
-  subjectCode: string | null;
-  term: string | null;
-  year: string | null;
-  publicationStatus?: "Published" | "Republished";
-  examId?: number | null;
-  examName?: string | null;
-}
+const REPORT_TYPES = [
+  "End-of-Term Exam",
+  "Mock Exam",
+  "Monthly Test",
+  "Fortnight Test",
+  "End-of-Vacation Exam",
+] as const;
 
-interface ChildGrades {
-  student: Student;
-  marks: EnrichedMark[];
+type ReportType = (typeof REPORT_TYPES)[number];
+
+type ChildReportIndex = {
+  student: {
+    id: number;
+    admissionNo: string | null;
+    firstName: string;
+    lastName: string;
+    photo?: string | null;
+    schoolId: number;
+    schoolName: string | null;
+    schoolShortCode: string | null;
+    classId: number | null;
+  };
+  reports: Array<{
+    examId: number;
+    examName: string;
+    assessmentTypeId: number;
+    assessmentType: ReportType;
+    publishedAt: string | null;
+    classId: number;
+  }>;
+};
+
+function PublishedReportCard({ studentId, classId, examId }: { studentId: number; classId: number; examId: number }) {
+  const { data, isLoading, error } = useQuery<ReportCardData>({
+    queryKey: ["/api/report-cards/parent", examId, classId, studentId],
+    queryFn: async () => {
+      const params = new URLSearchParams({ studentIds: String(studentId), pdfData: "1" });
+      const response = await schoolFetch(`/api/report-cards/${examId}/class/${classId}?${params.toString()}`);
+      if (!response.ok) throw new Error((await response.text()) || "Could not load the report card");
+      return response.json();
+    },
+  });
+
+  if (isLoading) return <div className="space-y-3 py-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-96 w-full" /></div>;
+  if (error || !data) return <div className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">Could not load this published report card.</div>;
+  const studentReport = data.reportCards?.find((row: any) => Number(row?.student?.id) === Number(studentId));
+  if (!studentReport) return <div className="rounded-md border p-4 text-sm text-muted-foreground">No published report is available for this examination yet.</div>;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => window.open(`/api/report-cards/${examId}/student/${studentId}/download?classId=${classId}`, "_blank", "noopener,noreferrer")}
+        >
+          <Download className="mr-2 h-4 w-4" /> Download report
+        </Button>
+      </div>
+      <div className="overflow-x-auto rounded-lg border bg-white p-2 sm:p-4">
+        <div className="min-w-[820px]">
+          <ReportCardSlip
+            data={data}
+            studentReport={studentReport}
+            onSendIndividual={() => undefined}
+            onDownloadIndividual={() => window.open(`/api/report-cards/${examId}/student/${studentId}/download?classId=${classId}`, "_blank", "noopener,noreferrer")}
+            sendingId={null}
+            downloadingId={null}
+            editableComments={false}
+            canSendIndividual={false}
+          />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function ChildrenReportsPage() {
-  const { data, isLoading } = useQuery<ChildGrades[]>({
-    queryKey: ["/api/me/children-grades"],
-  });
-
-  const [termFilter, setTermFilter] = useState<string>("all");
-  const [subjectFilter, setSubjectFilter] = useState<string>("all");
-
+  const { data, isLoading } = useQuery<ChildReportIndex[]>({ queryKey: ["/api/me/children-reports"] });
   const children = data || [];
-  const firstChild = children.length > 0 ? children[0].student : null;
-  const [activeChild, setActiveChild] = useState<string>("");
+  const [selectedChild, setSelectedChild] = useState<string>("");
+  const [reportType, setReportType] = useState<ReportType>(REPORT_TYPES[0]);
+  const [openReport, setOpenReport] = useState<string>("");
 
-  const selectedChildId = activeChild || (firstChild ? String(firstChild.id) : "");
-  const selectedChildData = children.find(c => String(c.student.id) === selectedChildId);
-
-  const terms = useMemo(() => {
-    if (!selectedChildData) return [];
-    const unique = new Set<string>();
-    selectedChildData.marks.forEach(m => {
-      if (m.term && m.year) unique.add(`${m.year} - ${m.term}`);
-    });
-    return Array.from(unique).sort().reverse();
-  }, [selectedChildData]);
-
-  const subjects = useMemo(() => {
-    if (!selectedChildData) return [];
-    const unique = new Set<string>();
-    selectedChildData.marks.forEach(m => unique.add(m.subjectName));
-    return Array.from(unique).sort();
-  }, [selectedChildData]);
-
-  const filteredMarks = useMemo(() => {
-    if (!selectedChildData) return [];
-    let filtered = [...selectedChildData.marks];
-    if (termFilter !== "all") {
-      filtered = filtered.filter(m => `${m.year} - ${m.term}` === termFilter);
-    }
-    if (subjectFilter !== "all") {
-      filtered = filtered.filter(m => m.subjectName === subjectFilter);
-    }
-    return filtered;
-  }, [selectedChildData, termFilter, subjectFilter]);
-
-  const overallAvg = useMemo(() => {
-    const withPct = filteredMarks.filter(m => m.percentage);
-    if (withPct.length === 0) return null;
-    const avg = withPct.reduce((sum, m) => sum + parseFloat(m.percentage!), 0) / withPct.length;
-    return Math.round(avg * 10) / 10;
-  }, [filteredMarks]);
-
-  const gradeColor = (grade: string | null) => {
-    if (!grade) return "secondary" as const;
-    if (["A*", "A", "1", "2"].includes(grade)) return "default" as const;
-    if (["B", "C", "3", "4", "5"].includes(grade)) return "secondary" as const;
-    return "destructive" as const;
-  };
+  const activeChildId = selectedChild || (children[0] ? String(children[0].student.id) : "");
+  const active = children.find((row) => String(row.student.id) === activeChildId) || children[0];
+  const counts = useMemo(() => Object.fromEntries(REPORT_TYPES.map((type) => [type, active?.reports.filter((row) => row.assessmentType === type).length || 0])), [active]);
+  const reports = active?.reports.filter((row) => row.assessmentType === reportType) || [];
 
   if (isLoading) {
-    return (
-      <div className="p-3 sm:p-4 lg:p-6 space-y-6">
-        <Skeleton className="h-10 w-48" />
-        <Skeleton className="h-32 w-full" />
-        <Skeleton className="h-64 w-full" />
-      </div>
-    );
+    return <div className="space-y-4 p-4 sm:p-6"><Skeleton className="h-10 w-64" /><Skeleton className="h-20 w-full" /><Skeleton className="h-64 w-full" /></div>;
   }
 
-  if (children.length === 0) {
+  if (!children.length) {
     return (
       <div className="p-4 sm:p-6">
-        <h1 className="text-3xl font-bold mb-2" data-testid="text-children-reports-title">Results & Reports</h1>
-        <Card>
-          <CardContent className="py-12 text-center">
-            <GraduationCap className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
-            <p className="text-muted-foreground">No children linked to your account.</p>
-          </CardContent>
-        </Card>
+        <h1 className="mb-4 text-3xl font-bold">Results & Reports</h1>
+        <Card><CardContent className="py-12 text-center"><GraduationCap className="mx-auto mb-4 h-12 w-12 text-muted-foreground" /><p className="text-muted-foreground">No children linked to your account.</p></CardContent></Card>
       </div>
     );
   }
 
   return (
-    <div className="p-3 sm:p-4 lg:p-6 space-y-6">
+    <div className="space-y-5 p-3 sm:p-4 lg:p-6">
       <div>
-        <h1 className="text-3xl font-bold" data-testid="text-children-reports-title">Results & Reports</h1>
-        <p className="text-muted-foreground">Your children's academic performance</p>
+        <h1 className="text-3xl font-bold">Results & Reports</h1>
+        <p className="text-muted-foreground">Published report cards for your children.</p>
       </div>
 
       {children.length > 1 && (
-        <Tabs value={selectedChildId} onValueChange={setActiveChild}>
-          <TabsList>
-            {children.map(child => (
-              <TabsTrigger key={child.student.id} value={String(child.student.id)} data-testid={`tab-child-${child.student.id}`}>
-                {child.student.firstName} {child.student.lastName}
+        <Tabs value={activeChildId} onValueChange={(value) => { setSelectedChild(value); setOpenReport(""); }}>
+          <TabsList className="h-auto flex-wrap justify-start">
+            {children.map(({ student }) => (
+              <TabsTrigger key={student.id} value={String(student.id)} className="h-auto py-2">
+                <span className="text-left"><span className="block">{student.firstName} {student.lastName}</span><span className="block text-[11px] font-normal text-muted-foreground">{student.schoolShortCode || student.schoolName}</span></span>
               </TabsTrigger>
             ))}
           </TabsList>
         </Tabs>
       )}
 
-      {selectedChildData && (
-        <>
-          <Card>
-            <CardContent className="pt-4 pb-4">
-              <div className="flex items-center gap-4">
-                <Avatar>
-                  <AvatarFallback className="bg-primary/10 text-primary">
-                    {selectedChildData.student.firstName[0]}{selectedChildData.student.lastName[0]}
-                  </AvatarFallback>
-                </Avatar>
-                <div>
-                  <p className="font-semibold">{selectedChildData.student.firstName} {selectedChildData.student.lastName}</p>
-                  <p className="text-sm text-muted-foreground font-mono">{selectedChildData.student.admissionNo}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+      {active && (
+        <Card><CardContent className="flex items-center justify-between gap-4 py-4"><div><div className="font-semibold">{active.student.firstName} {active.student.lastName}</div><div className="text-sm text-muted-foreground">{active.student.schoolName || "School"} · {active.student.admissionNo || "No admission number"}</div></div><FileText className="h-5 w-5 text-muted-foreground" /></CardContent></Card>
+      )}
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
-            <Card>
-              <CardContent className="pt-4 pb-4">
-                <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">
-                  <FileText className="w-4 h-4" />Assessments
-                </div>
-                <p className="text-2xl font-bold">{filteredMarks.length}</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-4 pb-4">
-                <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">
-                  <TrendingUp className="w-4 h-4" />Average
-                </div>
-                <p className="text-2xl font-bold">{overallAvg !== null ? `${overallAvg}%` : "—"}</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-4 pb-4">
-                <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">
-                  <BookOpen className="w-4 h-4" />Subjects
-                </div>
-                <p className="text-2xl font-bold">{subjects.length}</p>
-              </CardContent>
-            </Card>
-          </div>
+      <Tabs value={reportType} onValueChange={(value) => { setReportType(value as ReportType); setOpenReport(""); }}>
+        <TabsList className="h-auto w-full flex-wrap justify-start bg-muted p-1">
+          {REPORT_TYPES.map((type) => <TabsTrigger key={type} value={type}>{type} ({counts[type] || 0})</TabsTrigger>)}
+        </TabsList>
+      </Tabs>
 
-          {Array.from(new Map(selectedChildData.marks.filter(m => m.examId).map(m => [m.examId, m])).values()).length > 0 && (
-            <Card>
-              <CardHeader><CardTitle className="text-base">Published Academic Reports</CardTitle></CardHeader>
-              <CardContent className="flex flex-wrap gap-2">
-                {Array.from(new Map(selectedChildData.marks.filter(m => m.examId).map(m => [m.examId, m])).values()).map((mark) => (
-                  <Button key={mark.examId} variant="outline" size="sm" onClick={() => window.open(`/api/report-cards/${mark.examId}/student/${selectedChildData.student.id}/download`, "_blank", "noopener,noreferrer")}>
-                    <Download className="mr-2 h-4 w-4" />{mark.examName || mark.assessmentName}
-                  </Button>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-
-          <div className="flex items-center gap-3 flex-wrap">
-            <Select value={termFilter} onValueChange={setTermFilter}>
-              <SelectTrigger className="w-[200px]" data-testid="select-term-filter">
-                <SelectValue placeholder="Filter by term" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Terms</SelectItem>
-                {terms.map(t => (
-                  <SelectItem key={t} value={t}>{t}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={subjectFilter} onValueChange={setSubjectFilter}>
-              <SelectTrigger className="w-[200px]" data-testid="select-subject-filter">
-                <SelectValue placeholder="Filter by subject" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Subjects</SelectItem>
-                {subjects.map(s => (
-                  <SelectItem key={s} value={s}>{s}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Award className="w-5 h-5" />
-                Grade Results
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {filteredMarks.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Subject</TableHead>
-                      <TableHead>Assessment</TableHead>
-                      <TableHead>Type</TableHead>
-                      <TableHead>Percentage</TableHead>
-                      <TableHead>Grade</TableHead>
-                      <TableHead>Comment</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredMarks.map(mark => (
-                      <TableRow key={mark.id} data-testid={`row-grade-${mark.id}`}>
-                        <TableCell>
-                          <div>
-                            <span className="font-medium">{mark.subjectName}</span>
-                            {mark.subjectCode && (
-                              <span className="text-muted-foreground text-xs ml-1">({mark.subjectCode})</span>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span>{mark.assessmentName}</span>
-                        {mark.publicationStatus && <Badge className="bg-blue-600 text-white hover:bg-blue-600">{mark.publicationStatus}</Badge>}
-                      </div>
-                    </TableCell>
-                        <TableCell><Badge variant="outline">{mark.assessmentType}</Badge></TableCell>
-                        <TableCell className="font-mono">
-                          {mark.percentage ? `${parseFloat(mark.percentage).toFixed(1)}%` : "—"}
-                        </TableCell>
-                        <TableCell>
-                          {mark.grade ? <Badge variant={gradeColor(mark.grade)}>{mark.grade}</Badge> : "—"}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground max-w-[200px] truncate">
-                          {mark.comment || "—"}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <div className="text-center py-8">
-                  <Award className="w-10 h-10 mx-auto mb-3 text-muted-foreground" />
-                  <p className="text-muted-foreground">No grade records found.</p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </>
+      {!reports.length ? (
+        <Card><CardContent className="py-10 text-center text-muted-foreground">No published report is available for this examination type yet.</CardContent></Card>
+      ) : (
+        <Accordion type="single" collapsible value={openReport} onValueChange={setOpenReport} className="space-y-3">
+          {reports.map((report) => {
+            const value = `${active.student.id}:${report.examId}`;
+            return (
+              <AccordionItem key={value} value={value} className="rounded-xl border bg-card px-5">
+                <AccordionTrigger className="text-left text-base font-semibold uppercase hover:no-underline">{report.examName}</AccordionTrigger>
+                <AccordionContent>
+                  {openReport === value && <PublishedReportCard studentId={active.student.id} classId={report.classId} examId={report.examId} />}
+                </AccordionContent>
+              </AccordionItem>
+            );
+          })}
+        </Accordion>
       )}
     </div>
   );

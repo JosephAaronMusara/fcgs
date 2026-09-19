@@ -20,6 +20,7 @@ import { registerFleetRoutes } from "./fleet-routes";
 import { registerAccessControlRoutes } from "./access-control-routes";
 import { registerAccessControlOperations, getSchoolDaySchedule, sendAttendanceTemplate, syncSchoolAccessPolicies, syncStudentPolicy } from "./access-control-operations";
 import { registerPortalRoutes } from "./portal-routes";
+import { describeParentIdentityMatch, existingUserForParentIdentity, getAccessibleSchoolIdsForParentUser, getChildrenForParentUser, getParentIdsForUser, linkParentIdentityToUser, normalizeParentPhone, parentUserCanAccessStudent } from "./parent-identity";
 import { fleetRequirementForSchool } from "./school-feature-flags";
 import { communicationService, createInAppNotifications } from "./communication";
 import { renderAppRoutePdf, reportPdfFilename } from "./pdf-renderer";
@@ -1863,12 +1864,12 @@ async function getUserExternalChannels(user: User): Promise<ExternalChannel[]> {
     pushIfPresent("sms", linkedStaff.phone);
   }
 
-  const [linkedParent] = await db.select({
+  const linkedParents = await db.select({
     email: parentsTable.email,
     phone: parentsTable.phone,
-  }).from(parentsTable).where(eq(parentsTable.userId, user.id)).limit(1);
+  }).from(parentsTable).where(eq(parentsTable.userId, user.id));
 
-  if (linkedParent) {
+  for (const linkedParent of linkedParents) {
     pushIfPresent("email", linkedParent.email);
     pushIfPresent("sms", linkedParent.phone);
   }
@@ -1997,7 +1998,9 @@ type AccountDistributionPlanRow = {
   recipient: AccountDistributionRecipient;
   user?: User;
   username: string | null;
-  action: "existing" | "create" | "exception";
+  action: "existing" | "create" | "link_existing" | "link_after_create" | "exception";
+  identityKey?: string | null;
+  sourceRecipientId?: number | null;
   reasonCode?: string;
   reason?: string;
 };
@@ -2008,6 +2011,7 @@ const accountDistributionRequestSchema = z.object({
   search: z.string().optional().default(""),
   classFilter: z.string().optional().default("all"),
   statusFilter: z.string().optional().default("all"),
+  existingDelivery: z.enum(["skip", "send"]).optional().default("send"),
 });
 
 type AccountDistributionRequest = z.infer<typeof accountDistributionRequestSchema>;
@@ -2023,8 +2027,8 @@ function accountDistributionUsername(recipient: AccountDistributionRecipient): s
   }
 
   if (recipient.recipientType === "parent") {
-    const normalizedPhone = String(recipient.phone || "").replace(/\D/g, "").slice(-9);
-    if (normalizedPhone.length >= 3) return normalizedPhone;
+    const normalizedPhone = normalizeParentPhone(recipient.phone);
+    if (normalizedPhone.length >= 7) return normalizedPhone;
     const email = String(recipient.email || "").trim();
     return email.length >= 3 ? email : null;
   }
@@ -2181,57 +2185,110 @@ async function loadAccountDistributionRecipients(
 
 async function planAccountDistribution(recipients: AccountDistributionRecipient[]): Promise<AccountDistributionPlanRow[]> {
   const userIds = Array.from(new Set(recipients.map((recipient) => recipient.userId).filter((id): id is number => typeof id === "number")));
-  const linkedUsers = userIds.length
-    ? await db.select().from(users).where(inArray(users.id, userIds))
-    : [];
+  const linkedUsers = userIds.length ? await db.select().from(users).where(inArray(users.id, userIds)) : [];
   const usersById = new Map(linkedUsers.map((user) => [user.id, user]));
 
-  const candidateUsernames = recipients
-    .filter((recipient) => !recipient.userId)
-    .map(accountDistributionUsername)
-    .filter((value): value is string => Boolean(value));
-  const usernameCounts = new Map<string, number>();
-  for (const username of candidateUsernames) {
-    usernameCounts.set(username, (usernameCounts.get(username) || 0) + 1);
-  }
-  const existingUsernameRows = candidateUsernames.length
-    ? await db.select({ id: users.id, username: users.username }).from(users).where(inArray(users.username, Array.from(new Set(candidateUsernames))))
-    : [];
-  const existingUsernames = new Set(existingUsernameRows.map((row) => row.username));
-
-  return recipients.map((recipient) => {
-    const user = recipient.userId ? usersById.get(recipient.userId) : undefined;
-    const username = user?.username || accountDistributionUsername(recipient);
-
+  const preliminary = await Promise.all(recipients.map(async (recipient): Promise<AccountDistributionPlanRow> => {
+    const directUser = recipient.userId ? usersById.get(recipient.userId) : undefined;
+    const identityKey = recipient.recipientType === "parent" ? normalizeParentPhone(recipient.phone) : null;
     if (recipient.recipientType === "staff" && recipient.status !== "active") {
-      return { recipient, user, username, action: "exception" as const, reasonCode: "inactive_record", reason: "Staff member is inactive" };
+      return { recipient, user: directUser, username: directUser?.username || accountDistributionUsername(recipient), action: "exception", reasonCode: "inactive_record", reason: "Staff member is inactive", identityKey };
     }
     if (recipient.recipientType === "student" && (recipient.status !== "active" || recipient.archivedAt)) {
-      return { recipient, user, username, action: "exception" as const, reasonCode: "inactive_record", reason: recipient.archivedAt ? "Student record is archived" : "Student is not active" };
+      return { recipient, user: directUser, username: directUser?.username || accountDistributionUsername(recipient), action: "exception", reasonCode: "inactive_record", reason: recipient.archivedAt ? "Student record is archived" : "Student is not active", identityKey };
     }
-    if (recipient.userId && !user) {
-      return { recipient, username, action: "exception" as const, reasonCode: "broken_account_link", reason: "The linked user account could not be found" };
+    if (recipient.userId && !directUser) {
+      return { recipient, username: accountDistributionUsername(recipient), action: "exception", reasonCode: "broken_account_link", reason: "The linked user account could not be found", identityKey };
     }
-    if (user && user.isActive === false) {
-      return { recipient, user, username, action: "exception" as const, reasonCode: "inactive_account", reason: "Existing user account is inactive" };
+    if (directUser?.isActive === false) {
+      return { recipient, user: directUser, username: directUser.username, action: "exception", reasonCode: "inactive_account", reason: "Existing user account is inactive", identityKey };
     }
-    if (!accountDistributionHasContact(recipient, user)) {
-      return { recipient, user, username, action: "exception" as const, reasonCode: "missing_contact", reason: "No phone number or email address is available" };
+    if (directUser) {
+      if (!accountDistributionHasContact(recipient, directUser)) return { recipient, user: directUser, username: directUser.username, action: "exception", reasonCode: "missing_contact", reason: "No phone number or email address is available", identityKey };
+      return { recipient, user: directUser, username: directUser.username, action: "existing", identityKey };
     }
-    if (user) {
-      return { recipient, user, username: user.username, action: "existing" as const };
+
+    if (recipient.recipientType === "parent") {
+      if (!identityKey || identityKey.length < 7) {
+        return { recipient, username: accountDistributionUsername(recipient), action: "exception", reasonCode: "phone_correction_required", reason: "Enter a valid parent phone number before creating portal credentials", identityKey };
+      }
+      const identity = recipient.schoolId ? await describeParentIdentityMatch({ schoolId: recipient.schoolId, phone: recipient.phone, excludeParentId: recipient.id }) : null;
+      if (identity?.conflictingUserIds?.length) {
+        return { recipient, username: accountDistributionUsername(recipient), action: "exception", reasonCode: "parent_identity_conflict", reason: "This phone number is linked to more than one parent portal account. Correct the parent identity before sending credentials.", identityKey };
+      }
+      if (identity?.userId) {
+        const existingAccount = await storage.getUser(Number(identity.userId));
+        if (!existingAccount || existingAccount.isActive === false) {
+          return { recipient, username: existingAccount?.username || accountDistributionUsername(recipient), action: "exception", reasonCode: existingAccount ? "inactive_account" : "broken_account_link", reason: existingAccount ? "Existing parent account is inactive" : "Existing cross-school parent account could not be found", identityKey };
+        }
+        if (!accountDistributionHasContact(recipient, existingAccount)) return { recipient, user: existingAccount, username: existingAccount.username, action: "exception", reasonCode: "missing_contact", reason: "No phone number or email address is available", identityKey };
+        return { recipient, user: existingAccount, username: existingAccount.username, action: "link_existing", identityKey };
+      }
     }
-    if (!username) {
-      return { recipient, username: null, action: "exception" as const, reasonCode: "username_unavailable", reason: "A username could not be generated from the available record details" };
+
+    if (!accountDistributionHasContact(recipient)) {
+      return { recipient, username: accountDistributionUsername(recipient), action: "exception", reasonCode: "missing_contact", reason: "No phone number or email address is available", identityKey };
     }
-    if ((usernameCounts.get(username) || 0) > 1) {
-      return { recipient, username, action: "exception" as const, reasonCode: "username_collision", reason: `Generated username ${username} is shared by more than one record` };
+    const username = accountDistributionUsername(recipient);
+    if (!username) return { recipient, username: null, action: "exception", reasonCode: "username_unavailable", reason: "A username could not be generated from the available record details", identityKey };
+    return { recipient, username, action: "create", identityKey };
+  }));
+
+  // Same parent identity selected more than once must create at most one account.
+  const parentCreateByIdentity = new Map<string, AccountDistributionPlanRow>();
+  for (const row of preliminary) {
+    if (row.recipient.recipientType !== "parent" || row.action !== "create" || !row.identityKey) continue;
+    const source = parentCreateByIdentity.get(row.identityKey);
+    if (!source) parentCreateByIdentity.set(row.identityKey, row);
+    else {
+      row.action = "link_after_create";
+      row.sourceRecipientId = source.recipient.id;
+      row.username = source.username;
     }
-    if (existingUsernames.has(username)) {
-      return { recipient, username, action: "exception" as const, reasonCode: "username_collision", reason: `Generated username ${username} already belongs to another account` };
+  }
+
+  const createRows = preliminary.filter((row) => row.action === "create" && row.username);
+  const usernameGroups = new Map<string, AccountDistributionPlanRow[]>();
+  for (const row of createRows) {
+    const key = String(row.username);
+    usernameGroups.set(key, [...(usernameGroups.get(key) || []), row]);
+  }
+  const usernames = Array.from(usernameGroups.keys());
+  const existingUsernameRows = usernames.length ? await db.select().from(users).where(inArray(users.username, usernames)) : [];
+  const userByUsername = new Map(existingUsernameRows.map((user) => [user.username, user]));
+
+  for (const [username, rows] of usernameGroups) {
+    if (rows.length > 1) {
+      for (const row of rows) {
+        row.action = "exception";
+        row.reasonCode = "username_collision";
+        row.reason = `Generated username ${username} is shared by more than one unrelated record`;
+      }
+      continue;
     }
-    return { recipient, username, action: "create" as const };
-  });
+    const existingAccount = userByUsername.get(username);
+    if (!existingAccount) continue;
+    const row = rows[0];
+    row.action = "exception";
+    row.reasonCode = row.recipient.recipientType === "parent" ? "phone_correction_required" : "username_collision";
+    row.reason = row.recipient.recipientType === "parent"
+      ? `This phone number is already used by another FCGS account but is not linked to this parent identity. Correct the parent phone number before continuing.`
+      : `Generated username ${username} already belongs to another account`;
+  }
+
+  // If the one row responsible for creating a shared parent account cannot create it,
+  // every dependent same-identity row must surface the same actionable exception in preview.
+  const rowsByRecipientId = new Map(preliminary.map((row) => [row.recipient.id, row]));
+  for (const row of preliminary) {
+    if (row.action !== "link_after_create" || !row.sourceRecipientId) continue;
+    const source = rowsByRecipientId.get(row.sourceRecipientId);
+    if (source?.action === "exception") {
+      row.action = "exception";
+      row.reasonCode = source.reasonCode || "parent_identity_conflict";
+      row.reason = source.reason || "The shared parent account cannot be created until this parent identity is corrected.";
+    }
+  }
+  return preliminary;
 }
 
 async function createAccountForDistribution(recipient: AccountDistributionRecipient, username: string): Promise<User> {
@@ -2253,7 +2310,7 @@ async function createAccountForDistribution(recipient: AccountDistributionRecipi
       isActive: true,
       mustResetPassword: true,
     });
-    await storage.updateParent(recipient.id, { userId: newUser.id });
+    await linkParentIdentityToUser(recipient.id, newUser.id);
     return newUser;
   }
 
@@ -3037,12 +3094,11 @@ async function ensurePublishedPortalAccess(args: {
     return true;
   }
 
-  const [parent] = await db.select().from(parentsTable).where(eq(parentsTable.userId, args.user.id)).limit(1);
-  if (!parent) {
+  const linkedChildren = await getChildrenForParentUser(args.user.id);
+  if (!linkedChildren.length) {
     args.res.status(403).json({ message: "Parent profile not found" });
     return false;
   }
-  const linkedChildren = await db.select().from(studentsTable).where(eq(studentsTable.parentId, parent.id));
   const allowed = linkedChildren.some((student: any) =>
     Number(student.classId) === Number(args.classId) && (!args.studentId || Number(student.id) === Number(args.studentId))
   );
@@ -5125,6 +5181,18 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/parent-identity/match", requireAuth, requireAnyPermission("parents.view", "parents.create", "parents.edit"), async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      const schoolId = getSchoolContext(req) || currentUser.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const phone = String(req.query.phone || "");
+      const excludeParentId = req.query.excludeParentId ? Number(req.query.excludeParentId) : null;
+      const match = await describeParentIdentityMatch({ schoolId, phone, excludeParentId });
+      return res.json({ match });
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/parents/:id", requireAuth, async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
@@ -5147,16 +5215,39 @@ export async function registerRoutes(
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req);
       const data = insertParentSchema.parse(req.body);
-
-      // Determine effective schoolId - require context for all roles
       const effectiveSchoolId = schoolId || currentUser.schoolId;
+      if (!effectiveSchoolId) return res.status(400).json({ message: "School context required to create parent" });
 
-      if (!effectiveSchoolId) {
-        return res.status(400).json({ message: "School context required to create parent" });
+      const identity = await describeParentIdentityMatch({ schoolId: effectiveSchoolId, phone: data.phone });
+      const confirmedParentId = Number(req.body?.confirmExistingParentId || 0) || null;
+      if (identity?.conflictingUserIds?.length) {
+        return res.status(409).json({ code: "PARENT_PHONE_ACCOUNT_CONFLICT", message: "This phone number is linked to more than one portal account. Correct the existing parent identity before continuing.", match: identity });
+      }
+      if (identity && confirmedParentId !== Number(identity.parentId)) {
+        return res.status(409).json({ code: "PARENT_PHONE_EXISTS", message: `This phone number already belongs to ${identity.firstName} ${identity.lastName}. Use the existing parent or correct the phone number.`, match: identity });
+      }
+
+      if (identity) {
+        const sameSchool = identity.schools.find((row: any) => Number(row.schoolId) === Number(effectiveSchoolId));
+        if (sameSchool) {
+          const existing = await storage.getParent(Number(sameSchool.parentId));
+          if (!existing) return res.status(409).json({ code: "PARENT_PHONE_EXISTS", message: "This parent already exists at the current school.", match: identity });
+          return res.status(200).json({ ...existing, identityReused: true });
+        }
       }
 
       const newParent = await storage.createParent({
         ...data,
+        schoolId: effectiveSchoolId,
+        userId: identity?.userId || undefined,
+      });
+      if (identity?.userId) await linkParentIdentityToUser(newParent.id, Number(identity.userId));
+      logActivity(req, {
+        action: identity ? "link" : "create",
+        category: "parents",
+        description: identity ? `Linked parent #${newParent.id} to an existing cross-school parent identity.` : `Created parent #${newParent.id}.`,
+        targetType: "parent",
+        targetId: newParent.id,
         schoolId: effectiveSchoolId,
       });
       res.status(201).json(newParent);
@@ -5171,16 +5262,38 @@ export async function registerRoutes(
       const schoolId = getSchoolContext(req) || currentUser.schoolId;
       const parentId = parseIdParam(req.params.id);
       const parent = await storage.getParent(parentId);
-      if (!parent) {
-        return res.status(404).json({ message: "Parent not found" });
+      if (!parent) return res.status(404).json({ message: "Parent not found" });
+      if (schoolId && parent.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+
+      const { schoolId: _bodySchoolId, confirmExistingParentId, ...safeBody } = req.body || {};
+      const nextPhone = safeBody.phone !== undefined ? String(safeBody.phone || "") : parent.phone;
+      if (!nextPhone.trim()) return res.status(400).json({ message: "Phone number is required" });
+      const phoneChanged = normalizeParentPhone(nextPhone) !== normalizeParentPhone(parent.phone);
+      if (phoneChanged && parent.schoolId) {
+        const identity = await describeParentIdentityMatch({ schoolId: parent.schoolId, phone: nextPhone, excludeParentId: parent.id });
+        if (identity?.conflictingUserIds?.length) {
+          return res.status(409).json({ code: "PARENT_PHONE_ACCOUNT_CONFLICT", message: "This phone number is linked to more than one portal account. Correct the existing parent identity before continuing.", match: identity });
+        }
+        if (identity && Number(confirmExistingParentId || 0) !== Number(identity.parentId)) {
+          return res.status(409).json({ code: "PARENT_PHONE_EXISTS", message: `This phone number already belongs to ${identity.firstName} ${identity.lastName}. Use the existing parent or correct the phone number.`, match: identity });
+        }
+        const sameSchool = identity?.schools?.find((row: any) => Number(row.schoolId) === Number(parent.schoolId));
+        if (sameSchool) {
+          return res.status(409).json({ code: "PARENT_PHONE_DUPLICATE_IN_SCHOOL", message: "This phone number already belongs to another parent record at this school. Use that existing parent record or correct the phone number.", match: identity });
+        }
+        if (identity?.userId && parent.userId && Number(identity.userId) !== Number(parent.userId)) {
+          return res.status(409).json({
+            code: "PARENT_PHONE_ACCOUNT_CONFLICT",
+            message: "This phone number already belongs to a different FCGS parent portal account. Correct the phone number before continuing; accounts are never merged automatically.",
+            match: identity,
+          });
+        }
+        if (identity?.userId) safeBody.userId = identity.userId;
       }
-      // Enforce school context - must match parent.schoolId exactly
-      if (schoolId && parent.schoolId !== schoolId) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-      // Strip schoolId from body for all roles to prevent cross-school moves
-      const { schoolId: _bodySchoolId, ...safeBody } = req.body;
+
       const updated = await storage.updateParent(parentId, safeBody);
+      if (updated?.userId) await linkParentIdentityToUser(parentId, Number(updated.userId));
+      logActivity(req, { action: "update", category: "parents", description: `Updated parent #${parentId}.`, targetType: "parent", targetId: parentId, schoolId: parent.schoolId });
       res.json(updated);
     } catch (error) {
       next(error);
@@ -5210,76 +5323,71 @@ export async function registerRoutes(
   app.post("/api/parents/import", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("parents.import"), async (req, res, next) => {
     try {
       const { parents: parentData } = req.body;
-      if (!Array.isArray(parentData)) {
-        return res.status(400).json({ message: "Invalid data format" });
-      }
-
+      if (!Array.isArray(parentData)) return res.status(400).json({ message: "Invalid data format" });
       const schoolId = getSchoolContext(req);
-      if (!schoolId) {
-        return res.status(400).json({ message: "School context required for import" });
-      }
-
-      // Preload all parents for this school once (performance optimization)
-      const allParents = await storage.getAllParents();
-      const schoolParents = allParents.filter(p => p.schoolId === schoolId);
+      if (!schoolId) return res.status(400).json({ message: "School context required for import" });
 
       let imported = 0;
       let skipped = 0;
+      let linkedExisting = 0;
+      const exceptions: Array<{ row: number; name: string; phone?: string; reason: string }> = [];
 
-      for (const row of parentData) {
+      for (let index = 0; index < parentData.length; index += 1) {
+        const row = parentData[index];
         try {
-          // Validate basic required fields
-          if (!row.firstName || !row.lastName) {
-            skipped++;
+          if (!row.firstName || !row.lastName || !row.phone) {
+            skipped += 1;
+            exceptions.push({ row: index + 1, name: `${row.firstName || ""} ${row.lastName || ""}`.trim(), phone: row.phone, reason: "First name, last name and phone are required" });
             continue;
           }
-
-          const phone = row.phone?.replace(/\D/g, "").slice(-9) || "";
-
-          // Check if parent already exists by phone (scoped to current school)
-          let existingParent = null;
-          if (phone && phone.length >= 9) {
-            existingParent = schoolParents.find(p => {
-              const pPhone = p.phone?.replace(/\D/g, "").slice(-9) || "";
-              return pPhone === phone && pPhone.length >= 9;
-            });
+          const identity = await describeParentIdentityMatch({ schoolId, phone: row.phone });
+          if (identity?.conflictingUserIds?.length) {
+            skipped += 1;
+            exceptions.push({ row: index + 1, name: `${row.firstName} ${row.lastName}`.trim(), phone: row.phone, reason: "Phone is already linked to multiple portal accounts and needs manual correction" });
+            continue;
           }
-
-          if (existingParent) {
-            // Update existing parent
-            await storage.updateParent(existingParent.id, {
-              firstName: row.firstName || existingParent.firstName,
-              lastName: row.lastName || existingParent.lastName,
-              email: row.email || existingParent.email,
-              relationship: row.relationship || existingParent.relationship,
-              occupation: row.occupation || existingParent.occupation,
-              address: row.address || existingParent.address,
-            });
-            imported++;
-          } else {
-            // Create new parent with school context
-            const newParent = await storage.createParent({
-              firstName: row.firstName,
-              lastName: row.lastName,
-              phone: row.phone || "",
+          const sameSchool = identity?.schools?.find((entry: any) => Number(entry.schoolId) === Number(schoolId));
+          if (sameSchool) {
+            await storage.updateParent(Number(sameSchool.parentId), {
+              firstName: row.firstName || identity?.firstName,
+              lastName: row.lastName || identity?.lastName,
               email: row.email || undefined,
               relationship: row.relationship || "parent",
               occupation: row.occupation || undefined,
               address: row.address || undefined,
-              schoolId,
+              streetAddress: row.streetAddress || undefined,
+              residentialArea: row.residentialArea || undefined,
             });
-            schoolParents.push(newParent);
-            imported++;
+            imported += 1;
+            if (identity?.userId) await linkParentIdentityToUser(Number(sameSchool.parentId), Number(identity.userId));
+            continue;
           }
-        } catch {
-          skipped++;
+          const created = await storage.createParent({
+            firstName: row.firstName,
+            lastName: row.lastName,
+            phone: row.phone,
+            email: row.email || undefined,
+            relationship: row.relationship || "parent",
+            occupation: row.occupation || undefined,
+            address: row.address || undefined,
+            streetAddress: row.streetAddress || undefined,
+            residentialArea: row.residentialArea || undefined,
+            schoolId,
+            userId: identity?.userId || undefined,
+          });
+          if (identity?.userId) {
+            await linkParentIdentityToUser(created.id, Number(identity.userId));
+            linkedExisting += 1;
+          }
+          imported += 1;
+        } catch (error) {
+          skipped += 1;
+          exceptions.push({ row: index + 1, name: `${row.firstName || ""} ${row.lastName || ""}`.trim(), phone: row.phone, reason: error instanceof Error ? error.message : "Import failed" });
         }
       }
 
-      res.json({ imported, skipped, total: parentData.length });
-    } catch (error) {
-      next(error);
-    }
+      res.json({ imported, skipped, linkedExisting, total: parentData.length, exceptions });
+    } catch (error) { next(error); }
   });
 
   // Parent user account management
@@ -5300,16 +5408,37 @@ export async function registerRoutes(
       if (parent.userId) {
         const user = await storage.getUser(parent.userId);
         if (user) {
-          // Strip password from response
           const { password: _pw, ...safeUser } = user;
-          return res.json({ user: safeUser });
+          return res.json({ user: safeUser, existingIdentityAccount: null });
         }
       }
 
-      res.json({ user: null });
+      const identityAccount = await existingUserForParentIdentity(parentId);
+      if (identityAccount) {
+        const { password: _pw, ...safeUser } = identityAccount.user;
+        return res.json({ user: null, existingIdentityAccount: { user: safeUser, match: identityAccount.description } });
+      }
+      res.json({ user: null, existingIdentityAccount: null });
     } catch (error) {
       next(error);
     }
+  });
+
+  app.post("/api/parents/:id/user/link-existing", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+    try {
+      const schoolId = getSchoolContext(req);
+      const parentId = parseIdParam(req.params.id);
+      const parent = await storage.getParent(parentId);
+      if (!parent) return res.status(404).json({ message: "Parent not found" });
+      if (schoolId && parent.schoolId !== schoolId) return res.status(403).json({ message: "Access denied" });
+      const identityAccount = await existingUserForParentIdentity(parentId);
+      if (!identityAccount) return res.status(409).json({ message: "No existing FCGS parent account is available to link. Correct the phone number or create a new account." });
+      if (identityAccount.user.isActive === false) return res.status(409).json({ message: "The existing parent account is inactive. Reactivate it before linking this school." });
+      await linkParentIdentityToUser(parentId, identityAccount.user.id);
+      logActivity(req, { action: "link", category: "parents", description: `Linked parent #${parentId} to existing portal account #${identityAccount.user.id}.`, targetType: "parent", targetId: parentId, schoolId: parent.schoolId });
+      const { password: _pw, ...safeUser } = identityAccount.user;
+      res.json({ user: safeUser, message: "Existing parent account linked successfully" });
+    } catch (error) { next(error); }
   });
 
   app.post("/api/parents/:id/user", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
@@ -5333,6 +5462,10 @@ export async function registerRoutes(
 
       if (parent.userId) {
         return res.status(400).json({ message: "Parent already has a user account" });
+      }
+      const identityAccount = await existingUserForParentIdentity(parentId);
+      if (identityAccount) {
+        return res.status(409).json({ code: "PARENT_ACCOUNT_EXISTS_ELSEWHERE", message: "This parent already has an FCGS Portal account through another school. Use Existing Account instead of creating another account.", match: identityAccount.description });
       }
 
       const uniqueError = await validateUserUniqueness(username);
@@ -5380,7 +5513,7 @@ export async function registerRoutes(
         ...tokenData,
       });
 
-      await storage.updateParent(parentId, { userId: newUser.id });
+      await linkParentIdentityToUser(parentId, newUser.id);
 
       const name = `${parent.firstName} ${parent.lastName}`;
       const userId = (req.user as User).id;
@@ -5661,13 +5794,12 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Access denied" });
       }
       if (user.role === "parent") {
-        const allParents = await storage.getAllParents();
-        const parentRecord = allParents.find((parent) => parent.userId === user.id);
-        if (!parentRecord || parentRecord.id !== requestedParentId) {
+        const parentIds = await getParentIdsForUser(user.id);
+        if (!parentIds.includes(requestedParentId)) {
           logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access another parent's linked children", targetType: "students" });
           return res.status(403).json({ message: "Access denied" });
         }
-        const linkedStudents = await storage.getStudentsByParent(parentRecord.id);
+        const linkedStudents = await storage.getStudentsByParent(requestedParentId);
         return res.json(linkedStudents.map((student) => ({
           id: student.id, schoolId: student.schoolId, admissionNo: student.admissionNo,
           firstName: student.firstName, lastName: student.lastName, photo: student.photo,
@@ -5690,20 +5822,18 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Student not found" });
       }
 
+      const user = req.user as User;
       const schoolId = getSchoolContext(req);
-      if (schoolId && student.schoolId !== schoolId) {
+      if (user.role !== "parent" && user.role !== "student" && schoolId && student.schoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
 
-      const user = req.user as User;
       if (user.role === "student" && student.userId !== user.id) {
         logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to access another student's record", targetType: "student", targetId: String(student.id) });
         return res.status(403).json({ message: "Access denied" });
       }
       if (user.role === "parent") {
-        const parentRows = await storage.getAllParents();
-        const currentParent = parentRows.find((row) => row.userId === user.id);
-        if (!currentParent || student.parentId !== currentParent.id) {
+        if (!(await parentUserCanAccessStudent(user.id, student.id))) {
           logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access an unlinked student record", targetType: "student", targetId: String(student.id) });
           return res.status(403).json({ message: "Access denied" });
         }
@@ -6278,10 +6408,8 @@ export async function registerRoutes(
 
       const parentPhoneMap = new Map<string, number>();
       for (const p of schoolParents) {
-        if (p.phone) {
-          const normalizedPhone = p.phone.replace(/\D/g, "").slice(-9);
-          parentPhoneMap.set(normalizedPhone, p.id);
-        }
+        const normalizedPhone = normalizeParentPhone(p.phone);
+        if (normalizedPhone) parentPhoneMap.set(normalizedPhone, p.id);
       }
 
       let imported = 0;
@@ -6315,29 +6443,40 @@ export async function registerRoutes(
 
           let parentId: number | undefined;
           if (student.parentName || student.parentPhone) {
-            const normalizedPhone = student.parentPhone?.replace(/\D/g, "").slice(-9) || "";
+            const normalizedPhone = normalizeParentPhone(student.parentPhone);
 
             if (normalizedPhone && parentPhoneMap.has(normalizedPhone)) {
               parentId = parentPhoneMap.get(normalizedPhone);
-            } else if (student.parentName && effectiveSchoolId) {
-              const nameParts = student.parentName.trim().split(/\s+/);
-              const firstName = nameParts[0] || "Parent";
-              const lastName = nameParts.slice(1).join(" ") || student.lastName;
-
-              const newParent = await storage.createParent({
-                firstName,
-                lastName,
-                phone: student.parentPhone?.trim() || "",
-                email: student.parentEmail?.trim() || undefined,
-                relationship: student.parentRelationship?.trim() || undefined,
-                schoolId: effectiveSchoolId,
-              });
-
-              if (normalizedPhone) {
-                parentPhoneMap.set(normalizedPhone, newParent.id);
+            } else if (effectiveSchoolId) {
+              const identity = normalizedPhone
+                ? await describeParentIdentityMatch({ schoolId: effectiveSchoolId, phone: student.parentPhone })
+                : null;
+              if (identity?.conflictingUserIds?.length) {
+                throw new Error(`Parent phone ${student.parentPhone} is linked to multiple portal accounts and requires manual correction`);
               }
-              parentId = newParent.id;
-              parentsCreated++;
+
+              const sameSchool = identity?.schools?.find((entry: any) => Number(entry.schoolId) === Number(effectiveSchoolId));
+              if (sameSchool) {
+                parentId = Number(sameSchool.parentId);
+                if (normalizedPhone) parentPhoneMap.set(normalizedPhone, parentId);
+              } else if (student.parentName || identity) {
+                const nameParts = String(student.parentName || "").trim().split(/\s+/).filter(Boolean);
+                const firstName = nameParts[0] || identity?.firstName || "Parent";
+                const lastName = nameParts.slice(1).join(" ") || identity?.lastName || student.lastName;
+                const newParent = await storage.createParent({
+                  firstName,
+                  lastName,
+                  phone: student.parentPhone?.trim() || identity?.phone || "",
+                  email: student.parentEmail?.trim() || identity?.email || undefined,
+                  relationship: student.parentRelationship?.trim() || undefined,
+                  schoolId: effectiveSchoolId,
+                  userId: identity?.userId || undefined,
+                });
+                if (identity?.userId) await linkParentIdentityToUser(newParent.id, Number(identity.userId));
+                if (normalizedPhone) parentPhoneMap.set(normalizedPhone, newParent.id);
+                parentId = newParent.id;
+                parentsCreated++;
+              }
             }
           }
 
@@ -6956,10 +7095,8 @@ export async function registerRoutes(
       if (!student) return res.status(404).json({ message: "Student not found" });
       const user = req.user as User;
       if (user.role === "student" && student.userId !== user.id) return res.status(403).json({ message: "Access denied" });
-      if (user.role === "parent") {
-        const parentRows = await storage.getAllParents();
-        const parent = parentRows.find((row) => row.userId === user.id);
-        if (!parent || student.parentId !== parent.id) return res.status(403).json({ message: "Access denied" });
+      if (user.role === "parent" && !(await parentUserCanAccessStudent(user.id, student.id))) {
+        return res.status(403).json({ message: "Access denied" });
       }
       const records = await storage.getAttendanceByStudent(studentId);
       res.json(records);
@@ -7498,12 +7635,10 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Payment history is not available in the student portal" });
       }
       if (user.role === "parent") {
-        const parentRows = await storage.getAllParents();
-        const parent = parentRows.find((row) => row.userId === user.id);
-        if (!parent) return res.json([]);
-        const children = await storage.getStudentsByParent(parent.id);
-        const allowedIds = new Set(children.map((child) => child.id));
-        if (requestedStudentId !== undefined && !allowedIds.has(requestedStudentId)) return res.status(403).json({ message: "Access denied" });
+        const children = await getChildrenForParentUser(user.id);
+        if (!children.length) return res.json([]);
+        const allowedIds = new Set(children.map((child) => Number(child.id)));
+        if (requestedStudentId !== undefined && !allowedIds.has(Number(requestedStudentId))) return res.status(403).json({ message: "Access denied" });
         if (requestedStudentId !== undefined) return res.json(await storage.getFeesPayments(requestedStudentId));
         const paymentGroups = await Promise.all(children.map((child) => storage.getFeesPayments(child.id)));
         return res.json(paymentGroups.flat());
@@ -11407,17 +11542,29 @@ ${schoolName}`;
           const parentFirstName = nameParts[0] || "Parent";
           const parentLastName = nameParts.slice(1).join(" ") || updated.lastName;
 
-          const newParent = await storage.createParent({
-            schoolId: updated.schoolId,
-            firstName: parentFirstName,
-            lastName: parentLastName,
-            email: updated.parentEmail || undefined,
-            phone: updated.parentPhone || "",
-            streetAddress: updated.streetAddress || undefined,
-            residentialArea: updated.residentialArea || undefined,
-            address: updated.address || undefined,
-            relationship: updated.parentRelationship || "parent",
-          });
+          const parentIdentity = updated.parentPhone
+            ? await describeParentIdentityMatch({ schoolId: updated.schoolId, phone: updated.parentPhone })
+            : null;
+          if (parentIdentity?.conflictingUserIds?.length) {
+            throw new Error("The parent phone number is linked to multiple portal accounts and must be corrected before enrolment.");
+          }
+          const sameSchoolParent = parentIdentity?.schools?.find((entry: any) => Number(entry.schoolId) === Number(updated.schoolId));
+          let enrollmentParent = sameSchoolParent ? await storage.getParent(Number(sameSchoolParent.parentId)) : undefined;
+          if (!enrollmentParent) {
+            enrollmentParent = await storage.createParent({
+              schoolId: updated.schoolId,
+              firstName: parentFirstName || parentIdentity?.firstName || "Parent",
+              lastName: parentLastName || parentIdentity?.lastName || updated.lastName,
+              email: updated.parentEmail || parentIdentity?.email || undefined,
+              phone: updated.parentPhone || parentIdentity?.phone || "",
+              streetAddress: updated.streetAddress || undefined,
+              residentialArea: updated.residentialArea || undefined,
+              address: updated.address || undefined,
+              relationship: updated.parentRelationship || "parent",
+              userId: parentIdentity?.userId || undefined,
+            });
+            if (parentIdentity?.userId) await linkParentIdentityToUser(enrollmentParent.id, Number(parentIdentity.userId));
+          }
 
           await storage.createStudent({
             schoolId: updated.schoolId,
@@ -11430,7 +11577,7 @@ ${schoolName}`;
             streetAddress: updated.streetAddress || undefined,
             residentialArea: updated.residentialArea || undefined,
             address: updated.address || undefined,
-            parentId: newParent.id,
+            parentId: enrollmentParent.id,
             enrollmentDate: new Date().toISOString().split("T")[0],
             status: "active",
           });
@@ -11967,10 +12114,18 @@ ${schoolName}`;
       res.json({
         totalCount: recipients.length,
         existingCount: plan.filter((row) => row.action === "existing").length,
+        linkExistingCount: plan.filter((row) => row.action === "link_existing").length,
         createCount: plan.filter((row) => row.action === "create").length,
+        linkedAfterCreateCount: plan.filter((row) => row.action === "link_after_create").length,
         missingContactCount,
         attentionCount,
         exceptionCount: missingContactCount + attentionCount,
+        exceptions: plan.filter((row) => row.action === "exception").slice(0, 50).map((row) => ({
+          recipientId: row.recipient.id,
+          recipientName: accountDistributionDisplayName(row.recipient),
+          reasonCode: row.reasonCode || "exception",
+          reason: row.reason || "This record requires attention",
+        })),
         scope: input.recipientIds.length ? "selected" : "filtered",
         channels: {
           emailConfigured: communicationService.isEmailConfigured(),
@@ -12001,9 +12156,12 @@ ${schoolName}`;
       const scope = input.recipientIds.length ? "selected" : "filtered";
       const previewCounts = {
         existingCount: plan.filter((row) => row.action === "existing").length,
+        linkExistingCount: plan.filter((row) => row.action === "link_existing").length,
         createCount: plan.filter((row) => row.action === "create").length,
+        linkedAfterCreateCount: plan.filter((row) => row.action === "link_after_create").length,
         missingContactCount: plan.filter((row) => row.reasonCode === "missing_contact").length,
         attentionCount: plan.filter((row) => row.action === "exception" && row.reasonCode !== "missing_contact").length,
+        existingDelivery: input.existingDelivery,
       };
 
       const job = await queueCommunicationBackgroundJob({
@@ -12022,16 +12180,21 @@ ${schoolName}`;
           recipientId: number;
           recipientName: string;
           username?: string | null;
-          status: "sent" | "failed";
-          accountAction: "existing" | "created" | "none";
+          status: "sent" | "failed" | "skipped";
+          accountAction: "existing" | "created" | "linked" | "none";
           reasonCode?: string | null;
           reason?: string | null;
           deliveries?: Array<{ channel: "email" | "sms"; destination: string; success: boolean; error?: string | null }>;
         }> = [];
         let successCount = 0;
         let failedCount = 0;
+        let skippedCount = 0;
         let createdCount = 0;
         let existingSentCount = 0;
+        let linkedCount = 0;
+        let skippedExistingCount = 0;
+        const accountsByIdentity = new Map<string, User>();
+        const sentUserIds = new Set<number>();
 
         for (const row of plan) {
           const recipientName = accountDistributionDisplayName(row.recipient);
@@ -12052,62 +12215,118 @@ ${schoolName}`;
           } else {
             try {
               let account: User;
-              let accountAction: "existing" | "created";
+              let accountAction: "existing" | "created" | "linked";
+              let newlyCreated = false;
 
-              if (row.action === "existing") {
+              if (row.action === "create") {
+                if (!row.username) throw new Error("A username could not be generated");
+                account = await createAccountForDistribution(row.recipient, row.username);
+                accountAction = "created";
+                newlyCreated = true;
+                createdCount += 1;
+                if (row.identityKey) accountsByIdentity.set(row.identityKey, account);
+              } else if (row.action === "link_after_create") {
+                account = (row.identityKey && accountsByIdentity.get(row.identityKey)) as User;
+                if (!account) throw new Error("The shared parent account could not be created before linking this record");
+                await linkParentIdentityToUser(row.recipient.id, account.id);
+                linkedCount += 1;
+                skippedCount += 1;
+                outcome = {
+                  recipientId: row.recipient.id,
+                  recipientName,
+                  username: account.username,
+                  status: "skipped",
+                  accountAction: "linked",
+                  reasonCode: "shared_parent_account",
+                  reason: "Linked to the parent account already processed in this distribution; no duplicate message was sent.",
+                  deliveries: [],
+                };
+                outcomes.push(outcome);
+                await updateCommunicationJobProgress(jobId, { processedCount: outcomes.length, successCount, failedCount, skippedCount });
+                continue;
+              } else {
                 if (!row.user) throw new Error("Linked user account could not be found");
                 const currentAccount = await storage.getUser(row.user.id);
                 if (!currentAccount) throw new Error("Linked user account could not be found");
                 if (currentAccount.isActive === false) throw new Error("Existing user account is inactive");
                 account = currentAccount;
-                accountAction = "existing";
-              } else {
-                if (!row.username) throw new Error("A username could not be generated");
-                account = await createAccountForDistribution(row.recipient, row.username);
-                accountAction = "created";
-                createdCount += 1;
+                accountAction = row.action === "link_existing" ? "linked" : "existing";
+                if (row.action === "link_existing") {
+                  await linkParentIdentityToUser(row.recipient.id, account.id);
+                  linkedCount += 1;
+                }
               }
 
-              const deliveries = await sendAccountDistributionLoginDetails({
-                user: account,
-                recipient: row.recipient,
-                sentBy: currentUser.id,
-                requestBaseUrl,
-                newlyCreated: accountAction === "created",
-              });
-              const delivered = deliveries.some((delivery) => delivery.success);
-
-              if (delivered) {
-                successCount += 1;
-                if (accountAction === "existing") existingSentCount += 1;
-                const deliveryWarnings = deliveries.filter((delivery) => !delivery.success);
+              const shouldSendExisting = input.existingDelivery === "send";
+              if (!newlyCreated && !shouldSendExisting) {
+                skippedCount += 1;
+                skippedExistingCount += 1;
                 outcome = {
                   recipientId: row.recipient.id,
                   recipientName,
                   username: account.username,
-                  status: "sent",
+                  status: "skipped",
                   accountAction,
-                  reasonCode: deliveryWarnings.length ? "partial_delivery" : null,
-                  reason: deliveryWarnings.length
-                    ? `Sent through ${deliveries.filter((delivery) => delivery.success).map((delivery) => delivery.channel.toUpperCase()).join(", ")}; ${deliveryWarnings.length} other channel${deliveryWarnings.length === 1 ? "" : "s"} failed`
-                    : null,
-                  deliveries,
+                  reasonCode: row.action === "link_existing" ? "linked_existing_skipped" : "existing_skipped",
+                  reason: row.action === "link_existing"
+                    ? "The school record was linked to the existing FCGS parent account. Existing-account login details were not resent."
+                    : "Existing-account login details were skipped by this distribution.",
+                  deliveries: [],
+                };
+              } else if (sentUserIds.has(account.id)) {
+                skippedCount += 1;
+                outcome = {
+                  recipientId: row.recipient.id,
+                  recipientName,
+                  username: account.username,
+                  status: "skipped",
+                  accountAction,
+                  reasonCode: "duplicate_account_delivery",
+                  reason: "This portal account was already sent login details in this distribution.",
+                  deliveries: [],
                 };
               } else {
-                failedCount += 1;
-                const details = deliveries.length
-                  ? deliveries.map((delivery) => `${delivery.channel.toUpperCase()}: ${delivery.error || "delivery failed"}`).join("; ")
-                  : "No email address or phone number was available at send time";
-                outcome = {
-                  recipientId: row.recipient.id,
-                  recipientName,
-                  username: account.username,
-                  status: "failed",
-                  accountAction,
-                  reasonCode: "delivery_failed",
-                  reason: accountAction === "created" ? `Account was created, but login details could not be delivered. ${details}` : details,
-                  deliveries,
-                };
+                const deliveries = await sendAccountDistributionLoginDetails({
+                  user: account,
+                  recipient: row.recipient,
+                  sentBy: currentUser.id,
+                  requestBaseUrl,
+                  newlyCreated,
+                });
+                const delivered = deliveries.some((delivery) => delivery.success);
+                if (delivered) {
+                  sentUserIds.add(account.id);
+                  successCount += 1;
+                  if (!newlyCreated) existingSentCount += 1;
+                  const deliveryWarnings = deliveries.filter((delivery) => !delivery.success);
+                  outcome = {
+                    recipientId: row.recipient.id,
+                    recipientName,
+                    username: account.username,
+                    status: "sent",
+                    accountAction,
+                    reasonCode: deliveryWarnings.length ? "partial_delivery" : null,
+                    reason: deliveryWarnings.length
+                      ? `Sent through ${deliveries.filter((delivery) => delivery.success).map((delivery) => delivery.channel.toUpperCase()).join(", ")}; ${deliveryWarnings.length} other channel${deliveryWarnings.length === 1 ? "" : "s"} failed`
+                      : null,
+                    deliveries,
+                  };
+                } else {
+                  failedCount += 1;
+                  const details = deliveries.length
+                    ? deliveries.map((delivery) => `${delivery.channel.toUpperCase()}: ${delivery.error || "delivery failed"}`).join("; ")
+                    : "No email address or phone number was available at send time";
+                  outcome = {
+                    recipientId: row.recipient.id,
+                    recipientName,
+                    username: account.username,
+                    status: "failed",
+                    accountAction,
+                    reasonCode: "delivery_failed",
+                    reason: newlyCreated ? `Account was created, but login details could not be delivered. ${details}` : details,
+                    deliveries,
+                  };
+                }
               }
             } catch (error) {
               failedCount += 1;
@@ -12126,12 +12345,7 @@ ${schoolName}`;
           }
 
           outcomes.push(outcome);
-          await updateCommunicationJobProgress(jobId, {
-            processedCount: outcomes.length,
-            successCount,
-            failedCount,
-            skippedCount: 0,
-          });
+          await updateCommunicationJobProgress(jobId, { processedCount: outcomes.length, successCount, failedCount, skippedCount });
         }
 
         const failures = outcomes.filter((outcome) => outcome.status === "failed");
@@ -12139,15 +12353,18 @@ ${schoolName}`;
           processedCount: outcomes.length,
           successCount,
           failedCount,
-          skippedCount: 0,
+          skippedCount,
           errorSummary: failures.length
             ? failures.slice(0, 20).map((failure) => `${failure.recipientName}: ${failure.reason || "failed"}`).join("; ")
             : null,
           metadata: {
             recipientType: input.recipientType,
             scope,
+            existingDelivery: input.existingDelivery,
             createdCount,
             existingSentCount,
+            linkedCount,
+            skippedExistingCount,
             outcomes,
           },
         };
@@ -15060,9 +15277,12 @@ ${schoolName}`;
           const [student] = await db.select().from(studentsTable).where(eq(studentsTable.userId, currentUser.id)).limit(1);
           if (student?.classId) classIds = [Number(student.classId)];
         } else {
-          const [parent] = await db.select().from(parentsTable).where(eq(parentsTable.userId, currentUser.id)).limit(1);
-          if (parent) {
-            const children = await db.select().from(studentsTable).where(eq(studentsTable.parentId, parent.id));
+          const parentIds = await getParentIdsForUser(currentUser.id);
+          if (parentIds.length) {
+            const children = await db.select({ classId: studentsTable.classId }).from(studentsTable).where(and(
+              inArray(studentsTable.parentId, parentIds),
+              eq(studentsTable.schoolId, schoolId),
+            ));
             classIds = Array.from(new Set(children.map((student: any) => Number(student.classId)).filter(Boolean)));
           }
         }
@@ -15097,16 +15317,18 @@ ${schoolName}`;
       const examId = parseIdParam(req.params.examId);
       const classId = parseIdParam(req.params.classId);
       const currentUser = await storage.getUser((req.user as any).id);
-      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      const classInfo = await storage.getClass(classId);
+      if (!classInfo) return res.status(404).json({ message: "Class not found" });
+      const schoolId = currentUser?.role === "parent" || currentUser?.role === "student"
+        ? classInfo.schoolId
+        : (getSchoolContext(req) || currentUser?.schoolId);
 
       if (!schoolId) return res.status(400).json({ message: "School context required" });
 
       const school = await storage.getSchool(schoolId);
       const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : undefined;
 
-      const classInfo = await storage.getClass(classId);
-      if (!classInfo) return res.status(404).json({ message: "Class not found" });
-      if (classInfo.schoolId && classInfo.schoolId !== schoolId) {
+      if (classInfo.schoolId && Number(classInfo.schoolId) !== Number(schoolId)) {
         return res.status(403).json({ message: "Access denied" });
       }
 
@@ -15907,14 +16129,16 @@ ${schoolName}`;
       const examId = parseIdParam(req.params.examId);
       const studentId = parseIdParam(req.params.studentId);
       const currentUser = await storage.getUser((req.user as any).id);
-      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
-
+      const student = await storage.getStudent(studentId);
+      if (!student) return res.status(404).json({ message: "Student not found" });
+      const schoolId = currentUser?.role === "parent" || currentUser?.role === "student"
+        ? student.schoolId
+        : (getSchoolContext(req) || currentUser?.schoolId);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
+      if (Number(student.schoolId) !== Number(schoolId)) return res.status(404).json({ message: "Student not found" });
 
       const school = await storage.getSchool(schoolId);
       const org2 = school?.organizationId ? await storage.getOrganization(school.organizationId) : undefined;
-      const student = await storage.getStudent(studentId);
-      if (!student) return res.status(404).json({ message: "Student not found" });
 
       const classInfo = student.classId ? await storage.getClass(student.classId) : null;
       const exam = await storage.getExam(examId);
@@ -16705,11 +16929,13 @@ async function buildReportCardMessage(
       const classId = req.query.classId ? parseInt(req.query.classId as string) : null;
 
       const currentUser = await storage.getUser((req.user as any).id);
-      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
-      if (!schoolId) return res.status(400).json({ message: "School context required" });
-
       const student = await storage.getStudent(studentId);
-      if (!student || student.schoolId !== schoolId) return res.status(404).json({ message: "Student not found" });
+      if (!student) return res.status(404).json({ message: "Student not found" });
+      const schoolId = currentUser?.role === "parent" || currentUser?.role === "student"
+        ? student.schoolId
+        : (getSchoolContext(req) || currentUser?.schoolId);
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      if (Number(student.schoolId) !== Number(schoolId)) return res.status(404).json({ message: "Student not found" });
 
       const activeClassId = classId || student.classId;
       if (!activeClassId) return res.status(400).json({ message: "Class context required" });
@@ -20251,13 +20477,76 @@ async function buildReportCardMessage(
     try {
       const currentUser = req.user as User;
       if (currentUser.role !== "parent") return res.status(403).json({ message: "Parents only" });
-      const allParents = await storage.getAllParents();
-      const parent = allParents.find(p => p.userId === currentUser.id);
-      if (!parent) return res.status(404).json({ message: "Parent record not found" });
-      const children = await storage.getStudentsByParent(parent.id);
+      const children = await getChildrenForParentUser(currentUser.id);
+      if (!children.length) return res.status(404).json({ message: "Parent record not found" });
       const result = await Promise.all(children.map(async child => {
         const records = await storage.getAttendanceByStudent(child.id);
         return { student: { id: child.id, admissionNo: child.admissionNo, firstName: child.firstName, lastName: child.lastName, photo: child.photo }, records };
+      }));
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  const PARENT_REPORT_TYPE_NAMES = new Set([
+    "End-of-Term Exam",
+    "Mock Exam",
+    "Monthly Test",
+    "Fortnight Test",
+    "End-of-Vacation Exam",
+  ]);
+
+  // Parent: lightweight metadata for published report cards. Full report data is lazy-loaded
+  // from the existing individual report-card endpoint when an accordion is expanded.
+  app.get("/api/me/children-reports", requireAuth, async (req, res, next) => {
+    try {
+      const currentUser = req.user as User;
+      if (currentUser.role !== "parent") return res.status(403).json({ message: "Parents only" });
+      const children = await getChildrenForParentUser(currentUser.id);
+      const result = await Promise.all(children.map(async (child: any) => {
+        const [school, publishedRows] = await Promise.all([
+          child.schoolId ? storage.getSchool(Number(child.schoolId)) : Promise.resolve(undefined),
+          child.classId
+            ? db.select().from(assessmentPublications).where(and(
+                eq(assessmentPublications.schoolId, Number(child.schoolId)),
+                eq(assessmentPublications.classId, Number(child.classId)),
+                eq(assessmentPublications.isPublished, true),
+              ))
+            : Promise.resolve([]),
+        ]);
+        const reportRows: any[] = [];
+        const seen = new Set<number>();
+        for (const publication of publishedRows as any[]) {
+          const examId = Number(publication.examId);
+          if (!examId || seen.has(examId)) continue;
+          const exam = await storage.getExam(examId);
+          if (!exam) continue;
+          const assessmentType = exam.assessmentTypeId ? await storage.getAssessmentType(Number(exam.assessmentTypeId)) : undefined;
+          if (!assessmentType || !PARENT_REPORT_TYPE_NAMES.has(String(assessmentType.name))) continue;
+          seen.add(examId);
+          reportRows.push({
+            examId,
+            examName: exam.examName,
+            assessmentTypeId: assessmentType.id,
+            assessmentType: assessmentType.name,
+            publishedAt: publication.publishedAt || publication.updatedAt || null,
+            classId: child.classId,
+          });
+        }
+        reportRows.sort((a, b) => String(a.examName || "").localeCompare(String(b.examName || ""), undefined, { numeric: true }));
+        return {
+          student: {
+            id: child.id,
+            admissionNo: child.admissionNo,
+            firstName: child.firstName,
+            lastName: child.lastName,
+            photo: child.photo,
+            schoolId: child.schoolId,
+            schoolName: school?.name || null,
+            schoolShortCode: school?.shortCode || null,
+            classId: child.classId,
+          },
+          reports: reportRows,
+        };
       }));
       res.json(result);
     } catch (error) { next(error); }
@@ -20268,9 +20557,8 @@ async function buildReportCardMessage(
     try {
       const currentUser = req.user as User;
       if (currentUser.role !== "parent") return res.status(403).json({ message: "Parents only" });
-      const [parent] = await db.select().from(parentsTable).where(eq(parentsTable.userId, currentUser.id)).limit(1);
-      if (!parent) return res.status(404).json({ message: "Parent record not found" });
-      const children = await storage.getStudentsByParent(parent.id);
+      const children = await getChildrenForParentUser(currentUser.id);
+      if (!children.length) return res.status(404).json({ message: "Parent record not found" });
       const result = await Promise.all(children.map(async (child: any) => ({
         student: { id: child.id, admissionNo: child.admissionNo, firstName: child.firstName, lastName: child.lastName, photo: child.photo },
         marks: await getPublishedPortalGradesForStudent(child),
@@ -20283,9 +20571,12 @@ async function buildReportCardMessage(
   app.get("/api/me/newsletters", requireAuth, async (req, res, next) => {
     try {
       const currentUser = req.user as User;
-      const schoolId = getSchoolContext(req) || currentUser.schoolId;
-      if (!schoolId) return res.json([]);
-      const newsletters = await storage.getNewsletters(schoolId);
+      const schoolIds = currentUser.role === "parent"
+        ? await getAccessibleSchoolIdsForParentUser(currentUser.id)
+        : [getSchoolContext(req) || currentUser.schoolId].filter((id): id is number => Number(id) > 0);
+      if (!schoolIds.length) return res.json([]);
+      const newsletterGroups = await Promise.all(schoolIds.map((schoolId) => storage.getNewsletters(schoolId)));
+      const newsletters = newsletterGroups.flat();
       const roleAudience = currentUser.role === "student"
         ? "students"
         : currentUser.role === "parent"
@@ -20298,7 +20589,8 @@ async function buildReportCardMessage(
         const legacyAudience = String(newsletter.targetAudience || "all");
         return legacyAudience === "all" || legacyAudience === roleAudience;
       });
-      res.json(published);
+      const unique = Array.from(new Map(published.map((newsletter: any) => [Number(newsletter.id), newsletter])).values());
+      res.json(unique);
     } catch (error) { next(error); }
   });
 

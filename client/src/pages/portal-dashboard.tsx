@@ -11,7 +11,7 @@ const money = (value: number | string | null | undefined) => `USD ${Number(value
 const dateTime = (value: string | null | undefined) => value ? new Date(value).toLocaleString() : "—";
 
 type Summary = {
-  student: { id: number; admissionNo: string; firstName: string; lastName: string; photo?: string | null; className?: string | null; status?: string | null };
+  student: { id: number; schoolId?: number; schoolName?: string | null; schoolShortCode?: string | null; admissionNo: string; firstName: string; lastName: string; photo?: string | null; className?: string | null; status?: string | null };
   attendance: { rate: number; total: number; recent: any[] };
   finance: { balance: number; status: string; snapshotAt?: string | null; temporaryAccessOverride?: any | null };
   access: { enrolled: boolean; entryPolicy: string; policyReason?: string | null; manuallyRestricted?: boolean; recentEvents: any[]; earlyRelease?: any | null };
@@ -34,7 +34,7 @@ function StudentOverview({ summary, parentView = false }: { summary: Summary; pa
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <CardTitle>{summary.student.firstName} {summary.student.lastName}</CardTitle>
-            <p className="text-sm text-muted-foreground">{summary.student.admissionNo}{summary.student.className ? ` · ${summary.student.className}` : ""}</p>
+            <p className="text-sm text-muted-foreground">{summary.student.schoolName ? `${summary.student.schoolName} · ` : ""}{summary.student.admissionNo}{summary.student.className ? ` · ${summary.student.className}` : ""}</p>
           </div>
           <Badge variant={summary.student.status === "active" ? "default" : "secondary"}>{summary.student.status || "active"}</Badge>
         </div>

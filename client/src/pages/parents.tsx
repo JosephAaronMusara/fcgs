@@ -106,16 +106,18 @@ export default function ParentsPage() {
   };
 
   const createMutation = useMutation({
-    mutationFn: async (data: Partial<Parent>) => {
+    mutationFn: async (data: Partial<Parent> & { confirmExistingParentId?: number }) => {
       const res = await apiRequest("POST", "/api/parents", data);
       return res.json();
     },
-    onSuccess: async (newParent: Parent) => {
-      await linkStudentsToParent(newParent.id);
+    onSuccess: async (newParent: Parent & { identityReused?: boolean }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/parents"] });
       setIsAddOpen(false);
       setLinkedStudentIds([]);
-      toast({ title: "Success", description: "Parent added successfully" });
+      toast({
+        title: "Success",
+        description: newParent.identityReused ? "Existing parent record reused successfully" : "Parent added successfully",
+      });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -123,7 +125,7 @@ export default function ParentsPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: async ({ id, data }: { id: number; data: Partial<Parent> }) => {
+    mutationFn: async ({ id, data }: { id: number; data: Partial<Parent> & { confirmExistingParentId?: number } }) => {
       const res = await apiRequest("PUT", `/api/parents/${id}`, data);
       return res.json();
     },
@@ -323,6 +325,7 @@ export default function ParentsPage() {
       address: (formData.get("address") as string) || null,
       occupation: (formData.get("occupation") as string) || null,
       relationship: (formData.get("relationship") as string) || "parent",
+      ...(formData.get("confirmExistingParentId") ? { confirmExistingParentId: Number(formData.get("confirmExistingParentId")) } : {}),
     };
 
     if (editingParent) {
@@ -774,6 +777,12 @@ export default function ParentsPage() {
           parent={userAccountParent}
           open={!!userAccountParent}
           onClose={() => setUserAccountParent(null)}
+          onCorrectPhone={() => {
+            const parent = userAccountParent;
+            setUserAccountParent(null);
+            setEditingParent(parent);
+            setLinkedStudentIds((students || []).filter((student) => student.parentId === parent.id).map((student) => student.id));
+          }}
         />
       )}
 
@@ -864,128 +873,81 @@ function ParentForm({
   students?: Student[];
   linkedStudentIds: number[];
 }) {
+  const { currentSchoolId } = useAuth();
+  const [phone, setPhone] = useState(defaultValues?.phone || "");
+  const [debouncedPhone, setDebouncedPhone] = useState(defaultValues?.phone || "");
+  const [confirmedParentId, setConfirmedParentId] = useState<number | null>(null);
+  const phoneRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedPhone(phone.trim()), 300);
+    return () => window.clearTimeout(timeout);
+  }, [phone]);
+  useEffect(() => { setConfirmedParentId(null); }, [debouncedPhone]);
+
+  const normalizedDigits = debouncedPhone.replace(/\D/g, "");
+  const identityQuery = useQuery<any>({
+    queryKey: ["/api/parent-identity/match", debouncedPhone, defaultValues?.id || 0],
+    enabled: normalizedDigits.length >= 7,
+    queryFn: async () => {
+      const params = new URLSearchParams({ phone: debouncedPhone });
+      if (defaultValues?.id) params.set("excludeParentId", String(defaultValues.id));
+      const response = await schoolFetch(`/api/parent-identity/match?${params.toString()}`);
+      if (!response.ok) throw new Error("Could not check the parent phone number");
+      return response.json();
+    },
+  });
+  const match = identityQuery.data?.match || null;
+  const sameSchoolMatch = match?.schools?.find((row: any) => Number(row.schoolId) === Number(currentSchoolId));
+  const identityAlreadyLinked = Boolean(match?.userId && defaultValues?.userId && Number(match.userId) === Number(defaultValues.userId));
+  const canConfirmMatch = Boolean(match && !identityAlreadyLinked && (!defaultValues || !sameSchoolMatch));
+  const unresolvedMatch = Boolean(match && !identityAlreadyLinked && (!confirmedParentId || Number(confirmedParentId) !== Number(match.parentId)));
+
+  const correctPhone = () => {
+    setConfirmedParentId(null);
+    window.setTimeout(() => { phoneRef.current?.focus(); phoneRef.current?.select(); }, 0);
+  };
 
   return (
     <form onSubmit={onSubmit} className="space-y-4">
+      <input type="hidden" name="confirmExistingParentId" value={confirmedParentId || ""} />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="space-y-2">
-          <Label htmlFor="firstName">First Name</Label>
-          <Input
-            id="firstName"
-            name="firstName"
-            defaultValue={defaultValues?.firstName}
-            required
-            data-testid="input-first-name"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="lastName">Last Name</Label>
-          <Input
-            id="lastName"
-            name="lastName"
-            defaultValue={defaultValues?.lastName}
-            required
-            data-testid="input-last-name"
-          />
-        </div>
+        <div className="space-y-2"><Label htmlFor="firstName">First Name</Label><Input id="firstName" name="firstName" defaultValue={defaultValues?.firstName} required data-testid="input-first-name" /></div>
+        <div className="space-y-2"><Label htmlFor="lastName">Last Name</Label><Input id="lastName" name="lastName" defaultValue={defaultValues?.lastName} required data-testid="input-last-name" /></div>
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="space-y-2">
-          <Label htmlFor="phone">Phone Number</Label>
-          <Input
-            id="phone"
-            name="phone"
-            defaultValue={defaultValues?.phone}
-            required
-            data-testid="input-phone"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="email">Email</Label>
-          <Input
-            id="email"
-            name="email"
-            type="email"
-            defaultValue={defaultValues?.email || ""}
-            data-testid="input-email"
-          />
-        </div>
+        <div className="space-y-2"><Label htmlFor="phone">Phone Number</Label><Input ref={phoneRef} id="phone" name="phone" value={phone} onChange={(event) => setPhone(event.target.value)} required data-testid="input-phone" /></div>
+        <div className="space-y-2"><Label htmlFor="email">Email</Label><Input id="email" name="email" type="email" defaultValue={defaultValues?.email || ""} data-testid="input-email" /></div>
       </div>
+
+      {match && (
+        <div className="space-y-3 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-100" data-testid="parent-existing-identity-alert">
+          <div><div className="font-semibold">Existing FCGS parent found</div><div>This phone number already belongs to <strong>{match.firstName} {match.lastName}</strong>. If this is the same parent, use the existing parent identity. Otherwise correct the phone number before continuing.</div></div>
+          <div className="space-y-2">
+            {(match.schools || []).map((school: any) => <div key={school.parentId} className="rounded-md border bg-background/70 p-2 text-foreground"><div className="font-medium">{school.schoolName || `School #${school.schoolId}`}</div>{school.children?.length ? <div className="text-muted-foreground">Parent of {school.children.map((child: any) => `${child.firstName} ${child.lastName}`).join(", ")}</div> : <div className="text-muted-foreground">No linked learner shown</div>}</div>)}
+          </div>
+          {sameSchoolMatch && defaultValues && <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-amber-950">Another parent record at this school already uses this phone number. Correct the phone number; parent records cannot be merged by editing one into another.</div>}
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="outline" onClick={correctPhone}>Correct Phone Number</Button>
+            {canConfirmMatch && <Button type="button" onClick={() => setConfirmedParentId(Number(match.parentId))}>{match.userId ? "Use Existing Account" : "Use Existing Parent"}</Button>}
+          </div>
+          {identityAlreadyLinked && <div className="text-xs font-medium text-green-700 dark:text-green-400">This parent record is already linked to the same FCGS parent account.</div>}
+          {!identityAlreadyLinked && confirmedParentId === Number(match.parentId) && <div className="text-xs font-medium text-green-700 dark:text-green-400">Existing parent identity selected. No duplicate portal account will be created.</div>}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="space-y-2">
-          <Label htmlFor="relationship">Relationship</Label>
-          <Input
-            id="relationship"
-            name="relationship"
-            placeholder="e.g., Father, Mother, Guardian"
-            defaultValue={defaultValues?.relationship || "parent"}
-            data-testid="input-relationship"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="occupation">Occupation</Label>
-          <Input
-            id="occupation"
-            name="occupation"
-            defaultValue={defaultValues?.occupation || ""}
-            data-testid="input-occupation"
-          />
-        </div>
+        <div className="space-y-2"><Label htmlFor="relationship">Relationship</Label><Input id="relationship" name="relationship" placeholder="e.g., Father, Mother, Guardian" defaultValue={defaultValues?.relationship || "parent"} data-testid="input-relationship" /></div>
+        <div className="space-y-2"><Label htmlFor="occupation">Occupation</Label><Input id="occupation" name="occupation" defaultValue={defaultValues?.occupation || ""} data-testid="input-occupation" /></div>
       </div>
       <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-2">
-          <Label htmlFor="streetAddress">Street Address</Label>
-          <Input
-            id="streetAddress"
-            name="streetAddress"
-            placeholder="House number & street"
-            defaultValue={defaultValues?.streetAddress || ""}
-            data-testid="input-street-address"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="residentialArea">Residential Area / Suburb</Label>
-          <ResidentialAreaInput defaultValue={defaultValues?.residentialArea || ""} />
-        </div>
+        <div className="space-y-2"><Label htmlFor="streetAddress">Street Address</Label><Input id="streetAddress" name="streetAddress" placeholder="House number & street" defaultValue={defaultValues?.streetAddress || ""} data-testid="input-street-address" /></div>
+        <div className="space-y-2"><Label htmlFor="residentialArea">Residential Area / Suburb</Label><ResidentialAreaInput defaultValue={defaultValues?.residentialArea || ""} /></div>
       </div>
-      <div className="space-y-2">
-        <Label htmlFor="address">City</Label>
-        <Input
-          id="address"
-          name="address"
-          placeholder="e.g. Harare, Marondera"
-          defaultValue={defaultValues?.address || ""}
-          data-testid="input-address"
-        />
-      </div>
-      <div className="space-y-2">
-        <Label>Linked Students</Label>
-        <div className="border rounded-md">
-          {linkedStudentIds.length > 0 ? (
-            <div className="divide-y">
-              {linkedStudentIds.map(id => {
-                const s = (students || []).find(st => st.id === id);
-                if (!s) return null;
-                return (
-                  <div key={id} className="flex items-center gap-2 px-3 py-2" data-testid={`linked-student-${id}`}>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{s.firstName} {s.lastName}</p>
-                      <p className="text-xs text-muted-foreground">{s.admissionNo}</p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground text-center py-3">
-              No students linked to this parent
-              </p>
-            )}
-          </div>
-        </div>
-      <Button type="submit" className="w-full" disabled={isLoading} data-testid="button-save-parent">
-        {isLoading ? "Saving..." : defaultValues ? "Update Parent" : "Add Parent"}
-      </Button>
+      <div className="space-y-2"><Label htmlFor="address">City</Label><Input id="address" name="address" placeholder="e.g. Harare, Marondera" defaultValue={defaultValues?.address || ""} data-testid="input-address" /></div>
+      <div className="space-y-2"><Label>Linked Students</Label><div className="rounded-md border">{linkedStudentIds.length ? <div className="divide-y">{linkedStudentIds.map((id) => { const student = (students || []).find((row) => row.id === id); return student ? <div key={id} className="flex items-center gap-2 px-3 py-2"><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{student.firstName} {student.lastName}</p><p className="text-xs text-muted-foreground">{student.admissionNo}</p></div></div> : null; })}</div> : <p className="py-3 text-center text-xs text-muted-foreground">No students linked to this parent</p>}</div></div>
+      <Button type="submit" className="w-full" disabled={isLoading || identityQuery.isFetching || unresolvedMatch} data-testid="button-save-parent">{isLoading ? "Saving..." : defaultValues ? "Update Parent" : "Add Parent"}</Button>
+      {unresolvedMatch && <p className="text-center text-xs text-muted-foreground">Resolve the existing phone-number match before saving.</p>}
     </form>
   );
 }
@@ -994,22 +956,35 @@ function ParentUserAccountModal({
   parent,
   open,
   onClose,
+  onCorrectPhone,
 }: {
   parent: Parent;
   open: boolean;
   onClose: () => void;
+  onCorrectPhone: () => void;
 }) {
   const { toast } = useToast();
   const [isCreating, setIsCreating] = useState(false);
 
-  const { data: accountData, isLoading, refetch } = useQuery<{ user: User | null }>({
+  const { data: accountData, isLoading, refetch } = useQuery<{ user: User | null; existingIdentityAccount?: { user: User; match: any } | null }>({
     queryKey: ["/api/parents", parent.id, "user"],
     queryFn: async () => {
       const res = await schoolFetch(`/api/parents/${parent.id}/user`);
-      if (!res.ok) return { user: null };
+      if (!res.ok) return { user: null, existingIdentityAccount: null };
       return res.json();
     },
     enabled: open,
+  });
+
+  const linkExistingMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", `/api/parents/${parent.id}/user/link-existing`, {})).json(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/parents", parent.id, "user"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/parents"] });
+      refetch();
+      toast({ title: "Account linked", description: "This school parent record now uses the existing FCGS parent account." });
+    },
+    onError: (error: Error) => toast({ title: "Could not link account", description: error.message, variant: "destructive" }),
   });
 
   const createAccountMutation = useMutation({
@@ -1073,6 +1048,7 @@ function ParentUserAccountModal({
   };
 
   const user = accountData?.user;
+  const existingIdentityAccount = accountData?.existingIdentityAccount || null;
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -1108,6 +1084,7 @@ function ParentUserAccountModal({
               </div>
             </div>
             <div className="flex gap-2 flex-wrap">
+              <LoginDetailsBulkDialog recipientType="parent" selectedIds={[parent.id]} triggerLabel="Resend Login Details" triggerSize="sm" />
               <Button variant="outline" size="sm" onClick={handleResetPassword} disabled={resetPasswordMutation.isPending}>
                 Reset Password
               </Button>
@@ -1120,6 +1097,15 @@ function ParentUserAccountModal({
                 {user.isActive ? "Deactivate" : "Activate"}
               </Button>
             </div>
+          </div>
+        ) : existingIdentityAccount ? (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-100">
+              <div className="font-semibold">Existing FCGS parent account found</div>
+              <p className="mt-1">This phone number is already linked to <strong>{existingIdentityAccount.match?.firstName} {existingIdentityAccount.match?.lastName}</strong>. Use the existing account so the parent keeps one login across schools.</p>
+              <div className="mt-3 space-y-2">{(existingIdentityAccount.match?.schools || []).map((school: any) => <div key={school.parentId} className="rounded-md border bg-background/70 p-2 text-foreground"><div className="font-medium">{school.schoolName}</div><div className="text-muted-foreground">{school.children?.length ? `Parent of ${school.children.map((child: any) => `${child.firstName} ${child.lastName}`).join(", ")}` : "Parent record"}</div></div>)}</div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={onCorrectPhone}>Correct Phone Number</Button><Button onClick={() => linkExistingMutation.mutate()} disabled={linkExistingMutation.isPending}>{linkExistingMutation.isPending ? "Linking..." : "Use Existing Account"}</Button></div>
           </div>
         ) : isCreating ? (
           <CreateAccountForm

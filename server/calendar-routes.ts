@@ -16,6 +16,7 @@ import {
 } from "../shared/schema";
 import { requireAuth } from "./auth";
 import { storage } from "./storage";
+import { getParentIdsForUser } from "./parent-identity";
 
 type AuthedUser = {
   id: number;
@@ -267,11 +268,12 @@ export function registerCalendarRoutes(app: Express) {
     // PARENT (view-only)
     // ----------------------------
     if (parentRow) {
-      // parent can have multiple children in different classes
-      const childRows = await db
+      // One parent portal user can be linked to school-specific parent records across multiple schools.
+      const parentIds = await getParentIdsForUser(user.id);
+      const childRows = parentIds.length ? await db
         .select({ classId: students.classId, schoolId: students.schoolId })
         .from(students)
-        .where(eq(students.parentId, parentRow.id));
+        .where(inArray(students.parentId, parentIds)) : [];
 
       const childClassIds = childRows.map((r) => r.classId).filter(Boolean) as number[];
       const childSchoolIds = Array.from(
