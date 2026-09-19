@@ -1,6 +1,6 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
-import { setupAuth, requireAuth, requirePermission, requireAnyPermission, requireRole } from "./auth";
+import { setupAuth, requireAuth, requirePermission, requireAnyPermission, requireAllPermissions, requireRole } from "./auth";
 import { storage, PosSaleProcessingError } from "./storage";
 import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
@@ -11952,7 +11952,7 @@ ${schoolName}`;
 
   // Bulk login-details distribution for parents, students and staff.
   // Uses communicationJobs.metadata for persistent recipient-level history without adding a second job system.
-  app.post("/api/account-distribution/preview", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/account-distribution/preview", requireAuth, requireAllPermissions("users.view", "communication.view"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req) || currentUser.schoolId;
@@ -11983,7 +11983,7 @@ ${schoolName}`;
     }
   });
 
-  app.post("/api/account-distribution/send", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.post("/api/account-distribution/send", requireAuth, requireAllPermissions("users.create", "communication.send"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req) || currentUser.schoolId;
@@ -12174,7 +12174,7 @@ ${schoolName}`;
     }
   });
 
-  app.get("/api/account-distribution/history", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.get("/api/account-distribution/history", requireAuth, requireAllPermissions("users.view", "communication.view"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req) || currentUser.schoolId;
@@ -12214,7 +12214,7 @@ ${schoolName}`;
     }
   });
 
-  app.get("/api/account-distribution/history/:id", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
+  app.get("/api/account-distribution/history/:id", requireAuth, requireAllPermissions("users.view", "communication.view"), async (req, res, next) => {
     try {
       const currentUser = req.user as User;
       const schoolId = getSchoolContext(req) || currentUser.schoolId;

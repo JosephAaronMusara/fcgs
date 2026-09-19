@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, History, KeyRound, Loader2, RefreshCw, Send } from "lucide-react";
 import { apiRequest, queryClient, schoolFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -105,6 +106,10 @@ export function LoginDetailsBulkDialog({
   statusFilter = "all",
 }: LoginDetailsBulkDialogProps) {
   const { toast } = useToast();
+  const { hasPermission } = useAuth();
+  const canViewDistribution = hasPermission("users.view") && hasPermission("communication.view");
+  const canSendDistribution = hasPermission("users.create") && hasPermission("communication.send");
+  const canUseDistribution = canViewDistribution && canSendDistribution;
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("send");
   const [jobId, setJobId] = useState<number | null>(null);
@@ -121,7 +126,7 @@ export function LoginDetailsBulkDialog({
 
   const previewQuery = useQuery<DistributionPreview>({
     queryKey: ["/api/account-distribution/preview", recipientType, selectedIds.join(","), search, classFilter, statusFilter],
-    enabled: open,
+    enabled: open && canViewDistribution,
     staleTime: 0,
     queryFn: async () => {
       const res = await apiRequest("POST", "/api/account-distribution/preview", baseRequest);
@@ -131,7 +136,7 @@ export function LoginDetailsBulkDialog({
 
   const historyQuery = useQuery<DistributionJob[]>({
     queryKey: ["/api/account-distribution/history", recipientType],
-    enabled: open,
+    enabled: open && canViewDistribution,
     staleTime: 0,
     queryFn: async () => {
       const res = await schoolFetch(`/api/account-distribution/history?recipientType=${encodeURIComponent(recipientType)}`);
@@ -142,7 +147,7 @@ export function LoginDetailsBulkDialog({
 
   const historyDetailQuery = useQuery<DistributionJob>({
     queryKey: ["/api/account-distribution/history/detail", selectedHistoryJobId],
-    enabled: open && !!selectedHistoryJobId,
+    enabled: open && canViewDistribution && !!selectedHistoryJobId,
     staleTime: 0,
     queryFn: async () => {
       const res = await schoolFetch(`/api/account-distribution/history/${selectedHistoryJobId}`);
@@ -223,6 +228,8 @@ export function LoginDetailsBulkDialog({
   const progressPercent = currentJob?.totalCount
     ? Math.min(100, Math.round(((currentJob.processedCount || 0) / currentJob.totalCount) * 100))
     : 0;
+
+  if (!canUseDistribution) return null;
 
   return (
     <>

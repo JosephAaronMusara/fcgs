@@ -681,6 +681,27 @@ export function requireAnyPermission(...permissions: string[]) {
   };
 }
 
+export function requireAllPermissions(...permissions: string[]) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const userId = req.user.id;
+    const permissionResults = await Promise.all(
+      permissions.map((permissionCode) => storage.userHasPermission(userId, permissionCode)),
+    );
+    const hasAllPermissions = permissionResults.every(Boolean);
+
+    if (!hasAllPermissions) {
+      logBlockedActivity(req, permissions, "Missing one or more required permissions");
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    next();
+  };
+}
+
 export function requireRole(..._roles: string[]) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (!req.isAuthenticated() || !req.user) {
