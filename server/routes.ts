@@ -1758,6 +1758,11 @@ function normalizePortalBaseUrl(value?: string | null): string {
   return `https://${trimmed}`;
 }
 
+function buildPortalCredentialHeader(displayName: string, portalUrl: string | null | undefined, username: string): string {
+  const portalDisplayUrl = normalizePortalBaseUrl(portalUrl) || "FCGS Portal";
+  return `Dear ${displayName},\n\nFCGS Portal: ${portalDisplayUrl}\nUsername: ${username}\n\n`;
+}
+
 function getRequestBaseUrl(req: Request): string {
   const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
     .split(",")[0]
@@ -1929,11 +1934,12 @@ async function issuePasswordSetupLink(user: User, options?: {
 
   const displayName = options?.recipientName || [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username;
   const username = options?.usernameOverride || user.username;
+  const portalUrl = baseUrl || normalizePortalBaseUrl(systemUrl) || normalizePortalBaseUrl(process.env.APP_BASE_URL);
   const isPasswordReset = options?.subjectPrefix === "Password Reset";
   const introduction = isPasswordReset
     ? "A password reset was requested for your account."
     : "Your account is ready.";
-  const messageText = `Dear ${displayName},\n${introduction}\nUsername: ${username}\nUse this one-time link to set or reset your password (valid for 1 hour):\n${resetLink}\n\nIf you did not request this change, you can ignore this message.\n\nHardwork - Discipline - Changing Lives`;
+  const messageText = `${buildPortalCredentialHeader(displayName, portalUrl, username)}${introduction}\nUse this one-time link to set or reset your password (valid for 1 hour):\n${resetLink}\n\nIf you did not request this change, you can ignore this message.\n\nHardwork - Discipline - Changing Lives`;
   const messageHtml = messageText.replace(/\n/g, "<br>");
   const subject = `${options?.subjectPrefix || "Password Setup"} Link`;
 
@@ -2384,14 +2390,15 @@ async function sendAccountDistributionLoginDetails(options: {
     normalizePortalBaseUrl(options.requestBaseUrl) ||
     normalizePortalBaseUrl(systemUrl) ||
     normalizePortalBaseUrl(process.env.APP_BASE_URL);
-  const loginLink = baseUrl || systemUrl || "FCGS Portal";
+  const portalUrl = baseUrl || normalizePortalBaseUrl(systemUrl) || normalizePortalBaseUrl(process.env.APP_BASE_URL);
   const resetPath = `/reset-password?token=${encodeURIComponent(resetToken)}`;
   const resetLink = baseUrl ? `${baseUrl}${resetPath}` : resetPath;
   const displayName = accountDistributionDisplayName(options.recipient);
+  const credentialHeader = buildPortalCredentialHeader(displayName, portalUrl, options.user.username);
 
   const messageText = requiresSetup
-    ? `Dear ${displayName},\nYour FCGS Portal account is ready.\nUsername: ${options.user.username}\nSet your password using this secure one-time link (valid for ${expiresHours} hours):\n${resetLink}\nLogin: ${loginLink}\n\nHardwork - Discipline - Changing Lives`
-    : `Dear ${displayName},\nYour FCGS Portal login details are:\nUsername: ${options.user.username}\nLogin: ${loginLink}\nYour current password has not been changed. If you do not remember it, use this secure one-time reset link (valid for ${expiresHours} hours):\n${resetLink}\n\nHardwork - Discipline - Changing Lives`;
+    ? `${credentialHeader}Your FCGS Portal account is ready.\nSet your password using this secure one-time link (valid for ${expiresHours} hours):\n${resetLink}\n\nHardwork - Discipline - Changing Lives`
+    : `${credentialHeader}Your current password has not been changed. If you do not remember it, use this secure one-time reset link (valid for ${expiresHours} hours):\n${resetLink}\n\nHardwork - Discipline - Changing Lives`;
   const subject = options.newlyCreated ? "FCGS Portal Account Created" : "FCGS Portal Login Details";
   const channels = await getUserExternalChannels(options.user);
   const deliveries = [] as Array<{ channel: "email" | "sms"; destination: string; success: boolean; error?: string | null }>;
@@ -4756,11 +4763,12 @@ export async function registerRoutes(
           sentBy: userId,
           usernameOverride: username,
           subjectPrefix: "Password Setup",
+          requestBaseUrl: getRequestBaseUrl(req),
         });
       } else if (passwordToSend) {
         const sysUrl = await getSystemUrl(schoolId);
-        const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
-        const credMsg = `Dear ${name},\nYour account has been created.\nUsername: ${username}\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.${loginLink}\n\nHardwork - Discipline - Changing Lives`;
+        const portalUrl = getRequestBaseUrl(req) || normalizePortalBaseUrl(sysUrl) || normalizePortalBaseUrl(process.env.APP_BASE_URL);
+        const credMsg = `${buildPortalCredentialHeader(name, portalUrl, username)}Your account has been created.\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.\n\nHardwork - Discipline - Changing Lives`;
         if (staffMember.phone) {
           await communicationService.sendSms({ to: staffMember.phone, message: credMsg, schoolId: schoolId || 0, recipientType: "staff", recipientId: staffId, sentBy: userId, category: "account", recipientName: name });
         }
@@ -5527,11 +5535,12 @@ export async function registerRoutes(
           sentBy: userId,
           usernameOverride: username,
           subjectPrefix: "Password Setup",
+          requestBaseUrl: getRequestBaseUrl(req),
         });
       } else if (passwordToSend) {
         const sysUrl = await getSystemUrl(effectiveSchoolId);
-        const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
-        const credMsg = `Dear ${name},\nYour account has been created.\nUsername: ${username}\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.${loginLink}\n\nHardwork - Discipline - Changing Lives`;
+        const portalUrl = getRequestBaseUrl(req) || normalizePortalBaseUrl(sysUrl) || normalizePortalBaseUrl(process.env.APP_BASE_URL);
+        const credMsg = `${buildPortalCredentialHeader(name, portalUrl, username)}Your account has been created.\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.\n\nHardwork - Discipline - Changing Lives`;
         if (parent.phone) {
           await communicationService.sendSms({ to: parent.phone, message: credMsg, schoolId: effectiveSchoolId, recipientType: "parent", recipientId: parentId, sentBy: userId, category: "account", recipientName: name });
         }
@@ -6625,14 +6634,15 @@ export async function registerRoutes(
           sentBy: userId,
           usernameOverride: parsed.username,
           subjectPrefix: "Password Setup",
+          requestBaseUrl: getRequestBaseUrl(req),
         });
       } else if (passwordToSend) {
         const parentRecord = student.parentId ? await storage.getParent(student.parentId) : null;
         const contactPhone = student.phone || parentRecord?.phone;
         const contactEmail = student.email || parentRecord?.email;
         const sysUrl = await getSystemUrl(effSchoolId);
-        const loginLink = sysUrl ? `\nLogin here: ${sysUrl}` : "";
-        const credMsg = `Dear ${name},\nYour account has been created.\nUsername: ${parsed.username}\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.${loginLink}\n\nHardwork - Discipline - Changing Lives`;
+        const portalUrl = getRequestBaseUrl(req) || normalizePortalBaseUrl(sysUrl) || normalizePortalBaseUrl(process.env.APP_BASE_URL);
+        const credMsg = `${buildPortalCredentialHeader(name, portalUrl, parsed.username)}Your account has been created.\nTemporary Password: ${passwordToSend}\nThis password is valid for 3 logins. You will be required to set your own password.\n\nHardwork - Discipline - Changing Lives`;
         if (contactPhone) {
           await communicationService.sendSms({ to: contactPhone, message: credMsg, schoolId: effSchoolId, recipientType: "student", recipientId: studentId, sentBy: userId, category: "account", recipientName: name });
         }
