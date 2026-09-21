@@ -20,3 +20,7 @@ repair-transport-additive.cjs
 
 # Local Gate Bridge credentials
 gate-bridge.env
+
+gate-bridge-logs/
+FCGS-deployment-support-*.zip
+REPLACEMENT_MANIFEST.json
