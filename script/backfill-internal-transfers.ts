@@ -81,6 +81,21 @@ async function applyAssessment(assessment: Assessment) {
     const [transfer] = await tx.select().from(internalTransfers).where(eq(internalTransfers.id, assessment.transferId)).limit(1);
     if (!transfer) throw new Error(`Transfer ${assessment.transferId} disappeared during apply.`);
     if (transfer.sourceStudentId && transfer.destinationStudentId) return; // idempotent
+
+    // Defence in depth: never auto-reconstruct when more than one unresolved legacy
+    // completed transfer references the same mutable legacy learner row. Once the old
+    // architecture moved a single learner row between schools, the chronological chain
+    // cannot be reconstructed safely from duplicate/repeated rows without manual review.
+    const duplicateLegacyRows = await tx.select({ id: internalTransfers.id }).from(internalTransfers).where(and(
+      eq(internalTransfers.personType, "student"),
+      eq(internalTransfers.status, "completed"),
+      eq(internalTransfers.personId, transfer.personId),
+      or(isNull(internalTransfers.sourceStudentId), isNull(internalTransfers.destinationStudentId)),
+    ));
+    if (duplicateLegacyRows.length > 1) {
+      throw new Error(`Transfer ${assessment.transferId} became ambiguous during apply: ${duplicateLegacyRows.length} unresolved legacy transfers reference learner ${transfer.personId}. Re-run preflight.`);
+    }
+
     const [destination] = await tx.select().from(students).where(eq(students.id, assessment.destinationStudentId!)).limit(1);
     if (!destination) throw new Error(`Destination learner ${assessment.destinationStudentId} disappeared during apply.`);
 
@@ -165,8 +180,34 @@ async function applyAssessment(assessment: Assessment) {
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required.");
   const transfers = await db.select().from(internalTransfers).where(and(eq(internalTransfers.personType, "student"), eq(internalTransfers.status, "completed"))).orderBy(internalTransfers.id);
+
+  // In the legacy model personId pointed at the single learner row that was physically
+  // moved between schools. If multiple unresolved completed transfers reference that same
+  // row, we cannot safely know whether they are duplicate submissions, repeated attempts,
+  // or a genuine multi-school sequence with missing intermediate history. Treat every such
+  // row as manual review instead of guessing.
+  const unresolvedLegacyCounts = new Map<number, number>();
+  for (const transfer of transfers) {
+    if (!transfer.sourceStudentId || !transfer.destinationStudentId) {
+      unresolvedLegacyCounts.set(transfer.personId, (unresolvedLegacyCounts.get(transfer.personId) || 0) + 1);
+    }
+  }
+  const ambiguousLegacyPersonIds = new Set(
+    [...unresolvedLegacyCounts.entries()].filter(([, count]) => count > 1).map(([personId]) => personId),
+  );
+
   const assessments: Assessment[] = [];
-  for (const transfer of transfers) assessments.push(await assessTransfer(transfer));
+  for (const transfer of transfers) {
+    if ((!transfer.sourceStudentId || !transfer.destinationStudentId) && ambiguousLegacyPersonIds.has(transfer.personId)) {
+      assessments.push({
+        transferId: transfer.id,
+        classification: "manual_review",
+        reason: `Multiple unresolved legacy completed transfers reference learner ${transfer.personId}; the historical sequence cannot be reconstructed safely automatically.`,
+      });
+      continue;
+    }
+    assessments.push(await assessTransfer(transfer));
+  }
 
   const summary = assessments.reduce<Record<string, number>>((acc, row) => {
     acc[row.classification] = (acc[row.classification] || 0) + 1;
