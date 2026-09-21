@@ -218,7 +218,7 @@ const parentMenuGroups: MenuGroup[] = [
   {
     label: "Finance",
     items: [
-      { title: "Fees & Payments", url: "/fees", icon: CreditCard, featureKey: "enableFinance" },
+      { title: "Fees & Payments", url: "/fees", icon: CreditCard },
     ],
   },
   {
@@ -238,6 +238,11 @@ export function AppSidebar() {
   const { data: schools } = useQuery<SchoolType[]>({
     queryKey: ["/api/schools"],
     enabled: !!user,
+  });
+
+  const { data: parentDashboard } = useQuery<any>({
+    queryKey: ["/api/me/parent-dashboard"],
+    enabled: user?.role === "parent",
   });
 
   const { data: selfStaffProfile } = useQuery<any | null>({
@@ -271,6 +276,10 @@ export function AppSidebar() {
   const filteredGroups = allGroups.map(group => ({
     ...group,
     items: group.items.filter(item => {
+      if (user?.role === "parent" && item.url === "/fees") {
+        const financeEnabled = (parentDashboard?.children || []).some((row: any) => row?.student?.parentFeesPaymentsEnabled !== false);
+        if (!financeEnabled) return false;
+      }
       if (item.featureKey && currentSchool && (currentSchool as Record<string, unknown>)[item.featureKey] !== true) {
         return false;
       }

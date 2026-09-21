@@ -1,0 +1,40 @@
+{
+  "package": "FCGS_Recruitment_17Sep2026_Final_Replacement_Files.zip",
+  "files": [
+    {
+      "path": "client/src/App.tsx",
+      "sha256": "38a51140b9fafd31c967226009589374e78f2ba6dd1d84cd4a4095475ce0daa8",
+      "bytes": 45328
+    },
+    {
+      "path": "client/src/components/app-sidebar.tsx",
+      "sha256": "b5a063aec8868db0af1611ca2772efc176c526a401240b2b4697d5052f39d6f2",
+      "bytes": 14843
+    },
+    {
+      "path": "client/src/pages/recruitment.tsx",
+      "sha256": "475ef1b842245437502eabb342e748c17e07ef7440d2865e3bade716c5f325c6",
+      "bytes": 115106
+    },
+    {
+      "path": "client/src/pages/careers.tsx",
+      "sha256": "e4800775ff308b315511146f167d550d469304b8a358a35fcb2876c9c8460eef",
+      "bytes": 32792
+    },
+    {
+      "path": "server/recruitment-routes.ts",
+      "sha256": "9da8a38905d591b5e27f02dffff89839fd88ed1ec4dde061a296f5472259cb41",
+      "bytes": 99098
+    },
+    {
+      "path": "shared/recruitment.ts",
+      "sha256": "ae035a1799178d1a8092dc6888d610a5da858842337b613a3336c8f5b506c554",
+      "bytes": 6702
+    },
+    {
+      "path": "shared/schema.ts",
+      "sha256": "e4a3499bbe1cf6fbb3b9d485c7b24bd2969e4f54a3ebc219c3948f29f14bc098",
+      "bytes": 259916
+    }
+  ]
+}

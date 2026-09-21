@@ -81,6 +81,7 @@ export default function InternalTransfersPage() {
     studentId: "",
     destinationSchoolId: "",
     effectiveDate: todayIso(),
+    joiningDate: todayIso(),
     reason: "",
     notes: "",
   });
@@ -165,7 +166,7 @@ export default function InternalTransfersPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/students"] });
       queryClient.invalidateQueries({ queryKey: ["/api/internal-transfers"] });
-      setStudentForm({ studentId: "", destinationSchoolId: "", effectiveDate: todayIso(), reason: "", notes: "" });
+      setStudentForm({ studentId: "", destinationSchoolId: "", effectiveDate: todayIso(), joiningDate: todayIso(), reason: "", notes: "" });
       toast({
         title: "Student transferred",
         description: data?.warnings?.length ? data.warnings.join(" ") : "The student has been moved to the destination school.",
@@ -194,7 +195,7 @@ export default function InternalTransfersPage() {
     onError: (error) => toast({ title: "Transfer failed", description: parseError(error), variant: "destructive" }),
   });
 
-  const canSubmitStudent = studentForm.studentId && studentForm.destinationSchoolId && studentForm.effectiveDate && studentForm.reason.trim().length >= 3;
+  const canSubmitStudent = studentForm.studentId && studentForm.destinationSchoolId && studentForm.effectiveDate && studentForm.joiningDate && studentForm.joiningDate >= studentForm.effectiveDate && studentForm.reason.trim().length >= 3;
   const canSubmitStaff = staffForm.staffId && staffForm.destinationSchoolId && staffForm.destinationRole && staffForm.destinationAccessGroupId && staffForm.effectiveDate && staffForm.reason.trim().length >= 3;
 
   return (
@@ -342,8 +343,12 @@ export default function InternalTransfersPage() {
                     <p className="text-xs text-muted-foreground">Permanent identifier — transfers keep the existing admission number.</p>
                   </div>
                   <div className="space-y-2">
-                    <Label>Effective date</Label>
+                    <Label>Transfer Date *</Label>
                     <Input type="date" value={studentForm.effectiveDate} onChange={(e) => setStudentForm((prev) => ({ ...prev, effectiveDate: e.target.value }))} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Joining Date *</Label>
+                    <Input type="date" min={studentForm.effectiveDate} value={studentForm.joiningDate} onChange={(e) => setStudentForm((prev) => ({ ...prev, joiningDate: e.target.value }))} />
                   </div>
                 </div>
                 <div className="space-y-2">

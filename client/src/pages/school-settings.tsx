@@ -68,6 +68,7 @@ export default function SchoolSettingsPage() {
   // Feature toggle values for edit mode
   const [featureValues, setFeatureValues] = useState({
     enableFinance: true,
+    enableParentFeesPayments: true,
     enableELibrary: false,
     enablePOS: false,
     enableELogbook: false,
@@ -123,6 +124,7 @@ export default function SchoolSettingsPage() {
       });
       setFeatureValues({
         enableFinance: school.enableFinance !== false,
+        enableParentFeesPayments: school.enableParentFeesPayments !== false,
         enableELibrary: school.enableELibrary || false,
         enablePOS: school.enablePOS || false,
         enableELogbook: school.enableELogbook || false,
@@ -165,6 +167,7 @@ export default function SchoolSettingsPage() {
     if (!school) return;
     updateSchool.mutate({
       enableFinance: featureValues.enableFinance,
+      enableParentFeesPayments: featureValues.enableParentFeesPayments,
       enableELibrary: featureValues.enableELibrary,
       enablePOS: featureValues.enablePOS,
       enableELogbook: featureValues.enableELogbook,
@@ -180,6 +183,7 @@ export default function SchoolSettingsPage() {
     if (school) {
       setFeatureValues({
         enableFinance: school.enableFinance !== false,
+        enableParentFeesPayments: school.enableParentFeesPayments !== false,
         enableELibrary: school.enableELibrary || false,
         enablePOS: school.enablePOS || false,
         enableELogbook: school.enableELogbook || false,
@@ -641,6 +645,19 @@ export default function SchoolSettingsPage() {
               )}
             </CardHeader>
             <CardContent className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label>Parent Fees & Payments</Label>
+                  <p className="text-sm text-muted-foreground">Allow parents to view fees and payment information for learners at this school.</p>
+                </div>
+                <Switch
+                  checked={featureValues.enableParentFeesPayments}
+                  onCheckedChange={(checked) => handleToggle("enableParentFeesPayments", checked)}
+                  disabled={!isEditingFeatures}
+                  data-testid="switch-parent-fees-payments"
+                />
+              </div>
+
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
                   <Label>Accounting & Finance</Label>

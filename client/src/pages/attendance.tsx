@@ -258,12 +258,12 @@ export default function AttendancePage() {
   }, [singleEditTarget?.student.id, singleEditTarget?.date]);
 
   const selectedClassName = useMemo(() => {
-    if (!classes || selectedClass === "all") return "";
+    if (selectedClass === "all") return "All Classes";
+    if (!classes) return "";
     return classes.find(c => c.id.toString() === selectedClass)?.className || "";
   }, [selectedClass, classes]);
 
   const visibleStudents = useMemo(() => {
-    if (selectedClass === "all") return [];
     const rawStudents = gridData?.students ?? [];
     return sortStudents(rawStudents.filter((student) => studentMatchesSearch(student, studentSearch)));
   }, [gridData?.students, selectedClass, studentSearch]);
@@ -528,13 +528,17 @@ export default function AttendancePage() {
 
   const handleDownload = () => {
     if (!gridData) return;
-    const headers = ["Student", "Admission No", "Class", ...gridData.dates.map(formatDateLabel)];
-    const rows = visibleStudents.map(s => [
-      normalizeStudentName(s),
-      s.admissionNo,
-      s.className || "",
-      ...gridData.dates.map(d => STATUS_LABELS[s.statuses?.[d]] || ""),
-    ]);
+    const headers = selectedClass === "all"
+      ? ["Date", "Admission No.", "Student", "Class", "Attendance Status"]
+      : ["Student", "Admission No", "Class", ...gridData.dates.map(formatDateLabel)];
+    const rows = selectedClass === "all"
+      ? visibleStudents.flatMap(student => gridData.dates.map(date => [
+          date, student.admissionNo, normalizeStudentName(student), student.className || "", STATUS_LABELS[student.statuses?.[date]] || "",
+        ]))
+      : visibleStudents.map(student => [
+          normalizeStudentName(student), student.admissionNo, student.className || "",
+          ...gridData.dates.map(date => STATUS_LABELS[student.statuses?.[date]] || ""),
+        ]);
     const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -570,7 +574,8 @@ export default function AttendancePage() {
           <button
             type="button"
             className="relative inline-flex h-7 min-w-7 items-center justify-center rounded-full border border-amber-500/60 bg-amber-50 px-1.5 text-[11px] font-bold text-amber-800 shadow-sm hover:bg-amber-100 dark:bg-amber-950/30 dark:text-amber-200"
-            onClick={() => student && date && setSingleEditTarget({ student, date })}
+            onClick={() => selectedClass !== "all" && student && date && setSingleEditTarget({ student, date })}
+            disabled={selectedClass === "all"}
             title={`${activity.entryDenied && !activity.admitted ? "Gate arrival pending reconciliation" : "Gate activity without final attendance"}${activity.latestReason ? ` · ${activity.latestReason}` : ""}`}
             aria-label="Open Gate activity details"
           >
@@ -582,7 +587,8 @@ export default function AttendancePage() {
         <button
           type="button"
           className="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-dashed px-1.5 text-[11px] text-muted-foreground hover:border-primary hover:text-primary"
-          onClick={() => student && date && setSingleEditTarget({ student, date })}
+          onClick={() => selectedClass !== "all" && student && date && setSingleEditTarget({ student, date })}
+          disabled={selectedClass === "all"}
           aria-label="Mark blank attendance cell"
         >
           —
@@ -598,7 +604,8 @@ export default function AttendancePage() {
         className="relative inline-flex h-7 min-w-7 items-center justify-center rounded-full px-1.5 text-[11px] font-bold text-white shadow-sm transition-transform hover:scale-105"
         style={{ backgroundColor: color }}
         title={`${STATUS_LABELS[status] || status}${gateBacked ? " · Gate evidence" : ""}`}
-        onClick={() => student && date && setSingleEditTarget({ student, date })}
+        onClick={() => selectedClass !== "all" && student && date && setSingleEditTarget({ student, date })}
+        disabled={selectedClass === "all"}
         data-testid={`button-edit-attendance-${student?.id}-${date}`}
       >
         {STATUS_ICONS[status] || status.charAt(0).toUpperCase()}
@@ -787,7 +794,7 @@ export default function AttendancePage() {
                   <SelectValue placeholder="Select Class" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">Select Class</SelectItem>
+                  <SelectItem value="all">All Classes</SelectItem>
                   {classes?.map(c => (
                     <SelectItem key={c.id} value={c.id.toString()}>{c.className}</SelectItem>
                   ))}
@@ -815,11 +822,12 @@ export default function AttendancePage() {
                 />
               </div>
             </div>
-            <Button onClick={handleOpenMarkDialog} className="w-full self-end lg:w-auto" data-testid="button-mark-attendance">
+            <Button onClick={handleOpenMarkDialog} disabled={selectedClass === "all"} title={selectedClass === "all" ? "Select an individual class to mark attendance." : "Mark attendance"} className="w-full self-end lg:w-auto" data-testid="button-mark-attendance">
               <Calendar className="w-4 h-4 mr-2" />
               Mark
             </Button>
           </div>
+          {selectedClass === "all" && <p className="mt-2 text-xs text-muted-foreground">School-wide reporting mode. Select an individual class to mark attendance.</p>}
 
           <div className="mt-3 flex w-full flex-wrap items-center justify-start gap-1.5 rounded-md border bg-muted/20 px-2 py-2 text-xs sm:justify-between sm:gap-2 sm:px-4 lg:px-6" data-testid="attendance-status-legend">
             {Object.entries(STATUS_LABELS).map(([status, label]) => (
@@ -880,7 +888,7 @@ export default function AttendancePage() {
                   )) : (
                     <TableRow>
                       <TableCell colSpan={gridData.dates.length + (selectedClass === "all" ? 2 : 1)} className="h-24 text-center text-muted-foreground">
-                        {selectedClass === "all" ? "Select a class to view attendance records." : "No students match the current filters."}
+                        No students match the current filters.
                       </TableCell>
                     </TableRow>
                   )}

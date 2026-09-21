@@ -140,7 +140,7 @@ async function studentSummary(student: typeof students.$inferSelect, includePaym
   const [classInfo, hostel, school, attendance, finance, access, transport] = await Promise.all([
     student.classId ? db.select().from(classes).where(eq(classes.id, student.classId)).limit(1).then((r) => r[0] || null) : null,
     student.hostelId ? db.select().from(hostels).where(eq(hostels.id, student.hostelId)).limit(1).then((r) => r[0] || null) : null,
-    student.schoolId ? db.select({ id: schools.id, name: schools.name, shortCode: schools.shortCode }).from(schools).where(eq(schools.id, student.schoolId)).limit(1).then((r) => r[0] || null) : null,
+    student.schoolId ? db.select({ id: schools.id, name: schools.name, shortCode: schools.shortCode, enableParentFeesPayments: schools.enableParentFeesPayments }).from(schools).where(eq(schools.id, student.schoolId)).limit(1).then((r) => r[0] || null) : null,
     storage.getAttendanceByStudent(student.id),
     financeSnapshot(student, includePayments),
     accessSnapshot(student.id),
@@ -162,6 +162,7 @@ async function studentSummary(student: typeof students.$inferSelect, includePaym
       schoolId: student.schoolId,
       schoolName: school?.name || null,
       schoolShortCode: school?.shortCode || null,
+      parentFeesPaymentsEnabled: school?.enableParentFeesPayments !== false,
       isBoarding: student.isBoarding === true,
       isDayScholar: student.isDayScholar === true,
     },
@@ -215,7 +216,13 @@ export function registerPortalRoutes(app: Express) {
     const parentRecords = await getParentRecordsForUser(user.id);
     if (!parentRecords.length) return res.status(404).json({ message: "Parent record not found" });
     const children = await getChildrenForParentUser(user.id);
-    const summaries = await Promise.all(children.map((student) => studentSummary(student, false)));
+    const summaries = await Promise.all(children.map(async (student) => {
+      const summary = await studentSummary(student, false);
+      if (summary.student.parentFeesPaymentsEnabled === false) {
+        return { ...summary, finance: { enabled: false, snapshotAt: null } };
+      }
+      return { ...summary, finance: { ...summary.finance, enabled: true } };
+    }));
     const primary = parentRecords[0];
     return res.json({
       parent: { id: primary.id, firstName: primary.firstName, lastName: primary.lastName, photo: primary.photo },
@@ -228,14 +235,25 @@ export function registerPortalRoutes(app: Express) {
     const user = req.user as User;
     const parentRecords = await getParentRecordsForUser(user.id);
     if (!parentRecords.length) return res.status(404).json({ message: "Parent record not found" });
-    const children = await getChildrenForParentUser(user.id);
-    const rows = await Promise.all(children.map(async (student) => {
-      const [school] = student.schoolId ? await db.select({ id: schools.id, name: schools.name, shortCode: schools.shortCode }).from(schools).where(eq(schools.id, student.schoolId)).limit(1) : [];
-      return {
+    const linkedChildren = await getChildrenForParentUser(user.id);
+    const requestedStudentId = req.query.studentId ? Number(req.query.studentId) : null;
+    if (requestedStudentId && !linkedChildren.some((student) => student.id === requestedStudentId)) {
+      return res.status(404).json({ message: "Linked learner not found" });
+    }
+    const candidateChildren = requestedStudentId ? linkedChildren.filter((student) => student.id === requestedStudentId) : linkedChildren;
+    const rows = [];
+    for (const student of candidateChildren) {
+      const [school] = student.schoolId ? await db.select({ id: schools.id, name: schools.name, shortCode: schools.shortCode, enableParentFeesPayments: schools.enableParentFeesPayments }).from(schools).where(eq(schools.id, student.schoolId)).limit(1) : [];
+      if (school?.enableParentFeesPayments === false) {
+        if (requestedStudentId) return res.status(403).json({ message: "Fees & Payments is not enabled for this learner's school." });
+        continue;
+      }
+      rows.push({
         student: { id: student.id, schoolId: student.schoolId, schoolName: school?.name || null, schoolShortCode: school?.shortCode || null, admissionNo: student.admissionNo, firstName: student.firstName, lastName: student.lastName, photo: student.photo },
         finance: await financeSnapshot(student, true),
-      };
-    }));
+      });
+    }
+    if (!rows.length) return res.status(403).json({ message: "Fees & Payments is not enabled for your linked learners." });
     return res.json({ children: rows });
   });
 

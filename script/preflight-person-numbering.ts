@@ -9,11 +9,11 @@ async function main() {
     .where(sql`${staff.staffNo} <> upper(btrim(${staff.staffNo})) OR ${staff.staffNo} !~ '^FCGS[0-9]{2}E[0-9]{4,}[A-Z]+$'`);
 
   const studentDupes = await db.execute(sql`
-    SELECT upper(btrim(admission_no)) AS normalized, count(*)::int AS count
+    SELECT school_id AS "schoolId", upper(btrim(admission_no)) AS normalized, count(*)::int AS count
     FROM students
-    GROUP BY upper(btrim(admission_no))
+    GROUP BY school_id, upper(btrim(admission_no))
     HAVING count(*) > 1
-    ORDER BY count(*) DESC, normalized
+    ORDER BY count(*) DESC, school_id, normalized
     LIMIT 20
   `);
   const staffDupes = await db.execute(sql`
@@ -33,7 +33,7 @@ async function main() {
   console.log("FCGS person-numbering schema preflight");
   console.log(`Student rows incompatible with canonical DB check: ${studentBad}`);
   console.log(`Staff rows incompatible with canonical DB check: ${staffBad}`);
-  console.log(`Normalized Student duplicate groups: ${studentDuplicateRows.length}`);
+  console.log(`Same-school normalized Student duplicate groups: ${studentDuplicateRows.length}`);
   console.log(`Normalized Staff duplicate groups: ${staffDuplicateRows.length}`);
 
   if (studentDuplicateRows.length) console.table(studentDuplicateRows);

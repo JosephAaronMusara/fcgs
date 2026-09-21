@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import { db } from "./db";
 import { parents, schools, students, users, type Parent, type User } from "@shared/schema";
 
@@ -20,7 +20,7 @@ export async function getParentIdsForUser(userId: number): Promise<number[]> {
 export async function getChildrenForParentUser(userId: number) {
   const parentIds = await getParentIdsForUser(userId);
   if (!parentIds.length) return [];
-  return db.select().from(students).where(inArray(students.parentId, parentIds));
+  return db.select().from(students).where(and(inArray(students.parentId, parentIds), isNull(students.archivedAt), or(isNull(students.status), ne(students.status, "internally_transferred"))));
 }
 
 export async function getAccessibleSchoolIdsForParentUser(userId: number): Promise<number[]> {

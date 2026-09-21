@@ -115,7 +115,7 @@ export interface IStorage {
 
   getInternalTransfers(filters?: { organizationId?: number | null; schoolId?: number | null; personType?: string | null }): Promise<InternalTransfer[]>;
   createInternalTransfer(data: InsertInternalTransfer): Promise<InternalTransfer>;
-  transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }>;
+  transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; effectiveDate: string; joiningDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; sourceStudent: Student; transfer: InternalTransfer; warnings: string[] }>;
   transferStaffWithinOrganization(args: { staffId: number; destinationSchoolId: number; destinationRole: string; destinationAccessGroupId?: number | null; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ staff: Staff; transfer: InternalTransfer }>;
 
   getAllStreams(): Promise<Stream[]>;
@@ -839,66 +839,120 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
-  async transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; effectiveDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; transfer: InternalTransfer; warnings: string[] }> {
+  async transferStudentWithinOrganization(args: { studentId: number; destinationSchoolId: number; effectiveDate: string; joiningDate: string; reason: string; userId?: number | null; notes?: string | null }): Promise<{ student: Student; sourceStudent: Student; transfer: InternalTransfer; warnings: string[] }> {
     return db.transaction(async (tx) => {
       const [existing] = await tx.select().from(students).where(eq(students.id, args.studentId));
       if (!existing || existing.archivedAt) throw new Error("Student not found");
       if (!existing.schoolId) throw new Error("Student does not belong to a school");
+      if (existing.status !== "active") throw new Error("Only an active student can be internally transferred");
       if (existing.schoolId === args.destinationSchoolId) throw new Error("Destination school must be different from the current school");
+      if (args.joiningDate < args.effectiveDate) throw new Error("Joining date cannot be before the transfer date");
 
       const [sourceSchool] = await tx.select().from(schools).where(eq(schools.id, existing.schoolId));
       const [destinationSchool] = await tx.select().from(schools).where(eq(schools.id, args.destinationSchoolId));
       if (!sourceSchool || !destinationSchool) throw new Error("Source or destination school not found");
       if (!sourceSchool.organizationId || sourceSchool.organizationId !== destinationSchool.organizationId) throw new Error("Transfers are only allowed within the same organization");
 
-      // Destination classroom assignment is deliberately a receiving-school task.
-      // Internal transfers must never infer, copy, or create a classroom at the destination.
+      const priorTransfer = await tx.select({ id: internalTransfers.id }).from(internalTransfers).where(and(
+        eq(internalTransfers.personType, "student"),
+        eq(internalTransfers.sourceStudentId, existing.id),
+        eq(internalTransfers.status, "completed"),
+      )).limit(1);
+      if (priorTransfer.length) throw new Error("This student has already been internally transferred from this school record");
 
-      // Admission numbers are permanent person identifiers. Internal transfers move the
-      // record but never issue or accept a replacement number.
-      const nextAdmissionNo = existing.admissionNo;
+      const normalizedAdmission = existing.admissionNo.trim().toUpperCase();
+      const destinationDuplicate = await tx.select({ id: students.id, status: students.status }).from(students).where(and(
+        eq(students.schoolId, args.destinationSchoolId),
+        sql`upper(btrim(${students.admissionNo})) = ${normalizedAdmission}`,
+        isNull(students.archivedAt),
+      )).limit(1);
+      if (destinationDuplicate.length) throw new Error("A learner record with this admission number already exists at the destination school");
 
-      await tx.delete(studentSubjects).where(eq(studentSubjects.studentId, existing.id));
-
-      const [updated] = await tx.update(students).set({
-        schoolId: args.destinationSchoolId,
+      // End current source-school membership but retain the source row permanently as history.
+      const [sourceStudent] = await tx.update(students).set({
+        userId: null,
         classId: null,
         streamId: null,
-        admissionNo: nextAdmissionNo,
+        hostelId: null,
+        isBoarding: false,
+        isDayScholar: true,
+        status: "internally_transferred",
+        statusDate: args.effectiveDate,
+      }).where(eq(students.id, existing.id)).returning();
+      if (!sourceStudent) throw new Error("Unable to close the source-school learner record");
+
+      // Maintain a school-specific parent identity at the destination while preserving
+      // the same parent portal login across schools. The source-school parent row remains.
+      let destinationParentId = existing.parentId || null;
+      if (existing.parentId) {
+        const [sourceParent] = await tx.select().from(parents).where(eq(parents.id, existing.parentId)).limit(1);
+        if (sourceParent) {
+          let destinationParent = sourceParent.userId
+            ? (await tx.select().from(parents).where(and(eq(parents.schoolId, args.destinationSchoolId), eq(parents.userId, sourceParent.userId))).limit(1))[0]
+            : undefined;
+          if (!destinationParent && sourceParent.phone) {
+            destinationParent = (await tx.select().from(parents).where(and(
+              eq(parents.schoolId, args.destinationSchoolId),
+              sql`regexp_replace(coalesce(${parents.phone}, ''), '\D', '', 'g') = regexp_replace(${sourceParent.phone}, '\D', '', 'g')`,
+            )).limit(1))[0];
+          }
+          if (!destinationParent) {
+            [destinationParent] = await tx.insert(parents).values({
+              userId: sourceParent.userId, schoolId: args.destinationSchoolId, firstName: sourceParent.firstName, lastName: sourceParent.lastName,
+              email: sourceParent.email, phone: sourceParent.phone, address: sourceParent.address, streetAddress: sourceParent.streetAddress,
+              residentialArea: sourceParent.residentialArea, occupation: sourceParent.occupation, relationship: sourceParent.relationship, photo: sourceParent.photo,
+            }).returning();
+          }
+          destinationParentId = destinationParent.id;
+        }
+      }
+
+      // Create a new school-specific destination row. Classroom assignment is intentionally
+      // omitted and must be performed by the receiving school after the transfer.
+      const [destinationStudent] = await tx.insert(students).values({
+        userId: existing.userId,
+        schoolId: args.destinationSchoolId,
+        admissionNo: normalizedAdmission,
+        firstName: existing.firstName,
+        lastName: existing.lastName,
+        nationalIdNumber: existing.nationalIdNumber,
+        passportNumber: existing.passportNumber,
+        email: existing.email,
+        phone: existing.phone,
+        gender: existing.gender,
+        dateOfBirth: existing.dateOfBirth,
+        address: existing.address,
+        streetAddress: existing.streetAddress,
+        residentialArea: existing.residentialArea,
+        photo: existing.photo,
+        classId: null,
+        streamId: null,
+        parentId: destinationParentId,
         hostelId: null,
         isBoarding: false,
         isDayScholar: true,
         status: "active",
-      }).where(eq(students.id, existing.id)).returning();
-      if (!updated) throw new Error("Student transfer failed");
-
-      const warnings: string[] = [];
-      if (existing.parentId) {
-        const siblingsInSource = await tx.select({ id: students.id }).from(students).where(and(
-          eq(students.parentId, existing.parentId),
-          eq(students.schoolId, existing.schoolId),
-          ne(students.id, existing.id),
-          isNull(students.archivedAt)
-        ));
-        if (siblingsInSource.length === 0) {
-          const [parent] = await tx.select().from(parents).where(eq(parents.id, existing.parentId));
-          await tx.update(parents).set({ schoolId: args.destinationSchoolId }).where(eq(parents.id, existing.parentId));
-          if (parent?.userId) {
-            await tx.update(users).set({ schoolId: args.destinationSchoolId, organizationId: sourceSchool.organizationId }).where(eq(users.id, parent.userId));
-          }
-        } else {
-          warnings.push("The linked parent still has another child at the source school, so the parent account was left at the source school.");
-        }
-      }
+        enrollmentDate: args.joiningDate,
+        statusDate: args.joiningDate,
+        feesTotalTerm: "0",
+        feesPaidSoFar: "0",
+        feesBalance: "0",
+        feesMaxBalance: "0",
+        feesCustomerId: null,
+        feesStatus: "n/a",
+        feesSource: "student_payments_csv",
+        feesSnapshotAt: null,
+        feesImportBatchId: null,
+      }).returning();
+      if (!destinationStudent) throw new Error("Unable to create the destination-school learner record");
 
       if (existing.userId) {
         await tx.update(users).set({ schoolId: args.destinationSchoolId, organizationId: sourceSchool.organizationId, isActive: true }).where(eq(users.id, existing.userId));
       }
 
-      // End the old-school Transport registration on the day before the transfer effective date.
-      // Future-dated transfers therefore schedule the service end without rewriting Transport history.
+      // Schedule the old-school Transport service to end on the day before transfer.
       const effective = new Date(`${args.effectiveDate}T00:00:00Z`);
-      if (Number.isNaN(effective.getTime())) throw new Error("Invalid transfer effective date");
+      if (Number.isNaN(effective.getTime())) throw new Error("Invalid transfer date");
       effective.setUTCDate(effective.getUTCDate() - 1);
       const transportEndDate = effective.toISOString().slice(0, 10);
       const activeTransport = await tx.select().from(transportAssignments).where(and(
@@ -907,55 +961,36 @@ export class DatabaseStorage implements IStorage {
         or(isNull(transportAssignments.endDate), gte(transportAssignments.endDate, args.effectiveDate)),
       ));
       for (const assignment of activeTransport) {
-        const [closedAssignment] = await tx.update(transportAssignments).set({
-          endDate: transportEndDate,
-        }).where(eq(transportAssignments.id, assignment.id)).returning();
+        const [closedAssignment] = await tx.update(transportAssignments).set({ endDate: transportEndDate }).where(eq(transportAssignments.id, assignment.id)).returning();
         await tx.insert(transportAssignmentEvents).values({
-          schoolId: existing.schoolId,
-          assignmentId: assignment.id,
-          eventType: "internal_transfer_service_end_scheduled",
-          effectiveDate: args.effectiveDate,
-          previousValues: assignment,
-          newValues: closedAssignment,
+          schoolId: existing.schoolId, assignmentId: assignment.id, eventType: "internal_transfer_service_end_scheduled",
+          effectiveDate: args.effectiveDate, previousValues: assignment, newValues: closedAssignment,
           reason: `Transport service scheduled to end ${transportEndDate} because of internal transfer effective ${args.effectiveDate}`,
           createdByUserId: args.userId || null,
         });
       }
 
-      await tx.insert(studentEnrollmentEvents).values({
-        studentId: existing.id,
-        schoolId: args.destinationSchoolId,
-        eventType: "internal_transfer_in",
-        effectiveDate: args.effectiveDate,
-        reason: args.reason,
-        notes: args.notes || null,
-        previousStatus: existing.status || null,
-        newStatus: "active",
-        createdByUserId: args.userId || null,
-      });
+      await tx.insert(studentEnrollmentEvents).values([
+        {
+          studentId: existing.id, schoolId: existing.schoolId, eventType: "internal_transfer_out", effectiveDate: args.effectiveDate,
+          reason: args.reason, notes: args.notes || null, previousStatus: existing.status || null, newStatus: "internally_transferred", createdByUserId: args.userId || null,
+        },
+        {
+          studentId: destinationStudent.id, schoolId: args.destinationSchoolId, eventType: "internal_transfer_in", effectiveDate: args.joiningDate,
+          reason: args.reason, notes: args.notes || null, previousStatus: null, newStatus: "active", createdByUserId: args.userId || null,
+        },
+      ]);
 
       const [transfer] = await tx.insert(internalTransfers).values({
-        organizationId: sourceSchool.organizationId,
-        personType: "student",
-        personId: existing.id,
-        personName: `${existing.firstName} ${existing.lastName}`.trim(),
-        sourceSchoolId: existing.schoolId,
-        destinationSchoolId: args.destinationSchoolId,
-        sourceClassId: existing.classId || null,
-        destinationClassId: null,
-        sourceStreamId: existing.streamId || null,
-        destinationStreamId: null,
-        sourceAdmissionNo: existing.admissionNo,
-        destinationAdmissionNo: nextAdmissionNo,
-        effectiveDate: args.effectiveDate,
-        reason: args.reason,
-        status: "completed",
-        requestedByUserId: args.userId || null,
-        completedByUserId: args.userId || null,
-        notes: args.notes || null,
+        organizationId: sourceSchool.organizationId, personType: "student", personId: existing.id,
+        sourceStudentId: existing.id, destinationStudentId: destinationStudent.id, personName: `${existing.firstName} ${existing.lastName}`.trim(),
+        sourceSchoolId: existing.schoolId, destinationSchoolId: args.destinationSchoolId,
+        sourceClassId: existing.classId || null, destinationClassId: null, sourceStreamId: existing.streamId || null, destinationStreamId: null,
+        sourceAdmissionNo: normalizedAdmission, destinationAdmissionNo: normalizedAdmission, effectiveDate: args.effectiveDate, joiningDate: args.joiningDate,
+        reason: args.reason, status: "completed", requestedByUserId: args.userId || null, completedByUserId: args.userId || null, notes: args.notes || null,
       }).returning();
 
-      return { student: updated, transfer, warnings };
+      return { student: destinationStudent, sourceStudent, transfer, warnings: [] };
     });
   }
 
@@ -3172,15 +3207,15 @@ export class DatabaseStorage implements IStorage {
       .from(userAccessGroups)
       .innerJoin(accessGroups, eq(userAccessGroups.accessGroupId, accessGroups.id))
       .where(eq(userAccessGroups.userId, userId));
-    const currentGroupIds = new Set(existingGroups.map(({ group }) => group.id));
+
+    // Baseline assignment is an onboarding fallback only. Once a user has any explicit
+    // access-group configuration, never add, remove, or replace it automatically.
+    if (existingGroups.length > 0) return;
 
     if (user.role === "org_admin") {
       const orgHqGroup = await this.findAccessGroupByLookupKey(["org_hq", "org admin", "organization hq"]);
       if (!orgHqGroup) return;
-
-      if (!currentGroupIds.has(orgHqGroup.id)) {
-        await this.addUserToAccessGroup({ userId, accessGroupId: orgHqGroup.id });
-      }
+      await this.addUserToAccessGroup({ userId, accessGroupId: orgHqGroup.id });
 
       const explicitSchoolAccess = await db.select().from(userSchoolAccess).where(eq(userSchoolAccess.userId, userId));
       if (explicitSchoolAccess.length === 0) {
@@ -3195,63 +3230,24 @@ export class DatabaseStorage implements IStorage {
       return;
     }
 
-    const { group: targetGroup, authoritative } = await this.resolveBaselineAccessGroupForUser(userId, user);
+    const { group: targetGroup } = await this.resolveBaselineAccessGroupForUser(userId, user);
     if (!targetGroup) return;
-
-    if (authoritative) {
-      const staleGroupIds = existingGroups
-        .map(({ group }) => group.id)
-        .filter((groupId) => groupId !== targetGroup.id);
-
-      if (staleGroupIds.length > 0) {
-        await db.delete(userAccessGroups).where(
-          and(
-            eq(userAccessGroups.userId, userId),
-            inArray(userAccessGroups.accessGroupId, staleGroupIds)
-          )
-        );
-      }
-    }
-
-    if (!currentGroupIds.has(targetGroup.id)) {
-      await this.addUserToAccessGroup({ userId, accessGroupId: targetGroup.id });
-    }
+    await this.addUserToAccessGroup({ userId, accessGroupId: targetGroup.id });
   }
 
   async normalizeAllUserBaselineAccessGroups(): Promise<void> {
-    const allUsers = await db.select({ id: users.id }).from(users);
-    for (const user of allUsers) {
-      await this.ensureUserBaselineAccessGroups(user.id);
-    }
+    // Kept for interface compatibility. Global normalization is intentionally disabled:
+    // application startup/deployments must not rewrite administrator-configured access.
+    return;
   }
 
   async normalizeUserBaselineAccess(userId: number): Promise<void> {
+    // Used only by explicit onboarding/synchronisation flows. This is additive only when
+    // the account has no access-group configuration and never deletes permission overrides.
     await this.ensureUserBaselineAccessGroups(userId);
-
-    const [user] = await db.select().from(users).where(eq(users.id, userId));
-    if (!user || user.role !== "org_admin") return;
-
-    const orgHqGroup = await this.getAccessGroupByName("Org HQ");
-    if (!orgHqGroup) return;
-
-    const groups = await this.getUserAccessGroups(userId);
-    if (!groups.some((g) => g.id === orgHqGroup.id)) return;
-
-    const baselinePermissions = await this.getAccessGroupPermissions(orgHqGroup.id);
-    if (baselinePermissions.length === 0) return;
-
-    const baselineIds = new Set(baselinePermissions.map((p) => p.id));
-    const overrides = await this.getUserPermissionOverrides(userId);
-    const falseOverrides = overrides.filter((o) => baselineIds.has(o.permissionId) && o.granted === false);
-    const trueOverrides = overrides.filter((o) => o.granted === true);
-
-    if (falseOverrides.length === baselineIds.size && trueOverrides.length === 0) {
-      await db.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, userId));
-    }
   }
 
   async getUserAccessGroups(userId: number): Promise<AccessGroup[]> {
-    await this.ensureUserBaselineAccessGroups(userId);
     const result = await db
       .select({ group: accessGroups })
       .from(userAccessGroups)

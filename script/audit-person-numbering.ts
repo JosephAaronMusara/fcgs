@@ -84,11 +84,17 @@ async function main() {
   const studentNumberIndex = makeIndex(studentRows, (row) => row.admissionNo);
   const staffNumberIndex = makeIndex(staffRows, (row) => row.staffNo);
   const transferMap = new Map<string, TransferRow[]>();
-  for (const transfer of transferRows) {
-    const key = `${transfer.personType}:${transfer.personId}`;
+  const addTransferMapEntry = (key: string, transfer: TransferRow) => {
     const list = transferMap.get(key) || [];
-    list.push(transfer);
+    if (!list.some((row) => row.id === transfer.id)) list.push(transfer);
     transferMap.set(key, list);
+  };
+  for (const transfer of transferRows) {
+    addTransferMapEntry(`${transfer.personType}:${transfer.personId}`, transfer);
+    if (transfer.personType === "student") {
+      if (transfer.sourceStudentId) addTransferMapEntry(`student:${transfer.sourceStudentId}`, transfer);
+      if (transfer.destinationStudentId) addTransferMapEntry(`student:${transfer.destinationStudentId}`, transfer);
+    }
   }
 
   const issues: RecordIssue[] = [];
@@ -159,7 +165,11 @@ async function main() {
       });
     }
 
-    if (issuanceYear !== null && parsed.year2 !== String(issuanceYear).slice(-2)) {
+    const recordTransfers = transferMap.get(`${entity}:${row.id}`) || [];
+    const isDestinationCopyPreservingOriginalStudentNumber = entity === "student" && recordTransfers.some((transfer) =>
+      transfer.destinationStudentId === row.id && schoolSequenceCode(transfer.sourceSchoolId) === parsed.schoolCode,
+    );
+    if (issuanceYear !== null && parsed.year2 !== String(issuanceYear).slice(-2) && !isDestinationCopyPreservingOriginalStudentNumber) {
       issues.push({
         ...base,
         issue: "NUMBER_YEAR_MISMATCH",
@@ -190,13 +200,25 @@ async function main() {
           schoolName: school?.name || null,
           issuanceYear: getYear(row),
           issue: "CASE_INSENSITIVE_DUPLICATE_NUMBER",
-          details: `Normalized number ${normalized} is used by ${rows.length} ${entity} records.`,
+          details: `Normalized number ${entity === "student" ? normalized.split(":").slice(1).join(":") : normalized} is used by ${rows.length} ${entity} records${entity === "student" ? " within the same school" : ""}.`,
         });
       }
     }
   };
 
-  addDuplicateIssues("student", studentNumberIndex, (row) => row.admissionNo, studentIssuanceYear);
+  const studentSchoolNumberIndex = new Map<string, StudentRow[]>();
+  for (const row of studentRows) {
+    const normalized = normalizeNumber(row.admissionNo);
+    if (!normalized) continue;
+    const key = `${row.schoolId ?? "none"}:${normalized}`;
+    const rows = studentSchoolNumberIndex.get(key) || [];
+    rows.push(row);
+    studentSchoolNumberIndex.set(key, rows);
+  }
+  // A permanent admission number can legitimately appear once at the historical source school
+  // and once at the active destination school after an internal transfer. Only duplicates inside
+  // the same school are errors.
+  addDuplicateIssues("student", studentSchoolNumberIndex, (row) => row.admissionNo, studentIssuanceYear);
   addDuplicateIssues("staff", staffNumberIndex, (row) => row.staffNo, staffIssuanceYear);
 
   const sequencesFor = (entity: EntityKind, schoolId: number) => {
@@ -287,7 +309,7 @@ async function main() {
       "Allocation uses a per-school/entity/year advisory lock plus a persisted counter.",
       "Allocator scans globally by encoded suffix when reconciling existing usage, so transferred identifiers remain consumed.",
       "Four-or-more digit sequences are supported; 10000+ does not reset the allocator.",
-      "Normalized unique indexes and canonical-format database checks protect stored identifiers.",
+      "School-scoped normalized uniqueness for Student numbers and canonical-format database checks protect stored identifiers while allowing permanent numbers to follow internal transfers.",
     ],
   };
 

@@ -55,7 +55,10 @@
     "transport:test-data:reset": "tsx script/seed-transport-test-data.ts --reset",
     "gate:bridge": "tsx script/gate-bridge.ts",
     "access-control:source-check": "node script/validate-access-control-gate-bridge.cjs",
-    "recruitment:talent-sync": "tsx script/sync-recruitment-talent-rankings.ts"
+    "recruitment:talent-sync": "tsx script/sync-recruitment-talent-rankings.ts",
+    "internal-transfers:preflight": "tsx script/backfill-internal-transfers.ts",
+    "internal-transfers:backfill": "tsx script/backfill-internal-transfers.ts --apply",
+    "fcgs:upgrade:2026-09-21": "tsx script/apply-2026-09-21-build-schema.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

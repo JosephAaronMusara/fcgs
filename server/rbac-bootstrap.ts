@@ -1,8 +1,7 @@
 import { db } from "./db";
 import { RBAC_PERMISSIONS_DATA } from "./rbac-config";
-import { accessGroupPermissions, accessGroups, permissions, userPermissionOverrides, users } from "@shared/schema";
-import { and, eq, inArray } from "drizzle-orm";
-import { storage } from "./storage";
+import { accessGroupPermissions, accessGroups, permissions } from "@shared/schema";
+import { eq, inArray } from "drizzle-orm";
 
 async function ensurePermissionsCatalog() {
   for (const permission of RBAC_PERMISSIONS_DATA) {
@@ -31,30 +30,6 @@ async function ensurePermissionsCatalog() {
         .where(eq(permissions.id, existing.id));
     }
   }
-}
-
-const RETIRED_PERMISSION_CODES = [
-  "discussion_forum.view",
-  "schemes.view",
-  "schemes.create",
-  "schemes.edit",
-  "schemes.delete",
-  "transport.payment_plans.manage",
-  "learning_materials.view",
-] as const;
-
-async function removeRetiredPermissions() {
-  const retired = await db
-    .select({ id: permissions.id })
-    .from(permissions)
-    .where(inArray(permissions.code, [...RETIRED_PERMISSION_CODES]));
-
-  const retiredIds = retired.map((permission) => permission.id);
-  if (!retiredIds.length) return;
-
-  await db.delete(accessGroupPermissions).where(inArray(accessGroupPermissions.permissionId, retiredIds));
-  await db.delete(userPermissionOverrides).where(inArray(userPermissionOverrides.permissionId, retiredIds));
-  await db.delete(permissions).where(inArray(permissions.id, retiredIds));
 }
 
 
@@ -86,6 +61,11 @@ const ACCOUNTANT_TRANSPORT_PERMISSIONS = [
   "transport.periods.lock", "transport.reports.view", "transport.audit.view",
 ];
 
+// Existing access-group permission mappings are administrator-owned configuration.
+// Baseline startup may seed permissions only for a group that it creates during this
+// same bootstrap run; it must never add/remove rights on a group that already exists.
+const accessGroupsCreatedThisBootstrap = new Set<number>();
+
 async function ensureAccessGroupPermissions(groupName: string, permissionCodes: string[], createIfMissing = false, description?: string) {
   let [group] = await db.select().from(accessGroups).where(eq(accessGroups.name, groupName));
   if (!group && createIfMissing) {
@@ -94,8 +74,9 @@ async function ensureAccessGroupPermissions(groupName: string, permissionCodes: 
       description: description || "System access group managed by the FCGS permission bootstrap.",
       isSystemDefault: true,
     }).returning();
+    accessGroupsCreatedThisBootstrap.add(group.id);
   }
-  if (!group) return;
+  if (!group || !accessGroupsCreatedThisBootstrap.has(group.id)) return;
 
   const permissionRows = await db.select({ id: permissions.id }).from(permissions).where(inArray(permissions.code, permissionCodes));
   if (!permissionRows.length) return;
@@ -112,24 +93,10 @@ const ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS = [
   "transport.subscription.manage", "transport.hq.claims.manage", "transport.hq.payouts.manage", "transport.hq.disbursements.manage", "transport.hq.settings.manage",
 ];
 
-async function replaceAccessGroupPermissionSubset(groupName: string, prefix: string, allowedCodes: string[]) {
-  const [group] = await db.select().from(accessGroups).where(eq(accessGroups.name, groupName));
-  if (!group) return;
-  const allRows = await db.select({ id: permissions.id, code: permissions.code }).from(permissions);
-  const matchingIds = allRows.filter((row) => row.code.startsWith(prefix)).map((row) => row.id);
-  if (matchingIds.length) {
-    await db.delete(accessGroupPermissions).where(and(
-      eq(accessGroupPermissions.accessGroupId, group.id),
-      inArray(accessGroupPermissions.permissionId, matchingIds),
-    ));
-  }
-  await ensureAccessGroupPermissions(groupName, allowedCodes);
-}
-
 async function ensureTransportAccessGroupDefaults() {
   const allTransportCodes = RBAC_PERMISSIONS_DATA.filter((permission) => permission.code.startsWith("transport.")).map((permission) => permission.code);
   await ensureAccessGroupPermissions("School Admin", allTransportCodes);
-  await replaceAccessGroupPermissionSubset("Org HQ", "transport.", ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS);
+  await ensureAccessGroupPermissions("Org HQ", ORG_HQ_TRANSPORT_OVERSIGHT_PERMISSIONS);
   await ensureAccessGroupPermissions("Accountant", ACCOUNTANT_TRANSPORT_PERMISSIONS);
   await ensureAccessGroupPermissions(
     "Receptionist",
@@ -222,45 +189,23 @@ async function ensurePhotoAccessGroupDefaults() {
   await ensureAccessGroupPermissions("Assistant Teacher", ["students.manage_photo"]);
 }
 
-async function cleanupLegacyBlanketAdminOverrides() {
-  const allPermissions = await db.select({ id: permissions.id }).from(permissions);
-  const allPermissionIds = allPermissions.map((permission) => permission.id).sort((a, b) => a - b);
-  if (allPermissionIds.length === 0) return;
-
-  const adminUsers = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(inArray(users.role, ["org_admin", "school_admin"]));
-
-  for (const adminUser of adminUsers) {
-    const overrides = await db
-      .select({ permissionId: userPermissionOverrides.permissionId, granted: userPermissionOverrides.granted })
-      .from(userPermissionOverrides)
-      .where(eq(userPermissionOverrides.userId, adminUser.id));
-
-    if (overrides.length !== allPermissionIds.length) continue;
-    if (overrides.some((override) => override.granted !== true)) continue;
-
-    const overridePermissionIds = overrides
-      .map((override) => override.permissionId)
-      .sort((a, b) => a - b);
-
-    const isLegacyBlanketGrant = overridePermissionIds.every((permissionId, index) => permissionId === allPermissionIds[index]);
-    if (!isLegacyBlanketGrant) continue;
-
-    await db.delete(userPermissionOverrides).where(eq(userPermissionOverrides.userId, adminUser.id));
-  }
-}
-
 export async function ensureRbacBaseline() {
+  accessGroupsCreatedThisBootstrap.clear();
+
+  // Catalog maintenance is safe: permission metadata can be introduced/renamed without
+  // changing which users or access groups actually hold those permissions.
   await ensurePermissionsCatalog();
-  await removeRetiredPermissions();
+
+  // Do not automatically remove retired permissions here. Removing a catalog entry also
+  // deletes its group mappings and user overrides, which would rewrite administrator
+  // configuration during application startup. Retirement must be an explicit migration.
+
+  // These routines now seed permissions only when they create a brand-new default group.
+  // Existing groups remain exactly as configured by administrators.
   await ensureTransportAccessGroupDefaults();
   await ensureRecruitmentAccessGroupDefaults();
   await ensureAssetsInventoryAccessGroupDefaults();
   await ensureFleetAccessGroupDefaults();
   await ensureAccessControlDefaults();
   await ensurePhotoAccessGroupDefaults();
-  await cleanupLegacyBlanketAdminOverrides();
-  await storage.normalizeAllUserBaselineAccessGroups();
 }

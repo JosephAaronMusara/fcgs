@@ -32,7 +32,7 @@ export const attendanceStatusEnum = pgEnum("attendance_status", ["present", "abs
 
 export const staffStatusEnum = pgEnum("staff_status", ["active", "inactive"]);
 
-export const studentStatusEnum = pgEnum("student_status", ["active", "inactive", "transferred", "graduated"]);
+export const studentStatusEnum = pgEnum("student_status", ["active", "inactive", "transferred", "internally_transferred", "graduated"]);
 
 export const internalTransferPersonTypeEnum = pgEnum("internal_transfer_person_type", ["student", "staff"]);
 export const internalTransferStatusEnum = pgEnum("internal_transfer_status", ["completed"]);
@@ -121,6 +121,7 @@ export const schools = pgTable("schools", {
   principalEmail: text("principal_email"),
   principalPhone: text("principal_phone"),
   enableFinance: boolean("enable_finance").default(true),
+  enableParentFeesPayments: boolean("enable_parent_fees_payments").default(true),
   enableHostel: boolean("enable_hostel").default(false),
   enablePOS: boolean("enable_pos").default(false),
   enableELibrary: boolean("enable_e_library").default(true),
@@ -285,7 +286,7 @@ export const students = pgTable("students", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   userId: integer("user_id").references(() => users.id),
   schoolId: integer("school_id").references(() => schools.id),
-  admissionNo: text("admission_no").notNull().unique(),
+  admissionNo: text("admission_no").notNull(),
   firstName: text("first_name").notNull(),
   lastName: text("last_name").notNull(),
   nationalIdNumber: text("national_id_number"),
@@ -306,6 +307,7 @@ export const students = pgTable("students", {
   isDayScholar: boolean("is_day_scholar").default(false),
   status: studentStatusEnum("status").default("active"),
   enrollmentDate: date("enrollment_date"),
+  statusDate: date("status_date"),
   feesTotalTerm: decimal("fees_total_term", { precision: 10, scale: 2 }).default("0"),
   feesPaidSoFar: decimal("fees_paid_so_far", { precision: 10, scale: 2 }).default("0"),
   feesBalance: decimal("fees_balance", { precision: 10, scale: 2 }).default("0"),
@@ -318,7 +320,7 @@ export const students = pgTable("students", {
   archivedAt: timestamp("archived_at"),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => ({
-  normalizedAdmissionNoUniqueIdx: uniqueIndex("students_admission_no_normalized_uidx").on(sql`upper(btrim(${table.admissionNo}))`),
+  schoolAdmissionNoUniqueIdx: uniqueIndex("students_school_admission_no_normalized_uidx").on(table.schoolId, sql`upper(btrim(${table.admissionNo}))`),
   canonicalAdmissionNoCheck: check(
     "students_admission_no_canonical_chk",
     sql`${table.admissionNo} = upper(btrim(${table.admissionNo})) AND ${table.admissionNo} ~ '^FCGS[0-9]{2}S[0-9]{4,}[A-Z]+$'`,
@@ -377,6 +379,8 @@ export const internalTransfers = pgTable("internal_transfers", {
   organizationId: integer("organization_id").references(() => organizations.id).notNull(),
   personType: internalTransferPersonTypeEnum("person_type").notNull(),
   personId: integer("person_id").notNull(),
+  sourceStudentId: integer("source_student_id").references(() => students.id),
+  destinationStudentId: integer("destination_student_id").references(() => students.id),
   personName: text("person_name").notNull(),
   sourceSchoolId: integer("source_school_id").references(() => schools.id).notNull(),
   destinationSchoolId: integer("destination_school_id").references(() => schools.id).notNull(),
@@ -391,6 +395,7 @@ export const internalTransfers = pgTable("internal_transfers", {
   sourceAdmissionNo: text("source_admission_no"),
   destinationAdmissionNo: text("destination_admission_no"),
   effectiveDate: date("effective_date").notNull(),
+  joiningDate: date("joining_date"),
   reason: text("reason").notNull(),
   status: internalTransferStatusEnum("status").notNull().default("completed"),
   requestedByUserId: integer("requested_by_user_id").references(() => users.id),
@@ -754,8 +759,11 @@ export const transportSettings = pgTable("transport_settings", {
   transportManagerStaffId: integer("transport_manager_staff_id").references(() => staff.id),
   currencyCode: text("currency_code").notNull().default("USD"),
   stopGroupingDistanceMeters: integer("stop_grouping_distance_meters").notNull().default(30),
+  oneWayPricingMode: text("one_way_pricing_mode").notNull().default("percentage"),
   inboundOneWayPercent: decimal("inbound_one_way_percent", { precision: 6, scale: 2 }).notNull().default("60"),
   outboundOneWayPercent: decimal("outbound_one_way_percent", { precision: 6, scale: 2 }).notNull().default("60"),
+  inboundOneWayFixedAddition: decimal("inbound_one_way_fixed_addition", { precision: 12, scale: 2 }).notNull().default("0"),
+  outboundOneWayFixedAddition: decimal("outbound_one_way_fixed_addition", { precision: 12, scale: 2 }).notNull().default("0"),
   joiningFullChargeThroughDay: integer("joining_full_charge_through_day").notNull().default(5),
   refundNoCreditRemainingDays: integer("refund_no_credit_remaining_days").notNull().default(5),
   pendingSeatReservationEnabled: boolean("pending_seat_reservation_enabled").notNull().default(true),
@@ -1053,6 +1061,8 @@ export const transportRefunds = pgTable("transport_refunds", {
   paidByUserId: integer("paid_by_user_id").references(() => users.id),
   paidAt: timestamp("paid_at"),
   externalReference: text("external_reference"),
+  accountedCashupId: integer("accounted_cashup_id"),
+  accountedAt: timestamp("accounted_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -1392,7 +1402,7 @@ export const transportCashupRefunds = pgTable("transport_cashup_refunds", {
   cashupId: integer("cashup_id").references(() => transportCashups.id).notNull(),
   refundId: integer("refund_id").references(() => transportRefunds.id).notNull(),
   createdAt: timestamp("created_at").defaultNow(),
-}, (table) => ({ refundUnique: uniqueIndex("transport_cashup_refund_uidx").on(table.refundId) }));
+}, (table) => ({ refundIdx: index("transport_cashup_refund_idx").on(table.refundId) }));
 
 // Organisation-level provider subscription policy. Historical rows are never rewritten after
 // settlement posting; replacing an open-month rule preserves the old row for audit.
@@ -2399,7 +2409,7 @@ export const insertTransportProviderAdjustmentSchema = omitInsertFields(createIn
 export const insertTransportPaymentSchema = omitInsertFields(createInsertSchema(transportPayments), { id: true, createdAt: true, reversedAt: true, reversedByUserId: true, reversalReason: true, verifiedAt: true, verifiedByUserId: true, reconciledAt: true, reconciledByUserId: true });
 export const insertTransportPaymentAllocationSchema = omitInsertFields(createInsertSchema(transportPaymentAllocations), { id: true, createdAt: true });
 export const insertTransportReceiptEventSchema = omitInsertFields(createInsertSchema(transportReceiptEvents), { id: true, createdAt: true });
-export const insertTransportRefundSchema = omitInsertFields(createInsertSchema(transportRefunds), { id: true, createdAt: true, approvedAt: true, paidAt: true });
+export const insertTransportRefundSchema = omitInsertFields(createInsertSchema(transportRefunds), { id: true, createdAt: true, approvedAt: true, paidAt: true, accountedCashupId: true, accountedAt: true });
 export const insertTransportCashupSchema = omitInsertFields(createInsertSchema(transportCashups), { id: true, createdAt: true, submittedAt: true, verifiedAt: true });
 export const insertTransportCashupPaymentSchema = omitInsertFields(createInsertSchema(transportCashupPayments), { id: true, createdAt: true });
 export const insertTransportSubscriptionRuleSchema = omitInsertFields(createInsertSchema(transportSubscriptionRules), { id: true, createdAt: true });

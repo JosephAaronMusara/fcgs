@@ -8,15 +8,18 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 const money = (value: unknown) => `USD ${Number(value || 0).toFixed(2)}`;
 
 function snapshotLabel(value: string | null | undefined) {
-  if (!value) return "Financial information has not yet been updated.";
+  if (!value) return "Not yet updated";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Financial information has not yet been updated.";
-  return `Financial information last updated: ${date.toLocaleString(undefined, { dateStyle: "long", timeStyle: "short" })}`;
+  if (Number.isNaN(date.getTime())) return "Not yet updated";
+  return `Updated: ${date.toLocaleString(undefined, { dateStyle: "long", timeStyle: "short" })}`;
 }
 
 export default function ParentFinancePage() {
-  const { data, isLoading } = useQuery<any>({ queryKey: ["/api/me/parent-finance"] });
+  const studentId = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("studentId") : null;
+  const financeUrl = studentId ? `/api/me/parent-finance?studentId=${encodeURIComponent(studentId)}` : "/api/me/parent-finance";
+  const { data, isLoading, isError } = useQuery<any>({ queryKey: [financeUrl] });
   if (isLoading) return <div className="space-y-4 p-4 sm:p-6"><Skeleton className="h-10 w-64" /><Skeleton className="h-64" /></div>;
+  if (isError || !data) return <div className="p-6"><Card><CardContent className="py-10 text-center text-muted-foreground">Fees & Payments is not available for the selected learner.</CardContent></Card></div>;
   const children = data?.children || [];
 
   return (

@@ -764,6 +764,22 @@ function SettingsWorkspace({ data, saving, onSave }: any) {
   const [form, setForm] = useState<any>(() => ({ ...data.settings }));
   useEffect(() => setForm({ ...data.settings }), [data.settings]);
   const set = (key: string, value: any) => setForm((current: any) => ({ ...current, [key]: value }));
+  const pricingValidationMessage = (() => {
+    if ((form.oneWayPricingMode || "percentage") === "percentage") {
+      const schoolBound = Number(form.inboundOneWayPercent);
+      const homeBound = Number(form.outboundOneWayPercent);
+      if (!Number.isFinite(schoolBound) || schoolBound < 50 || schoolBound > 100 || !Number.isFinite(homeBound) || homeBound < 50 || homeBound > 100) {
+        return "School-bound and home-bound percentages must each be between 50% and 100%.";
+      }
+    } else {
+      const schoolBound = Number(form.inboundOneWayFixedAddition);
+      const homeBound = Number(form.outboundOneWayFixedAddition);
+      if (!Number.isFinite(schoolBound) || schoolBound < 0 || !Number.isFinite(homeBound) || homeBound < 0) {
+        return "School-bound and home-bound fixed additions must each be zero or greater.";
+      }
+    }
+    return "";
+  })();
   return <Card><CardHeader><CardTitle>Transport settings</CardTitle><CardDescription>School-specific, effective operational policies. Currency remains USD for this release.</CardDescription></CardHeader><CardContent className="space-y-6">
     <SettingsSection title="Responsibility and location planning">
       <EntitySelect label="Transport Manager" items={data.staff} value={form.transportManagerStaffId} onChange={(value: any) => set("transportManagerStaffId", idValue(value))} itemText={(row: any) => `${row.firstName} ${row.lastName} (${row.position || "Staff"})`} optional/>
@@ -772,11 +788,28 @@ function SettingsWorkspace({ data, saving, onSave }: any) {
       <NumberField label="Default checkpoint radius (metres)" value={form.defaultCheckpointRadiusMeters} onChange={(value: any) => set("defaultCheckpointRadiusMeters", value)} min={1}/>
       <Field label="Map provider"><Input value="OpenStreetMap (testing)" disabled/></Field>
     </SettingsSection>
-    <SettingsSection title="Pricing and prorating">
-      <NumberField label="School-bound percentage" value={form.inboundOneWayPercent} onChange={(value: any) => set("inboundOneWayPercent", value)} min={0} max={100} step="0.01"/>
-      <NumberField label="Home-bound percentage" value={form.outboundOneWayPercent} onChange={(value: any) => set("outboundOneWayPercent", value)} min={0} max={100} step="0.01"/>
-      <NumberField label="Full charge through joining day" value={form.joiningFullChargeThroughDay} onChange={(value: any) => set("joiningFullChargeThroughDay", value)} min={0} max={31}/>
-      <NumberField label="No-refund remaining-day threshold" value={form.refundNoCreditRemainingDays} onChange={(value: any) => set("refundNoCreditRemainingDays", value)} min={0} max={31}/>
+    <SettingsSection title="Pricing and prorating" gridClassName="md:grid-cols-2 lg:grid-cols-[150px_repeat(4,minmax(0,1fr))]">
+      <Field label="Pricing method">
+        <div className="space-y-2 pt-1">
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input type="radio" name="oneWayPricingMode" value="percentage" checked={(form.oneWayPricingMode || "percentage") === "percentage"} onChange={() => set("oneWayPricingMode", "percentage")}/>
+            <span>Percentage</span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input type="radio" name="oneWayPricingMode" value="fixed_addition" checked={form.oneWayPricingMode === "fixed_addition"} onChange={() => set("oneWayPricingMode", "fixed_addition")}/>
+            <span>Fixed addition</span>
+          </label>
+        </div>
+      </Field>
+      {(form.oneWayPricingMode || "percentage") === "percentage" ? <>
+        <Field label="School-bound percentage"><Input type="number" value={form.inboundOneWayPercent ?? ""} min={50} max={100} step="0.01" onChange={(event) => set("inboundOneWayPercent", event.target.value)}/><p className="text-xs text-muted-foreground">Minimum 50% of the two-way charge.</p></Field>
+        <Field label="Home-bound percentage"><Input type="number" value={form.outboundOneWayPercent ?? ""} min={50} max={100} step="0.01" onChange={(event) => set("outboundOneWayPercent", event.target.value)}/><p className="text-xs text-muted-foreground">Minimum 50% of the two-way charge.</p></Field>
+      </> : <>
+        <Field label="School-bound addition"><Input type="number" value={form.inboundOneWayFixedAddition ?? 0} min={0} step="0.01" onChange={(event) => set("inboundOneWayFixedAddition", event.target.value)}/><p className="text-xs text-muted-foreground">Added to half the two-way charge.</p></Field>
+        <Field label="Home-bound addition"><Input type="number" value={form.outboundOneWayFixedAddition ?? 0} min={0} step="0.01" onChange={(event) => set("outboundOneWayFixedAddition", event.target.value)}/><p className="text-xs text-muted-foreground">Added to half the two-way charge.</p></Field>
+      </>}
+      <Field label="Full charge if joining by day"><Input type="number" value={form.joiningFullChargeThroughDay ?? ""} min={0} max={31} step="1" onChange={(event) => set("joiningFullChargeThroughDay", event.target.value)}/><p className="text-xs text-muted-foreground">Learners joining on or before this day are charged the full transport fee.</p></Field>
+      <Field label="No refund if days remaining are"><Input type="number" value={form.refundNoCreditRemainingDays ?? ""} min={0} max={31} step="1" onChange={(event) => set("refundNoCreditRemainingDays", event.target.value)}/><p className="text-xs text-muted-foreground">No refund is calculated when this many days or fewer remain.</p></Field>
     </SettingsSection>
     <SettingsSection title="Pending seats and school operational timing">
       <BooleanField label="Reserve seats for pending registrations" value={form.pendingSeatReservationEnabled} onChange={(value: any) => set("pendingSeatReservationEnabled", value)}/>
@@ -794,7 +827,8 @@ function SettingsWorkspace({ data, saving, onSave }: any) {
       <Field label="Deduction priority"><Input value={Array.isArray(form.deductionPriority) ? form.deductionPriority.join(", ") : (form.deductionPriority || "")} onChange={(event) => set("deductionPriority", event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} placeholder="refund, subscription, penalty, advance, other"/><p className="text-xs text-muted-foreground">First item is deducted first.</p></Field>
       <Field label="Receipt footer"><Textarea value={form.receiptFooter || ""} onChange={(event) => set("receiptFooter", event.target.value)}/></Field>
     </SettingsSection>
-    <div className="flex justify-end"><Button disabled={saving} onClick={() => onSave(form)}><Settings className="mr-2 h-4 w-4"/>{saving ? "Saving…" : "Save Transport Settings"}</Button></div>
+    {pricingValidationMessage && <p className="text-sm text-destructive">{pricingValidationMessage}</p>}
+    <div className="flex justify-end"><Button disabled={saving || !!pricingValidationMessage} onClick={() => !pricingValidationMessage && onSave(form)}><Settings className="mr-2 h-4 w-4"/>{saving ? "Saving…" : "Save Transport Settings"}</Button></div>
   </CardContent></Card>;
 }
 
@@ -849,8 +883,23 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
   const [creatingPoints, setCreatingPoints] = useState(false);
   const set = (key: string, value: any) => setForm((current: any) => ({ ...current, [key]: value }));
   const selectedRoute = data.routes.find((route: any) => Number(route.id) === Number(form.routeId));
-  const percentageFor = (serviceType: string) => serviceType === "pickup" ? Number(data.settings.inboundOneWayPercent || 0) : serviceType === "dropoff" ? Number(data.settings.outboundOneWayPercent || 0) : 100;
-  const expectedFee = Number(form.baseMonthlyFee || 0) * percentageFor(form.serviceType) / 100;
+  const pricingMode = String(data.settings.oneWayPricingMode || "percentage");
+  const percentageFor = (serviceType: string) => serviceType === "pickup" ? Number(data.settings.inboundOneWayPercent || 60) : serviceType === "dropoff" ? Number(data.settings.outboundOneWayPercent || 60) : 100;
+  const fixedAdditionFor = (serviceType: string) => serviceType === "pickup" ? Number(data.settings.inboundOneWayFixedAddition || 0) : serviceType === "dropoff" ? Number(data.settings.outboundOneWayFixedAddition || 0) : 0;
+  const calculatedFeeFor = (serviceType: string, fullFee: number) => {
+    if (serviceType === "both") return fullFee;
+    return pricingMode === "fixed_addition"
+      ? fullFee / 2 + fixedAdditionFor(serviceType)
+      : fullFee * percentageFor(serviceType) / 100;
+  };
+  const pricingLabelFor = (serviceType: string) => {
+    if (serviceType === "both") return "Two-way";
+    const direction = serviceType === "pickup" ? "School-bound" : "Home-bound";
+    return pricingMode === "fixed_addition"
+      ? `${direction} (half + USD ${money(fixedAdditionFor(serviceType))})`
+      : `${direction} (${money(percentageFor(serviceType))}%)`;
+  };
+  const expectedFee = calculatedFeeFor(form.serviceType, Number(form.baseMonthlyFee || 0));
   const savedPoints = (data.servicePoints || []).filter((point: any) => point.isActive !== false);
   const activeVehicles = (data.allVehicles || data.vehicles).filter((vehicle: any) => vehicle.isActive);
   const eligibleVehicles = activeVehicles.filter((vehicle: any) => {
@@ -868,7 +917,7 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
   useEffect(() => {
     if (!selectedRoute) return;
     const full = Number(selectedRoute.defaultFee || 0);
-    setForm((current: any) => ({ ...current, baseMonthlyFee: full, agreedFee: (full * percentageFor(current.serviceType) / 100).toFixed(2) }));
+    setForm((current: any) => ({ ...current, baseMonthlyFee: full, agreedFee: calculatedFeeFor(current.serviceType, full).toFixed(2) }));
   }, [form.routeId]);
 
   useEffect(() => {
@@ -885,7 +934,7 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
   const changeServiceType = (serviceType: string) => {
     setForm((current: any) => {
       const full = Number(current.baseMonthlyFee || selectedRoute?.defaultFee || 0);
-      const next: any = { ...current, serviceType, agreedFee: (full * percentageFor(serviceType) / 100).toFixed(2) };
+      const next: any = { ...current, serviceType, agreedFee: calculatedFeeFor(serviceType, full).toFixed(2) };
       if ((serviceType === "both" || serviceType === "dropoff") && current.vehicleId) next.outboundVehicleId = current.vehicleId;
       if (serviceType === "pickup") next.outboundVehicleId = null;
       return next;
@@ -908,7 +957,7 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
   const submitAssignment = async () => {
     const expected = Number(expectedFee.toFixed(2));
     const entered = Number(form.agreedFee || 0);
-    if (Math.abs(entered - expected) > 0.009 && !window.confirm(`The Agreed Monthly Fee entered (USD ${money(entered)}) is not the set ${percentageFor(form.serviceType)}% amount (USD ${money(expected)}). Are you sure you want to register the student?`)) return;
+    if (Math.abs(entered - expected) > 0.009 && !window.confirm(`The Agreed Monthly Fee entered (USD ${money(entered)}) is not the configured ${pricingMode === "fixed_addition" ? "half-plus-addition" : "percentage"} amount (USD ${money(expected)}). Are you sure you want to register the student?`)) return;
     if (!locationCanSubmit) return;
     try {
       setCreatingPoints(true);
@@ -952,11 +1001,11 @@ function LearnerRegistrationDialog({ record, data, saving, close, submit }: any)
       <div className="grid gap-4 md:grid-cols-3">
         <EntitySelect label="Learner" items={data.students} value={form.studentId} onChange={(value: any) => set("studentId", idValue(value))} itemText={(student: any) => `${student.firstName} ${student.lastName} (${student.admissionNo})`}/>
         <EntitySelect label="Destination" items={data.routes.filter((route: any) => route.isActive)} value={form.routeId} onChange={(value: any) => set("routeId", idValue(value))} itemText={(route: any) => `${route.code} · ${route.name}`}/>
-        <Choice label="Service Type" value={form.serviceType} onChange={changeServiceType} items={[["both", "Two-way"], ["pickup", `School-bound (${money(data.settings.inboundOneWayPercent)}%)`], ["dropoff", `Home-bound (${money(data.settings.outboundOneWayPercent)}%)`]]}/>
+        <Choice label="Service Type" value={form.serviceType} onChange={changeServiceType} items={[["both", "Two-way"], ["pickup", pricingLabelFor("pickup")], ["dropoff", pricingLabelFor("dropoff")]]}/>
       </div>
       <div className="grid gap-4 md:grid-cols-3">
         <Field label="Service Start Date"><Input type="date" value={form.startDate} onChange={(event) => set("startDate", event.target.value)}/></Field>
-        <NumberField label="Full Two-Way Service Fee" value={form.baseMonthlyFee} onChange={(value: any) => { const full = Number(value || 0); setForm((current: any) => ({ ...current, baseMonthlyFee: value, agreedFee: (full * percentageFor(current.serviceType) / 100).toFixed(2) })); }} min={0} step="0.01"/>
+        <NumberField label="Full Two-Way Service Fee" value={form.baseMonthlyFee} onChange={(value: any) => { const full = Number(value || 0); setForm((current: any) => ({ ...current, baseMonthlyFee: value, agreedFee: calculatedFeeFor(current.serviceType, full).toFixed(2) })); }} min={0} step="0.01"/>
         <NumberField label="Agreed Monthly Fee" value={form.agreedFee} onChange={(value: any) => set("agreedFee", value)} min={0} step="0.01"/>
       </div>
 
@@ -1279,7 +1328,7 @@ function renderDialogFields(type: string, form: any, set: (key: string, value: a
 
   if (type === "refund") return <><EntitySelect label="Learner" items={data.students} value={form.studentId} onChange={(value: any) => { set("studentId", idValue(value)); const assignment = data.assignments.find((row: any) => row.studentId === idValue(value) && row.isActive); set("assignmentId", assignment?.id || null); }} itemText={(student: any) => `${student.firstName} ${student.lastName} (${student.admissionNo})`}/><Choice label="Refund / credit type" value={form.refundType} onChange={(value: any) => set("refundType", value)} items={[["pause_credit", "Pause – learner transport credit"], ["termination_refund", "Termination refund"], ["overpayment", "Overpayment"], ["manual_adjustment", "Manual adjustment"]]}/><NumberField label="Amount (USD)" value={form.amount} onChange={(value: any) => set("amount", value)} min={0.01} step="0.01"/><Field label="Effective date"><Input type="date" value={form.effectiveDate} onChange={(event) => set("effectiveDate", event.target.value)}/></Field><Choice label="Method" value={form.method} onChange={(value: any) => set("method", value)} items={[["credit", "Learner transport credit"], ["cash", "Cash refund"], ["bank_transfer", "Bank transfer"], ["mobile_money", "Mobile money"], ["original_method", "Original payment method"]]}/><Field label="Reason"><Textarea value={form.reason || ""} onChange={(event) => set("reason", event.target.value)}/></Field></>;
   if (type === "payRefund") return <><div className="md:col-span-2 rounded-md border p-3"><b>{record.refundNumber}</b> · USD {money(record.amount)}</div><Field label="Payment reference"><Input value={form.externalReference || ""} onChange={(event) => set("externalReference", event.target.value)}/></Field></>;
-  if (type === "cashup") { const eligiblePayments = data.payments.filter((payment: any) => !payment.reversedAt && !payment.cashupId && payment.verificationStatus !== "reconciled"); const eligibleRefunds = data.refunds.filter((refund:any)=>refund.status === "paid" && refund.method !== "credit"); const allIds = eligiblePayments.map((payment: any) => payment.id); const allRefundIds=eligibleRefunds.map((refund:any)=>refund.id); return <><Field label="Cash-up date"><Input type="date" value={form.cashupDate} onChange={(event) => set("cashupDate", event.target.value)}/></Field><div className="md:col-span-2"><Field label="Payments to include"><div className="mb-2 flex gap-2"><Button type="button" size="sm" variant="outline" onClick={() => set("paymentIds", allIds)}>Select All</Button><Button type="button" size="sm" variant="outline" onClick={() => set("paymentIds", [])}>Deselect All</Button></div><div className="max-h-56 overflow-y-auto rounded-md border p-3 space-y-2">{eligiblePayments.map((payment: any) => <label key={payment.id} className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2"><Checkbox checked={(form.paymentIds || []).includes(payment.id)} onCheckedChange={(checked) => set("paymentIds", checked ? Array.from(new Set([...(form.paymentIds || []), payment.id])) : (form.paymentIds || []).filter((id: number) => id !== payment.id))}/><span>{payment.receiptNo} · {payment.firstName} {payment.lastName}</span></span><span>USD {money(payment.amount)}</span></label>)}</div></Field></div><div className="md:col-span-2"><Field label="Paid refunds to deduct"><div className="mb-2 flex gap-2"><Button type="button" size="sm" variant="outline" onClick={()=>set("refundIds",allRefundIds)}>Select All</Button><Button type="button" size="sm" variant="outline" onClick={()=>set("refundIds",[])}>Deselect All</Button></div><div className="max-h-44 overflow-y-auto rounded-md border p-3 space-y-2">{eligibleRefunds.length?eligibleRefunds.map((refund:any)=><label key={refund.id} className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2"><Checkbox checked={(form.refundIds||[]).includes(refund.id)} onCheckedChange={(checked)=>set("refundIds",checked?Array.from(new Set([...(form.refundIds||[]),refund.id])):(form.refundIds||[]).filter((id:number)=>id!==refund.id))}/><span>{refund.refundNumber} · {titleCase(refund.method)}</span></span><span className="text-destructive">− USD {money(refund.amount)}</span></label>):<span className="text-sm text-muted-foreground">No paid external refunds awaiting cash-up.</span>}</div></Field></div><NumberField label="Cash amount declared for handover" value={form.actualCash} onChange={(value: any) => set("actualCash", value)} min={0} step="0.01"/><NumberField label="Non-cash amount declared for handover" value={form.actualNonCash} onChange={(value: any) => set("actualNonCash", value)} min={0} step="0.01"/><Field label="Deposit / reconciliation reference"><Input value={form.depositReference || ""} onChange={(event) => set("depositReference", event.target.value)}/></Field><Field label="Notes"><Textarea value={form.notes || ""} onChange={(event) => set("notes", event.target.value)}/></Field></>; }
+  if (type === "cashup") { const eligiblePayments = data.payments.filter((payment: any) => !payment.reversedAt && !payment.cashupId && payment.verificationStatus !== "reconciled"); const eligibleRefunds = data.refunds.filter((refund:any)=>refund.status === "paid" && refund.method !== "credit" && !refund.accountedCashupId); const allIds = eligiblePayments.map((payment: any) => payment.id); const allRefundIds=eligibleRefunds.map((refund:any)=>refund.id); return <><Field label="Cash-up date"><Input type="date" value={form.cashupDate} onChange={(event) => set("cashupDate", event.target.value)}/></Field><div className="md:col-span-2"><Field label="Payments to include"><div className="mb-2 flex gap-2"><Button type="button" size="sm" variant="outline" onClick={() => set("paymentIds", allIds)}>Select All</Button><Button type="button" size="sm" variant="outline" onClick={() => set("paymentIds", [])}>Deselect All</Button></div><div className="max-h-56 overflow-y-auto rounded-md border p-3 space-y-2">{eligiblePayments.map((payment: any) => <label key={payment.id} className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2"><Checkbox checked={(form.paymentIds || []).includes(payment.id)} onCheckedChange={(checked) => set("paymentIds", checked ? Array.from(new Set([...(form.paymentIds || []), payment.id])) : (form.paymentIds || []).filter((id: number) => id !== payment.id))}/><span>{payment.receiptNo} · {payment.firstName} {payment.lastName}</span></span><span>USD {money(payment.amount)}</span></label>)}</div></Field></div><div className="md:col-span-2"><Field label="Paid refunds to deduct"><div className="mb-2 flex gap-2"><Button type="button" size="sm" variant="outline" onClick={()=>set("refundIds",allRefundIds)}>Select All</Button><Button type="button" size="sm" variant="outline" onClick={()=>set("refundIds",[])}>Deselect All</Button></div><div className="max-h-44 overflow-y-auto rounded-md border p-3 space-y-2">{eligibleRefunds.length?eligibleRefunds.map((refund:any)=><label key={refund.id} className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2"><Checkbox checked={(form.refundIds||[]).includes(refund.id)} onCheckedChange={(checked)=>set("refundIds",checked?Array.from(new Set([...(form.refundIds||[]),refund.id])):(form.refundIds||[]).filter((id:number)=>id!==refund.id))}/><span>{refund.refundNumber} · {titleCase(refund.method)}</span></span><span className="text-destructive">− USD {money(refund.amount)}</span></label>):<span className="text-sm text-muted-foreground">No paid external refunds awaiting cash-up.</span>}</div></Field></div><NumberField label="Cash amount declared for handover" value={form.actualCash} onChange={(value: any) => set("actualCash", value)} min={0} step="0.01"/><NumberField label="Non-cash amount declared for handover" value={form.actualNonCash} onChange={(value: any) => set("actualNonCash", value)} min={0} step="0.01"/><Field label="Deposit / reconciliation reference"><Input value={form.depositReference || ""} onChange={(event) => set("depositReference", event.target.value)}/></Field><Field label="Notes"><Textarea value={form.notes || ""} onChange={(event) => set("notes", event.target.value)}/></Field></>; }
   if (type === "subscription") return <><EntitySelect label="Vehicle override" items={data.vehicles} value={form.vehicleId} onChange={(value: any) => set("vehicleId", idValue(value))} itemText={(vehicle: any) => vehicle.registrationNumber} optional optionalLabel="All vehicles (school default)"/><Choice label="Rule type" value={form.ruleType} onChange={(value: any) => set("ruleType", value)} items={[["fixed", "Fixed amount"], ["percentage", "Percentage of gross"], ["percentage_with_limits", "Percentage with minimum/maximum"]]}/><NumberField label={form.ruleType === "fixed" ? "Value (USD)" : "Value (%)"} value={form.value} onChange={(value: any) => set("value", value)} min={0.01} step="0.01"/><NumberField label="Minimum amount (optional)" value={form.minimumAmount} onChange={(value: any) => set("minimumAmount", value)} min={0} step="0.01"/><NumberField label="Maximum amount (optional)" value={form.maximumAmount} onChange={(value: any) => set("maximumAmount", value)} min={0} step="0.01"/><Field label="Effective from"><Input type="date" value={form.effectiveFrom} onChange={(event) => set("effectiveFrom", event.target.value)}/></Field><Field label="Effective to"><Input type="date" value={form.effectiveTo || ""} onChange={(event) => set("effectiveTo", event.target.value)}/></Field><Field label="Notes"><Textarea value={form.notes || ""} onChange={(event) => set("notes", event.target.value)}/></Field></>;
   if (type === "penalty") return <><EntitySelect label="Vehicle" items={data.vehicles} value={form.vehicleId} onChange={(value: any) => { const vehicle = data.vehicles.find((row: any) => row.id === idValue(value)); set("vehicleId", idValue(value)); set("ownerId", vehicle?.ownerId || null); }} itemText={(vehicle: any) => vehicle.registrationNumber}/><Field label="Penalty category"><Input value={form.category || ""} onChange={(event) => set("category", event.target.value)} placeholder="Configurable category name"/></Field><Field label="Incident date"><Input type="date" value={form.incidentDate} onChange={(event) => set("incidentDate", event.target.value)}/></Field><NumberField label="Amount (USD)" value={form.amount} onChange={(value: any) => set("amount", value)} min={0.01} step="0.01"/><Field label="Effective year"><Input type="number" value={form.effectiveYear} onChange={(event) => set("effectiveYear", event.target.value)}/></Field><MonthSelector label="Effective Month" value={form.effectiveMonth} onChange={(value: any) => set("effectiveMonth", value)}/><div className="md:col-span-2"><Field label="Reason"><Textarea value={form.reason || ""} onChange={(event) => set("reason", event.target.value)}/></Field></div></>;
   if (type === "advance") return <><EntitySelect label="Vehicle" items={data.vehicles} value={form.vehicleId} onChange={(value: any) => { const vehicle = data.vehicles.find((row: any) => row.id === idValue(value)); set("vehicleId", idValue(value)); set("ownerId", vehicle?.ownerId || null); }} itemText={(vehicle: any) => vehicle.registrationNumber}/><NumberField label="Advance amount (USD)" value={form.amount} onChange={(value: any) => set("amount", value)} min={0.01} step="0.01"/><Field label="Request date"><Input type="date" value={form.requestDate} onChange={(event) => set("requestDate", event.target.value)}/></Field><Field label="Disbursement date"><Input type="date" value={form.disbursementDate || ""} onChange={(event) => set("disbursementDate", event.target.value)}/></Field><Choice label="Recovery method" value={form.recoveryMethod} onChange={(value: any) => set("recoveryMethod", value)} items={[["fixed_instalment", "Fixed instalment"], ["percentage", "Percentage of gross"], ["full_available", "Full available amount"], ["manual_schedule", "Manual schedule"]]}/><NumberField label={form.recoveryMethod === "percentage" ? "Recovery percentage" : "Recovery amount"} value={form.recoveryValue} onChange={(value: any) => set("recoveryValue", value)} min={0.01} step="0.01"/><Field label="Recovery start year"><Input type="number" value={form.recoveryStartYear} onChange={(event) => set("recoveryStartYear", event.target.value)}/></Field><MonthSelector label="Recovery Start Month" value={form.recoveryStartMonth} onChange={(value: any) => set("recoveryStartMonth", value)}/><NumberField label="Minimum owner take-home" value={form.minimumOwnerTakeHome} onChange={(value: any) => set("minimumOwnerTakeHome", value)} min={0} step="0.01"/><NumberField label="Maximum monthly recovery" value={form.maximumMonthlyRecovery} onChange={(value: any) => set("maximumMonthlyRecovery", value)} min={0} step="0.01"/><div className="md:col-span-2"><Field label="Purpose"><Textarea value={form.purpose || ""} onChange={(event) => set("purpose", event.target.value)}/></Field></div></>;
@@ -1394,7 +1443,7 @@ function Choice({ label, value, onChange, items }: any) { return <Field label={l
 function EntitySelect({ label, items, value, onChange, itemText, optional, optionalLabel = "None" }: any) { const options = [...(optional ? [{ value: "none", label: optionalLabel }] : []), ...items.map((item: any) => ({ value: String(item.id), label: itemText(item), searchText: itemText(item) }))]; return <Field label={label}><SearchableSelect value={value == null ? (optional ? "none" : "") : String(value)} onValueChange={onChange} options={options} placeholder={`Select ${label.toLowerCase()}`} searchPlaceholder={`Search ${label.toLowerCase()}…`} /></Field>; }
 function MonthSelector({ label = "Service Month", value, onChange, includeUnspecified = false }: any) { const options = [...(includeUnspecified ? [{ value: "0", label: "Arrears / Future Credit" }] : []), ...MONTHS.map((month, index) => ({ value: String(index + 1), label: month, searchText: month }))]; return <Field label={label}><SearchableSelect value={String(value ?? (includeUnspecified ? 0 : currentMonth()))} onValueChange={(next) => onChange(Number(next))} options={options} placeholder={`Select ${label.toLowerCase()}`} searchPlaceholder="Search month…"/></Field>; }
 function BooleanField({ label, value, onChange }: { label: string; value: boolean; onChange: (value: boolean) => void }) { return <div className="flex min-h-10 items-center gap-3 rounded-md border px-3 py-2"><Checkbox checked={Boolean(value)} onCheckedChange={(checked) => onChange(Boolean(checked))}/><Label>{label}</Label></div>; }
-function SettingsSection({ title, children }: { title: string; children: any }) { return <section className="rounded-xl border bg-card p-4 md:p-5"><div className="mb-4"><h3 className="font-semibold">{title}</h3></div><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{children}</div></section>; }
+function SettingsSection({ title, children, gridClassName = "md:grid-cols-2 xl:grid-cols-4" }: { title: string; children: any; gridClassName?: string }) { return <section className="rounded-xl border bg-card p-4 md:p-5"><div className="mb-4"><h3 className="font-semibold">{title}</h3></div><div className={`grid gap-4 ${gridClassName}`}>{children}</div></section>; }
 
 async function fetchJson(method: string, url: string, body?: any) {
   const response = await apiRequest(method, url, body);

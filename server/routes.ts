@@ -4,7 +4,7 @@ import { setupAuth, requireAuth, requirePermission, requireAnyPermission, requir
 import { storage, PosSaleProcessingError } from "./storage";
 import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { db } from "./db";
-import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups, accessGroupPermissions, permissions, userPermissionOverrides, notifications, studentEnrollmentEvents, gradeProfileSettings, ecdAssessmentRecords, ecdAssessmentResponses } from "@shared/schema";
+import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups, accessGroupPermissions, permissions, userPermissionOverrides, notifications, studentEnrollmentEvents, internalTransfers, gradeProfileSettings, ecdAssessmentRecords, ecdAssessmentResponses } from "@shared/schema";
 import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, isNull, count as drizzleCount } from "drizzle-orm";
@@ -3750,7 +3750,6 @@ export async function registerRoutes(
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      await storage.normalizeUserBaselineAccess(userId);
       const schoolAccess = await storage.getUserSchoolAccess(userId);
       res.json(schoolAccess);
     } catch (error) {
@@ -3776,18 +3775,6 @@ export async function registerRoutes(
       const targetUser = access.targetUser;
       if (!targetUser) {
         return res.status(404).json({ message: "User not found" });
-      }
-
-      await storage.normalizeUserBaselineAccess(userId);
-
-      if (targetUser.role === "org_admin") {
-        const orgHqGroup = await storage.getAccessGroupByName("Org HQ");
-        if (orgHqGroup) {
-          const currentGroups = await storage.getUserAccessGroups(userId);
-          if (!currentGroups.some(group => group.id === orgHqGroup.id)) {
-            await storage.addUserToAccessGroup({ userId, accessGroupId: orgHqGroup.id });
-          }
-        }
       }
 
       await db.delete(userSchoolAccess).where(eq(userSchoolAccess.userId, userId));
@@ -3919,6 +3906,7 @@ export async function registerRoutes(
     studentId: z.coerce.number().int().positive(),
     destinationSchoolId: z.coerce.number().int().positive(),
     effectiveDate: z.string().min(4),
+    joiningDate: z.string().min(4),
     reason: z.string().trim().min(3),
     notes: z.string().trim().optional().nullable(),
   });
@@ -5858,10 +5846,33 @@ export async function registerRoutes(
       }
 
       const parent = student.parentId ? await storage.getParent(student.parentId) : undefined;
-      if (!parent) return res.json(student);
+      const enrollmentEvents = await db.select().from(studentEnrollmentEvents).where(eq(studentEnrollmentEvents.studentId, student.id)).orderBy(desc(studentEnrollmentEvents.effectiveDate), desc(studentEnrollmentEvents.id));
+      const [transferRelation] = await db.select().from(internalTransfers).where(or(
+        eq(internalTransfers.sourceStudentId, student.id),
+        eq(internalTransfers.destinationStudentId, student.id),
+      )).orderBy(desc(internalTransfers.effectiveDate), desc(internalTransfers.id)).limit(1);
+      let transferDetails: any = null;
+      if (transferRelation) {
+        const sourceSchool = await storage.getSchool(transferRelation.sourceSchoolId);
+        const destinationSchool = await storage.getSchool(transferRelation.destinationSchoolId);
+        transferDetails = {
+          id: transferRelation.id,
+          direction: transferRelation.sourceStudentId === student.id ? "out" : "in",
+          transferDate: transferRelation.effectiveDate,
+          joiningDate: transferRelation.joiningDate,
+          sourceSchoolId: transferRelation.sourceSchoolId,
+          sourceSchoolName: sourceSchool?.name || null,
+          destinationSchoolId: transferRelation.destinationSchoolId,
+          destinationSchoolName: destinationSchool?.name || null,
+          reason: transferRelation.reason,
+        };
+      }
+      const lifecycle = { events: enrollmentEvents, transfer: transferDetails };
+      if (!parent) return res.json({ ...student, lifecycle });
 
       res.json({
         ...student,
+        lifecycle,
         parent,
         parentName: `${parent.firstName || ""} ${parent.lastName || ""}`.trim(),
         parentPhone: parent.phone,
@@ -5914,7 +5925,15 @@ export async function registerRoutes(
           return res.status(400).json({ message: "Student gender does not match the selected hostel" });
         }
       }
-      const newStudent = await storage.createStudent(normalizedData);
+      const newStudent = await storage.createStudent({
+        ...normalizedData,
+        statusDate: normalizedData.statusDate || normalizedData.enrollmentDate || new Date().toISOString().slice(0, 10),
+      });
+      await db.insert(studentEnrollmentEvents).values({
+        studentId: newStudent.id, schoolId: newStudent.schoolId, eventType: "enrolled",
+        effectiveDate: newStudent.enrollmentDate || newStudent.statusDate || new Date().toISOString().slice(0, 10),
+        reason: "Student enrolled", previousStatus: null, newStatus: newStudent.status || "active", createdByUserId: currentUser.id,
+      });
       logActivity(req, { action: "create", category: "students", description: `Added student: ${newStudent.firstName} ${newStudent.lastName}`, targetType: "student", targetId: newStudent.id, targetName: `${newStudent.firstName} ${newStudent.lastName}` });
       res.status(201).json(newStudent);
     } catch (error) {
@@ -5969,7 +5988,15 @@ export async function registerRoutes(
           return res.status(400).json({ message: "Student gender does not match the selected hostel" });
         }
       }
+      const statusChanged = Object.prototype.hasOwnProperty.call(normalizedData, "status") && normalizedData.status !== existing.status;
+      if (statusChanged) normalizedData.statusDate = new Date().toISOString().slice(0, 10);
       const updated = await storage.updateStudent(studentId, normalizedData);
+      if (updated && statusChanged) {
+        await db.insert(studentEnrollmentEvents).values({
+          studentId, schoolId: existing.schoolId, eventType: "status_changed", effectiveDate: normalizedData.statusDate,
+          reason: `Status changed to ${normalizedData.status}`, previousStatus: existing.status || null, newStatus: normalizedData.status, createdByUserId: currentUser.id,
+        });
+      }
       if (!updated) {
         return res.status(404).json({ message: "Student not found" });
       }
@@ -6052,7 +6079,7 @@ export async function registerRoutes(
       const effectiveDate = String(req.body?.effectiveDate || new Date().toISOString().slice(0, 10));
       const reason = String(req.body?.reason || "Transferred out").trim() || "Transferred out";
       const notes = req.body?.notes ? String(req.body.notes).trim() : null;
-      const updated = await storage.updateStudent(id, { status: "transferred" });
+      const updated = await storage.updateStudent(id, { status: "transferred", statusDate: effectiveDate });
       await db.insert(studentEnrollmentEvents).values({
         studentId: id,
         schoolId: student.schoolId,
@@ -6085,7 +6112,7 @@ export async function registerRoutes(
       const effectiveDate = String(req.body?.effectiveDate || new Date().toISOString().slice(0, 10));
       const reason = String(req.body?.reason || "Student returned after external transfer").trim() || "Student returned after external transfer";
       const notes = req.body?.notes ? String(req.body.notes).trim() : null;
-      const updated = await storage.updateStudent(id, { status: "active", classId: null, streamId: null });
+      const updated = await storage.updateStudent(id, { status: "active", statusDate: effectiveDate, classId: null, streamId: null });
       await db.insert(studentEnrollmentEvents).values({
         studentId: id,
         schoolId: student.schoolId,
@@ -6832,7 +6859,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/grade-profile-settings", requireAuth, async (req, res, next) => {
+  app.get("/api/grade-profile-settings", requireAuth, requirePermission("grades.view"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -6843,7 +6870,7 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/grade-profile-settings/:gradeLevel", requireAuth, requireRole("school_admin", "org_admin", "quality_control_officer"), async (req, res, next) => {
+  app.put("/api/grade-profile-settings/:gradeLevel", requireAuth, requirePermission("grades.edit"), async (req, res, next) => {
     try {
       const schoolId = getSchoolContext(req);
       if (!schoolId) return res.status(400).json({ message: "School context required" });
@@ -7507,41 +7534,63 @@ export async function registerRoutes(
 
   app.get("/api/attendance/export/:classId/:from/:to", requireAuth, denyPortalRoles, async (req, res, next) => {
     try {
-      const classId = parseIdParam(req.params.classId);
-      const isValidDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime());
-      let from = routeParam(req.params.from) || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-      let to = routeParam(req.params.to) || new Date().toISOString().split('T')[0];
-      if (!isValidDate(from)) from = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-      if (!isValidDate(to)) to = new Date().toISOString().split('T')[0];
-      const records = await storage.getAttendanceByClassRange(classId, from, to);
-      const students = await storage.getStudentsByClass(classId);
-      const classInfo = await storage.getClass(classId);
+      const classParam = routeParam(req.params.classId);
+      const showAllClasses = classParam === "all";
+      const classId = showAllClasses ? null : Number.parseInt(classParam, 10);
+      const isValidDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !isNaN(new Date(value).getTime());
+      let from = routeParam(req.params.from) || new Date(Date.now() - 30 * 86400000).toISOString().split("T")[0];
+      let to = routeParam(req.params.to) || new Date().toISOString().split("T")[0];
+      if (!isValidDate(from)) from = new Date(Date.now() - 30 * 86400000).toISOString().split("T")[0];
+      if (!isValidDate(to)) to = new Date().toISOString().split("T")[0];
 
+      const currentUser = await storage.getUser((req.user as any).id);
+      const schoolId = getSchoolContext(req) || currentUser?.schoolId;
+      if (!schoolId) return res.status(400).json({ message: "School context required" });
+      const schoolClasses = await storage.getClassesBySchool(schoolId);
+      const targetClasses = showAllClasses ? schoolClasses : schoolClasses.filter((item) => item.id === classId);
+      if (!showAllClasses && !targetClasses.length) return res.status(404).json({ message: "Class not found in the current school" });
+
+      const esc = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+      if (showAllClasses) {
+        let csv = ["Date", "Admission No.", "Student", "Class", "Attendance Status"].map(esc).join(",") + "\n";
+        for (const classInfo of targetClasses) {
+          const [studentRows, records] = await Promise.all([
+            storage.getStudentsByClass(classInfo.id),
+            storage.getAttendanceByClassRange(classInfo.id, from, to),
+          ]);
+          const studentById = new Map(studentRows.map((student) => [student.id, student]));
+          for (const record of records) {
+            const student = studentById.get(record.studentId);
+            if (!student) continue;
+            csv += [record.date, student.admissionNo, `${student.firstName} ${student.lastName}`.trim(), classInfo.className, record.status].map(esc).join(",") + "\n";
+          }
+        }
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", `attachment; filename="Attendance_All_Classes_${from}_to_${to}.csv"`);
+        return res.send(csv);
+      }
+
+      const classInfo = targetClasses[0];
+      const [records, studentRows] = await Promise.all([
+        storage.getAttendanceByClassRange(classInfo.id, from, to),
+        storage.getStudentsByClass(classInfo.id),
+      ]);
       const dates: string[] = [];
-      const d = new Date(from);
-      const end = new Date(to);
-      while (d <= end) {
-        dates.push(d.toISOString().split('T')[0]);
-        d.setDate(d.getDate() + 1);
-      }
-
+      const cursor = new Date(`${from}T00:00:00`);
+      const endDate = new Date(`${to}T00:00:00`);
+      while (cursor <= endDate) { dates.push(cursor.toISOString().slice(0, 10)); cursor.setDate(cursor.getDate() + 1); }
       const index: Record<number, Record<string, string>> = {};
-      for (const r of records) {
-        if (!index[r.studentId]) index[r.studentId] = {};
-        index[r.studentId][r.date] = r.status;
+      for (const record of records) {
+        if (!index[record.studentId]) index[record.studentId] = {};
+        index[record.studentId][record.date] = record.status;
       }
-
-      let csv = `"STUDENT",${dates.map(d => `"${d}"`).join(',')}\n`;
-      for (const s of students) {
-        const name = `${s.firstName} ${s.lastName}`.toUpperCase();
-        const row = dates.map(dt => (index[s.id]?.[dt] || '').toUpperCase());
-        csv += `"${name}",${row.map(v => `"${v}"`).join(',')}\n`;
+      let csv = ["STUDENT", ...dates].map(esc).join(",") + "\n";
+      for (const student of studentRows) {
+        csv += [`${student.firstName} ${student.lastName}`.toUpperCase(), ...dates.map((date) => (index[student.id]?.[date] || "").toUpperCase())].map(esc).join(",") + "\n";
       }
-
-      res.setHeader('Content-Type', 'text/csv');
-      const attClassName = (classInfo?.className || `Class_${classId}`).replace(/\s+/g, "_");
-      res.setHeader('Content-Disposition', `attachment; filename="Attendance_${attClassName}_${from}_to_${to}.csv"`);
-      res.send(csv);
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="Attendance_${classInfo.className.replace(/\s+/g, "_")}_${from}_to_${to}.csv"`);
+      return res.send(csv);
     } catch (error) {
       next(error);
     }
@@ -7647,10 +7696,19 @@ export async function registerRoutes(
       if (user.role === "parent") {
         const children = await getChildrenForParentUser(user.id);
         if (!children.length) return res.json([]);
-        const allowedIds = new Set(children.map((child) => Number(child.id)));
-        if (requestedStudentId !== undefined && !allowedIds.has(Number(requestedStudentId))) return res.status(403).json({ message: "Access denied" });
+        const schoolIds = Array.from(new Set(children.map((child) => Number(child.schoolId)).filter((id) => Number.isFinite(id) && id > 0)));
+        const schoolFeatureRows = schoolIds.length
+          ? await db.select({ id: schoolsTable.id, enableParentFeesPayments: schoolsTable.enableParentFeesPayments }).from(schoolsTable).where(inArray(schoolsTable.id, schoolIds))
+          : [];
+        const featureBySchool = new Map(schoolFeatureRows.map((row) => [Number(row.id), row.enableParentFeesPayments !== false]));
+        const financeEnabledChildren = children.filter((child) => child.schoolId && featureBySchool.get(Number(child.schoolId)) !== false);
+        const allowedIds = new Set(financeEnabledChildren.map((child) => Number(child.id)));
+        const linkedIds = new Set(children.map((child) => Number(child.id)));
+        if (requestedStudentId !== undefined && !linkedIds.has(Number(requestedStudentId))) return res.status(403).json({ message: "Access denied" });
+        if (requestedStudentId !== undefined && !allowedIds.has(Number(requestedStudentId))) return res.status(403).json({ message: "Fees & Payments is disabled for this learner's school" });
         if (requestedStudentId !== undefined) return res.json(await storage.getFeesPayments(requestedStudentId));
-        const paymentGroups = await Promise.all(children.map((child) => storage.getFeesPayments(child.id)));
+        if (!financeEnabledChildren.length) return res.status(403).json({ message: "Fees & Payments is disabled for your learners' schools" });
+        const paymentGroups = await Promise.all(financeEnabledChildren.map((child) => storage.getFeesPayments(child.id)));
         return res.json(paymentGroups.flat());
       }
       const payments = await storage.getFeesPayments(requestedStudentId);
@@ -11895,7 +11953,6 @@ ${schoolName}`;
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      await storage.normalizeUserBaselineAccess(targetUserId);
       const visibleGroups = await getVisibleAccessGroupsForUser(currentUser);
       const visibleIds = new Set(visibleGroups.map(g => g.id));
       const groups = (await storage.getUserAccessGroups(targetUserId)).filter(group => visibleIds.has(group.id));
@@ -11983,7 +12040,6 @@ ${schoolName}`;
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      await storage.normalizeUserBaselineAccess(targetUserId);
       const permissionStates = await storage.getUserPermissionStates(targetUserId);
       res.json(permissionStates);
     } catch (error) {
@@ -12002,7 +12058,6 @@ ${schoolName}`;
       if (!access.allowed) {
         return res.status(403).json({ message: access.error });
       }
-      await storage.normalizeUserBaselineAccess(targetUserId);
       const overrides = await storage.getUserPermissionOverrides(targetUserId);
       res.json(overrides);
     } catch (error) {

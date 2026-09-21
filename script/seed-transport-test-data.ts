@@ -242,7 +242,7 @@ async function ensureStaff(schoolId: number, year2: string) {
 }
 
 async function ensureParent(parentUserId: number, schoolId: number) {
-  const [existing] = await db.select().from(parents).where(eq(parents.userId, parentUserId)).limit(1);
+  const [existing] = await db.select().from(parents).where(and(eq(parents.userId, parentUserId), eq(parents.schoolId, schoolId))).limit(1);
   if (existing) return existing;
   const [created] = await db.insert(parents).values({
     userId: parentUserId,
@@ -265,7 +265,7 @@ async function ensureStudent(args: {
   firstName: string;
   lastName: string;
 }) {
-  const [existing] = await db.select().from(students).where(eq(students.admissionNo, args.admissionNo)).limit(1);
+  const [existing] = await db.select().from(students).where(and(eq(students.schoolId, args.schoolId), eq(students.admissionNo, args.admissionNo))).limit(1);
   if (existing) {
     const [updated] = await db.update(students).set({
       schoolId: args.schoolId,

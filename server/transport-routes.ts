@@ -445,8 +445,11 @@ const payoutPaymentInput = z.object({
 const settingsInput = z.object({
   transportManagerStaffId: nullablePositiveInt,
   stopGroupingDistanceMeters: z.coerce.number().int().min(1).max(500),
+  oneWayPricingMode: z.enum(["percentage", "fixed_addition"]),
   inboundOneWayPercent: z.coerce.number().min(0).max(100),
   outboundOneWayPercent: z.coerce.number().min(0).max(100),
+  inboundOneWayFixedAddition: z.coerce.number().min(0),
+  outboundOneWayFixedAddition: z.coerce.number().min(0),
   joiningFullChargeThroughDay: z.coerce.number().int().min(0).max(31),
   refundNoCreditRemainingDays: z.coerce.number().int().min(0).max(31),
   pendingSeatReservationEnabled: z.boolean(),
@@ -467,7 +470,15 @@ const settingsInput = z.object({
   complianceNotificationRecipients: z.array(z.string()).optional(),
   approvalWorkflow: z.any().optional(),
   deductionPriority: z.array(z.string()).optional(),
-}).partial();
+}).partial().superRefine((value, ctx) => {
+  if (value.oneWayPricingMode !== "percentage") return;
+  if (value.inboundOneWayPercent !== undefined && value.inboundOneWayPercent < 50) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["inboundOneWayPercent"], message: "School-bound percentage must be at least 50%." });
+  }
+  if (value.outboundOneWayPercent !== undefined && value.outboundOneWayPercent < 50) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["outboundOneWayPercent"], message: "Home-bound percentage must be at least 50%." });
+  }
+});
 
 function clean<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, item === "" ? null : item])) as T;
@@ -2107,6 +2118,21 @@ export function registerTransportRoutes(app: Express) {
         db.select().from(transportAuditEvents).where(eq(transportAuditEvents.schoolId, schoolId)).orderBy(desc(transportAuditEvents.createdAt)).limit(300),
       ]);
 
+      const legacyAccountedRefundRows = refunds.length ? await db.select({
+        refundId: transportCashupRefunds.refundId,
+        cashupId: transportCashupRefunds.cashupId,
+        verifiedAt: transportCashups.verifiedAt,
+      }).from(transportCashupRefunds)
+        .innerJoin(transportCashups, eq(transportCashups.id, transportCashupRefunds.cashupId))
+        .where(and(inArray(transportCashupRefunds.refundId, refunds.map((row) => row.id)), eq(transportCashups.status, "verified"))) : [];
+      const legacyAccountedRefundById = new Map(legacyAccountedRefundRows.map((row) => [Number(row.refundId), row]));
+      const refundsForView = refunds.map((refund: any) => {
+        const legacy = legacyAccountedRefundById.get(Number(refund.id));
+        return legacy && !refund.accountedCashupId
+          ? { ...refund, accountedCashupId: Number(legacy.cashupId), accountedAt: legacy.verifiedAt || refund.accountedAt || null }
+          : refund;
+      });
+
       const [organizationRoutes, vehicleDestinationRows, billingRuns, learnerAccountsResult] = await Promise.all([
         db.select({ id: transportRoutes.id, schoolId: transportRoutes.schoolId, destinationMasterId: transportRoutes.destinationMasterId, name: transportRoutes.name, code: transportRoutes.code, direction: transportRoutes.direction, defaultFee: transportRoutes.defaultFee, isActive: transportRoutes.isActive, status: transportRoutes.status })
           .from(transportRoutes).where(inArray(transportRoutes.schoolId, orgSchoolIds)).orderBy(asc(transportRoutes.name)),
@@ -2406,7 +2432,7 @@ export function registerTransportRoutes(app: Express) {
       const paymentById = new Map((paymentsResult.rows as any[]).map((row: any) => [Number(row.id), row]));
       const claimById = new Map(claimsWithHq.map((row: any) => [Number(row.id), row]));
       const payoutById = new Map(payouts.map((row: any) => [Number(row.id), row]));
-      const refundById = new Map(refunds.map((row: any) => [Number(row.id), row]));
+      const refundById = new Map(refundsForView.map((row: any) => [Number(row.id), row]));
       const cashupById = new Map(cashups.map((row: any) => [Number(row.id), row]));
       const billingRunById = new Map(billingRuns.map((row: any) => [Number(row.id), row]));
       const vehicleByIdForAudit = new Map(vehiclesWithOccupancy.map((row: any) => [Number(row.id), row]));
@@ -2451,7 +2477,7 @@ export function registerTransportRoutes(app: Express) {
         assignments: assignmentsWithArrears,
         learnerAccounts: learnerAccountsWithArrears,
         payments: paymentsResult.rows,
-        refunds,
+        refunds: refundsForView,
         cashups: cashups.map(schoolCashupView),
         billingRuns,
         subscriptions,
@@ -2973,8 +2999,16 @@ export function registerTransportRoutes(app: Express) {
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = clean(settingsInput.parse(req.body));
       const previous = await getOrCreateSettings(school.id);
+      const effectivePricingMode = String(parsed.oneWayPricingMode ?? previous.oneWayPricingMode ?? "percentage");
+      const effectiveSchoolBoundPercent = Number(parsed.inboundOneWayPercent ?? previous.inboundOneWayPercent ?? 60);
+      const effectiveHomeBoundPercent = Number(parsed.outboundOneWayPercent ?? previous.outboundOneWayPercent ?? 60);
+      if (effectivePricingMode === "percentage" && (effectiveSchoolBoundPercent < 50 || effectiveHomeBoundPercent < 50)) {
+        const error: any = new Error("School-bound and home-bound percentages must each be at least 50% when Percentage pricing is active.");
+        error.status = 400;
+        throw error;
+      }
       const settingsValues: any = { ...parsed, currencyCode: "USD", updatedAt: new Date() };
-      for (const key of ["inboundOneWayPercent", "outboundOneWayPercent"]) {
+      for (const key of ["inboundOneWayPercent", "outboundOneWayPercent", "inboundOneWayFixedAddition", "outboundOneWayFixedAddition"]) {
         if (settingsValues[key] !== undefined && settingsValues[key] !== null) settingsValues[key] = String(settingsValues[key]);
       }
       const [updated] = await db.update(transportSettings).set(settingsValues)
@@ -3593,7 +3627,21 @@ export function registerTransportRoutes(app: Express) {
         });
       }
       const settings = await getOrCreateSettings(school.id);
-      const percent = parsed.serviceType === "pickup" ? amount(settings.inboundOneWayPercent) : parsed.serviceType === "dropoff" ? amount(settings.outboundOneWayPercent) : 100;
+      const pricingMode = String(settings.oneWayPricingMode || "percentage");
+      const percent = parsed.serviceType === "pickup"
+        ? (pricingMode === "percentage" ? amount(settings.inboundOneWayPercent) : 50)
+        : parsed.serviceType === "dropoff"
+          ? (pricingMode === "percentage" ? amount(settings.outboundOneWayPercent) : 50)
+          : 100;
+      const expectedOneWayFee = parsed.serviceType === "both"
+        ? amount(parsed.baseMonthlyFee)
+        : pricingMode === "fixed_addition"
+          ? rounded(amount(parsed.baseMonthlyFee) / 2 + (parsed.serviceType === "pickup" ? amount(settings.inboundOneWayFixedAddition) : amount(settings.outboundOneWayFixedAddition)))
+          : rounded(amount(parsed.baseMonthlyFee) * percent / 100);
+      if (parsed.serviceType !== "both" && Math.abs(amount(parsed.agreedFee) - expectedOneWayFee) > 0.009) {
+        // Existing workflow permits a deliberately agreed override, but the configured
+        // pricing method remains the authoritative standard used by the UI and audit data.
+      }
       const seatReservedUntil = settings.pendingSeatReservationEnabled
         ? isoDate(new Date(new Date(`${parsed.startDate}T00:00:00Z`).getTime() + (settings.pendingSeatReservationDays ?? 0) * 86400000))
         : null;
@@ -3683,7 +3731,12 @@ export function registerTransportRoutes(app: Express) {
       const base = { ...previous, ...parsed } as any;
       if (base.serviceType === "both") base.outboundVehicleId = base.vehicleId;
       const serviceType = base.serviceType ?? previous.serviceType;
-      const percent = serviceType === "pickup" ? amount(settings.inboundOneWayPercent) : serviceType === "dropoff" ? amount(settings.outboundOneWayPercent) : 100;
+      const pricingMode = String(settings.oneWayPricingMode || "percentage");
+      const percent = serviceType === "pickup"
+        ? (pricingMode === "percentage" ? amount(settings.inboundOneWayPercent) : 50)
+        : serviceType === "dropoff"
+          ? (pricingMode === "percentage" ? amount(settings.outboundOneWayPercent) : 50)
+          : 100;
       const newAssignment = await db.transaction(async (tx) => {
         const startsNow = effectiveDate <= isoDate(new Date());
         await tx.update(transportAssignments).set({ endDate: previousEnd, isActive: startsNow ? false : true, serviceState: startsNow ? "terminated" : previous.serviceState, updatedAt: new Date() }).where(eq(transportAssignments.id, id));
@@ -4231,12 +4284,15 @@ export function registerTransportRoutes(app: Express) {
       if (!parsed.paymentIds.length && !parsed.refundIds.length) return res.status(400).json({ message: "Select at least one receipt or paid refund for this cash-up." });
       const payments = parsed.paymentIds.length ? await db.select().from(transportPayments).where(and(eq(transportPayments.schoolId, school.id), inArray(transportPayments.id, parsed.paymentIds), isNull(transportPayments.reversedAt))) : [];
       if (payments.length !== parsed.paymentIds.length) return res.status(400).json({ message: "One or more payments are invalid or already reversed" });
-      const refunds = parsed.refundIds.length ? await db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), inArray(transportRefunds.id, parsed.refundIds), eq(transportRefunds.status, "paid"))) : [];
+      const refunds = parsed.refundIds.length ? await db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), inArray(transportRefunds.id, parsed.refundIds), eq(transportRefunds.status, "paid"), isNull(transportRefunds.accountedCashupId))) : [];
       if (refunds.length !== parsed.refundIds.length) return res.status(400).json({ message: "One or more refunds are invalid or have not been paid yet." });
       const alreadyCashed = parsed.paymentIds.length ? await db.select({ paymentId: transportCashupPayments.paymentId }).from(transportCashupPayments).where(inArray(transportCashupPayments.paymentId, parsed.paymentIds)) : [];
       if (alreadyCashed.length) return res.status(409).json({ message: "One or more selected payments have already been included in a cash-up. Refresh the list and select only uncash-up payments." });
-      const alreadyRefunded = parsed.refundIds.length ? await db.select({ refundId: transportCashupRefunds.refundId }).from(transportCashupRefunds).where(inArray(transportCashupRefunds.refundId, parsed.refundIds)) : [];
-      if (alreadyRefunded.length) return res.status(409).json({ message: "One or more selected refunds have already been included in a cash-up." });
+      const historicallyAccountedRefunds = parsed.refundIds.length ? await db.select({ refundId: transportCashupRefunds.refundId })
+        .from(transportCashupRefunds)
+        .innerJoin(transportCashups, eq(transportCashups.id, transportCashupRefunds.cashupId))
+        .where(and(inArray(transportCashupRefunds.refundId, parsed.refundIds), eq(transportCashups.status, "verified"))) : [];
+      if (historicallyAccountedRefunds.length) return res.status(409).json({ message: "One or more selected refunds were already accounted for by a completed cash-up. Refresh the list and select only unaccounted refunds." });
 
       // Expected values are calculated and retained for HQ reconciliation only.
       // They are deliberately not returned to the Receptionist or Accounts Clerk.
@@ -4359,6 +4415,36 @@ export function registerTransportRoutes(app: Express) {
         { receivedCash: parsed.receivedCash, receivedNonCash: parsed.receivedNonCash, cashupNumber: previous.cashupNumber }
       );
       const updated = await db.transaction(async (tx) => {
+        // Refunds are only consumed when a cash-up successfully completes verification.
+        // Lock them first so stale tabs/concurrent cash-ups cannot deduct the same refund twice.
+        const linkedRefundRows = await tx.execute(sql`
+          SELECT r.id, r.accounted_cashup_id AS "accountedCashupId"
+          FROM transport_cashup_refunds cr
+          JOIN transport_refunds r ON r.id=cr.refund_id
+          WHERE cr.cashup_id=${id}
+          FOR UPDATE OF r
+        `);
+        const conflictingRefund = (linkedRefundRows.rows as any[]).find((item) => item.accountedCashupId && Number(item.accountedCashupId) !== id);
+        if (conflictingRefund) {
+          const conflict: any = new Error("One or more paid refunds were already accounted for by another completed cash-up. Refresh and prepare a new cash-up.");
+          conflict.status = 409;
+          throw conflict;
+        }
+        const refundIds = (linkedRefundRows.rows as any[]).map((item) => Number(item.id));
+        if (refundIds.length) {
+          const legacyCompletedLinks = await tx.select({ refundId: transportCashupRefunds.refundId, cashupId: transportCashupRefunds.cashupId })
+            .from(transportCashupRefunds)
+            .innerJoin(transportCashups, eq(transportCashups.id, transportCashupRefunds.cashupId))
+            .where(and(inArray(transportCashupRefunds.refundId, refundIds), eq(transportCashups.status, "verified"), ne(transportCashups.id, id)));
+          if (legacyCompletedLinks.length) {
+            const conflict: any = new Error("One or more paid refunds were already accounted for by another completed cash-up. Refresh and prepare a new cash-up.");
+            conflict.status = 409;
+            throw conflict;
+          }
+          await tx.update(transportRefunds).set({ accountedCashupId: id, accountedAt: new Date() })
+            .where(and(inArray(transportRefunds.id, refundIds), isNull(transportRefunds.accountedCashupId)));
+        }
+
         const [row] = await tx.update(transportCashups).set({
           status: "verified",
           accountsReceivedCash: String(parsed.receivedCash),

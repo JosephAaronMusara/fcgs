@@ -39,7 +39,7 @@ notContains(files.transfersUi, 'studentForm.admissionNo', 'Internal transfer req
 contains(files.schema, 'staffNo: true', 'insertStaffSchema does not omit staffNo.');
 contains(files.schema, 'admissionNo: true', 'insertStudentSchema does not omit admissionNo.');
 contains(files.schema, 'person_number_sequences', 'Persistent person-number sequence table is missing.');
-contains(files.schema, 'students_admission_no_normalized_uidx', 'Normalized Student number unique index is missing.');
+contains(files.schema, 'students_school_admission_no_normalized_uidx', 'School-scoped normalized Student number unique index is missing.');
 contains(files.schema, 'staff_staff_no_normalized_uidx', 'Normalized Staff number unique index is missing.');
 contains(files.schema, 'students_admission_no_canonical_chk', 'Canonical Student number DB check is missing.');
 contains(files.schema, 'staff_staff_no_canonical_chk', 'Canonical Staff number DB check is missing.');
@@ -47,7 +47,7 @@ contains(files.schema, 'staff_staff_no_canonical_chk', 'Canonical Staff number D
 contains(files.storage, 'pg_advisory_xact_lock', 'Allocator is missing the transaction-scoped concurrency lock.');
 contains(files.storage, 'personNumberSequences', 'Allocator is not using the persistent sequence state.');
 contains(files.storage, 'Math.max(storedSequence, consumedSequence) + 1', 'Allocator does not reconcile counter state with globally consumed numbers.');
-contains(files.storage, 'const nextAdmissionNo = existing.admissionNo;', 'Student transfers do not explicitly preserve the original admission number.');
+contains(files.storage, 'admissionNo: normalizedAdmission', 'Student transfers do not explicitly preserve the original admission number on the destination-school record.');
 contains(files.storage, 'schoolId: _blockedSchoolId', 'Storage update path is not stripping direct school changes.');
 contains(files.numbering, '[0-9]{4,}', 'Person number parser must support four or more sequence digits.');
 contains(files.numbering, 'padStart(4, "0")', 'Person number formatter must preserve four-digit minimum formatting.');

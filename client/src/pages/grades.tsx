@@ -48,7 +48,7 @@ interface GradesResponse {
 
 export default function GradesPage() {
   const { toast } = useToast();
-  const { currentSchoolId } = useAuth();
+  const { currentSchoolId, hasPermission } = useAuth();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -290,6 +290,7 @@ export default function GradesPage() {
                 <div className="max-w-md space-y-2">
                   <Label>Better performance has</Label>
                   <Select
+                    disabled={!hasPermission("grades.edit") || updateProfileSettingMutation.isPending}
                     value={activeProfileSetting?.pointsDirection || "unconfigured"}
                     onValueChange={(value) => {
                       if (value === "higher_is_better" || value === "lower_is_better") {
@@ -309,6 +310,7 @@ export default function GradesPage() {
                   {!activeProfileSetting && (
                     <p className="text-sm text-amber-700">Positions remain unresolved until this setting is configured.</p>
                   )}
+                  {!hasPermission("grades.edit") && <p className="text-xs text-muted-foreground">You can view this setting but do not have permission to change it.</p>}
                 </div>
               </div>
               {isLoading ? (

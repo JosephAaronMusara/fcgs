@@ -15,6 +15,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { Plus, Search, Trash2, GraduationCap, Download, Bell, Upload, BookOpen, UserCog, KeyRound, Eye, EyeOff, ArrowRightLeft, UserPlus, Camera, X, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import type { Student, Class, Parent, Subject, Stream, User, School, Hostel, Staff } from "@shared/schema";
@@ -46,6 +48,10 @@ type StudentRecord = Student & {
   parentResidentialArea?: string | null;
   parentOccupation?: string | null;
   parentPhoto?: string | null;
+  lifecycle?: {
+    events?: Array<{ eventType: string; effectiveDate: string; reason?: string | null; previousStatus?: string | null; newStatus?: string | null }>;
+    transfer?: { direction: "in" | "out"; transferDate?: string | null; joiningDate?: string | null; sourceSchoolName?: string | null; destinationSchoolName?: string | null; reason?: string | null } | null;
+  };
 };
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -67,6 +73,14 @@ export default function StudentsPage() {
   const [subjectsDialogStudent, setSubjectsDialogStudent] = useState<StudentRecord | null>(null);
   const [accountDialogStudent, setAccountDialogStudent] = useState<StudentRecord | null>(null);
   const [transferDialogStudent, setTransferDialogStudent] = useState<StudentRecord | null>(null);
+  const [transferType, setTransferType] = useState<"external" | "internal">("external");
+  const [internalTransferForm, setInternalTransferForm] = useState({
+    destinationSchoolId: "",
+    effectiveDate: new Date().toISOString().slice(0, 10),
+    joiningDate: new Date().toISOString().slice(0, 10),
+    reason: "",
+    notes: "",
+  });
   const [classroomStudent, setClassroomStudent] = useState<StudentRecord | null>(null);
   const [classroomId, setClassroomId] = useState("");
   const [quickAddParentOpen, setQuickAddParentOpen] = useState(false);
@@ -216,6 +230,11 @@ export default function StudentsPage() {
 
   const isBoardingSchool = school?.enableHostel || false;
   const getClassDisplayName = (cls: Class) => cls.shortCode?.trim() || cls.className;
+  const getStudentClassroomDisplay = (student: StudentRecord) => {
+    if (!student.classId) return "Unassigned";
+    const classroom = classes?.find((cls) => cls.id === student.classId);
+    return classroom ? getClassDisplayName(classroom) : `Classroom #${student.classId}`;
+  };
 
   const { data: hostels } = useQuery<Hostel[]>({
     queryKey: ["/api/hostels"],
@@ -234,6 +253,48 @@ export default function StudentsPage() {
     ],
     [classes],
   );
+
+  const canUseInternalTransfer = hasPermission("internal_transfers.view") && hasPermission("internal_transfers.transfer.student");
+  const internalTransferDestinationsUrl = transferDialogStudent?.schoolId
+    ? `/api/internal-transfers/destinations?sourceSchoolId=${transferDialogStudent.schoolId}`
+    : "/api/internal-transfers/destinations";
+  const {
+    data: internalTransferDestinations = [],
+    isLoading: internalTransferDestinationsLoading,
+    isError: internalTransferDestinationsError,
+  } = useQuery<School[]>({
+    queryKey: [internalTransferDestinationsUrl],
+    enabled: !!transferDialogStudent && transferType === "internal" && canUseInternalTransfer,
+    queryFn: async () => {
+      const res = await schoolFetch(internalTransferDestinationsUrl);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status}: ${text || res.statusText}`);
+      }
+      return res.json();
+    },
+  });
+
+  const resetTransferForm = () => {
+    setTransferType("external");
+    setInternalTransferForm({
+      destinationSchoolId: "",
+      effectiveDate: new Date().toISOString().slice(0, 10),
+      joiningDate: new Date().toISOString().slice(0, 10),
+      reason: "",
+      notes: "",
+    });
+  };
+
+  const openTransferDialog = (student: StudentRecord) => {
+    resetTransferForm();
+    setTransferDialogStudent(student);
+  };
+
+  const closeTransferDialog = () => {
+    setTransferDialogStudent(null);
+    resetTransferForm();
+  };
 
   const createMutation = useMutation({
     mutationFn: async (data: Partial<Student>) => {
@@ -288,11 +349,42 @@ export default function StudentsPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/students"] });
-      setTransferDialogStudent(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+      closeTransferDialog();
       toast({ title: "Success", description: "Student transferred successfully" });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const internalTransferMutation = useMutation({
+    mutationFn: async (studentId: number) => {
+      const res = await apiRequest("POST", "/api/internal-transfers/students", {
+        studentId,
+        destinationSchoolId: Number(internalTransferForm.destinationSchoolId),
+        effectiveDate: internalTransferForm.effectiveDate,
+        joiningDate: internalTransferForm.joiningDate,
+        reason: internalTransferForm.reason.trim(),
+        notes: internalTransferForm.notes.trim() || null,
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/students"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/internal-transfers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+      closeTransferDialog();
+      toast({
+        title: "Student transferred",
+        description: data?.warnings?.length
+          ? data.warnings.join(" ")
+          : "The student has been moved to the destination school. The receiving school will assign the classroom.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Transfer failed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -515,7 +607,7 @@ export default function StudentsPage() {
       classId: selectedClassId,
       parentId: formData.get("parentId") ? parseInt(formData.get("parentId") as string) : undefined,
       streamId: derivedStreamId,
-      status: formData.get("status") as "active" | "inactive" | "transferred" | "graduated" || "active",
+      status: formData.get("status") as "active" | "inactive" | "transferred" | "internally_transferred" | "graduated" || "active",
       enrollmentDate: formData.get("enrollmentDate") as string || new Date().toISOString().split("T")[0],
       isDayScholar: formData.get("isDayScholar") === "true",
       isBoarding: formData.get("isDayScholar") === "false",
@@ -645,7 +737,7 @@ export default function StudentsPage() {
           streetAddress: row["Street Address"] || row["street_address"] || "",
           residentialArea: row["Residential Area"] || row["residential_area"] || "",
           address: row["City"] || row["Address"] || row["address"] || "",
-          status: (row["Status"] || row["status"] || "active").toLowerCase() as "active" | "inactive" | "transferred" | "graduated",
+          status: (row["Status"] || row["status"] || "active").toLowerCase() as "active" | "inactive" | "transferred" | "internally_transferred" | "graduated",
           className: row["Class"] || row["class"] || "",
           parentName: row["Parent Name"] || row["parent_name"] || "",
           parentPhone: row["Parent Phone"] || row["parent_phone"] || "",
@@ -798,6 +890,7 @@ export default function StudentsPage() {
                 <SelectItem value="active">Active</SelectItem>
                 <SelectItem value="inactive">Inactive</SelectItem>
                 <SelectItem value="transferred">Transferred</SelectItem>
+                <SelectItem value="internally_transferred">Internally Transferred</SelectItem>
                 <SelectItem value="graduated">Graduated</SelectItem>
                 <SelectItem value="archived">Archived</SelectItem>
               </SelectContent>
@@ -884,7 +977,7 @@ export default function StudentsPage() {
                       </TableCell>
                       <TableCell className="font-mono text-sm">{s.admissionNo}</TableCell>
                       <TableCell>
-                        {s.classId ? getClassName(s.classId) : <Badge variant="outline" className="border-amber-300 text-amber-700">Classroom Unassigned</Badge>}
+                        {s.classId ? getClassName(s.classId) : s.status === "active" ? <Badge variant="outline" className="border-amber-300 text-amber-700">Classroom Unassigned</Badge> : <span className="text-muted-foreground">—</span>}
                       </TableCell>
                       {isBoardingSchool && (
                         <TableCell data-testid={`text-hostel-${s.id}`}>
@@ -906,17 +999,19 @@ export default function StudentsPage() {
                         </Button>
                       </TableCell>
                       <TableCell>
-                        <Badge
-                          variant={
-                            s.status === "active"
-                              ? "default"
-                              : s.status === "graduated"
-                              ? "secondary"
-                              : "outline"
-                          }
-                        >
-                          {s.status}
-                        </Badge>
+                        <div className="space-y-1">
+                          <Badge
+                            variant={s.status === "active" ? "default" : s.status === "graduated" ? "secondary" : "outline"}
+                            className="uppercase"
+                          >
+                            {String(s.status || "active").replaceAll("_", " ")}
+                          </Badge>
+                          <div className="text-xs text-muted-foreground">
+                            {s.status === "active"
+                              ? (s.enrollmentDate ? `Enrolled ${new Date(`${s.enrollmentDate}T00:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}` : "Enrollment date not recorded")
+                              : (s.statusDate ? new Date(`${s.statusDate}T00:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "Status date not recorded")}
+                          </div>
+                        </div>
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
@@ -1029,39 +1124,169 @@ export default function StudentsPage() {
                             </Button>
                           )}
 
-                          {s.status !== "transferred" ? (
+                          {!(["transferred", "internally_transferred"] as string[]).includes(String(s.status)) ? (
                           <Dialog
                             open={transferDialogStudent?.id === s.id}
-                            onOpenChange={(open) => !open && setTransferDialogStudent(null)}
+                            onOpenChange={(open) => !open && closeTransferDialog()}
                           >
                             <DialogTrigger asChild>
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                onClick={() => setTransferDialogStudent(s)}
+                                onClick={() => openTransferDialog(s)}
                                 data-testid={`button-transfer-student-${s.id}`}
                                 title="Transfer"
                               >
                                 <ArrowRightLeft className="w-4 h-4" />
                               </Button>
                             </DialogTrigger>
-                            <DialogContent>
+                            <DialogContent className="sm:max-w-xl">
                               <DialogHeader>
                                 <DialogTitle>Transfer Student</DialogTitle>
                                 <DialogDescription>
-                                  Are you sure you want to mark {s.firstName} {s.lastName} as transferred?
+                                  Choose whether {s.firstName} {s.lastName} is leaving the organisation or moving to another First Choice school.
                                 </DialogDescription>
                               </DialogHeader>
+
+                              <RadioGroup
+                                value={transferType}
+                                onValueChange={(value) => {
+                                  const nextType = value as "external" | "internal";
+                                  setTransferType(nextType);
+                                  if (nextType === "external") {
+                                    setInternalTransferForm((prev) => ({ ...prev, destinationSchoolId: "", reason: "", notes: "" }));
+                                  }
+                                }}
+                                className="grid grid-cols-2 gap-3"
+                              >
+                                <Label
+                                  htmlFor={`transfer-external-${s.id}`}
+                                  className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${transferType === "external" ? "border-primary bg-primary/5" : ""}`}
+                                >
+                                  <RadioGroupItem value="external" id={`transfer-external-${s.id}`} className="mt-0.5" />
+                                  <span>
+                                    <span className="block font-medium">External</span>
+                                    <span className="block text-xs font-normal text-muted-foreground">Leaves First Choice</span>
+                                  </span>
+                                </Label>
+                                <Label
+                                  htmlFor={`transfer-internal-${s.id}`}
+                                  className={`flex items-start gap-3 rounded-md border p-3 ${canUseInternalTransfer ? "cursor-pointer" : "cursor-not-allowed opacity-60"} ${transferType === "internal" ? "border-primary bg-primary/5" : ""}`}
+                                >
+                                  <RadioGroupItem value="internal" id={`transfer-internal-${s.id}`} className="mt-0.5" disabled={!canUseInternalTransfer} />
+                                  <span>
+                                    <span className="block font-medium">Internal</span>
+                                    <span className="block text-xs font-normal text-muted-foreground">Moves to another First Choice school</span>
+                                  </span>
+                                </Label>
+                              </RadioGroup>
+
+                              <div className="rounded-md border bg-muted/30 p-3 text-sm">
+                                <div className="font-medium">{s.firstName} {s.lastName}</div>
+                                <div className="text-muted-foreground">Admission no.: {s.admissionNo || "—"}</div>
+                                <div className="text-muted-foreground">
+                                  Current classroom: {getStudentClassroomDisplay(s)}
+                                </div>
+                              </div>
+
+                              {transferType === "external" ? (
+                                <DialogDescription>
+                                  Are you sure you want to mark {s.firstName} {s.lastName} as transferred out?
+                                </DialogDescription>
+                              ) : (
+                                <div className="space-y-4">
+                                  {!canUseInternalTransfer && (
+                                    <div className="rounded-md border border-amber-200 bg-amber-50/60 p-3 text-sm dark:border-amber-900 dark:bg-amber-950/20">
+                                      You do not have permission to complete internal student transfers.
+                                    </div>
+                                  )}
+                                  <div className="space-y-2">
+                                    <Label>Destination school</Label>
+                                    <Select
+                                      value={internalTransferForm.destinationSchoolId}
+                                      onValueChange={(value) => setInternalTransferForm((prev) => ({ ...prev, destinationSchoolId: value }))}
+                                      disabled={!canUseInternalTransfer || internalTransferDestinationsLoading || internalTransferDestinationsError}
+                                    >
+                                      <SelectTrigger>
+                                        <SelectValue placeholder={internalTransferDestinationsLoading ? "Loading schools..." : internalTransferDestinationsError ? "Unable to load schools" : "Choose destination school"} />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {internalTransferDestinations.length ? internalTransferDestinations
+                                          .filter((destination) => destination.id !== s.schoolId)
+                                          .map((destination) => (
+                                            <SelectItem key={destination.id} value={String(destination.id)}>{destination.name}</SelectItem>
+                                          )) : (
+                                            <div className="px-2 py-3 text-sm text-muted-foreground">No other schools are available in this organisation.</div>
+                                          )}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label>Transfer Date *</Label>
+                                    <Input
+                                      type="date"
+                                      value={internalTransferForm.effectiveDate}
+                                      onChange={(event) => setInternalTransferForm((prev) => ({ ...prev, effectiveDate: event.target.value }))}
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label>Joining Date *</Label>
+                                    <Input
+                                      type="date"
+                                      min={internalTransferForm.effectiveDate}
+                                      value={internalTransferForm.joiningDate}
+                                      onChange={(event) => setInternalTransferForm((prev) => ({ ...prev, joiningDate: event.target.value }))}
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label>Reason</Label>
+                                    <Textarea
+                                      value={internalTransferForm.reason}
+                                      onChange={(event) => setInternalTransferForm((prev) => ({ ...prev, reason: event.target.value }))}
+                                      placeholder="Reason for the internal transfer"
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label>Notes</Label>
+                                    <Textarea
+                                      value={internalTransferForm.notes}
+                                      onChange={(event) => setInternalTransferForm((prev) => ({ ...prev, notes: event.target.value }))}
+                                      placeholder="Optional notes"
+                                    />
+                                  </div>
+                                  <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+                                    Classroom is read-only transfer context. The receiving school will assign the learner to an existing classroom after the transfer.
+                                  </div>
+                                </div>
+                              )}
+
                               <DialogFooter>
-                                <Button variant="outline" onClick={() => setTransferDialogStudent(null)}>
+                                <Button variant="outline" onClick={closeTransferDialog}>
                                   Cancel
                                 </Button>
-                                <Button 
-                                  onClick={() => transferMutation.mutate(s.id)}
-                                  disabled={transferMutation.isPending}
-                                >
-                                  {transferMutation.isPending ? "Transferring..." : "Confirm Transfer"}
-                                </Button>
+                                {transferType === "external" ? (
+                                  <Button
+                                    onClick={() => transferMutation.mutate(s.id)}
+                                    disabled={transferMutation.isPending}
+                                  >
+                                    {transferMutation.isPending ? "Transferring..." : "Confirm External Transfer"}
+                                  </Button>
+                                ) : (
+                                  <Button
+                                    onClick={() => internalTransferMutation.mutate(s.id)}
+                                    disabled={
+                                      !canUseInternalTransfer ||
+                                      internalTransferMutation.isPending ||
+                                      !internalTransferForm.destinationSchoolId ||
+                                      !internalTransferForm.effectiveDate ||
+                                      !internalTransferForm.joiningDate ||
+                                      internalTransferForm.joiningDate < internalTransferForm.effectiveDate ||
+                                      internalTransferForm.reason.trim().length < 3
+                                    }
+                                  >
+                                    {internalTransferMutation.isPending ? "Transferring..." : "Complete Internal Transfer"}
+                                  </Button>
+                                )}
                               </DialogFooter>
                             </DialogContent>
                           </Dialog>
@@ -1217,7 +1442,7 @@ export default function StudentsPage() {
                             <span className="mobile-record-action-text">Subjects</span>
                           </Button>
                           {s.status !== "transferred" ? (
-                            <Button variant="outline" size="sm" className="mobile-record-action-button" onClick={() => setTransferDialogStudent(s)} data-testid={`mobile-button-transfer-student-${s.id}`} title="Transfer" aria-label="Transfer">
+                            <Button variant="outline" size="sm" className="mobile-record-action-button" onClick={() => openTransferDialog(s)} data-testid={`mobile-button-transfer-student-${s.id}`} title="Transfer" aria-label="Transfer">
                               <ArrowRightLeft className="mobile-record-action-icon" /><span className="mobile-record-action-text">Transfer</span>
                             </Button>
                           ) : (
@@ -1381,9 +1606,18 @@ function StudentView({
   onEdit: () => void;
 }) {
   const studentType = student.isDayScholar ? "Day Scholar" : "Boarder";
+  const externalTransferEvent = student.lifecycle?.events?.find((event) => event.eventType === "transfer_out") || null;
+  const restoreEvent = student.lifecycle?.events?.find((event) => event.eventType === "restored") || null;
   const formatValue = (value: unknown) => {
     const text = String(value ?? "").trim();
     return text && text !== "___" ? text : "-";
+  };
+  const formatLifecycleDate = (value?: string | null) => {
+    if (!value) return "Not recorded";
+    const parsed = new Date(`${value}T00:00:00`);
+    return Number.isNaN(parsed.getTime())
+      ? value
+      : parsed.toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
   };
   const studentAddressLine = [student.streetAddress, student.residentialArea, student.address]
     .map((value) => String(value || "").trim())
@@ -1490,6 +1724,32 @@ function StudentView({
           <Label>Full Address</Label>
           <div className="rounded-md border px-3 py-2 text-sm">{studentAddressLine || "-"}</div>
         </div>
+      </div>
+
+      <div className="rounded-lg border p-4">
+        <h4 className="mb-3 font-semibold">Enrollment Details</h4>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div><div className="text-xs text-muted-foreground">Enrollment date</div><div className="text-sm font-medium">{formatLifecycleDate(student.enrollmentDate)}</div></div>
+          <div><div className="text-xs text-muted-foreground">Current status</div><div className="text-sm font-medium capitalize">{String(student.status || "active").replaceAll("_", " ")}</div></div>
+          <div><div className="text-xs text-muted-foreground">Status since</div><div className="text-sm font-medium">{formatLifecycleDate(student.statusDate || student.enrollmentDate)}</div></div>
+          {student.lifecycle?.transfer?.direction === "out" && <>
+            <div><div className="text-xs text-muted-foreground">Transfer date</div><div className="text-sm font-medium">{formatLifecycleDate(student.lifecycle.transfer.transferDate)}</div></div>
+            <div><div className="text-xs text-muted-foreground">Transfer type</div><div className="text-sm font-medium">Internal</div></div>
+            <div><div className="text-xs text-muted-foreground">Transferred to</div><div className="text-sm font-medium">{student.lifecycle.transfer.destinationSchoolName || "Not recorded"}</div></div>
+          </>}
+          {student.status === "transferred" && <>
+            <div><div className="text-xs text-muted-foreground">Transfer date</div><div className="text-sm font-medium">{formatLifecycleDate(externalTransferEvent?.effectiveDate || student.statusDate)}</div></div>
+            <div><div className="text-xs text-muted-foreground">Transfer type</div><div className="text-sm font-medium">External</div></div>
+          </>}
+          {student.status === "active" && restoreEvent && <>
+            <div><div className="text-xs text-muted-foreground">Most recent re-enrolment</div><div className="text-sm font-medium">{formatLifecycleDate(restoreEvent.effectiveDate)}</div></div>
+          </>}
+          {student.lifecycle?.transfer?.direction === "in" && <>
+            <div><div className="text-xs text-muted-foreground">Transferred from</div><div className="text-sm font-medium">{student.lifecycle.transfer.sourceSchoolName || "Not recorded"}</div></div>
+            <div><div className="text-xs text-muted-foreground">Previous transfer date</div><div className="text-sm font-medium">{formatLifecycleDate(student.lifecycle.transfer.transferDate)}</div></div>
+          </>}
+        </div>
+        {!!student.lifecycle?.events?.length && <div className="mt-4 border-t pt-3"><div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Status history</div><div className="space-y-2">{student.lifecycle.events.map((event, index) => <div key={`${event.eventType}-${event.effectiveDate}-${index}`} className="text-sm"><span className="font-medium capitalize">{event.eventType.replaceAll("_", " ")}</span> · {formatLifecycleDate(event.effectiveDate)}{event.reason ? ` · ${event.reason}` : ""}</div>)}</div></div>}
       </div>
 
       <div className="flex justify-end">
@@ -1786,6 +2046,7 @@ function StudentForm({
               <SelectItem value="active">Active</SelectItem>
               <SelectItem value="inactive">Inactive</SelectItem>
               <SelectItem value="transferred">Transferred</SelectItem>
+              <SelectItem value="internally_transferred">Internally Transferred</SelectItem>
               <SelectItem value="graduated">Graduated</SelectItem>
             </SelectContent>
           </Select>

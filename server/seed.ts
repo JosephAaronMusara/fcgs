@@ -1,7 +1,7 @@
 import { db } from "./db";
-import { users, organizations, schools, permissions, accessGroups, accessGroupPermissions, userAccessGroups, userSchoolAccess, staffRoles, userPermissionOverrides } from "@shared/schema";
+import { users, organizations, schools, permissions, accessGroups, accessGroupPermissions, userAccessGroups, userSchoolAccess, staffRoles } from "@shared/schema";
 import bcrypt from "bcrypt";
-import { eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { RBAC_PERMISSIONS_DATA } from "./rbac-config";
 
@@ -287,18 +287,10 @@ async function seed() {
 
   const hashedPassword = await bcrypt.hash("admin123", 10);
   const adminUserIds: number[] = [];
+  const newlyCreatedAdminUserIds = new Set<number>();
 
-  // Delete old generic admin if exists (and its access group mappings)
-  const oldAdmin = await db.select().from(users).where(eq(users.username, "admin"));
-  if (oldAdmin.length > 0) {
-    try {
-      await db.delete(userAccessGroups).where(eq(userAccessGroups.userId, oldAdmin[0].id));
-      await db.delete(users).where(eq(users.username, "admin"));
-      console.log("Removed old generic admin user");
-    } catch {
-      console.log("Could not remove old generic admin user (referenced by other records), skipping");
-    }
-  }
+  // Existing user/group/school-scope configuration is administrator-owned. Seed reruns
+  // must not delete legacy accounts or rewrite their RBAC memberships/scope.
 
   for (const admin of schoolAdmins) {
     const schoolId = schoolMap.get(admin.schoolCode);
@@ -316,6 +308,7 @@ async function seed() {
         organizationId: orgId,
       }).returning();
       adminUserIds.push(newAdmin.id);
+      newlyCreatedAdminUserIds.add(newAdmin.id);
       console.log(`Admin user created: ${admin.username} / admin123`);
     } else {
       // Update password and school assignment
@@ -332,6 +325,7 @@ async function seed() {
   // Create org_admin user
   const existingOrgAdmin = await db.select().from(users).where(eq(users.username, "org_admin"));
   let orgAdminUserId: number;
+  let orgAdminCreated = false;
 
   if (existingOrgAdmin.length === 0) {
     const hashedPassword = await bcrypt.hash("admin123", 10);
@@ -345,6 +339,7 @@ async function seed() {
       organizationId: orgId,
     }).returning();
     orgAdminUserId = orgAdmin.id;
+    orgAdminCreated = true;
     console.log("Org Admin user created: org_admin / admin123");
   } else {
     orgAdminUserId = existingOrgAdmin[0].id;
@@ -355,14 +350,8 @@ async function seed() {
   console.log("Seeding permissions...");
   const permissionMap = new Map<string, number>();
 
-  const legacyLibraryDeleteCodes = ["library.catalog.delete", "library.delete"];
-  const legacyDeletePermissions = await db.select().from(permissions).where(inArray(permissions.code, legacyLibraryDeleteCodes));
-  if (legacyDeletePermissions.length > 0) {
-    const legacyIds = legacyDeletePermissions.map((perm) => perm.id);
-    await db.delete(accessGroupPermissions).where(inArray(accessGroupPermissions.permissionId, legacyIds));
-    await db.delete(userPermissionOverrides).where(inArray(userPermissionOverrides.permissionId, legacyIds));
-    await db.delete(permissions).where(inArray(permissions.id, legacyIds));
-  }
+  // Seeding must be non-destructive on an existing installation. Legacy permission
+  // retirement is handled by explicit migrations, not by deleting configured rights here.
 
   for (const perm of PERMISSIONS_DATA) {
     const existing = await db.select().from(permissions).where(eq(permissions.code, perm.code));
@@ -383,7 +372,8 @@ async function seed() {
     const existing = await db.select().from(accessGroups).where(eq(accessGroups.name, group.name));
     let groupId: number;
 
-    if (existing.length === 0) {
+    const created = existing.length === 0;
+    if (created) {
       const [newGroup] = await db.insert(accessGroups).values({
         name: group.name,
         description: group.description,
@@ -395,19 +385,22 @@ async function seed() {
     }
     accessGroupMap.set(group.name, groupId);
 
-    // Clear existing permissions for this group and reassign
-    await db.delete(accessGroupPermissions).where(eq(accessGroupPermissions.accessGroupId, groupId));
-
-    for (const permCode of group.permissions) {
-      const permId = permissionMap.get(permCode);
-      if (permId) {
-        await db.insert(accessGroupPermissions).values({
-          accessGroupId: groupId,
-          permissionId: permId,
-        });
+    // Permission defaults are applied only to a newly-created access group. Existing
+    // groups are administrator-owned configuration and must survive seed/deploy reruns.
+    if (created) {
+      for (const permCode of group.permissions) {
+        const permId = permissionMap.get(permCode);
+        if (permId) {
+          await db.insert(accessGroupPermissions).values({
+            accessGroupId: groupId,
+            permissionId: permId,
+          });
+        }
       }
+      console.log(`Access group "${group.name}" created with ${group.permissions.length} permissions`);
+    } else {
+      console.log(`Access group "${group.name}" already exists; preserving configured permissions`);
     }
-    console.log(`Access group "${group.name}" created with ${group.permissions.length} permissions`);
   }
 
   // Assign access groups to users
@@ -417,45 +410,38 @@ async function seed() {
   // Assign School Admin access group to all school-specific admins
   if (schoolAdminGroupId) {
     for (const adminId of adminUserIds) {
-      const existingMapping = await db.select().from(userAccessGroups)
-        .where(eq(userAccessGroups.userId, adminId));
-      if (existingMapping.length === 0) {
-        await db.insert(userAccessGroups).values({
-          userId: adminId,
-          accessGroupId: schoolAdminGroupId,
-        });
-      }
-    }
-    console.log(`${adminUserIds.length} school admins assigned to School Admin access group`);
-  }
-
-  if (orgMemberGroupId) {
-    const existingMapping = await db.select().from(userAccessGroups)
-      .where(eq(userAccessGroups.userId, orgAdminUserId));
-    if (existingMapping.length === 0) {
+      if (!newlyCreatedAdminUserIds.has(adminId)) continue;
       await db.insert(userAccessGroups).values({
-        userId: orgAdminUserId,
-        accessGroupId: orgMemberGroupId,
-      });
-      console.log("Org Admin user assigned to Org HQ access group");
+        userId: adminId,
+        accessGroupId: schoolAdminGroupId,
+      }).onConflictDoNothing();
     }
+    console.log(`Default School Admin membership applied only to newly created admin users`);
   }
 
-  const allAdminUserIds = [...adminUserIds, orgAdminUserId];
+  if (orgMemberGroupId && orgAdminCreated) {
+    await db.insert(userAccessGroups).values({
+      userId: orgAdminUserId,
+      accessGroupId: orgMemberGroupId,
+    }).onConflictDoNothing();
+    console.log("New Org Admin user assigned to Org HQ access group");
+  }
 
-  // Seed school access for all admin users (access to all schools)
-  console.log("Seeding school access for admin users...");
+  const newlyCreatedAllAdminUserIds = [...newlyCreatedAdminUserIds, ...(orgAdminCreated ? [orgAdminUserId] : [])];
+
+  // Seed school scope only for accounts created in this run. Existing scope is preserved,
+  // including the deliberate choice to leave an existing user with no school mappings.
+  console.log("Seeding school access for newly created admin users...");
   const allSchoolIds = Array.from(schoolMap.values());
 
-  for (const adminId of allAdminUserIds) {
-    await db.delete(userSchoolAccess).where(eq(userSchoolAccess.userId, adminId));
+  for (const adminId of newlyCreatedAllAdminUserIds) {
     if (allSchoolIds.length > 0) {
       await db.insert(userSchoolAccess).values(
         allSchoolIds.map(schoolId => ({ userId: adminId, schoolId }))
-      );
+      ).onConflictDoNothing();
     }
   }
-  console.log(`School access seeded for ${allAdminUserIds.length} admin users (${allSchoolIds.length} schools each)`);
+  console.log(`Existing configured school access was preserved`);
 
   // Seed default staff roles
   console.log("Seeding staff roles...");
