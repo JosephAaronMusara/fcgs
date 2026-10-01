@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -30,6 +31,7 @@ import {
   Banknote,
   Bus,
   CheckCircle2,
+  ChevronDown,
   CircleDollarSign,
   ClipboardCheck,
   Copy,
@@ -599,6 +601,31 @@ function SavedPointsWorkspace({ data, open, can, canManageLegacy, mutate }: any)
   </Card>;
 }
 
+function ReceiptPrintActions({ payment, defaultFormat, openTransportPdf }: { payment: any; defaultFormat: string; openTransportPdf: (url: string) => Promise<void> }) {
+  const normalizedDefault = defaultFormat === "thermal80" ? "thermal80" : "a4";
+  const defaultLabel = normalizedDefault === "thermal80" ? "80 mm Thermal" : "A4";
+  const baseUrl = `/api/transport/receipts/${payment.id}/print`;
+  return <div className="inline-flex items-center">
+    <Button size="sm" variant="outline" className="rounded-r-none" onClick={() => void openTransportPdf(baseUrl)}>
+      <FileText className="mr-1 h-3.5 w-3.5"/>Print Receipt
+    </Button>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" variant="outline" className="rounded-l-none border-l-0 px-2" aria-label="Choose receipt print format">
+          <ChevronDown className="h-3.5 w-3.5"/>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel>School default: {defaultLabel}</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => void openTransportPdf(baseUrl)}>Use school default</DropdownMenuItem>
+        <DropdownMenuSeparator/>
+        <DropdownMenuItem onSelect={() => void openTransportPdf(`${baseUrl}?format=thermal80`)}>Print as 80 mm Thermal</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void openTransportPdf(`${baseUrl}?format=a4`)}>Print as A4</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  </div>;
+}
+
 function BillingWorkspace({ data, tab, setTab, open, can, canManageLegacy, mutate, openTransportPdf }: any) {
   const [accountFilter, setAccountFilter] = useState("all");
   const [paymentSearch, setPaymentSearch] = useState("");
@@ -620,7 +647,7 @@ function BillingWorkspace({ data, tab, setTab, open, can, canManageLegacy, mutat
   return <><Tabs value={tab} onValueChange={setTab}>
     <div className="overflow-x-auto pb-1"><TabsList className="w-max justify-start"><TabsTrigger value="payments">Payments & Receipts</TabsTrigger><TabsTrigger value="accounts">Learner Accounts</TabsTrigger><TabsTrigger value="refunds">Credits & Refunds</TabsTrigger><TabsTrigger value="cashups">Cash-Up</TabsTrigger><TabsTrigger value="billingRuns">Billing Runs</TabsTrigger></TabsList></div>
 
-    <TabsContent value="payments"><div className="space-y-3"><div className="flex justify-end"><div className="relative w-full max-w-md"><Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground"/><Input value={paymentSearch} onChange={(event) => setPaymentSearch(event.target.value)} placeholder="Search receipt number, learner or admission number" className="pl-8"/></div></div><MasterTable title="Transport payments and immutable receipts" description="Issued receipts cannot be edited. Corrections use reversal and replacement." button="Record payment" canAdd={can("transport.payments.record") || canManageLegacy} onAdd={() => open("payment")} heads={["Receipt", "Learner", "Payment date", "Method", "Amount", "Allocated", "Credit", "Verification", "Cash-up", "Claim / payout", "Actions"]} rows={paymentRows.map((payment: any) => <TableRow key={payment.id}><TableCell><button type="button" className="font-medium hover:underline" onClick={() => void openTransportPdf(`/api/transport/receipts/${payment.id}/print`)}>{payment.receiptNo}</button>{Number(payment.reprintCount) > 0 && <div className="text-xs text-muted-foreground">{payment.reprintCount} reprint(s)</div>}</TableCell><TableCell><button type="button" className="text-left hover:underline" onClick={() => open("learnerAccount", { studentId: payment.studentId, firstName: payment.firstName, lastName: payment.lastName })}>{payment.firstName} {payment.lastName}</button><div className="text-xs text-muted-foreground">{payment.admissionNo}</div></TableCell><TableCell>{payment.paymentDate}</TableCell><TableCell>{titleCase(payment.paymentMethod)}</TableCell><TableCell>USD {money(payment.amount)}</TableCell><TableCell>USD {money(payment.allocatedAmount)}</TableCell><TableCell>USD {money(payment.unallocatedAmount)}</TableCell><TableCell><StatusBadge value={payment.reversedAt ? "reversed" : payment.verificationStatus}/></TableCell><TableCell>{payment.cashupId ? <StatusBadge value={payment.cashupStatus || "included"}/> : "Available"}</TableCell><TableCell>{payment.claimNumber || "—"}{payment.payoutNumber && <div className="text-xs text-muted-foreground">{payment.payoutNumber}</div>}</TableCell><TableCell><div className="flex flex-wrap gap-1"><Button size="sm" variant="outline" onClick={() => void openTransportPdf(`/api/transport/receipts/${payment.id}/print`)}><FileText className="mr-1 h-3.5 w-3.5"/>View PDF</Button>{!payment.reversedAt && payment.verificationStatus === "unverified" && (can("transport.payments.verify") || canManageLegacy) && <Button size="sm" variant="ghost" onClick={() => mutate.mutate({ url: `/api/transport/payments/${payment.id}/verify` })}>Verify</Button>}{!payment.reversedAt && !payment.claimId && (can("transport.payments.reverse") || can("transport.delete")) && <Button size="sm" variant="destructive" onClick={() => open("reversePayment", payment)}>Reverse</Button>}</div></TableCell></TableRow>)}/></div></TabsContent>
+    <TabsContent value="payments"><div className="space-y-3"><div className="flex justify-end"><div className="relative w-full max-w-md"><Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground"/><Input value={paymentSearch} onChange={(event) => setPaymentSearch(event.target.value)} placeholder="Search receipt number, learner or admission number" className="pl-8"/></div></div><MasterTable title="Transport payments and immutable receipts" description="Issued receipts cannot be edited. Corrections use reversal and replacement." button="Record payment" canAdd={can("transport.payments.record") || canManageLegacy} onAdd={() => open("payment")} heads={["Receipt", "Learner", "Payment date", "Method", "Amount", "Allocated", "Credit", "Verification", "Cash-up", "Claim / payout", "Actions"]} rows={paymentRows.map((payment: any) => <TableRow key={payment.id}><TableCell><button type="button" className="font-medium hover:underline" onClick={() => void openTransportPdf(`/api/transport/receipts/${payment.id}/print`)}>{payment.receiptNo}</button>{Number(payment.reprintCount) > 0 && <div className="text-xs text-muted-foreground">{payment.reprintCount} reprint(s)</div>}</TableCell><TableCell><button type="button" className="text-left hover:underline" onClick={() => open("learnerAccount", { studentId: payment.studentId, firstName: payment.firstName, lastName: payment.lastName })}>{payment.firstName} {payment.lastName}</button><div className="text-xs text-muted-foreground">{payment.admissionNo}</div></TableCell><TableCell>{payment.paymentDate}</TableCell><TableCell>{titleCase(payment.paymentMethod)}</TableCell><TableCell>USD {money(payment.amount)}</TableCell><TableCell>USD {money(payment.allocatedAmount)}</TableCell><TableCell>USD {money(payment.unallocatedAmount)}</TableCell><TableCell><StatusBadge value={payment.reversedAt ? "reversed" : payment.verificationStatus}/></TableCell><TableCell>{payment.cashupId ? <StatusBadge value={payment.cashupStatus || "included"}/> : "Available"}</TableCell><TableCell>{payment.claimNumber || "—"}{payment.payoutNumber && <div className="text-xs text-muted-foreground">{payment.payoutNumber}</div>}</TableCell><TableCell><div className="flex flex-wrap gap-1"><ReceiptPrintActions payment={payment} defaultFormat={data.settings?.receiptPrintFormat || "a4"} openTransportPdf={openTransportPdf}/>{!payment.reversedAt && payment.verificationStatus === "unverified" && (can("transport.payments.verify") || canManageLegacy) && <Button size="sm" variant="ghost" onClick={() => mutate.mutate({ url: `/api/transport/payments/${payment.id}/verify` })}>Verify</Button>}{!payment.reversedAt && !payment.claimId && (can("transport.payments.reverse") || can("transport.delete")) && <Button size="sm" variant="destructive" onClick={() => open("reversePayment", payment)}>Reverse</Button>}</div></TableCell></TableRow>)}/></div></TabsContent>
 
     <TabsContent value="accounts"><Card><CardHeader className="gap-3 md:flex-row md:items-center md:justify-between"><div><CardTitle>Learner transport accounts</CardTitle><CardDescription>One lifetime Transport account per learner. Open a row to view every service period and financial transaction.</CardDescription></div><SearchableSelect value={accountFilter} onValueChange={setAccountFilter} options={[{value:"all",label:"All accounts"},{value:"active",label:"Active"},{value:"inactive",label:"Inactive / Cancelled"},{value:"fully_paid",label:"Fully Paid / Credit"},{value:"arrears",label:"In Arrears"}]} placeholder="Filter accounts"/></CardHeader><CardContent><DataTable heads={["Learner", "Current status", "Destination / Vehicle", "Charged", "Adjustments", "Paid", "Balance", "Financial status"]}>{accountRows.map((row: any) => { const balance=Number(row.balance||0); return <TableRow key={row.studentId} className="cursor-pointer" onClick={() => open("learnerAccount", row)}><TableCell><button type="button" className="font-medium hover:underline" onClick={(event) => { event.stopPropagation(); open("learnerAccount", row); }}>{row.firstName} {row.lastName}</button><div className="text-xs text-muted-foreground">{row.admissionNo}{row.className ? ` · ${row.className}` : ""}</div></TableCell><TableCell><StatusBadge value={row.serviceState || "inactive"}/><div className="mt-1 text-xs text-muted-foreground">{row.endDate ? `Effective to ${row.endDate}` : row.startDate ? `From ${row.startDate}` : "—"}</div></TableCell><TableCell>{row.destinationName || "—"}<div className="text-xs text-muted-foreground">{row.vehicleRegistration || "—"}</div></TableCell><TableCell>USD {money(row.charges)}</TableCell><TableCell>USD {money(row.adjustments)}</TableCell><TableCell>USD {money(row.received)}</TableCell><TableCell className={balance > 0 ? "font-medium text-destructive" : balance < 0 ? "font-medium text-emerald-600" : "font-medium"}>USD {money(balance)}</TableCell><TableCell><StatusBadge value={balance > 0 ? "overdue" : balance < 0 ? "credit" : "paid"}/></TableCell></TableRow>; })}</DataTable></CardContent></Card></TabsContent>
 
@@ -820,6 +847,13 @@ function SettingsWorkspace({ data, saving, onSave }: any) {
       <Field label="Receipt prefix"><Input value={form.receiptPrefix || ""} onChange={(event) => set("receiptPrefix", event.target.value.toUpperCase())}/></Field>
       <NumberField label="Receipt sequence length" value={form.receiptSequenceLength} onChange={(value: any) => set("receiptSequenceLength", value)} min={3} max={12}/>
       <BooleanField label="Reset receipt sequence yearly" value={form.receiptResetYearly} onChange={(value: any) => set("receiptResetYearly", value)}/>
+      <Field label="Default receipt format">
+        <Select value={String(form.receiptPrintFormat || "a4")} onValueChange={(value) => set("receiptPrintFormat", value)}>
+          <SelectTrigger><SelectValue placeholder="Select receipt format"/></SelectTrigger>
+          <SelectContent><SelectItem value="thermal80">80 mm Thermal</SelectItem><SelectItem value="a4">A4</SelectItem></SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">Normal Print/Reprint uses this school default. The receipt action menu can override it for one print only.</p>
+      </Field>
       <BooleanField label="Print both copies on one page" value={form.printCopiesOnOnePage} onChange={(value: any) => set("printCopiesOnOnePage", value)}/>
       <BooleanField label="Require reconciliation before claim" value={form.requireCashupForClaim} onChange={(value: any) => set("requireCashupForClaim", value)}/>
       <Field label="Fortnight anchor date"><Input type="date" value={form.fortnightAnchorDate || ""} onChange={(event) => set("fortnightAnchorDate", event.target.value || null)}/></Field>

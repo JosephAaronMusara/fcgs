@@ -1,5 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { randomBytes, createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import bcrypt from "bcrypt";
 import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
@@ -458,6 +460,7 @@ const settingsInput = z.object({
   receiptSequenceLength: z.coerce.number().int().min(3).max(12),
   receiptResetYearly: z.boolean(),
   receiptFooter: optionalText,
+  receiptPrintFormat: z.enum(["a4", "thermal80"]),
   printCopiesOnOnePage: z.boolean(),
   requireCashupForClaim: z.boolean(),
   reportWeekStartsOn: z.coerce.number().int().min(0).max(6),
@@ -521,6 +524,56 @@ function numberCode(prefix: string, schoolCode: string, id: number | string, dat
 
 function verificationToken(): string {
   return randomBytes(18).toString("base64url");
+}
+
+const receiptPrintFormatInput = z.enum(["a4", "thermal80"]);
+
+function imageMimeType(buffer: Buffer, reference: string): string {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]))) return "image/png";
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 6 && ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii"))) return "image/gif";
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  const lower = reference.toLowerCase();
+  if (lower.includes(".svg")) return "image/svg+xml";
+  if (lower.includes(".webp")) return "image/webp";
+  if (lower.includes(".gif")) return "image/gif";
+  if (lower.includes(".jpg") || lower.includes(".jpeg")) return "image/jpeg";
+  return "image/png";
+}
+
+async function imageDataUrl(reference: unknown): Promise<string | null> {
+  const value = String(reference || "").trim();
+  if (!value) return null;
+  if (value.startsWith("data:image/")) return value;
+  try {
+    if (value.startsWith("http://") || value.startsWith("https://")) {
+      const response = await fetch(value);
+      if (!response.ok) return null;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const mime = response.headers.get("content-type")?.split(";")[0] || imageMimeType(buffer, value);
+      return `data:${mime};base64,${buffer.toString("base64")}`;
+    }
+    let buffer: Buffer | null = null;
+    if (value.startsWith("/objects/")) {
+      const roots = process.env.LOCAL_OBJECT_DIR
+        ? [path.resolve(process.env.LOCAL_OBJECT_DIR)]
+        : [path.resolve(process.cwd(), "object_storage"), path.resolve("/var/lib/fcgs/object_storage")];
+      for (const root of roots) {
+        const candidate = path.resolve(root, value.slice("/objects/".length));
+        if (!candidate.startsWith(root + path.sep)) continue;
+        try { buffer = await fs.readFile(candidate); break; } catch { /* try next root */ }
+      }
+    } else {
+      const relative = value.replace(/^\/+/, "");
+      for (const candidate of [path.resolve(process.cwd(), relative), path.resolve(process.cwd(), "client/public", relative)]) {
+        try { buffer = await fs.readFile(candidate); break; } catch { /* try next */ }
+      }
+    }
+    if (!buffer) return null;
+    return `data:${imageMimeType(buffer, value)};base64,${buffer.toString("base64")}`;
+  } catch {
+    return null;
+  }
 }
 
 function escapeHtml(value: unknown): string {
@@ -4123,47 +4176,138 @@ export function registerTransportRoutes(app: Express) {
       let payment = await assertSchoolRecord(transportPayments, id, school.id);
       if (!payment) return res.status(404).send("Receipt not found");
       payment = await ensureReceiptSecurity(payment, school, req);
+
+      const settings = await getOrCreateSettings(school.id);
+      const queryFormatRaw = Array.isArray(req.query.format) ? req.query.format[0] : req.query.format;
+      const queryFormat = queryFormatRaw ? receiptPrintFormatInput.safeParse(String(queryFormatRaw)) : null;
+      if (queryFormat && !queryFormat.success) return res.status(400).json({ message: "Receipt format must be either a4 or thermal80." });
+      const configuredFormat = receiptPrintFormatInput.safeParse(String(settings.receiptPrintFormat || "a4"));
+      const printFormat = queryFormat?.success ? queryFormat.data : (configuredFormat.success ? configuredFormat.data : "a4");
+
       const printCountResult = await db.execute(sql`SELECT COUNT(*)::int count FROM transport_receipt_events WHERE payment_id=${id} AND event_type IN ('printed','reprint')`);
       const priorPrintCount = Number(printCountResult.rows[0]?.count ?? 0);
       const eventType = priorPrintCount > 0 ? "reprint" : "printed";
-      await db.insert(transportReceiptEvents).values({ schoolId: school.id, paymentId: id, eventType, copyType: "customer_and_service_provider", createdByUserId: user.id, metadata: { printNumber: priorPrintCount + 1 } });
-      await writeAudit(db, school.id, user.id, "receipt", id, eventType, null, { receiptNo: payment.receiptNo, printNumber: priorPrintCount + 1 });
+      await db.insert(transportReceiptEvents).values({
+        schoolId: school.id,
+        paymentId: id,
+        eventType,
+        copyType: "customer_and_service_provider",
+        createdByUserId: user.id,
+        metadata: { printNumber: priorPrintCount + 1, format: printFormat, formatOverride: Boolean(queryFormat?.success) },
+      });
+      await writeAudit(db, school.id, user.id, "receipt", id, eventType, null, {
+        receiptNo: payment.receiptNo,
+        printNumber: priorPrintCount + 1,
+        format: printFormat,
+        formatOverride: Boolean(queryFormat?.success),
+      });
+
       const snapshot = payment.receiptSnapshot as any;
       const verifyUrl = `${req.protocol}://${req.get("host")}/api/public/transport/receipts/${encodeURIComponent(payment.verificationToken)}`;
       const qr = await QRCode.toDataURL(verifyUrl, { margin: 1, width: 150 });
       const allocation = await db.execute(sql`SELECT COALESCE(SUM(amount),0)::text allocated FROM transport_payment_allocations WHERE payment_id=${id}`);
       const allocated = amount(allocation.rows[0]?.allocated);
+      const credit = rounded(amount(payment.amount) - allocated);
       const reprint = priorPrintCount > 0;
-      const copy = (label: string) => `
+      const logo = await imageDataUrl(snapshot?.school?.logo || school.logo);
+      const logoMarkup = logo ? `<div class="logo"><img src="${escapeHtml(logo)}" alt="School logo"/></div>` : "";
+      const schoolName = escapeHtml(snapshot?.school?.name || school.name);
+      const schoolAddress = escapeHtml(snapshot?.school?.address || school.address || "");
+      const schoolPhone = escapeHtml(snapshot?.school?.phone || school.phone || "");
+      const learnerName = escapeHtml(`${snapshot?.learner?.firstName ?? ""} ${snapshot?.learner?.lastName ?? ""}`.trim());
+      const admissionNo = escapeHtml(snapshot?.learner?.admissionNo || "—");
+      const className = escapeHtml(snapshot?.learner?.className || "—");
+      const routeName = escapeHtml(snapshot?.assignment?.routeName || "—");
+      const pickupDestination = escapeHtml(snapshot?.assignment?.pickupName || snapshot?.assignment?.dropoffName || "—");
+      const vehicleRegistration = escapeHtml(snapshot?.assignment?.vehicleRegistration || "—");
+      const driverName = escapeHtml(snapshot?.assignment?.driverName || "—");
+      const serviceType = escapeHtml(snapshot?.assignment?.serviceType || "—");
+      const paymentMethod = escapeHtml(payment.paymentMethod || "—");
+      const receivedBy = escapeHtml(snapshot?.receivedBy || "—");
+      const transportManager = escapeHtml(snapshot?.transportManagerName || "Not configured");
+      const issuedAt = escapeHtml(snapshot?.issuedAt || "—");
+      const paymentDate = escapeHtml(payment.paymentDate || "—");
+      const status = escapeHtml(payment.status || "—");
+      const receiptNo = escapeHtml(payment.receiptNo);
+      const notice = "This copy does not independently authorise a claim or payout. Claim eligibility is verified in the FCGS Portal.";
+
+      const a4Copy = (label: string) => `
         <section class="receipt">
           ${reprint ? '<div class="watermark">REPRINT</div>' : ""}
-          <header><div><h1>${escapeHtml(snapshot?.school?.name || school.name)}</h1><div>${escapeHtml(snapshot?.school?.address || school.address || "")}</div><div>${escapeHtml(snapshot?.school?.phone || school.phone || "")}</div></div><div class="copy">${label}</div></header>
+          ${logoMarkup}
+          <header><div class="school"><h1>${schoolName}</h1><div>${schoolAddress}</div><div>${schoolPhone}</div></div><div class="copy">${label}</div></header>
           <h2>TRANSPORT RECEIPT</h2>
           <div class="grid">
-            <div><b>Receipt No.</b><span>${escapeHtml(payment.receiptNo)}</span></div>
-            <div><b>Status</b><span>${escapeHtml(payment.status)}</span></div>
-            <div><b>Learner</b><span>${escapeHtml(`${snapshot?.learner?.firstName ?? ""} ${snapshot?.learner?.lastName ?? ""}`)}</span></div>
-            <div><b>Admission No.</b><span>${escapeHtml(snapshot?.learner?.admissionNo)}</span></div>
-            <div><b>Class</b><span>${escapeHtml(snapshot?.learner?.className)}</span></div>
-            <div><b>Payment date</b><span>${escapeHtml(payment.paymentDate)}</span></div>
-            <div><b>Route</b><span>${escapeHtml(snapshot?.assignment?.routeName)}</span></div>
-            <div><b>Pickup / destination</b><span>${escapeHtml(snapshot?.assignment?.pickupName || snapshot?.assignment?.dropoffName || "—")}</span></div>
-            <div><b>Vehicle</b><span>${escapeHtml(snapshot?.assignment?.vehicleRegistration || "—")}</span></div>
-            <div><b>Driver</b><span>${escapeHtml(snapshot?.assignment?.driverName || "—")}</span></div>
-            <div><b>Service</b><span>${escapeHtml(snapshot?.assignment?.serviceType || "—")}</span></div>
-            <div><b>Payment method</b><span>${escapeHtml(payment.paymentMethod)}</span></div>
+            <div><b>Receipt No.</b><span>${receiptNo}</span></div>
+            <div><b>Status</b><span>${status}</span></div>
+            <div><b>Learner</b><span>${learnerName}</span></div>
+            <div><b>Admission No.</b><span>${admissionNo}</span></div>
+            <div><b>Class</b><span>${className}</span></div>
+            <div><b>Payment date</b><span>${paymentDate}</span></div>
+            <div><b>Route</b><span>${routeName}</span></div>
+            <div><b>Pickup / destination</b><span>${pickupDestination}</span></div>
+            <div><b>Vehicle</b><span>${vehicleRegistration}</span></div>
+            <div><b>Driver</b><span>${driverName}</span></div>
+            <div><b>Service</b><span>${serviceType}</span></div>
+            <div><b>Payment method</b><span>${paymentMethod}</span></div>
           </div>
           <div class="amount">USD ${amount(payment.amount).toFixed(2)}</div>
-          <div class="small">Allocated: USD ${allocated.toFixed(2)} · Learner credit: USD ${rounded(amount(payment.amount) - allocated).toFixed(2)}</div>
-          <footer><div><b>Received by:</b> ${escapeHtml(snapshot?.receivedBy)}<br/><b>Transport Manager:</b> ${escapeHtml(snapshot?.transportManagerName || "Not configured")}<br/><b>Issued:</b> ${escapeHtml(snapshot?.issuedAt)}</div><div class="qr"><img src="${qr}"/><small>Scan to verify</small></div></footer>
-          <p class="notice">This copy does not independently authorise a claim or payout. Claim eligibility is verified in the FCGS Portal.</p>
+          <div class="small">Allocated: USD ${allocated.toFixed(2)} · Learner credit: USD ${credit.toFixed(2)}</div>
+          <footer><div><b>Received by:</b> ${receivedBy}<br/><b>Transport Manager:</b> ${transportManager}<br/><b>Issued:</b> ${issuedAt}</div><div class="qr"><img src="${qr}"/><small>Scan to verify</small></div></footer>
+          <p class="notice">${notice}</p>
         </section>`;
-      const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${escapeHtml(payment.receiptNo)}</title><style>
-        @page{size:A4;margin:10mm}body{font-family:Arial,sans-serif;color:#111;margin:0}.receipt{position:relative;border:1.5px solid #222;padding:16px;margin-bottom:12px;min-height:122mm;box-sizing:border-box;overflow:hidden}.receipt:first-child{border-bottom-style:dashed}header{display:flex;justify-content:space-between;gap:20px;font-size:12px}h1{font-size:19px;margin:0 0 4px}h2{text-align:center;font-size:16px;letter-spacing:1.2px;margin:13px 0}.copy{font-weight:bold;border:1px solid #111;padding:7px;height:max-content}.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 20px;font-size:12px}.grid div{display:flex;justify-content:space-between;border-bottom:1px dotted #bbb;padding-bottom:3px}.grid span{text-align:right}.amount{text-align:center;font-size:28px;font-weight:bold;margin:14px 0 4px}.small{text-align:center;font-size:11px}footer{display:flex;justify-content:space-between;align-items:end;margin-top:10px;font-size:11px}.qr{text-align:center}.qr img{width:75px;display:block}.notice{font-size:9px;border-top:1px solid #ddd;padding-top:6px}.watermark{position:absolute;transform:rotate(-25deg);font-size:82px;font-weight:bold;color:rgba(180,0,0,.09);top:42%;left:17%}@media print{button{display:none}}</style></head><body>${copy("CUSTOMER COPY")}${copy("SERVICE PROVIDER COPY")}</body></html>`;
-      const pdf = await renderHtmlPdf({ html, pdfOptions: { format: "A4", printBackground: true, preferCSSPageSize: true } });
-      const filename = reportPdfFilename(`Transport_Receipt_${payment.receiptNo}`);
+
+      const thermalRow = (label: string, value: string) => `<div class="row"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+      const thermalCopy = (label: string) => `
+        <section class="receipt thermal-receipt">
+          ${reprint ? '<div class="watermark">REPRINT</div>' : ""}
+          ${logoMarkup}
+          <div class="school"><h1>${schoolName}</h1>${schoolAddress ? `<div>${schoolAddress}</div>` : ""}${schoolPhone ? `<div>${schoolPhone}</div>` : ""}</div>
+          <div class="copy">${label}</div>
+          <h2>TRANSPORT RECEIPT</h2>
+          <div class="details">
+            ${thermalRow("Receipt No.", receiptNo)}
+            ${thermalRow("Status", status)}
+            ${thermalRow("Learner", learnerName)}
+            ${thermalRow("Admission No.", admissionNo)}
+            ${thermalRow("Class", className)}
+            ${thermalRow("Payment date", paymentDate)}
+            ${thermalRow("Route", routeName)}
+            ${thermalRow("Pickup / destination", pickupDestination)}
+            ${thermalRow("Vehicle", vehicleRegistration)}
+            ${thermalRow("Driver", driverName)}
+            ${thermalRow("Service", serviceType)}
+            ${thermalRow("Payment method", paymentMethod)}
+          </div>
+          <div class="amount">USD ${amount(payment.amount).toFixed(2)}</div>
+          <div class="totals"><div><b>Allocated</b><span>USD ${allocated.toFixed(2)}</span></div><div><b>Learner credit</b><span>USD ${credit.toFixed(2)}</span></div></div>
+          <div class="handover">
+            ${thermalRow("Received by", receivedBy)}
+            ${thermalRow("Transport Manager", transportManager)}
+            ${thermalRow("Issued", issuedAt)}
+          </div>
+          <div class="qr"><img src="${qr}"/><small>Scan to verify</small></div>
+          <p class="notice">${notice}</p>
+        </section>`;
+
+      let pdf: Buffer;
+      if (printFormat === "thermal80") {
+        const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${receiptNo}</title><style>
+          *{box-sizing:border-box}html,body{width:80mm;margin:0;padding:0;font-family:Arial,sans-serif;color:#111;background:#fff}body{overflow-wrap:anywhere;word-break:normal}.receipt{position:relative;width:80mm;padding:3.5mm 4mm;overflow:visible}.thermal-receipt+.thermal-receipt{border-top:1px dashed #555;margin-top:3mm;padding-top:5mm}.logo{text-align:center;margin:0 auto 2mm}.logo img{display:inline-block;max-width:34mm;max-height:20mm;width:auto;height:auto;object-fit:contain}.school{text-align:center;font-size:9.5px;line-height:1.35;overflow-wrap:anywhere}.school h1{font-size:13px;line-height:1.2;margin:0 0 1mm}.copy{margin:3mm auto 1.5mm;text-align:center;font-weight:700;font-size:10px;border:1px solid #222;padding:1.5mm 2mm;max-width:60mm}.thermal-receipt h2{text-align:center;font-size:13px;letter-spacing:.5px;margin:2mm 0 3mm}.details,.handover{border-top:1px solid #999}.row{padding:1.5mm 0;border-bottom:1px dotted #aaa}.label{font-size:8.5px;font-weight:700;margin-bottom:.6mm}.value{font-size:10px;line-height:1.35;white-space:normal;overflow-wrap:anywhere}.amount{text-align:center;font-size:21px;font-weight:700;margin:4mm 0 2mm}.totals{font-size:9.5px;border-top:1px solid #999;border-bottom:1px solid #999;padding:1.5mm 0;margin-bottom:3mm}.totals div{display:flex;justify-content:space-between;gap:3mm;padding:.7mm 0}.totals span{text-align:right;white-space:nowrap}.handover{margin-top:2mm}.qr{text-align:center;margin:3mm auto 2mm}.qr img{display:block;width:25mm;height:25mm;margin:0 auto 1mm}.qr small{font-size:8px}.notice{font-size:8px;line-height:1.35;border-top:1px solid #aaa;padding-top:2mm;margin:2mm 0 0;white-space:normal;overflow-wrap:anywhere}.watermark{position:absolute;z-index:0;transform:rotate(-25deg);font-size:25mm;font-weight:700;color:rgba(180,0,0,.07);top:42%;left:7mm;pointer-events:none}.receipt>*:not(.watermark){position:relative;z-index:1}@media print{html,body{width:80mm}}
+        </style></head><body>${thermalCopy("CUSTOMER COPY")}${thermalCopy("SERVICE PROVIDER COPY")}</body></html>`;
+        pdf = await renderHtmlPdf({ html, pdfOptions: { printBackground: true }, fitToContent: { width: "80mm", paddingPx: 2 } });
+      } else {
+        const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${receiptNo}</title><style>
+          @page{size:A4;margin:10mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;margin:0}.receipt{position:relative;border:1.5px solid #222;padding:16px;margin-bottom:12px;min-height:122mm;overflow:hidden}.receipt:first-child{border-bottom-style:dashed}.logo{text-align:center;margin:0 auto 8px}.logo img{display:inline-block;max-width:42mm;max-height:22mm;width:auto;height:auto;object-fit:contain}header{position:relative;display:flex;justify-content:center;align-items:flex-start;gap:20px;font-size:12px;min-height:48px}.school{text-align:center;max-width:70%}.school h1{font-size:19px;margin:0 0 4px;overflow-wrap:anywhere}.copy{position:absolute;right:0;top:0;font-weight:bold;border:1px solid #111;padding:7px;max-width:28%;text-align:center;overflow-wrap:anywhere}h2{text-align:center;font-size:16px;letter-spacing:1.2px;margin:13px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 20px;font-size:12px}.grid div{display:flex;justify-content:space-between;gap:12px;border-bottom:1px dotted #bbb;padding-bottom:3px;min-width:0}.grid b{flex:0 0 auto}.grid span{text-align:right;overflow-wrap:anywhere;min-width:0}.amount{text-align:center;font-size:28px;font-weight:bold;margin:14px 0 4px}.small{text-align:center;font-size:11px}footer{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-top:10px;font-size:11px;overflow-wrap:anywhere}.qr{text-align:center;flex:0 0 auto}.qr img{width:75px;display:block}.notice{font-size:9px;border-top:1px solid #ddd;padding-top:6px;overflow-wrap:anywhere}.watermark{position:absolute;transform:rotate(-25deg);font-size:82px;font-weight:bold;color:rgba(180,0,0,.09);top:42%;left:17%;pointer-events:none}@media print{button{display:none}}
+        </style></head><body>${a4Copy("CUSTOMER COPY")}${a4Copy("SERVICE PROVIDER COPY")}</body></html>`;
+        pdf = await renderHtmlPdf({ html, pdfOptions: { format: "A4", printBackground: true, preferCSSPageSize: true } });
+      }
+
+      const suffix = printFormat === "thermal80" ? "80mm" : "A4";
+      const filename = reportPdfFilename(`Transport_Receipt_${payment.receiptNo}_${suffix}`);
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename="${filename}.pdf"`);
+      res.setHeader("X-FCGS-Receipt-Format", printFormat);
       res.send(pdf);
     } catch (error) { return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to generate receipt PDF" }); }
   });

@@ -287,6 +287,7 @@ export async function renderHtmlPdf(args: {
   pdfOptions?: PDFOptions;
   timeoutMs?: number;
   priority?: PdfRenderPriority;
+  fitToContent?: { width: string; paddingPx?: number };
 }): Promise<Buffer> {
   const priority = args.priority || "interactive";
   const queueWaitMs = await acquireSlot(priority);
@@ -312,7 +313,25 @@ export async function renderHtmlPdf(args: {
         });
       }));
     });
-    const buffer = Buffer.from(await page.pdf({ ...A4_TWO_MM, ...args.pdfOptions }));
+    let effectiveOptions: PDFOptions = { ...A4_TWO_MM, ...args.pdfOptions };
+    if (args.fitToContent) {
+      const contentHeight = await page.evaluate(() => Math.max(
+        document.documentElement.scrollHeight,
+        document.body?.scrollHeight || 0,
+        document.documentElement.offsetHeight,
+        document.body?.offsetHeight || 0,
+      ));
+      const paddingPx = Math.max(0, Number(args.fitToContent.paddingPx || 0));
+      effectiveOptions = {
+        ...effectiveOptions,
+        width: args.fitToContent.width,
+        height: `${Math.max(1, Math.ceil(contentHeight + paddingPx))}px`,
+        margin: { top: "0", right: "0", bottom: "0", left: "0" },
+        preferCSSPageSize: false,
+      };
+      delete (effectiveOptions as any).format;
+    }
+    const buffer = Buffer.from(await page.pdf(effectiveOptions));
     if (queueWaitMs > 0) console.info(`[pdf-renderer] priority=${priority} HTML job waited ${queueWaitMs}ms for a render slot`);
     return buffer;
   } finally {

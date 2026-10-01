@@ -58,7 +58,8 @@
     "recruitment:talent-sync": "tsx script/sync-recruitment-talent-rankings.ts",
     "internal-transfers:preflight": "tsx script/backfill-internal-transfers.ts",
     "internal-transfers:backfill": "tsx script/backfill-internal-transfers.ts --apply",
-    "fcgs:upgrade:2026-09-21": "tsx script/apply-2026-09-21-build-schema.ts"
+    "fcgs:upgrade:2026-09-21": "tsx script/apply-2026-09-21-build-schema.ts",
+    "fcgs:upgrade:2026-10-01-emergency": "tsx script/apply-2026-10-01-emergency-receipt-schema.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",
