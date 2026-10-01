@@ -774,6 +774,7 @@ export const transportSettings = pgTable("transport_settings", {
   receiptNextSequence: integer("receipt_next_sequence").notNull().default(1),
   receiptSequenceYear: integer("receipt_sequence_year"),
   receiptFooter: text("receipt_footer"),
+  receiptPrintFormat: text("receipt_print_format").notNull().default("a4"),
   printCopiesOnOnePage: boolean("print_copies_on_one_page").notNull().default(true),
   requireCashupForClaim: boolean("require_cashup_for_claim").notNull().default(true),
   reportWeekStartsOn: integer("report_week_starts_on").notNull().default(1),
