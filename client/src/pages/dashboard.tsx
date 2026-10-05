@@ -12,6 +12,7 @@ import { Users, Search, Phone, Clock, ArrowUp, ArrowDown, CheckCircle, XCircle, 
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, Legend } from "recharts";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
+import { schoolFetch } from "@/lib/queryClient";
 
 interface DashboardStats {
   totalStudents: number;
@@ -117,7 +118,15 @@ export default function Dashboard() {
   }, [attendanceFromDate, normalizedAttendanceToDate]);
 
   const { data: stats, isLoading } = useQuery<DashboardStats>({
-    queryKey: [dashboardStatsQueryKey],
+    queryKey: ["/api/dashboard/stats", currentSchoolId ?? "organization", attendanceFromDate, normalizedAttendanceToDate, attendancePage, attendancePageSize],
+    queryFn: async () => {
+      const res = await schoolFetch(dashboardStatsQueryKey);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status}: ${text || res.statusText}`);
+      }
+      return res.json();
+    },
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
     refetchInterval: 15000,

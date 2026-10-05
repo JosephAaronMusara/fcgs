@@ -2216,6 +2216,7 @@ export const recruitmentInterviews = pgTable("recruitment_interviews", {
   scheduledAt: timestamp("scheduled_at").notNull(),
   location: text("location"),
   interviewType: text("interview_type").notNull().default("in_person"),
+  interviewStageType: text("interview_stage_type"), // informal_written | formal; null preserves legacy interview records without inventing a type
   panelUserIds: jsonb("panel_user_ids").notNull().default(sql`'[]'::jsonb`),
   notes: text("notes"),
   applicantInstructions: text("applicant_instructions"),
@@ -2223,6 +2224,9 @@ export const recruitmentInterviews = pgTable("recruitment_interviews", {
   interviewLink: text("interview_link"),
   status: text("status").notNull().default("scheduled"),
   outcome: text("outcome"),
+  outcomeNotes: text("outcome_notes"),
+  resultRecordedByUserId: integer("result_recorded_by_user_id").references(() => users.id),
+  resultRecordedAt: timestamp("result_recorded_at"),
   createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -2314,6 +2318,8 @@ export const recruitmentNotificationLogs = pgTable("recruitment_notification_log
   destination: text("destination"),
   status: text("status").notNull(),
   errorMessage: text("error_message"),
+  renderedSubject: text("rendered_subject"),
+  renderedMessage: text("rendered_message"),
   sentAt: timestamp("sent_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -2614,6 +2620,8 @@ export const communicationLogs = pgTable("communication_logs", {
   category: text("category"), // attendance, academic_reports, account, notices, general
   status: communicationStatusEnum("status").default("pending"),
   errorMessage: text("error_message"),
+  renderedSubject: text("rendered_subject"),
+  renderedMessage: text("rendered_message"),
   sentAt: timestamp("sent_at"),
   sentBy: integer("sent_by").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),

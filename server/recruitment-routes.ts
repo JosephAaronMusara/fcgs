@@ -373,6 +373,7 @@ function applicationExamBoards(application: Pick<typeof recruitmentApplications.
 
 async function ensureRecruitmentNotificationConfigs(organizationId: number): Promise<void> {
   const defaults = [
+    { eventKey: "informal_interview_scheduled", applicationVariant: "any", enabled: true, channel: "both", emailSubject: "FCGS Informal / Written Interview", emailTemplate: "Dear {applicantName}, your Informal / Written Interview is scheduled for {interviewDate} at {interviewTime}. {interviewVenue} {applicantInstructions} {groupHodContact}", smsTemplate: "FCGS: Your Informal / Written Interview is scheduled for {interviewDate} at {interviewTime}. {interviewVenue} {applicantInstructions} {groupHodContact}" },
     { eventKey: "interview_scheduled", applicationVariant: "any", enabled: true, channel: "both", emailSubject: "FCGS Interview Scheduled", emailTemplate: "Dear {applicantName}, your {interviewMode} interview is scheduled for {interviewDate} at {interviewTime}. {interviewVenue} {interviewLink} {applicantInstructions}", smsTemplate: "FCGS: Your {interviewMode} interview is scheduled for {interviewDate} at {interviewTime}. {interviewVenue} {applicantInstructions}" },
     { eventKey: "interview_rescheduled", applicationVariant: "any", enabled: true, channel: "both", emailSubject: "FCGS Interview Rescheduled", emailTemplate: "Dear {applicantName}, your {interviewMode} interview has been rescheduled to {interviewDate} at {interviewTime}. {interviewVenue} {interviewLink} {applicantInstructions}", smsTemplate: "FCGS: Your {interviewMode} interview has been rescheduled to {interviewDate} at {interviewTime}. {interviewVenue} {applicantInstructions}" },
     { eventKey: "interview_cancelled", applicationVariant: "any", enabled: true, channel: "both", emailSubject: "FCGS Interview Cancelled", emailTemplate: "Dear {applicantName}, your interview scheduled for {interviewDate} at {interviewTime} has been cancelled. Please contact Recruitment if you need assistance.", smsTemplate: "FCGS: Your interview scheduled for {interviewDate} at {interviewTime} has been cancelled." },
@@ -810,6 +811,9 @@ async function recruitmentTemplateValues(
   const scheduled = interview?.scheduledAt ? new Date(interview.scheduledAt) : null;
   const validScheduled = scheduled && !Number.isNaN(scheduled.getTime()) ? scheduled : null;
   const recruiterName = [recruiter?.firstName, recruiter?.lastName].filter(Boolean).join(" ").trim() || "Recruitment Team";
+  const groupHodName = recruiterName === "Recruitment Team" ? "" : recruiterName;
+  const groupHodPhone = department?.applicantContactPhone || recruiter?.phone || "";
+  const groupHodContact = [groupHodName, groupHodPhone].filter(Boolean).join(" · ");
   return {
     applicantName: `${application.firstName} ${application.lastName}`.trim(),
     firstName: application.firstName,
@@ -824,9 +828,21 @@ async function recruitmentTemplateValues(
     recruiterName,
     recruiterPhone: department?.applicantContactPhone || recruiter?.phone || "",
     recruiterEmail: department?.applicantContactEmail || recruiter?.email || "",
+    groupHodName,
+    group_hod_name: groupHodName,
+    groupHodPhone,
+    group_hod_phone: groupHodPhone,
+    groupHodContact: groupHodContact ? `Group HOD: ${groupHodContact}` : "",
+    group_hod_contact: groupHodContact ? `Group HOD: ${groupHodContact}` : "",
+    department_name: normalizeRecruitmentDepartment(application.department) || "",
     interviewDate: validScheduled ? validScheduled.toLocaleDateString("en-GB", { dateStyle: "full" }) : "",
     interviewTime: validScheduled ? validScheduled.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "",
     interviewMode: interview ? String(interview.interviewType || "in_person").replace(/_/g, " ") : "",
+    interviewType: interview ? (interview.interviewStageType === "informal_written" ? "Informal / Written Interview" : interview.interviewStageType === "formal" ? "Formal Interview" : "Interview") : "",
+    interview_type: interview ? (interview.interviewStageType === "informal_written" ? "Informal / Written Interview" : interview.interviewStageType === "formal" ? "Formal Interview" : "Interview") : "",
+    interview_date: validScheduled ? validScheduled.toLocaleDateString("en-GB", { dateStyle: "full" }) : "",
+    interview_time: validScheduled ? validScheduled.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "",
+    interview_location: interview?.location || "",
     interviewVenue: interview?.location || "",
     interviewLink: interview?.interviewLink || "",
     applicantInstructions: interview?.applicantInstructions || "",
@@ -852,8 +868,15 @@ async function sendRecruitmentNotification(options: {
 
   const values = await recruitmentTemplateValues(options.application, { vacancy: options.vacancy, interview: options.interview });
   const emailSubject = renderRecruitmentTemplate(config.emailSubject || "FCGS Recruitment Update", values).trim() || "FCGS Recruitment Update";
-  const emailMessage = renderRecruitmentTemplate(config.emailTemplate, values).trim();
-  const smsMessage = renderRecruitmentTemplate(config.smsTemplate, values).trim();
+  let emailMessage = renderRecruitmentTemplate(config.emailTemplate, values).trim();
+  let smsMessage = renderRecruitmentTemplate(config.smsTemplate, values).trim();
+  // Preserve existing Formal Interview templates while ensuring configured Department Group HOD
+  // contact details are included. Templates that already use the HOD variables are not duplicated.
+  const hodContact = String((values as any).groupHodContact || "").trim();
+  if (options.interview && ["informal_interview_scheduled", "interview_scheduled"].includes(options.eventKey) && hodContact) {
+    if (emailMessage && !emailMessage.includes(hodContact)) emailMessage = `${emailMessage}\n${hodContact}`;
+    if (smsMessage && !smsMessage.includes(hodContact)) smsMessage = `${smsMessage} ${hodContact}`.trim();
+  }
   const common = {
     schoolId: options.application.schoolId || undefined,
     recipientType: "recruitment_applicant",
@@ -882,6 +905,8 @@ async function sendRecruitmentNotification(options: {
       destination: options.application.email || null,
       status: delivery?.success ? "sent" : "failed",
       errorMessage: delivery?.success ? null : String(delivery?.error || "Email delivery failed"),
+      renderedSubject: emailSubject,
+      renderedMessage: emailMessage,
       sentAt: delivery?.success ? new Date() : null,
     });
   }
@@ -902,6 +927,8 @@ async function sendRecruitmentNotification(options: {
       destination: options.application.phone || null,
       status: delivery?.success ? "sent" : "failed",
       errorMessage: delivery?.success ? null : String(delivery?.error || "SMS delivery failed"),
+      renderedSubject: null,
+      renderedMessage: smsMessage,
       sentAt: delivery?.success ? new Date() : null,
     });
   }
@@ -1019,14 +1046,22 @@ export function registerRecruitmentRoutes(app: Express): void {
       const coreDocumentCodes = new Set(coreDocuments.map((document) => document.code));
       const missingCoreDocuments = coreDocuments.filter((document) => document.isRequired && !submittedCategoryCodes.includes(document.code));
       const missingRequiredDocuments = applicableCategories.filter((category) => category.isRequired && !submittedCategoryCodes.includes(category.code));
+      const missingDocumentMap = new Map<string, string>();
+      for (const row of [...missingCoreDocuments, ...missingRequiredDocuments]) missingDocumentMap.set(row.code, row.label);
+      if (missingDocumentMap.size) {
+        return res.status(422).json({
+          message: `Your application is incomplete. Please upload: ${Array.from(missingDocumentMap.values()).join(", ")}.`,
+          missingDocuments: Array.from(missingDocumentMap, ([code, label]) => ({ code, label })),
+        });
+      }
 
       const highSchoolEligibility = categoryCode === "high_school_teaching"
         ? evaluateHighSchoolEligibility({
             dateOfBirth: input.dateOfBirth,
             aLevelResults: input.aLevelResults,
             holdsTeachingQualification: input.holdsTeachingQualification,
-            // Uploads are reviewer evidence, not submission gates. A declared teaching qualification may
-            // use the configured exception route even when the certificate will be supplied/reviewed later.
+            // Eligibility evaluation uses the applicant declaration; document completeness is enforced separately
+            // by the applicable Required-document rules above.
             teachingCertificateUploaded: input.holdsTeachingQualification,
             policy: {
               maxAge: context.settings.highSchoolMaxAge,
@@ -1065,8 +1100,8 @@ export function registerRecruitmentRoutes(app: Express): void {
       const failedAutoReject = evaluated.filter(({ requirement, passed }) => requirement.isMandatory && requirement.autoRejectOnFail && !passed);
       const failedCodes = failedAutoReject.map(({ requirement }) => requirement.code);
       const preferredSchoolIds: number[] = [];
-      // Requested documents are deliberately non-blocking. Keep the missing-document list for reviewer visibility,
-      // but never reject an otherwise eligible application solely because an upload is absent.
+      // Applicable Required document categories are enforced before this point.
+      // Keep eligibility failures separate from document-completeness validation.
       if (highSchoolEligibility && !highSchoolEligibility.passed) failedCodes.push(...highSchoolEligibility.failedCodes);
       if (primarySchoolEligibility && !primarySchoolEligibility.passed) failedCodes.push(...primarySchoolEligibility.failedCodes);
 
@@ -1175,9 +1210,7 @@ export function registerRecruitmentRoutes(app: Express): void {
           newStatus: "submitted",
           notes: [
             "Application submitted through the public Careers page.",
-            [...missingRequiredDocuments.map((row) => row.label), ...missingCoreDocuments.map((row) => row.label)].length
-              ? `Missing requested documents: ${[...missingRequiredDocuments.map((row) => row.label), ...missingCoreDocuments.map((row) => row.label)].join(", ")}`
-              : null,
+            null,
           ].filter(Boolean).join(" "),
           changedByUserId: null,
           actorType: "applicant",
@@ -1308,7 +1341,7 @@ export function registerRecruitmentRoutes(app: Express): void {
       const applications = visibleApplications.map((application) => {
         const applicationDocuments = documents.filter((document) => document.applicationId === application.id);
         const categoryCode = recruitmentCategoryCode(application.employmentCategory);
-        const applicableRequested = categories.filter((category) => (
+        const applicableRequired = categories.filter((category) => (
           category.isActive
           && category.isRequired
           && (category.vacancyId === application.vacancyId
@@ -1316,7 +1349,7 @@ export function registerRecruitmentRoutes(app: Express): void {
             || (!category.vacancyId && !category.employmentCategory))
         ));
         const expectedCodes = new Set<string>([
-          ...applicableRequested.map((row) => row.code),
+          ...applicableRequired.map((row) => row.code),
           ...coreRecruitmentDocumentRequirements(
             categoryCode,
             Boolean(application.holdsTeachingQualification),
@@ -1414,7 +1447,7 @@ export function registerRecruitmentRoutes(app: Express): void {
           submitted: applications.filter((application) => application.status === "submitted").length,
           underReview: applications.filter((application) => application.status === "under_review").length,
           shortlisted: applications.filter((application) => application.status === "shortlisted").length,
-          interviews: visibleInterviews.filter((interview) => new Date(interview.scheduledAt) >= new Date()).length,
+          interviews: visibleInterviews.filter((interview) => interview.interviewStageType === "formal" && new Date(interview.scheduledAt) >= new Date()).length,
           hired: applications.filter((application) => application.status === "hired").length,
           rejectedAttempts: automaticRejectedCount + recruiterRejectedEntries.length,
         },
@@ -1979,6 +2012,14 @@ export function registerRecruitmentRoutes(app: Express): void {
       if (!existing || !canAccessApplication(userOf(req)!, existing)) return res.status(404).json({ message: "Application not found" });
       const userId = userOf(req)!.id;
       const statusChanged = existing.status !== input.status;
+      if (statusChanged && input.status === "interview") {
+        const passedInformal = await db.select({ id: recruitmentInterviews.id }).from(recruitmentInterviews).where(and(
+          eq(recruitmentInterviews.applicationId, id),
+          eq(recruitmentInterviews.interviewStageType, "informal_written"),
+          eq(recruitmentInterviews.outcome, "passed"),
+        )).limit(1);
+        if (!passedInformal.length) return res.status(409).json({ message: "Formal Interview is locked until an Informal / Written Interview has been passed." });
+      }
       const rejectionReason = input.rejectionReason?.trim() || null;
       if (statusChanged && input.status === "rejected" && !rejectionReason) {
         return res.status(400).json({ message: "Enter a rejection reason before rejecting this application." });
@@ -2010,6 +2051,8 @@ export function registerRecruitmentRoutes(app: Express): void {
             summary: `Application status changed from ${existing.status} to ${input.status}.`,
             details: { previousStatus: existing.status, newStatus: input.status, ...(input.status === "rejected" ? { rejectionSource: "recruiter", rejectionReason } : {}) }, actorUserId: userId,
           });
+        } else if (input.recruiterAssignedSubjects && JSON.stringify(normalizeSubjectList(input.recruiterAssignedSubjects)) !== JSON.stringify(normalizeSubjectList(existing.recruiterAssignedSubjects))) {
+          await tx.insert(recruitmentActivity).values({ organizationId, applicationId: id, vacancyId: row.vacancyId || null, activityType: "subjects_assigned", summary: `Group HOD subject assignment saved: ${normalizeSubjectList(input.recruiterAssignedSubjects).join(", ") || "None"}.`, details: { previousSubjects: normalizeSubjectList(existing.recruiterAssignedSubjects), newSubjects: normalizeSubjectList(input.recruiterAssignedSubjects) }, actorUserId: userId });
         } else if (input.recruiterNotes !== undefined && input.recruiterNotes !== existing.recruiterNotes) {
           await tx.insert(recruitmentActivity).values({ organizationId, applicationId: id, vacancyId: row.vacancyId || null, activityType: "recruitment_note_updated", summary: "Recruitment notes updated.", actorUserId: userId });
         }
@@ -2072,31 +2115,37 @@ export function registerRecruitmentRoutes(app: Express): void {
         scheduledAt: z.string().datetime({ offset: true }).or(z.string().datetime()),
         location: optionalText,
         interviewType: z.enum(["in_person", "online", "phone"]).default("in_person"),
+        interviewStageType: z.enum(["informal_written", "formal"]),
         panelUserIds: z.array(z.coerce.number().int().positive()).optional().default([]),
         applicantInstructions: optionalText,
         internalNotes: optionalText,
         interviewLink: optionalText,
-        outcome: optionalText,
       }).parse(req.body);
       const [application] = await db.select().from(recruitmentApplications).where(and(eq(recruitmentApplications.id, applicationId), eq(recruitmentApplications.organizationId, organizationId))).limit(1);
       if (!application || !canAccessApplication(userOf(req)!, application)) return res.status(404).json({ message: "Application not found" });
-      if (RECRUITMENT_TERMINAL_STATUSES.has(String(application.status))) {
-        return res.status(409).json({ message: `Applications in ${application.status} status cannot have a new interview scheduled.` });
+      if (RECRUITMENT_TERMINAL_STATUSES.has(String(application.status))) return res.status(409).json({ message: `Applications in ${application.status} status cannot have a new interview scheduled.` });
+      if (input.interviewStageType === "informal_written" && application.status !== "under_review") return res.status(409).json({ message: "Informal / Written Interviews can only be scheduled while the application is at Informal Interview." });
+      if (input.interviewStageType === "formal") {
+        if (application.status !== "interview") return res.status(409).json({ message: "Formal Interviews can only be scheduled when the application is at Formal Interview." });
+        const passed = await db.select({ id: recruitmentInterviews.id }).from(recruitmentInterviews).where(and(eq(recruitmentInterviews.applicationId, applicationId), eq(recruitmentInterviews.interviewStageType, "informal_written"), eq(recruitmentInterviews.outcome, "passed"))).limit(1);
+        if (!passed.length) return res.status(409).json({ message: "Formal Interview is locked until an Informal / Written Interview has been passed." });
       }
       const actorUserId = userOf(req)!.id;
+      const [department] = application.department ? await db.select().from(recruitmentDepartments).where(and(eq(recruitmentDepartments.organizationId, organizationId), eq(recruitmentDepartments.name, normalizeRecruitmentDepartment(application.department)))).limit(1) : [];
+      const hodWarning = !department?.responsibleUserId || !department?.applicantContactPhone ? "Group HOD name/phone is incomplete for this Department; the communication will omit unavailable HOD details." : null;
       const created = await db.transaction(async (tx) => {
         const [interview] = await tx.insert(recruitmentInterviews).values({
           applicationId, scheduledAt: new Date(input.scheduledAt), location: input.location || null, interviewType: input.interviewType,
-          panelUserIds: input.panelUserIds, applicantInstructions: input.applicantInstructions || null, internalNotes: input.internalNotes || null,
-          interviewLink: input.interviewLink || null, status: "scheduled", outcome: input.outcome || null, createdByUserId: actorUserId,
+          interviewStageType: input.interviewStageType, panelUserIds: input.panelUserIds, applicantInstructions: input.applicantInstructions || null, internalNotes: input.internalNotes || null,
+          interviewLink: input.interviewLink || null, status: "scheduled", outcome: null, createdByUserId: actorUserId,
         }).returning();
-        await autoAdvanceRecruitmentStatus(tx, { organizationId, application, targetStatus: "interview", actorUserId, reason: "interview_scheduled" });
-        await tx.insert(recruitmentActivity).values({ organizationId, applicationId, vacancyId: application.vacancyId || null, activityType: "interview_scheduled", summary: `Interview scheduled for ${new Date(interview.scheduledAt).toLocaleString("en-GB")}.`, actorUserId });
+        await tx.insert(recruitmentActivity).values({ organizationId, applicationId, vacancyId: application.vacancyId || null, activityType: "interview_scheduled", summary: `${input.interviewStageType === "informal_written" ? "Informal / Written Interview" : "Formal Interview"} scheduled for ${new Date(interview.scheduledAt).toLocaleString("en-GB")}.`, details: { interviewId: interview.id, interviewStageType: input.interviewStageType }, actorUserId });
         await syncApplicationTalentRankings(tx, organizationId, applicationId, { actorUserId, reason: "interview_scheduled" });
         return interview;
       });
-      const notifications = await sendRecruitmentNotification({ organizationId, application: { ...application, status: "interview" } as any, eventKey: "interview_scheduled", interview: created, sentByUserId: actorUserId }).catch((error) => ({ error: String(error) }));
-      res.status(201).json({ ...created, notifications });
+      const eventKey = input.interviewStageType === "informal_written" ? "informal_interview_scheduled" : "interview_scheduled";
+      const notifications = await sendRecruitmentNotification({ organizationId, application, eventKey, interview: created, sentByUserId: actorUserId }).catch((error) => ({ error: String(error) }));
+      res.status(201).json({ ...created, notifications, warning: hodWarning });
     } catch (error) { next(error); }
   });
 
@@ -2193,77 +2242,62 @@ export function registerRecruitmentRoutes(app: Express): void {
         interviewType: z.enum(["in_person", "online", "phone"]).optional(),
         panelUserIds: z.array(z.coerce.number().int().positive()).optional(),
         applicantInstructions: optionalText, internalNotes: optionalText, interviewLink: optionalText,
-        status: z.enum(["scheduled", "completed", "cancelled"]).optional(), outcome: optionalText,
+        status: z.enum(["scheduled", "completed", "cancelled", "no_show"]).optional(),
+        outcome: z.enum(["passed", "not_passed_retry", "not_passed_end_process"]).optional().nullable(),
+        outcomeNotes: optionalText,
       }).parse(req.body);
       const [existing] = await db.select({
-        id: recruitmentInterviews.id,
-        applicationId: recruitmentInterviews.applicationId,
-        scheduledAt: recruitmentInterviews.scheduledAt,
-        status: recruitmentInterviews.status,
-        schoolId: recruitmentApplications.schoolId,
-        preferredSchoolIds: recruitmentApplications.preferredSchoolIds,
-        applicationStatus: recruitmentApplications.status,
-        vacancyId: recruitmentApplications.vacancyId,
+        id: recruitmentInterviews.id, applicationId: recruitmentInterviews.applicationId, scheduledAt: recruitmentInterviews.scheduledAt,
+        status: recruitmentInterviews.status, interviewStageType: recruitmentInterviews.interviewStageType, outcome: recruitmentInterviews.outcome,
+        schoolId: recruitmentApplications.schoolId, preferredSchoolIds: recruitmentApplications.preferredSchoolIds,
+        applicationStatus: recruitmentApplications.status, vacancyId: recruitmentApplications.vacancyId,
       }).from(recruitmentInterviews).innerJoin(recruitmentApplications, eq(recruitmentApplications.id, recruitmentInterviews.applicationId))
         .where(and(eq(recruitmentInterviews.id, interviewId), eq(recruitmentApplications.organizationId, organizationId))).limit(1);
       if (!existing || !canAccessApplication(userOf(req)!, existing)) return res.status(404).json({ message: "Interview not found" });
-
-      const isCancellation = input.status === "cancelled" && existing.status !== "cancelled";
-      const isInterviewActivity = !isCancellation && (
-        input.status === "scheduled" || input.status === "completed" ||
-        Boolean(input.scheduledAt) || input.location !== undefined || Boolean(input.interviewType) || input.interviewLink !== undefined
-      );
-      if (isInterviewActivity && RECRUITMENT_TERMINAL_STATUSES.has(String(existing.applicationStatus))) {
-        return res.status(409).json({ message: `Applications in ${existing.applicationStatus} status cannot have an interview scheduled or rescheduled.` });
-      }
+      if (!existing.interviewStageType && input.outcome) return res.status(409).json({ message: "This is a legacy interview without a reliable Informal/Formal type. Assigning a staged outcome would fabricate history; update only its appointment details." });
+      if (RECRUITMENT_TERMINAL_STATUSES.has(String(existing.applicationStatus)) && input.status !== "cancelled") return res.status(409).json({ message: `Applications in ${existing.applicationStatus} status cannot have an interview changed.` });
 
       const actorUserId = userOf(req)!.id;
       const result = await db.transaction(async (tx) => {
+        const [application] = await tx.select().from(recruitmentApplications).where(and(eq(recruitmentApplications.id, existing.applicationId), eq(recruitmentApplications.organizationId, organizationId))).limit(1);
+        if (!application) throw Object.assign(new Error("Application not found"), { status: 404 });
+        const isNewOutcome = input.outcome !== undefined && input.outcome !== existing.outcome;
         const [updated] = await tx.update(recruitmentInterviews).set({
           ...(input.scheduledAt ? { scheduledAt: new Date(input.scheduledAt) } : {}), ...(input.location !== undefined ? { location: input.location || null } : {}),
           ...(input.interviewType ? { interviewType: input.interviewType } : {}), ...(input.panelUserIds ? { panelUserIds: input.panelUserIds } : {}),
           ...(input.applicantInstructions !== undefined ? { applicantInstructions: input.applicantInstructions || null } : {}),
-          ...(input.internalNotes !== undefined ? { internalNotes: input.internalNotes || null } : {}), ...(input.interviewLink !== undefined ? { interviewLink: input.interviewLink || null } : {}),
-          ...(input.status ? { status: input.status } : {}), ...(input.outcome !== undefined ? { outcome: input.outcome || null } : {}), updatedAt: new Date(),
+          ...(input.internalNotes !== undefined ? { internalNotes: input.internalNotes || null } : {}), ...(input.outcomeNotes !== undefined ? { outcomeNotes: input.outcomeNotes || null } : {}),
+          ...(input.interviewLink !== undefined ? { interviewLink: input.interviewLink || null } : {}),
+          ...(input.status ? { status: input.status } : {}), ...(input.outcome !== undefined ? { outcome: input.outcome || null, ...(input.outcome ? { status: "completed" } : {}) } : {}),
+          ...(isNewOutcome ? { resultRecordedByUserId: actorUserId, resultRecordedAt: new Date() } : {}), updatedAt: new Date(),
         }).where(eq(recruitmentInterviews.id, interviewId)).returning();
 
-        const [application] = await tx.select().from(recruitmentApplications).where(and(
-          eq(recruitmentApplications.id, existing.applicationId),
-          eq(recruitmentApplications.organizationId, organizationId),
-        )).limit(1);
-        if (!application) throw Object.assign(new Error("Application not found"), { status: 404 });
-
-        let eventKey: string | null = null;
-        if (isCancellation) eventKey = "interview_cancelled";
-        else if (input.scheduledAt || input.location !== undefined || input.interviewType || input.interviewLink !== undefined) eventKey = "interview_rescheduled";
-
-        if (isInterviewActivity) {
-          await autoAdvanceRecruitmentStatus(tx, { organizationId, application, targetStatus: "interview", actorUserId, reason: "interview_rescheduled" });
-          await syncApplicationTalentRankings(tx, organizationId, application.id, { actorUserId, reason: "interview_rescheduled" });
+        if (isNewOutcome && existing.interviewStageType === "informal_written") {
+          if (input.outcome === "passed") {
+            await tx.update(recruitmentApplications).set({ status: "interview", reviewedByUserId: actorUserId, reviewedAt: new Date(), updatedAt: new Date() }).where(eq(recruitmentApplications.id, application.id));
+            if (application.status !== "interview") await tx.insert(recruitmentApplicationStatusHistory).values({ applicationId: application.id, previousStatus: application.status, newStatus: "interview", notes: "Informal / Written Interview passed. Formal Interview may now be scheduled.", changedByUserId: actorUserId, actorType: "staff" });
+          } else if (input.outcome === "not_passed_retry") {
+            if (application.status !== "under_review") {
+              await tx.update(recruitmentApplications).set({ status: "under_review", reviewedByUserId: actorUserId, reviewedAt: new Date(), updatedAt: new Date() }).where(eq(recruitmentApplications.id, application.id));
+              await tx.insert(recruitmentApplicationStatusHistory).values({ applicationId: application.id, previousStatus: application.status, newStatus: "under_review", notes: input.outcomeNotes || "Informal / Written Interview: another attempt required.", changedByUserId: actorUserId, actorType: "staff" });
+            }
+          } else if (input.outcome === "not_passed_end_process") {
+            await tx.update(recruitmentApplications).set({ status: "rejected", reviewedByUserId: actorUserId, reviewedAt: new Date(), updatedAt: new Date() }).where(eq(recruitmentApplications.id, application.id));
+            if (application.status !== "rejected") await tx.insert(recruitmentApplicationStatusHistory).values({ applicationId: application.id, previousStatus: application.status, newStatus: "rejected", notes: input.outcomeNotes || "Informal / Written Interview: Not Passed — End Process.", changedByUserId: actorUserId, actorType: "staff" });
+            await tx.delete(recruitmentVacancyCandidates).where(eq(recruitmentVacancyCandidates.applicationId, application.id));
+          }
+        } else if (isNewOutcome && existing.interviewStageType === "formal" && input.outcome === "not_passed_end_process") {
+          await tx.update(recruitmentApplications).set({ status: "rejected", reviewedByUserId: actorUserId, reviewedAt: new Date(), updatedAt: new Date() }).where(eq(recruitmentApplications.id, application.id));
+          if (application.status !== "rejected") await tx.insert(recruitmentApplicationStatusHistory).values({ applicationId: application.id, previousStatus: application.status, newStatus: "rejected", notes: input.outcomeNotes || "Formal Interview: Not Passed — End Process.", changedByUserId: actorUserId, actorType: "staff" });
+          await tx.delete(recruitmentVacancyCandidates).where(eq(recruitmentVacancyCandidates.applicationId, application.id));
         }
-        if (eventKey) {
-          await tx.insert(recruitmentActivity).values({
-            organizationId,
-            applicationId: application.id,
-            vacancyId: application.vacancyId || null,
-            activityType: eventKey,
-            summary: eventKey === "interview_cancelled" ? "Interview cancelled." : "Interview rescheduled or updated.",
-            actorUserId,
-          });
-        }
-        return { updated, application, eventKey };
+        const activityType = input.status === "cancelled" ? "interview_cancelled" : isNewOutcome ? "interview_result_recorded" : "interview_updated";
+        await tx.insert(recruitmentActivity).values({ organizationId, applicationId: application.id, vacancyId: application.vacancyId || null, activityType, summary: isNewOutcome ? `${existing.interviewStageType === "informal_written" ? "Informal / Written" : "Formal"} interview result recorded: ${String(input.outcome).replace(/_/g, " ")}.` : input.status === "cancelled" ? "Interview cancelled." : "Interview rescheduled or updated.", details: { interviewId, outcome: input.outcome || null }, actorUserId });
+        await syncApplicationTalentRankings(tx, organizationId, application.id, { actorUserId, reason: activityType });
+        return { updated, application };
       });
-
-      let notifications: any = null;
-      if (result.eventKey) {
-        notifications = await sendRecruitmentNotification({
-          organizationId,
-          application: isInterviewActivity ? { ...result.application, status: "interview" } as any : result.application,
-          eventKey: result.eventKey,
-          interview: result.updated,
-          sentByUserId: actorUserId,
-        }).catch((error) => ({ error: String(error) }));
-      }
+      const eventKey = input.status === "cancelled" ? "interview_cancelled" : (input.scheduledAt || input.location !== undefined || input.interviewType || input.interviewLink !== undefined) ? "interview_rescheduled" : null;
+      const notifications = eventKey ? await sendRecruitmentNotification({ organizationId, application: result.application, eventKey, interview: result.updated, sentByUserId: actorUserId }).catch((error) => ({ error: String(error) })) : null;
       res.json({ ...result.updated, notifications });
     } catch (error) { next(error); }
   });

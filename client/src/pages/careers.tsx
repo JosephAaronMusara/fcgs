@@ -52,6 +52,7 @@ export default function CareersPage() {
   const [files, setFiles] = useState<Record<string, File[]>>({});
   const [examBoardToAdd, setExamBoardToAdd] = useState("");
   const [result, setResult] = useState<{ message: string; reference?: string } | null>(null);
+  const [missingRequiredCodes, setMissingRequiredCodes] = useState<string[]>([]);
 
   const { data, isLoading, error } = useQuery<any>({
     queryKey: ["/api/public/recruitment/context"],
@@ -253,6 +254,15 @@ export default function CareersPage() {
         }
       }
 
+      const missingRequired = applicableDocumentCategories.filter((category: any) => category.isRequired && !(files[category.code]?.length));
+      if (missingRequired.length) {
+        const codes = missingRequired.map((category: any) => category.code);
+        setMissingRequiredCodes(codes);
+        window.setTimeout(() => document.getElementById(`required-document-${codes[0]}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+        throw new Error(`Your application is incomplete. Please upload: ${missingRequired.map((category: any) => category.label).join(", ")}.`);
+      }
+      setMissingRequiredCodes([]);
+
       const payload = {
         ...form,
         organizationId: data.organization.id,
@@ -282,7 +292,14 @@ export default function CareersPage() {
 
       const response = await fetch("/api/public/recruitment/applications", { method: "POST", body, credentials: "include" });
       const responseBody = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(responseBody?.message || "Unable to submit application");
+      if (!response.ok) {
+        if (Array.isArray(responseBody?.missingDocuments)) {
+          const codes = responseBody.missingDocuments.map((item: any) => String(item.code));
+          setMissingRequiredCodes(codes);
+          if (codes[0]) window.setTimeout(() => document.getElementById(`required-document-${codes[0]}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+        }
+        throw new Error(responseBody?.message || "Unable to submit application");
+      }
       return responseBody;
     },
     onSuccess: (response) => {
@@ -290,6 +307,7 @@ export default function CareersPage() {
       setForm(emptyForm);
       setFiles({});
       setExamBoardToAdd("");
+      setMissingRequiredCodes([]);
       window.scrollTo({ top: 0, behavior: "smooth" });
     },
   });
@@ -605,18 +623,28 @@ export default function CareersPage() {
           <Card>
             <CardHeader>
               <CardTitle>Supporting documents</CardTitle>
-              <CardDescription>Requested documents help Recruitment review your application, but missing documents do not prevent submission. Maximum {data.settings.attachmentSizeLimitMB} MB per file.</CardDescription>
+              <CardDescription>Required documents must be uploaded before the application can be submitted. Maximum {data.settings.attachmentSizeLimitMB} MB per file.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2">
                 <div className="md:col-span-2 rounded-md border bg-muted/40 p-4 text-sm">
-                  <div className="font-semibold">Supporting documents are strongly recommended</div>
-                  <div className="mt-1 text-muted-foreground">Providing the requested documents helps Recruitment assess your application accurately and may speed up the review process. Missing requested documents do not prevent submission.</div>
+                  <div className="font-semibold">Required-document check</div>
+                  <div className="mt-1 text-muted-foreground">Required documents: {applicableDocumentCategories.filter((category: any) => category.isRequired && files[category.code]?.length).length} of {applicableDocumentCategories.filter((category: any) => category.isRequired).length} uploaded. Optional documents may be supplied where relevant.</div>
                 </div>
-              {applicableDocumentCategories.map((category: any) => (
-                <Field key={category.id} label={`${category.label}${category.isRequired ? " (requested)" : ""}`}>
-                  <Input type="file" multiple={category.allowsMultiple} onChange={(event) => setFiles((current) => ({ ...current, [category.code]: Array.from(event.target.files || []) }))} />
-                </Field>
-              ))}
+              {applicableDocumentCategories.map((category: any) => {
+                const missing = missingRequiredCodes.includes(category.code);
+                return (
+                  <div key={category.id} id={`required-document-${category.code}`} className={missing ? "rounded-md border border-destructive p-3" : ""}>
+                    <Field label={`${category.label}${category.isRequired ? " * · Required" : " · Optional"}`}>
+                      <Input type="file" multiple={category.allowsMultiple} aria-invalid={missing} onChange={(event) => {
+                        const nextFiles = Array.from(event.target.files || []);
+                        setFiles((current) => ({ ...current, [category.code]: nextFiles }));
+                        if (nextFiles.length) setMissingRequiredCodes((current) => current.filter((code) => code !== category.code));
+                      }} />
+                      {missing && <p className="text-xs font-medium text-destructive">This document is required before you can submit your application.</p>}
+                    </Field>
+                  </div>
+                );
+              })}
               {!applicableDocumentCategories.some((category: any) => category.code === "other") && (
                 <Field label="Other documents"><Input type="file" multiple onChange={(event) => setFiles((current) => ({ ...current, other: Array.from(event.target.files || []) }))} /></Field>
               )}
