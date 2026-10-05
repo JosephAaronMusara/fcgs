@@ -67,10 +67,19 @@ type ModalState =
   | { type: "document-category"; record?: any }
   | null;
 
-const titleCase = (value: unknown) =>
-  String(value || "—")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+const titleCase = (value: unknown) => {
+  const raw = String(value || "—");
+  const special: Record<string, string> = {
+    under_review: "Informal Interview",
+    interview: "Formal Interview",
+    informal_written: "Informal / Written Interview",
+    formal: "Formal Interview",
+    not_passed_retry: "Not Passed — Another Attempt",
+    not_passed_end_process: "Not Passed — End Process",
+    no_show: "No Show",
+  };
+  return special[raw] || raw.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+};
 
 const toLocalInput = (value: unknown) =>
   value ? new Date(String(value)).toISOString().slice(0, 16) : "";
@@ -606,9 +615,9 @@ export default function RecruitmentPage() {
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-7">
             <Metric title="Open vacancies" value={dashboard.openVacancies || 0} icon={<BriefcaseBusiness className="h-5 w-5" />} />
             <Metric title="Submitted" value={dashboard.submitted || 0} icon={<FileText className="h-5 w-5" />} />
-            <Metric title="Under review" value={dashboard.underReview || 0} icon={<Search className="h-5 w-5" />} />
+            <Metric title="Informal Interview" value={dashboard.underReview || 0} icon={<Search className="h-5 w-5" />} />
             <Metric title="Shortlisted" value={dashboard.shortlisted || 0} icon={<UserRoundCheck className="h-5 w-5" />} />
-            <Metric title="Interviews" value={dashboard.interviews || 0} icon={<CalendarClock className="h-5 w-5" />} />
+            <Metric title="Formal Interviews" value={dashboard.interviews || 0} icon={<CalendarClock className="h-5 w-5" />} />
             <Metric title="Hired" value={dashboard.hired || 0} icon={<Trophy className="h-5 w-5" />} />
             <Metric title="Rejected" value={dashboard.rejectedAttempts || 0} icon={<X className="h-5 w-5" />} />
           </div>
@@ -967,7 +976,7 @@ export default function RecruitmentPage() {
             <CardHeader className="gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <CardTitle>Application Requirements</CardTitle>
-                <CardDescription>Additional screening rules remain available. Requested documents remain non-blocking.</CardDescription>
+                <CardDescription>Additional screening rules remain available. Applicable documents marked Required block incomplete applications from submission.</CardDescription>
               </div>
               {canRequirements && <Button onClick={() => setModal({ type: "requirement" })}><Plus className="mr-2 h-4 w-4" />Add requirement</Button>}
             </CardHeader>
@@ -991,13 +1000,13 @@ export default function RecruitmentPage() {
           <Card>
             <CardHeader className="gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <CardTitle>Requested Document Categories</CardTitle>
-                <CardDescription>Applicants may submit even when requested documents are missing.</CardDescription>
+                <CardTitle>Required Document Categories</CardTitle>
+                <CardDescription>Applicable documents marked Required must be uploaded before an applicant can submit. Optional documents remain non-blocking.</CardDescription>
               </div>
               {canRequirements && <Button onClick={() => setModal({ type: "document-category" })}><Plus className="mr-2 h-4 w-4" />Add document category</Button>}
             </CardHeader>
             <CardContent>
-              <DataTable heads={["Scope", "Document", "Requested", "Multiple", "Status", "Actions"]}>
+              <DataTable heads={["Scope", "Document", "Required", "Multiple", "Status", "Actions"]}>
                 {(data.documentCategories || []).map((category: any) => (
                   <TableRow key={category.id}>
                     <TableCell>{category.vacancyId ? vacancies.find((row: any) => row.id === category.vacancyId)?.title || `Vacancy ${category.vacancyId}` : category.employmentCategory || "All applications"}</TableCell>
@@ -1138,9 +1147,9 @@ export default function RecruitmentPage() {
                 body,
               },
               {
-                onSuccess: () => {
+                onSuccess: (result: any) => {
                   setModal({ type: "application", record: modal.application });
-                  toast({ title: isEdit ? "Interview updated" : "Interview scheduled" });
+                  toast({ title: isEdit ? "Interview updated" : "Interview scheduled", description: result?.warning || undefined });
                 },
               },
             );
@@ -1444,7 +1453,7 @@ function VacancyWorkspace({
             <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
               <div className="rounded-md border p-3 text-sm"><div className="text-xs text-muted-foreground">Applications</div><div className="text-xl font-bold">{directApplications.length}</div></div>
               <div className="rounded-md border p-3 text-sm"><div className="text-xs text-muted-foreground">New</div><div className="text-xl font-bold">{vacancyStatusCounts.submitted}</div></div>
-              <div className="rounded-md border p-3 text-sm"><div className="text-xs text-muted-foreground">Under Review</div><div className="text-xl font-bold">{vacancyStatusCounts.underReview}</div></div>
+              <div className="rounded-md border p-3 text-sm"><div className="text-xs text-muted-foreground">Informal Interview</div><div className="text-xl font-bold">{vacancyStatusCounts.underReview}</div></div>
               <div className="rounded-md border p-3 text-sm"><div className="text-xs text-muted-foreground">Shortlisted</div><div className="text-xl font-bold">{vacancyStatusCounts.shortlisted}</div></div>
               <div className="rounded-md border p-3 text-sm"><div className="text-xs text-muted-foreground">Interview</div><div className="text-xl font-bold">{vacancyStatusCounts.interview}</div></div>
               <div className="rounded-md border p-3 text-sm"><div className="text-xs text-muted-foreground">Hired</div><div className="text-xl font-bold">{vacancyStatusCounts.hired}</div></div>
@@ -1813,18 +1822,20 @@ function ApplicationDialog({
     if (!candidateIdentity) return Number(row.id) === Number(application.id);
     return row.normalizedNationalId === candidateIdentity || row.normalizedEmail === candidateIdentity || row.normalizedPhone === candidateIdentity;
   });
-  const relatedApplicationIds = new Set(relatedApplications.map((row: any) => Number(row.id)));
-  const notificationLogs = (data.notificationLogs || []).filter((row: any) => row.applicationId && relatedApplicationIds.has(Number(row.applicationId)));
-  const activity = (data.activity || []).filter((row: any) => row.applicationId && relatedApplicationIds.has(Number(row.applicationId)))
+  // Candidate identity can have multiple applications, but operational tabs remain scoped to the
+  // application currently opened so vacancy/department/interview/communication context cannot leak.
+  const notificationLogs = (data.notificationLogs || []).filter((row: any) => Number(row.applicationId) === Number(application.id));
+  const activity = (data.activity || []).filter((row: any) => Number(row.applicationId) === Number(application.id))
     .slice().sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  const relatedDocuments = relatedApplications.flatMap((row: any) => (row.documents || []).map((document: any) => ({ document, application: row })));
-  const relatedInterviews = relatedApplications.flatMap((row: any) => (row.interviews || []).map((interview: any) => ({ interview, application: row })));
-  const relatedNotes = relatedApplications.flatMap((row: any) => (row.notes || []).map((note: any) => ({ note, application: row })))
+  const relatedDocuments = (application.documents || []).map((document: any) => ({ document, application }));
+  const relatedInterviews = (application.interviews || []).map((interview: any) => ({ interview, application }))
+    .sort((a: any, b: any) => new Date(a.interview.scheduledAt).getTime() - new Date(b.interview.scheduledAt).getTime());
+  const relatedNotes = (application.notes || []).map((note: any) => ({ note, application }))
     .sort((a: any, b: any) => new Date(b.note.createdAt).getTime() - new Date(a.note.createdAt).getTime());
-  const relatedStatusHistory = relatedApplications.flatMap((row: any) => (row.history || []).map((history: any) => ({ history, application: row })))
+  const relatedStatusHistory = (application.history || []).map((history: any) => ({ history, application }))
     .sort((a: any, b: any) => new Date(b.history.changedAt).getTime() - new Date(a.history.changedAt).getTime());
   const currentTalentRankings = (data.talentRankings || [])
-    .filter((row: any) => row.isActive && relatedApplicationIds.has(Number(row.applicationId)))
+    .filter((row: any) => row.isActive && Number(row.applicationId) === Number(application.id))
     .slice()
     .sort((a: any, b: any) => String(a.subject || "").localeCompare(String(b.subject || "")));
   const subjectOptions = normalizeSubjectList(data.subjectCatalog || []).filter((subject: string) => !form.recruiterAssignedSubjects.includes(subject));
@@ -2024,14 +2035,16 @@ function ApplicationDialog({
           </TabsContent>
 
           <TabsContent value="interviews" className="space-y-3 pt-4">
-            <div className="flex justify-end">
-              {canInterviews && <Button size="sm" onClick={() => onInterview(application)}><CalendarClock className="mr-2 h-4 w-4" />Schedule interview</Button>}
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">Scheduling actions apply to application #{application.id}: {application.vacancy?.title || "General application"}.</p>
+              {canInterviews && application.status === "under_review" && <Button size="sm" onClick={() => onInterview(application)}><CalendarClock className="mr-2 h-4 w-4" />Schedule Informal / Written Interview</Button>}
+              {canInterviews && application.status === "interview" && <Button size="sm" onClick={() => onInterview(application)}><CalendarClock className="mr-2 h-4 w-4" />Schedule Formal Interview</Button>}
             </div>
             {relatedInterviews.map(({ interview, application: interviewApplication }: any) => (
               <div key={`${interviewApplication.id}-${interview.id}`} className="rounded-md border p-4 text-sm">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                   <div>
-                    <div className="font-medium">{new Date(interview.scheduledAt).toLocaleString()} · {titleCase(interview.interviewType)}</div>
+                    <div className="font-medium">{titleCase(interview.interviewStageType || "legacy interview")} · {new Date(interview.scheduledAt).toLocaleString()} · {titleCase(interview.interviewType)}</div>
                     <div className="text-muted-foreground">{interview.location || "Location not specified"}</div>
                     <div className="mt-1 text-xs text-muted-foreground">For: {interviewApplication.vacancy?.title || "General application"}</div>
                   </div>
@@ -2040,7 +2053,10 @@ function ApplicationDialog({
                 {interview.applicantInstructions && <div className="mt-3"><strong>Applicant instructions:</strong> {interview.applicantInstructions}</div>}
                 {interview.internalNotes && <div className="mt-2 rounded-md bg-muted p-2"><strong>Internal notes:</strong> {interview.internalNotes}</div>}
                 {interview.interviewLink && <div className="mt-2"><strong>Interview link:</strong> {interview.interviewLink}</div>}
-                {interview.outcome && <div className="mt-2"><strong>Outcome:</strong> {interview.outcome}</div>}
+                {interview.outcome && <div className="mt-2"><strong>Outcome:</strong> {titleCase(interview.outcome)}</div>}
+                {interview.outcomeNotes && <div className="mt-1 whitespace-pre-wrap text-muted-foreground"><strong>Outcome notes:</strong> {interview.outcomeNotes}</div>}
+                <div className="mt-2 text-xs text-muted-foreground">Scheduled by {(() => { const actor=(data.recruiters || []).find((row:any)=>Number(row.userId)===Number(interview.createdByUserId)); return actor ? `${actor.firstName || ""} ${actor.lastName || ""}`.trim() || actor.username || `User ${interview.createdByUserId}` : `User ${interview.createdByUserId}`; })()} · Created {interview.createdAt ? new Date(interview.createdAt).toLocaleString() : "—"}</div>
+                {interview.resultRecordedAt && <div className="mt-1 text-xs text-muted-foreground">Result recorded {new Date(interview.resultRecordedAt).toLocaleString()} by {(() => { const actor=(data.recruiters || []).find((row:any)=>Number(row.userId)===Number(interview.resultRecordedByUserId)); return actor ? `${actor.firstName || ""} ${actor.lastName || ""}`.trim() || actor.username || `User ${interview.resultRecordedByUserId}` : interview.resultRecordedByUserId ? `User ${interview.resultRecordedByUserId}` : "—"; })()}</div>}
               </div>
             ))}
             {!relatedInterviews.length && <p className="text-sm text-muted-foreground">No interviews scheduled.</p>}
@@ -2097,6 +2113,8 @@ function ApplicationDialog({
                   <StatusBadge value={log.status} />
                 </div>
                 <div className="text-muted-foreground">{log.destination || "No destination"}</div>
+                {log.renderedSubject && <div className="mt-2 font-medium">{log.renderedSubject}</div>}
+                {log.renderedMessage && <div className="mt-2 whitespace-pre-wrap rounded-md bg-muted/50 p-2">{log.renderedMessage}</div>}
                 {log.errorMessage && <div className="mt-1 text-destructive">{log.errorMessage}</div>}
                 <div className="mt-1 text-xs text-muted-foreground">{new Date(log.createdAt).toLocaleString()}</div>
               </div>
@@ -2143,26 +2161,32 @@ function InterviewDialog({
   onClose: () => void;
   onSave: (body: any) => void;
 }) {
+  const stageType = record?.interviewStageType || (application.status === "under_review" ? "informal_written" : "formal");
   const [form, setForm] = useState<any>({
     scheduledAt: toLocalInput(record?.scheduledAt) || toLocalInput(new Date(Date.now() + 24 * 60 * 60 * 1000)),
     location: record?.location || "",
     interviewType: record?.interviewType || "in_person",
+    interviewStageType: stageType,
     applicantInstructions: record?.applicantInstructions || "",
     internalNotes: record?.internalNotes || "",
     interviewLink: record?.interviewLink || "",
     status: record?.status || "scheduled",
     outcome: record?.outcome || "",
+    outcomeNotes: record?.outcomeNotes || "",
   });
   const set = (key: string, value: unknown) => setForm((current: any) => ({ ...current, [key]: value }));
+  const isLegacy = Boolean(record && !record.interviewStageType);
 
   return (
     <Dialog open={open} onOpenChange={(value) => !value && onClose()}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{record ? "Edit interview" : "Schedule interview"}</DialogTitle>
-          <DialogDescription>{application.firstName} {application.lastName}. Applicant Instructions may be sent to the candidate; Internal Notes are Recruitment-only.</DialogDescription>
+          <DialogTitle>{record ? `Edit ${isLegacy ? "legacy interview" : titleCase(stageType)}` : `Schedule ${titleCase(stageType)}`}</DialogTitle>
+          <DialogDescription>{application.firstName} {application.lastName}. This appointment belongs to application #{application.id}. Applicant Instructions may be sent to the candidate; Internal Notes are Recruitment-only.</DialogDescription>
         </DialogHeader>
+        {isLegacy && <Alert><ShieldAlert className="h-4 w-4"/><AlertTitle>Legacy interview</AlertTitle><AlertDescription>This historical record has no reliable Informal/Formal type. The system will not fabricate one. Appointment details can be maintained, but staged outcomes are disabled.</AlertDescription></Alert>}
         <div className="grid gap-4 md:grid-cols-2">
+          <Field label="Interview type"><Input value={titleCase(stageType)} disabled /></Field>
           <Field label="Date and time"><Input type="datetime-local" value={form.scheduledAt} onChange={(event) => set("scheduledAt", event.target.value)} /></Field>
           <Field label="Interview mode">
             <Select value={form.interviewType} onValueChange={(value) => set("interviewType", value)}>
@@ -2173,16 +2197,26 @@ function InterviewDialog({
           <Field label="Venue / location"><Input value={form.location} onChange={(event) => set("location", event.target.value)} /></Field>
           <Field label="Interview link"><Input value={form.interviewLink} onChange={(event) => set("interviewLink", event.target.value)} /></Field>
           {record && (
-            <Field label="Interview status">
+            <Field label="Appointment status">
               <Select value={form.status} onValueChange={(value) => set("status", value)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent><SelectItem value="scheduled">Scheduled</SelectItem><SelectItem value="completed">Completed</SelectItem><SelectItem value="cancelled">Cancelled</SelectItem></SelectContent>
+                <SelectContent><SelectItem value="scheduled">Scheduled</SelectItem><SelectItem value="completed">Completed</SelectItem><SelectItem value="cancelled">Cancelled</SelectItem><SelectItem value="no_show">No Show</SelectItem></SelectContent>
               </Select>
             </Field>
           )}
           <div className="md:col-span-2"><Field label="Applicant Instructions"><Textarea value={form.applicantInstructions} onChange={(event) => set("applicantInstructions", event.target.value)} placeholder="Safe to send to the candidate." /></Field></div>
           <div className="md:col-span-2"><Field label="Internal Notes"><Textarea value={form.internalNotes} onChange={(event) => set("internalNotes", event.target.value)} placeholder="Recruitment only. Never inserted into applicant notifications." /></Field></div>
-          <div className="md:col-span-2"><Field label="Outcome"><Textarea value={form.outcome} onChange={(event) => set("outcome", event.target.value)} /></Field></div>
+          {record && !isLegacy && (
+            <>
+              <Field label="Outcome">
+                <Select value={form.outcome || "none"} onValueChange={(value) => set("outcome", value === "none" ? "" : value)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="none">Pending / not recorded</SelectItem><SelectItem value="passed">Passed</SelectItem>{stageType === "informal_written" && <SelectItem value="not_passed_retry">Not Passed — Another Attempt</SelectItem>}<SelectItem value="not_passed_end_process">Not Passed — End Process</SelectItem></SelectContent>
+                </Select>
+              </Field>
+              <Field label="Outcome notes"><Textarea value={form.outcomeNotes} onChange={(event) => set("outcomeNotes", event.target.value)} /></Field>
+            </>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -2192,14 +2226,14 @@ function InterviewDialog({
               scheduledAt: new Date(form.scheduledAt).toISOString(),
               location: form.location || null,
               interviewType: form.interviewType,
+              ...(!record ? { interviewStageType: form.interviewStageType } : {}),
               applicantInstructions: form.applicantInstructions || null,
               internalNotes: form.internalNotes || null,
               interviewLink: form.interviewLink || null,
-              ...(record ? { status: form.status } : {}),
-              outcome: form.outcome || null,
+              ...(record ? { status: form.status, outcome: form.outcome || null, outcomeNotes: form.outcomeNotes || null } : {}),
             })}
           >
-            {saving ? "Saving…" : record ? "Save interview" : "Schedule interview"}
+            {saving ? "Saving…" : record ? "Save interview" : `Schedule ${titleCase(stageType)}`}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -2345,7 +2379,7 @@ function NotificationConfigDialog({
             </Select>
           </Field>
           <Field label="Email subject"><Input value={form.emailSubject} onChange={(event) => setForm((current: any) => ({ ...current, emailSubject: event.target.value }))} /></Field>
-          <Field label="Email template" hint="Available variables include {applicantName}, {applicationCategory}, {departmentName}, {vacancyTitle}, {schoolName}, {status}, {recruiterName}, {recruiterPhone}, {recruiterEmail}, and interview fields where applicable.">
+          <Field label="Email template" hint="Available variables include {applicantName}, {applicationCategory}, {departmentName}, {department_name}, {vacancyTitle}, {schoolName}, {status}, {groupHodName}, {groupHodPhone}, {groupHodContact}, {group_hod_name}, {group_hod_phone}, {group_hod_contact}, {interviewDate}, {interviewTime}, {interviewVenue}, {interviewType}, and their supported snake_case interview variants.">
             <Textarea className="min-h-32" value={form.emailTemplate} onChange={(event) => setForm((current: any) => ({ ...current, emailTemplate: event.target.value }))} />
           </Field>
           <Field label="SMS template"><Textarea value={form.smsTemplate} onChange={(event) => setForm((current: any) => ({ ...current, smsTemplate: event.target.value }))} /></Field>
@@ -2748,7 +2782,7 @@ function DocumentCategoryDialog({ open, record, data, saving, onClose, onSave }:
           <Field label="Code"><Input value={form.code} onChange={(event) => setForm((current: any) => ({ ...current, code: event.target.value }))} /></Field>
           <Field label="Label"><Input value={form.label} onChange={(event) => setForm((current: any) => ({ ...current, label: event.target.value }))} /></Field>
           <Field label="Display Order"><Input type="number" min="0" value={form.displayOrder} onChange={(event) => setForm((current: any) => ({ ...current, displayOrder: event.target.value }))} /></Field>
-          <Toggle label="Requested" checked={form.isRequired} onChange={(value) => setForm((current: any) => ({ ...current, isRequired: value }))} description="Requested documents do not block submission." />
+          <Toggle label="Required" checked={form.isRequired} onChange={(value) => setForm((current: any) => ({ ...current, isRequired: value }))} description="When applicable to an application, Required documents block submission until uploaded." />
           <Toggle label="Allow multiple files" checked={form.allowsMultiple} onChange={(value) => setForm((current: any) => ({ ...current, allowsMultiple: value }))} />
           <Toggle label="Active" checked={form.isActive} onChange={(value) => setForm((current: any) => ({ ...current, isActive: value }))} />
         </div>

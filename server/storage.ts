@@ -518,7 +518,7 @@ export interface IStorage {
   }): Promise<{ logs: ActivityLog[]; total: number }>;
 }
 
-const DASHBOARD_ACTIVE_STUDENT_STATUSES = new Set(["", "active", "approved"]);
+const DASHBOARD_ACTIVE_STUDENT_STATUSES = new Set(["active"]);
 
 function normalizeDashboardDate(value: unknown): Date | null {
   if (value == null) return null;
@@ -585,7 +585,7 @@ function computeClassroomPopulation(
   }
 
   for (const student of studentList ?? []) {
-    const status = String(student?.status ?? "active").trim().toLowerCase();
+    const status = String(student?.status ?? "").trim().toLowerCase();
     if (!DASHBOARD_ACTIVE_STUDENT_STATUSES.has(status)) continue;
 
     const classId = Number(student?.classId);
@@ -629,10 +629,10 @@ function archivedStudentCondition() {
 }
 
 function activeEnrolledStudentCondition() {
-  return sql`
-    ${students.archivedAt} IS NULL
-    AND LOWER(TRIM(COALESCE(${students.status}::text, 'active'))) IN ('active', 'approved', '')
-  `;
+  return and(
+    isNull(students.archivedAt),
+    eq(students.status, "active"),
+  );
 }
 
 export class DatabaseStorage implements IStorage {
@@ -2110,8 +2110,7 @@ export class DatabaseStorage implements IStorage {
       const relevantClassIds = relevantClasses.map((classItem) => classItem.id);
       const activeStudents = studentsList.filter((studentItem: any) => {
         if (!studentItem.classId || !relevantClassIds.includes(studentItem.classId)) return false;
-        const status = String(studentItem.status || "active").toLowerCase();
-        return status === "active" || status === "approved" || status === "";
+        return String(studentItem.status || "").trim().toLowerCase() === "active";
       });
 
       const assignmentList = relevantClassIds.length
@@ -2305,7 +2304,7 @@ export class DatabaseStorage implements IStorage {
         .where(and(eq(students.schoolId, schoolId), nonArchivedStudentCondition()));
 
       const schoolStudentsList = schoolStudentRecordsList.filter((studentItem: any) => {
-        const status = String(studentItem.status || "active").toLowerCase();
+        const status = String(studentItem.status || "").trim().toLowerCase();
         return DASHBOARD_ACTIVE_STUDENT_STATUSES.has(status);
       });
       const schoolStaffList = await db.select().from(staff).where(eq(staff.schoolId, schoolId));

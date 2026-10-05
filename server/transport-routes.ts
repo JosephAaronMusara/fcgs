@@ -857,6 +857,30 @@ async function accountSummary(studentId: number, schoolId: number) {
   };
 }
 
+async function transportPaymentEligibility(schoolId: number, studentId: number) {
+  const [learner] = await db.select({
+    id: students.id, schoolId: students.schoolId, firstName: students.firstName, lastName: students.lastName,
+    admissionNo: students.admissionNo, status: students.status, archivedAt: students.archivedAt,
+  }).from(students).where(and(eq(students.id, studentId), eq(students.schoolId, schoolId))).limit(1);
+  if (!learner || learner.archivedAt) return { eligible: false, reason: "Learner is deleted/archived or is not in the selected school", learner, balance: 0, activeAssignment: null };
+  const [activeAssignment] = await db.select({ id: transportAssignments.id, serviceState: transportAssignments.serviceState, startDate: transportAssignments.startDate, endDate: transportAssignments.endDate })
+    .from(transportAssignments).where(and(
+      eq(transportAssignments.schoolId, schoolId), eq(transportAssignments.studentId, studentId), eq(transportAssignments.isActive, true),
+      sql`${transportAssignments.serviceState} NOT IN ('terminated','completed')`,
+    )).orderBy(desc(transportAssignments.startDate), desc(transportAssignments.id)).limit(1);
+  const summary = await accountSummary(studentId, schoolId);
+  const payableBalance = Math.max(0, Number(summary.balance || 0));
+  const eligible = Boolean(activeAssignment) || payableBalance > 0.00001;
+  return { eligible, reason: eligible ? null : "Learner has no current Transport service and no outstanding Transport balance", learner, balance: payableBalance, activeAssignment: activeAssignment || null };
+}
+
+async function pendingCancellationForAssignment(assignmentId: number) {
+  const [event] = await db.select({ id: transportAssignmentEvents.id, effectiveDate: transportAssignmentEvents.effectiveDate, createdAt: transportAssignmentEvents.createdAt })
+    .from(transportAssignmentEvents).where(and(eq(transportAssignmentEvents.assignmentId, assignmentId), eq(transportAssignmentEvents.eventType, "service_cancelled")))
+    .orderBy(desc(transportAssignmentEvents.createdAt)).limit(1);
+  return event || null;
+}
+
 async function learnerStatementData(schoolId: number, studentId: number, from: string, to: string) {
   const [learner] = await db.select({ id: students.id, firstName: students.firstName, lastName: students.lastName, admissionNo: students.admissionNo, className: classes.className })
     .from(students).leftJoin(classes, eq(classes.id, students.classId)).where(and(eq(students.id, studentId), eq(students.schoolId, schoolId)));
@@ -2113,6 +2137,7 @@ export function registerTransportRoutes(app: Express) {
             a.start_date AS "startDate", a.end_date AS "endDate", a.is_active AS "isActive",
             a.service_state AS "serviceState", a.financial_status AS "financialStatus", a.planning_status AS "planningStatus",
             a.seat_reserved_until AS "seatReservedUntil", a.suspension_reason AS "suspensionReason", a.seat_released_at AS "seatReleasedAt",
+            (SELECT e.effective_date FROM transport_assignment_events e WHERE e.assignment_id=a.id AND e.event_type='service_cancelled' ORDER BY e.created_at DESC LIMIT 1) AS "cancellationEffectiveDate",
             a.agreed_fee AS "agreedFee", a.base_monthly_fee AS "fullFee", a.vehicle_id AS "vehicleId", a.outbound_vehicle_id AS "outboundVehicleId",
             a.driver_id AS "driverId", a.pickup_service_point_id AS "pickupServicePointId", a.dropoff_service_point_id AS "dropoffServicePointId",
             s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className",
@@ -2217,7 +2242,7 @@ export function registerTransportRoutes(app: Express) {
             FROM transport_assignments WHERE school_id=${schoolId}
             ORDER BY student_id, is_active DESC, start_date DESC, id DESC
           )
-          SELECT s.id AS "studentId", s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className",
+          SELECT s.id AS "studentId", s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo", c.class_name AS "className", s.status AS "studentStatus", s.archived_at AS "archivedAt",
                  ca.assignment_id AS "assignmentId", ca.service_state AS "serviceState", ca.financial_status AS "financialStatus", ca.start_date AS "startDate", ca.end_date AS "endDate",
                  ca.seat_reserved_until AS "seatReservedUntil", ca.suspension_reason AS "suspensionReason", ca.seat_released_at AS "seatReleasedAt", ca.is_active AS "isActive",
                  r.name AS "destinationName", v.registration_number AS "vehicleRegistration",
@@ -2458,6 +2483,9 @@ export function registerTransportRoutes(app: Express) {
       const arrearsByStudent = new Map((arrearsSnapshotResult.rows as any[]).map((row:any)=>[Number(row.studentId),row]));
       const assignmentsWithArrears = assignmentsWithLedger.map((row:any) => ({ ...row, ...(arrearsByStudent.get(Number(row.studentId)) || { qualifyingArrears:"0", oldestOverdueMonth:null, currentMonthOutstanding:"0" }) }));
       const learnerAccountsWithArrears = (learnerAccountsResult.rows as any[]).map((row:any) => ({ ...row, ...(arrearsByStudent.get(Number(row.studentId)) || { qualifyingArrears:"0", oldestOverdueMonth:null, currentMonthOutstanding:"0" }) }));
+      const paymentEligibleStudents = learnerAccountsWithArrears.filter((row: any) => !row.archivedAt && (Boolean(row.isActive) && !["terminated", "completed"].includes(String(row.serviceState || "")) || amount(row.balance) > 0.00001)).map((row: any) => ({
+        id: Number(row.studentId), firstName: row.firstName, lastName: row.lastName, admissionNo: row.admissionNo, className: row.className, status: row.studentStatus,
+      }));
 
       const totalsResult = await db.execute(sql`
         SELECT
@@ -2490,6 +2518,7 @@ export function registerTransportRoutes(app: Express) {
       const billingRunById = new Map(billingRuns.map((row: any) => [Number(row.id), row]));
       const vehicleByIdForAudit = new Map(vehiclesWithOccupancy.map((row: any) => [Number(row.id), row]));
       const studentByIdForAudit = new Map(learnerRows.map((row: any) => [Number(row.id), row]));
+      const assignmentByIdForAudit = new Map(assignmentsWithArrears.map((row: any) => [Number(row.id), row]));
       const auditsWithNames = audits.map((audit: any) => {
         const auditUser = auditUserById.get(Number(audit.userId));
         const userName = auditUser ? `${auditUser.firstName || ""} ${auditUser.lastName || ""}`.trim() || auditUser.username : audit.userId ? `User #${audit.userId}` : "System";
@@ -2501,12 +2530,16 @@ export function registerTransportRoutes(app: Express) {
         if (audit.entityType === "cashup") recordReference = cashupById.get(Number(audit.entityId))?.cashupNumber || recordReference;
         if (audit.entityType === "payment") recordReference = paymentById.get(Number(audit.entityId))?.receiptNo || recordReference;
         if (audit.entityType === "billing_run") recordReference = billingRunById.get(Number(audit.entityId))?.runNumber || recordReference;
-        if (audit.entityType === "learner" || audit.entityType === "student") { const student = studentByIdForAudit.get(Number(audit.entityId)); recordReference = student ? `${student.firstName} ${student.lastName}` : recordReference; }
-        return { ...audit, userName, recordReference };
+        if (audit.entityType === "learner" || audit.entityType === "student") { const student = studentByIdForAudit.get(Number(audit.entityId)); recordReference = student ? `${student.firstName} ${student.lastName} (${student.admissionNo || "—"})` : recordReference; }
+        if (audit.entityType === "assignment") { const assignment = assignmentByIdForAudit.get(Number(audit.entityId)); recordReference = assignment ? `${assignment.firstName} ${assignment.lastName} (${assignment.admissionNo || "—"})` : recordReference; }
+        const metadata = (audit.metadata || {}) as any;
+        const effectiveDate = metadata.stopServiceDate || metadata.effectiveDate || null;
+        return { ...audit, userName, recordReference, effectiveDate };
       });
 
       return res.json({
         school,
+        currentUserId: userOf(req)?.id || null,
         settings,
         routes: routesWithUsage,
         points,
@@ -2526,6 +2559,7 @@ export function registerTransportRoutes(app: Express) {
         pathNodes,
         pathNodeLearners,
         students: learnerRows,
+        paymentEligibleStudents,
         staff: staffRows,
         assignments: assignmentsWithArrears,
         learnerAccounts: learnerAccountsWithArrears,
@@ -3768,6 +3802,8 @@ export function registerTransportRoutes(app: Express) {
       const id = Number(req.params.id);
       const previous = await assertSchoolRecord(transportAssignments, id, school.id);
       if (!previous || !previous.isActive) return res.status(404).json({ message: "Active assignment not found" });
+      const pendingCancellation = await pendingCancellationForAssignment(id);
+      if (pendingCancellation) return res.status(409).json({ message: `This service already has a cancellation scheduled for ${pendingCancellation.effectiveDate}. A transfer cannot be started while that cancellation is pending.` });
       const parsed: any = clean(transferInput.parse(req.body));
       const prospective = { ...previous, ...parsed, studentId: previous.studentId };
       if (prospective.serviceType === "both") prospective.outboundVehicleId = prospective.vehicleId;
@@ -3844,6 +3880,8 @@ export function registerTransportRoutes(app: Express) {
       const id = Number(req.params.id);
       const previous = await assertSchoolRecord(transportAssignments, id, school.id);
       if (!previous || !previous.isActive) return res.status(404).json({ message: "Active transport registration not found" });
+      const existingCancellation = await pendingCancellationForAssignment(id);
+      if (existingCancellation) return res.status(409).json({ message: `Service cancellation has already been recorded for this service period (effective ${existingCancellation.effectiveDate}).` });
       const parsed = z.object({ stopServiceDate: dateString, reason: z.string().trim().min(3), refundMethod: z.enum(["credit", "cash", "bank_transfer", "mobile_money", "original_method"]).optional() }).parse(req.body);
       if (parsed.stopServiceDate < previous.startDate) return res.status(409).json({ message: "Stop Service Date cannot be before the Service Start Date." });
       const settings = await getOrCreateSettings(school.id);
@@ -3872,6 +3910,8 @@ export function registerTransportRoutes(app: Express) {
       const id = Number(req.params.id);
       const previous = await assertSchoolRecord(transportAssignments, id, school.id);
       if (!previous) return res.status(404).json({ message: "Assignment not found" });
+      const pendingCancellation = await pendingCancellationForAssignment(id);
+      if (pendingCancellation) return res.status(409).json({ message: `This service already has a cancellation scheduled for ${pendingCancellation.effectiveDate}. A service-state change cannot be applied while that cancellation is pending.` });
       const parsed = stateInput.parse(req.body);
       const settings = await getOrCreateSettings(school.id);
       const closesService = ["suspended", "paused", "terminated", "completed"].includes(parsed.state);
@@ -4056,6 +4096,8 @@ export function registerTransportRoutes(app: Express) {
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = paymentInput.parse(req.body);
+      const eligibility = await transportPaymentEligibility(school.id, parsed.studentId);
+      if (!eligibility.eligible) return res.status(409).json({ message: eligibility.reason || "Learner is not eligible for a Transport payment." });
       const settings = await getOrCreateSettings(school.id);
       const snapshot = await receiptSnapshot(school, parsed.studentId, req, parsed);
       const result = await db.transaction(async (tx) => {
@@ -4470,6 +4512,69 @@ export function registerTransportRoutes(app: Express) {
     } catch (error) { return routeError(res, error); }
   });
 
+  app.put("/api/transport/cashups/:id", requireAuth, requireAnyPermission("transport.cashups.prepare", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const previous = await assertSchoolRecord(transportCashups, id, school.id);
+      if (!previous || previous.status !== "draft") return res.status(409).json({ message: "Only a draft cash-up can be edited" });
+      if (previous.cashierUserId !== user.id) return res.status(403).json({ message: "Only the Receptionist/cashier who prepared this draft can edit it" });
+      const parsed = cashupInput.parse(req.body);
+      if (!parsed.paymentIds.length && !parsed.refundIds.length) return res.status(400).json({ message: "Select at least one receipt or paid refund for this cash-up." });
+      const payments = parsed.paymentIds.length ? await db.select().from(transportPayments).where(and(eq(transportPayments.schoolId, school.id), inArray(transportPayments.id, parsed.paymentIds), isNull(transportPayments.reversedAt))) : [];
+      if (payments.length !== parsed.paymentIds.length) return res.status(409).json({ message: "One or more selected payments are no longer valid. Refresh this draft." });
+      const refunds = parsed.refundIds.length ? await db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), inArray(transportRefunds.id, parsed.refundIds), eq(transportRefunds.status, "paid"), isNull(transportRefunds.accountedCashupId))) : [];
+      if (refunds.length !== parsed.refundIds.length) return res.status(409).json({ message: "One or more selected refunds are no longer valid or have already been accounted for." });
+      const conflictingPayments = parsed.paymentIds.length ? await db.select({ paymentId: transportCashupPayments.paymentId, cashupId: transportCashupPayments.cashupId }).from(transportCashupPayments).where(and(inArray(transportCashupPayments.paymentId, parsed.paymentIds), ne(transportCashupPayments.cashupId, id))) : [];
+      if (conflictingPayments.length) return res.status(409).json({ message: "One or more selected payments were included in another cash-up while this draft was open." });
+      const conflictingRefunds = parsed.refundIds.length ? await db.select({ refundId: transportCashupRefunds.refundId, cashupId: transportCashupRefunds.cashupId }).from(transportCashupRefunds).innerJoin(transportCashups, eq(transportCashups.id, transportCashupRefunds.cashupId)).where(and(inArray(transportCashupRefunds.refundId, parsed.refundIds), ne(transportCashupRefunds.cashupId, id), eq(transportCashups.status, "verified"))) : [];
+      if (conflictingRefunds.length) return res.status(409).json({ message: "One or more selected refunds were already accounted for by another completed cash-up." });
+      const cashReceipts = payments.filter((row) => row.paymentMethod === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+      const nonCashReceipts = payments.filter((row) => row.paymentMethod !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+      const cashRefunds = refunds.filter((row) => row.method === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+      const nonCashRefunds = refunds.filter((row) => row.method !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+      const expectedCash = rounded(cashReceipts - cashRefunds);
+      const expectedNonCash = rounded(nonCashReceipts - nonCashRefunds);
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx.update(transportCashups).set({
+          cashupDate: parsed.cashupDate, expectedCash: String(expectedCash), actualCash: String(parsed.actualCash),
+          expectedNonCash: String(expectedNonCash), actualNonCash: String(parsed.actualNonCash),
+          variance: String(rounded(parsed.actualCash + parsed.actualNonCash - expectedCash - expectedNonCash)),
+          depositReference: parsed.depositReference || null, notes: parsed.notes || null,
+        }).where(and(eq(transportCashups.id, id), eq(transportCashups.status, "draft"))).returning();
+        if (!row) throw Object.assign(new Error("Draft changed while you were editing it. Refresh and try again."), { status: 409 });
+        await tx.delete(transportCashupPayments).where(eq(transportCashupPayments.cashupId, id));
+        await tx.delete(transportCashupRefunds).where(eq(transportCashupRefunds.cashupId, id));
+        for (const payment of payments) await tx.insert(transportCashupPayments).values({ cashupId: id, paymentId: payment.id });
+        for (const refund of refunds) await tx.insert(transportCashupRefunds).values({ cashupId: id, refundId: refund.id });
+        await writeAudit(tx, school.id, user.id, "cashup", id, "edit_draft", schoolCashupView(previous), schoolCashupView(row), null, { paymentIds: parsed.paymentIds, refundIds: parsed.refundIds });
+        return row;
+      });
+      return res.json(schoolCashupView(updated));
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.post("/api/transport/cashups/:id/discard", requireAuth, requireAnyPermission("transport.cashups.prepare", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const id = Number(req.params.id);
+      const previous = await assertSchoolRecord(transportCashups, id, school.id);
+      if (!previous || previous.status !== "draft") return res.status(409).json({ message: "Only a draft cash-up can be discarded" });
+      if (previous.cashierUserId !== user.id) return res.status(403).json({ message: "Only the Receptionist/cashier who prepared this draft can discard it" });
+      const reason = z.object({ reason: z.string().trim().min(3).default("Draft discarded before submission") }).parse(req.body || {}).reason;
+      const discarded = await db.transaction(async (tx) => {
+        await tx.delete(transportCashupPayments).where(eq(transportCashupPayments.cashupId, id));
+        await tx.delete(transportCashupRefunds).where(eq(transportCashupRefunds.cashupId, id));
+        const [row] = await tx.update(transportCashups).set({ status: "discarded", notes: previous.notes ? `${previous.notes}\n[Discarded] ${reason}` : `[Discarded] ${reason}` }).where(eq(transportCashups.id, id)).returning();
+        await writeAudit(tx, school.id, user.id, "cashup", id, "discard_draft", schoolCashupView(previous), schoolCashupView(row), reason);
+        return row;
+      });
+      return res.json(schoolCashupView(discarded));
+    } catch (error) { return routeError(res, error); }
+  });
+
   app.get("/api/transport/cashups/:id/detail", requireAuth, requireAnyPermission("transport.cashups.view", "transport.cashups.prepare", "transport.cashups.verify", "transport.view"), async (req, res) => {
     try {
       const school = await schoolContext(req);
@@ -4520,6 +4625,26 @@ export function registerTransportRoutes(app: Express) {
       if (!previous) return res.status(404).json({ message: "Cash-up not found" });
       if (previous.status !== "draft") return res.status(409).json({ message: "Only a draft cash-up can be submitted" });
       if (previous.cashierUserId !== user.id) return res.status(403).json({ message: "Only the Receptionist/cashier who prepared this cash-up can submit and sign it" });
+      const invalidPayments = await db.execute(sql`
+        SELECT p.receipt_no AS "receiptNo"
+        FROM transport_cashup_payments cp
+        JOIN transport_payments p ON p.id=cp.payment_id
+        WHERE cp.cashup_id=${id}
+          AND (p.school_id<>${school.id} OR p.reversed_at IS NOT NULL OR p.status='reversed')
+      `);
+      const invalidRefunds = await db.execute(sql`
+        SELECT r.refund_number AS "refundNumber"
+        FROM transport_cashup_refunds cr
+        JOIN transport_refunds r ON r.id=cr.refund_id
+        WHERE cr.cashup_id=${id}
+          AND (r.school_id<>${school.id} OR r.status<>'paid' OR r.method='credit')
+      `);
+      if (invalidPayments.rows.length || invalidRefunds.rows.length) return res.status(409).json({
+        message: "This draft contains receipts or refunds whose financial state changed after the draft was prepared. Reopen and edit the draft before submitting.",
+        invalidReceipts: invalidPayments.rows, invalidRefunds: invalidRefunds.rows,
+      });
+      const linkedCount = await db.execute(sql`SELECT (SELECT COUNT(*) FROM transport_cashup_payments WHERE cashup_id=${id}) + (SELECT COUNT(*) FROM transport_cashup_refunds WHERE cashup_id=${id}) AS count`);
+      if (Number((linkedCount.rows[0] as any)?.count || 0) === 0) return res.status(409).json({ message: "This draft no longer contains any receipts or paid refunds. Reopen and edit it before submitting." });
       const signature = await preparedElectronicSignature(
         user.id, password, "transport_cashup", id, "receptionist",
         `I confirm that I handed over the amounts declared on cash-up ${previous.cashupNumber}.`,

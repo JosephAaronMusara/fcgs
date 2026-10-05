@@ -95,7 +95,7 @@ export default function StudentsPage() {
   useEffect(() => {
     setPage(1);
     setSelectedStudentIds([]);
-  }, [debouncedSearch, classFilter, statusFilter, pageSize]);
+  }, [currentSchoolId, debouncedSearch, classFilter, statusFilter, pageSize]);
 
   const clearQuickAddParentFlowAfterClose = () => {
     setTimeout(() => {
@@ -145,7 +145,7 @@ export default function StudentsPage() {
   const studentListMode = statusFilter === "archived" ? "archived" : "records";
 
   const { data: studentPageData, isLoading } = useQuery<PaginatedResponse<StudentRecord>>({
-    queryKey: ["/api/students", studentListMode, page, pageSize, debouncedSearch, classFilter, statusFilter],
+    queryKey: ["/api/students", studentListMode, currentSchoolId ?? null, page, pageSize, debouncedSearch, classFilter, statusFilter],
     queryFn: async () => {
       const params = new URLSearchParams({
         paginated: "true",
@@ -164,7 +164,18 @@ export default function StudentsPage() {
 
       return res.json();
     },
-    placeholderData: (previousData) => previousData,
+    placeholderData: (previousData, previousQuery) => {
+      const previousKey = previousQuery?.queryKey || [];
+      const sameSchoolAndFilters =
+        previousKey[1] === studentListMode &&
+        previousKey[2] === (currentSchoolId ?? null) &&
+        previousKey[4] === pageSize &&
+        previousKey[5] === debouncedSearch &&
+        previousKey[6] === classFilter &&
+        previousKey[7] === statusFilter;
+
+      return sameSchoolAndFilters ? previousData : undefined;
+    },
   });
 
   const { data: viewingStudentDetails, isFetching: isViewingStudentFetching } = useQuery<StudentRecord>({
@@ -895,10 +906,12 @@ export default function StudentsPage() {
                 <SelectItem value="archived">Archived</SelectItem>
               </SelectContent>
             </Select>
-            <Badge variant="secondary" className="flex items-center gap-1">
-              <GraduationCap className="w-3 h-3" />
-              {totalStudents} Students
-            </Badge>
+            {statusFilter !== "all" && (
+              <Badge variant="secondary" className="flex items-center gap-1">
+                <GraduationCap className="w-3 h-3" />
+                {totalStudents} Students
+              </Badge>
+            )}
             {unassignedClassroomCount > 0 && (
               <Button variant="outline" size="sm" className="border-amber-300 text-amber-700" onClick={() => setClassFilter("unassigned")}>
                 Needs Classroom Assignment · {unassignedClassroomCount}
