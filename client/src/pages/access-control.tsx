@@ -18,6 +18,7 @@ import {
   Activity,
   AlertTriangle,
   Copy,
+  Download,
   DoorOpen,
   FileClock,
   KeyRound,
@@ -62,6 +63,11 @@ type Bridge = {
   lastIpAddress: string | null;
   softwareVersion: string | null;
   lastError: string | null;
+  installationId: string | null;
+  machineName: string | null;
+  pairedAt: string | null;
+  lastServiceStartedAt: string | null;
+  lastIdentityReconcileAt: string | null;
 };
 
 type Gate = {
@@ -141,6 +147,25 @@ type Bootstrap = {
 };
 
 type TokenReveal = { bridgeName: string; token: string; message: string } | null;
+type GateBridgeRelease = {
+  version: string;
+  semver: string;
+  platform: string;
+  ready: boolean;
+  expectedAssets: string[];
+  assets: Array<{ name: string; size: number; sha256: string }>;
+  signing: { requiredBeforeBroadRollout: boolean; configured: boolean; note: string };
+};
+type WindowsInstallResult = {
+  bridge: { id: number; name: string; machineName: string | null; pairedAt: string | null };
+  pairingCode: string;
+  expiresAt: string;
+  portalUrl: string;
+  release: GateBridgeRelease;
+  installerFileName: string;
+  installerContent: string;
+  instructions: string;
+};
 type TerminalDialogState = { device?: Device; gate?: Gate; lane?: LaneDefinition; allowAssignment?: boolean } | null;
 
 type Issue = { key: string; title: string; detail: string; severity: "warning" | "error" };
@@ -183,6 +208,10 @@ export default function AccessControlPage() {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("gates");
   const [bridgeDialogOpen, setBridgeDialogOpen] = useState(false);
+  const [installDialogOpen, setInstallDialogOpen] = useState(false);
+  const [installBridgeId, setInstallBridgeId] = useState("");
+  const [installPortalUrl, setInstallPortalUrl] = useState("https://portal.firstchoicegroup.co.zw");
+  const [installResult, setInstallResult] = useState<WindowsInstallResult | null>(null);
   const [gateDialogOpen, setGateDialogOpen] = useState(false);
   const [gateEditTarget, setGateEditTarget] = useState<Gate | null>(null);
   const [terminalDialog, setTerminalDialog] = useState<TerminalDialogState>(null);
@@ -219,9 +248,22 @@ export default function AccessControlPage() {
     refetchInterval: activeTab === "logs" ? 5000 : false,
   });
 
+  const releaseQuery = useQuery<GateBridgeRelease>({
+    queryKey: ["/api/access-control/gate-bridge-release", currentSchoolId || "school"],
+    queryFn: async () => {
+      const response = await schoolFetch("/api/access-control/gate-bridge-release");
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.message || "Failed to load Gate Bridge release information");
+      return payload;
+    },
+    enabled: activeTab === "bridges" && hasPermission("access_control.view"),
+    staleTime: 60_000,
+  });
+
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/access-control/bootstrap"] });
     queryClient.invalidateQueries({ queryKey: ["/api/access-control/logs"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/access-control/gate-bridge-release"] });
   };
 
   const bridgeMutation = useMutation({
@@ -252,6 +294,34 @@ export default function AccessControlPage() {
       refresh();
     },
     onError: (error) => toast({ title: "Token rotation failed", description: error instanceof Error ? error.message : String(error), variant: "destructive" }),
+  });
+
+  const installMutation = useMutation({
+    mutationFn: async ({ bridgeId, portalUrl }: { bridgeId: number; portalUrl: string }) => {
+      const response = await schoolFetch(`/api/access-control/bridges/${bridgeId}/install-windows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ portalUrl: portalUrl.trim() || undefined }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.message || "Failed to prepare the Windows Gate Bridge installer");
+      return payload as WindowsInstallResult;
+    },
+    onSuccess: (payload) => {
+      setInstallResult(payload);
+      const blob = new Blob([payload.installerContent], { type: "application/x-msdos-program;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = payload.installerFileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      toast({ title: "Windows Gate Bridge installer ready", description: `The one-time installer for ${payload.bridge.name} was downloaded.` });
+      refresh();
+    },
+    onError: (error) => toast({ title: "Installer not prepared", description: error instanceof Error ? error.message : String(error), variant: "destructive" }),
   });
 
   const gateMutation = useMutation({
@@ -438,7 +508,7 @@ export default function AccessControlPage() {
       </Card>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-4 md:w-[640px]">
+        <TabsList className="grid w-full grid-cols-5 md:w-[760px]">
           <TabsTrigger value="gates">Gates</TabsTrigger>
           <TabsTrigger value="bridges">Gate Bridges</TabsTrigger>
           <TabsTrigger value="history">Command History</TabsTrigger>
@@ -517,19 +587,40 @@ export default function AccessControlPage() {
         </TabsContent>
 
         <TabsContent value="bridges" className="space-y-4">
-          <div className="flex justify-end">{hasPermission("access_control.manage_devices") && <Button onClick={() => setBridgeDialogOpen(true)}><Plus className="mr-2 h-4 w-4" />Create Gate Bridge</Button>}</div>
-          <SetupCallout text="The Gate Bridge is the service running on the school's always-on mini-PC/computer. FCGS now supplies terminal Gate/lane/IP/port configuration automatically; only the bridge token and terminal credentials remain local." />
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            {hasPermission("access_control.manage_devices") && (
+              <>
+                <Button variant="outline" onClick={() => setBridgeDialogOpen(true)}><Plus className="mr-2 h-4 w-4" />Create Gate Bridge</Button>
+                <Button onClick={() => {
+                  setInstallResult(null);
+                  setInstallBridgeId(data.bridges[0] ? String(data.bridges[0].id) : "");
+                  setInstallPortalUrl("https://portal.firstchoicegroup.co.zw");
+                  setInstallDialogOpen(true);
+                }} disabled={!data.bridges.length || releaseQuery.data?.ready === false}>
+                  <Download className="mr-2 h-4 w-4" />Install Windows Gate Bridge Service
+                </Button>
+              </>
+            )}
+          </div>
+          <SetupCallout text="The Gate Bridge is the production Windows Service on the school's always-on mini-PC/computer. FCGS supplies Gate/lane/IP/port configuration automatically; terminal administrator credentials stay encrypted on that computer." />
+          {releaseQuery.data && !releaseQuery.data.ready && (
+            <Card className="border-destructive/40"><CardContent className="py-4 text-sm"><div className="font-medium text-destructive">Windows Gate Bridge release is not ready</div><div className="mt-1 text-xs text-muted-foreground">The server is missing one or more Windows runtime/deployment assets. Installation is disabled until the release package is prepared.</div></CardContent></Card>
+          )}
+          {releaseQuery.data?.ready && releaseQuery.data.signing.requiredBeforeBroadRollout && !releaseQuery.data.signing.configured && (
+            <Card className="border-amber-500/40"><CardContent className="py-4 text-sm"><div className="font-medium">Pilot release ready · code signing still required before broad rollout</div><div className="mt-1 text-xs text-muted-foreground">{releaseQuery.data.signing.note}</div></CardContent></Card>
+          )}
           <div className="grid gap-4 xl:grid-cols-2">
             {data.bridges.map((bridge) => {
               const assignedGates = data.gates.filter((gate) => gate.bridgeId === bridge.id).length;
               const assignedDevices = data.devices.filter((device) => device.bridgeId === bridge.id).length;
-              return <Card key={bridge.id}><CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Router className="h-4 w-4" />{bridge.name}</CardTitle><CardDescription>{bridge.softwareVersion || "Bridge has not connected yet"}</CardDescription></div><StatusBadge status={bridge.isOnline ? "online" : "offline"} /></div></CardHeader><CardContent className="space-y-4 text-sm"><div className="grid gap-3 sm:grid-cols-2"><Info label="Last heartbeat" value={formatTime(bridge.lastHeartbeatAt)} /><Info label="Last public IP" value={bridge.lastIpAddress || "—"} /><Info label="Assigned Gates" value={String(assignedGates)} /><Info label="Assigned terminals" value={String(assignedDevices)} /><Info label="Configuration" value={bridge.configSynchronized ? "Synchronized" : bridge.isOnline ? "Update pending" : "Unknown while offline"} /><Info label="Last config sync" value={formatTime(bridge.lastConfigSyncAt)} /></div><div className="rounded-md border bg-muted/30 p-3 text-xs"><div className="font-medium">Configuration revision</div><div className="mt-1 text-muted-foreground">Portal: {bridge.configurationRevision} · Bridge: {bridge.lastSyncedRevision ?? "not reported"}</div></div>{bridge.lastError && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{bridge.lastError}</div>}{hasPermission("access_control.manage_devices") && <Button size="sm" variant="outline" onClick={() => setRotateTarget(bridge)} disabled={rotateMutation.isPending}><KeyRound className="mr-2 h-4 w-4" />Rotate Bridge Token</Button>}</CardContent></Card>;
+              const updateAvailable = !!releaseQuery.data?.version && !!bridge.softwareVersion && bridge.softwareVersion !== releaseQuery.data.version;
+              return <Card key={bridge.id}><CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Router className="h-4 w-4" />{bridge.name}</CardTitle><CardDescription>{bridge.softwareVersion || "Bridge has not connected yet"}{updateAvailable ? " · update available" : ""}</CardDescription></div><StatusBadge status={bridge.isOnline ? "online" : "offline"} /></div></CardHeader><CardContent className="space-y-4 text-sm"><div className="grid gap-3 sm:grid-cols-2"><Info label="Paired Windows PC" value={bridge.machineName || "Not paired through installer"} /><Info label="Paired at" value={formatTime(bridge.pairedAt)} /><Info label="Service started" value={formatTime(bridge.lastServiceStartedAt)} /><Info label="Last heartbeat" value={formatTime(bridge.lastHeartbeatAt)} /><Info label="Last public IP" value={bridge.lastIpAddress || "—"} /><Info label="Release" value={releaseQuery.data ? `${bridge.softwareVersion || "Not reported"} / ${releaseQuery.data.version}` : bridge.softwareVersion || "Not reported"} /><Info label="Assigned Gates" value={String(assignedGates)} /><Info label="Assigned terminals" value={String(assignedDevices)} /><Info label="Configuration" value={bridge.configSynchronized ? "Synchronized" : bridge.isOnline ? "Update pending" : "Unknown while offline"} /><Info label="Last config sync" value={formatTime(bridge.lastConfigSyncAt)} /><Info label="Last identity reconciliation" value={formatTime(bridge.lastIdentityReconcileAt)} /><Info label="Installation ID" value={bridge.installationId || "—"} /></div><div className="rounded-md border bg-muted/30 p-3 text-xs"><div className="font-medium">Configuration revision</div><div className="mt-1 text-muted-foreground">Portal: {bridge.configurationRevision} · Bridge: {bridge.lastSyncedRevision ?? "not reported"}</div></div>{bridge.lastError && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{bridge.lastError}</div>}{hasPermission("access_control.manage_devices") && <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => { setInstallResult(null); setInstallBridgeId(String(bridge.id)); setInstallPortalUrl("https://portal.firstchoicegroup.co.zw"); setInstallDialogOpen(true); }} disabled={releaseQuery.data?.ready === false}><Download className="mr-2 h-4 w-4" />{bridge.pairedAt ? "Reinstall / Re-pair Service" : "Install Windows Service"}</Button><Button size="sm" variant="outline" onClick={() => setRotateTarget(bridge)} disabled={rotateMutation.isPending}><KeyRound className="mr-2 h-4 w-4" />Rotate Bridge Token</Button></div>}</CardContent></Card>;
             })}
           </div>
         </TabsContent>
 
         <TabsContent value="history">
-          <Card><CardHeader><CardTitle className="text-base">Recent gate commands</CardTitle><CardDescription>Manual opens and tests are successful only after the local Gate Bridge confirms that the target terminal accepted the command.</CardDescription></CardHeader><CardContent className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Time</TableHead><TableHead>Gate / Terminal</TableHead><TableHead>Command</TableHead><TableHead>Requested By</TableHead><TableHead>Reason</TableHead><TableHead>Status</TableHead><TableHead>Result</TableHead></TableRow></TableHeader><TableBody>{data.commands.length ? data.commands.map((command) => <TableRow key={command.id}><TableCell className="whitespace-nowrap">{formatTime(command.requestedAt)}</TableCell><TableCell><div className="font-medium">{command.gateName ? `${command.gateName} · ` : ""}{command.deviceName}</div><div className="text-xs text-muted-foreground">{command.bridgeName}</div></TableCell><TableCell>{command.commandType === "open_gate" ? "Open Gate" : "Connection Test"}</TableCell><TableCell>{command.requestedByName}</TableCell><TableCell className="max-w-[260px] whitespace-normal">{command.requestReason || "—"}</TableCell><TableCell><StatusBadge status={command.status} /></TableCell><TableCell className="max-w-[300px] whitespace-normal text-xs">{command.errorMessage || (command.status === "succeeded" ? "Acknowledged by Gate Bridge" : "—")}</TableCell></TableRow>) : <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No gate commands have been sent yet.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>
+          <Card><CardHeader><CardTitle className="text-base">Recent gate commands</CardTitle><CardDescription>Manual opens and tests are successful only after the local Gate Bridge confirms that the target terminal accepted the command.</CardDescription></CardHeader><CardContent className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Time</TableHead><TableHead>Gate / Terminal</TableHead><TableHead>Command</TableHead><TableHead>Requested By</TableHead><TableHead>Reason</TableHead><TableHead>Status</TableHead><TableHead>Result</TableHead></TableRow></TableHeader><TableBody>{data.commands.length ? data.commands.map((command) => <TableRow key={command.id}><TableCell className="whitespace-nowrap">{formatTime(command.requestedAt)}</TableCell><TableCell><div className="font-medium">{command.gateName ? `${command.gateName} · ` : ""}{command.deviceName}</div><div className="text-xs text-muted-foreground">{command.bridgeName}</div></TableCell><TableCell>{command.commandType === "open_gate" ? "Open Gate" : command.commandType === "get_version" ? "Connection Test" : humanize(command.commandType)}</TableCell><TableCell>{command.requestedByName}</TableCell><TableCell className="max-w-[260px] whitespace-normal">{command.requestReason || "—"}</TableCell><TableCell><StatusBadge status={command.status} /></TableCell><TableCell className="max-w-[300px] whitespace-normal text-xs">{command.errorMessage || (command.status === "succeeded" ? "Acknowledged by Gate Bridge" : "—")}</TableCell></TableRow>) : <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No gate commands have been sent yet.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>
         </TabsContent>
 
         <TabsContent value="people" className="space-y-4">
@@ -540,6 +631,32 @@ export default function AccessControlPage() {
           <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><FileClock className="h-4 w-4" />Access Control logs</CardTitle><CardDescription>Operational and security-relevant events from the portal, Gate Bridges and terminals. Routine successful polling is intentionally not stored as noise.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4"><div className="space-y-2"><Label>Search</Label><div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" /><Input value={logSearch} onChange={(e) => setLogSearch(e.target.value)} placeholder="Event, Gate, terminal…" className="pl-9" /></div></div><div className="space-y-2"><Label>Severity</Label><Select value={logSeverity} onValueChange={setLogSeverity}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All severities</SelectItem><SelectItem value="info">Info</SelectItem><SelectItem value="warning">Warning</SelectItem><SelectItem value="error">Error</SelectItem><SelectItem value="security">Security</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label>Gate</Label><Select value={logGateId} onValueChange={(value) => { setLogGateId(value); setLogDeviceId("all"); }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All Gates</SelectItem>{data.gates.map((gate) => <SelectItem key={gate.id} value={String(gate.id)}>{gate.name}</SelectItem>)}</SelectContent></Select></div><div className="space-y-2"><Label>Terminal</Label><Select value={logDeviceId} onValueChange={setLogDeviceId}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All terminals</SelectItem>{data.devices.filter((device) => logGateId === "all" || String(device.gateId || "") === logGateId).map((device) => <SelectItem key={device.id} value={String(device.id)}>{device.gateName ? `${device.gateName} · ` : ""}{device.name}</SelectItem>)}</SelectContent></Select></div></div>{logsQuery.isLoading ? <div className="py-8 text-center text-sm text-muted-foreground">Loading logs…</div> : logsQuery.isError ? <div className="rounded-md border border-destructive/30 p-4 text-sm text-destructive">{logsQuery.error instanceof Error ? logsQuery.error.message : "Failed to load logs"}</div> : <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Time</TableHead><TableHead>Severity</TableHead><TableHead>Source</TableHead><TableHead>Event</TableHead><TableHead>Message</TableHead><TableHead className="text-right">Details</TableHead></TableRow></TableHeader><TableBody>{filteredLogs.length ? filteredLogs.map((row) => <TableRow key={row.id}><TableCell className="whitespace-nowrap text-xs">{formatTime(row.occurredAt)}</TableCell><TableCell><StatusBadge status={row.severity} /></TableCell><TableCell><div className="text-sm font-medium">{row.deviceName || row.gateName || row.bridgeName || humanize(row.sourceType)}</div>{row.deviceName && <div className="text-xs text-muted-foreground">{row.gateName || row.bridgeName || ""}</div>}</TableCell><TableCell className="text-xs">{humanize(row.eventType.replaceAll(".", "_"))}</TableCell><TableCell className="min-w-[320px] text-sm">{row.message}</TableCell><TableCell className="text-right"><Button size="sm" variant="ghost" onClick={() => setLogTarget(row)}>View</Button></TableCell></TableRow>) : <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">No logs match these filters.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent></Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={installDialogOpen} onOpenChange={(open) => { setInstallDialogOpen(open); if (!open) setInstallResult(null); }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Install Windows Gate Bridge Service</DialogTitle>
+            <DialogDescription>Prepare a one-time installer for the always-on Windows mini-PC. Reinstalling an already paired Bridge replaces its machine credential cleanly; it does not create another Bridge.</DialogDescription>
+          </DialogHeader>
+          {!installResult ? (
+            <div className="space-y-4">
+              <div className="space-y-2"><Label>Gate Bridge</Label><Select value={installBridgeId} onValueChange={setInstallBridgeId}><SelectTrigger><SelectValue placeholder="Select Gate Bridge" /></SelectTrigger><SelectContent>{data.bridges.map((bridge) => <SelectItem key={bridge.id} value={String(bridge.id)}>{bridge.name}{bridge.machineName ? ` · ${bridge.machineName}` : ""}</SelectItem>)}</SelectContent></Select></div>
+              <div className="space-y-2"><Label htmlFor="gate-bridge-portal-url">Portal URL <span className="text-muted-foreground">(advanced)</span></Label><Input id="gate-bridge-portal-url" value={installPortalUrl} onChange={(event) => setInstallPortalUrl(event.target.value)} /><p className="text-xs text-muted-foreground">Production is the default. Only change this for an explicitly approved development/test deployment; non-local custom URLs must use HTTPS.</p></div>
+              <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">The installer downloads the verified runtime, prompts locally for the face-terminal administrator credentials, stores secrets with Windows machine-scope encryption, installs automatic service recovery, and creates the LAN-only recognition callback firewall rule.</div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/30 p-4"><div className="text-sm font-medium">{installResult.bridge.name}</div><div className="mt-1 text-xs text-muted-foreground">{installResult.instructions}</div></div>
+              <div className="grid gap-3 sm:grid-cols-2"><Info label="One-time pairing code" value={installResult.pairingCode} /><Info label="Expires" value={formatTime(installResult.expiresAt)} /><Info label="Release" value={installResult.release.version} /><Info label="Portal" value={installResult.portalUrl} /></div>
+              <div className="rounded-md border border-amber-500/40 p-3 text-xs">Run the downloaded <strong>.cmd</strong> file on the intended Gate Bridge computer as Administrator before this pairing code expires. Generating another installer for this Bridge invalidates any earlier unused pairing code. Use the most recently downloaded installer before its pairing code expires.</div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setInstallDialogOpen(false)}>{installResult ? "Close" : "Cancel"}</Button>
+            {!installResult && <Button disabled={!installBridgeId || installMutation.isPending || releaseQuery.data?.ready === false} onClick={() => installMutation.mutate({ bridgeId: Number(installBridgeId), portalUrl: installPortalUrl })}><Download className="mr-2 h-4 w-4" />{installMutation.isPending ? "Preparing…" : "Prepare & Download Installer"}</Button>}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <BridgeDialog open={bridgeDialogOpen} onOpenChange={setBridgeDialogOpen} pending={bridgeMutation.isPending} onSubmit={(name) => bridgeMutation.mutate(name)} />
       <GateDialog open={gateDialogOpen || !!gateEditTarget} onOpenChange={(open) => { if (!open) { setGateDialogOpen(false); setGateEditTarget(null); } }} bridges={data.bridges} gate={gateEditTarget} pending={gateMutation.isPending} onSubmit={(body) => gateMutation.mutate({ id: gateEditTarget?.id, body })} />

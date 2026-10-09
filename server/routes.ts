@@ -18,6 +18,7 @@ import { registerRecruitmentRoutes } from "./recruitment-routes";
 import { registerLanguageToolsRoutes } from "./language-tools-routes";
 import { registerFleetRoutes } from "./fleet-routes";
 import { registerAccessControlRoutes } from "./access-control-routes";
+import { registerGateBridgeBuild2Routes } from "./gate-bridge-build2";
 import { registerAccessControlOperations, getSchoolDaySchedule, sendAttendanceTemplate, syncSchoolAccessPolicies, syncStudentPolicy } from "./access-control-operations";
 import { registerPortalRoutes } from "./portal-routes";
 import { describeParentIdentityMatch, existingUserForParentIdentity, getAccessibleSchoolIdsForParentUser, getChildrenForParentUser, getParentIdsForUser, linkParentIdentityToUser, normalizeParentPhone, parentUserCanAccessStudent } from "./parent-identity";
@@ -3581,6 +3582,7 @@ export async function registerRoutes(
   registerLanguageToolsRoutes(app);
   registerFleetRoutes(app);
   registerAccessControlRoutes(app);
+  registerGateBridgeBuild2Routes(app);
   registerAccessControlOperations(app);
   registerPortalRoutes(app);
   await ensureEcdSeedData();

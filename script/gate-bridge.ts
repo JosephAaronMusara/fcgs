@@ -1,14 +1,18 @@
 import { createHash } from "crypto";
-import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
+import { appendFile, mkdir, readFile, readdir, stat, unlink, writeFile } from "fs/promises";
 import path from "path";
 import os from "os";
 import http from "http";
-import sharp from "sharp";
 
-const BRIDGE_VERSION = "fcgs-gate-bridge/0.3.4";
+import { GATE_BRIDGE_RELEASE_VERSION } from "../shared/gate-bridge-release";
+
+const BRIDGE_VERSION = GATE_BRIDGE_RELEASE_VERSION;
 const DEFAULT_PRODUCTION_URL = "https://portal.firstchoicegroup.co.zw";
 const serverUrl = String(process.env.FCGS_GATE_BRIDGE_URL || DEFAULT_PRODUCTION_URL).replace(/\/$/, "");
 const bridgeToken = String(process.env.FCGS_GATE_BRIDGE_TOKEN || "").trim();
+const installationId = String(process.env.FCGS_GATE_BRIDGE_INSTALLATION_ID || "").trim();
+const machineName = String(process.env.FCGS_GATE_BRIDGE_MACHINE_NAME || os.hostname()).trim() || os.hostname();
+const serviceStartedAt = new Date().toISOString();
 const defaultUsername = String(process.env.FCGS_GATE_DEVICE_USERNAME || "admin").trim() || "admin";
 const defaultPassword = String(process.env.FCGS_GATE_DEVICE_PASSWORD || "");
 const defaultPasswordIsMd5 = /^(1|true|yes)$/i.test(String(process.env.FCGS_GATE_DEVICE_PASSWORD_IS_MD5 || ""));
@@ -23,6 +27,7 @@ const explicitCallbackUrl = String(process.env.FCGS_GATE_BRIDGE_CALLBACK_URL || 
 const recognitionQueueFile = String(process.env.FCGS_GATE_BRIDGE_RECOGNITION_QUEUE_FILE || path.join(logDir, "recognition-queue.json"));
 const deviceReadTimeoutMs = Math.max(6000, Number(process.env.FCGS_GATE_DEVICE_READ_TIMEOUT_MS || 10_000));
 const deviceWriteTimeoutMs = Math.max(deviceReadTimeoutMs, Number(process.env.FCGS_GATE_DEVICE_WRITE_TIMEOUT_MS || 45_000));
+const localLogRetentionDays = Math.max(7, Number(process.env.FCGS_GATE_BRIDGE_LOG_RETENTION_DAYS || 30));
 
 type LegacyDeviceConfig = {
   deviceKey: string;
@@ -146,72 +151,25 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const FACE_TARGET_MAX_BYTES = Math.max(80_000, Number(process.env.FCGS_GATE_FACE_TARGET_MAX_BYTES || 220_000));
-const FACE_MAX_WIDTH = Math.max(320, Number(process.env.FCGS_GATE_FACE_MAX_WIDTH || 720));
-const FACE_MAX_HEIGHT = Math.max(320, Number(process.env.FCGS_GATE_FACE_MAX_HEIGHT || 960));
+const FACE_TARGET_MAX_BYTES = Math.max(80_000, Number(process.env.FCGS_GATE_FACE_TARGET_MAX_BYTES || 300_000));
 
 function stripDataUrl(value: string) {
   return value.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "").replace(/\s+/g, "");
 }
 
-async function normalizeFacePhoto(base64Value: string, idno: string) {
-  const sourceBase64 = stripDataUrl(base64Value);
+function prepareFacePhoto(base64Value: string, idno: string) {
+  const base64 = stripDataUrl(base64Value);
   let source: Buffer;
   try {
-    source = Buffer.from(sourceBase64, "base64");
+    source = Buffer.from(base64, "base64");
   } catch {
     throw new Error(`FCGS profile photo for ${idno} is not valid Base64`);
   }
   if (!source.length) throw new Error(`FCGS profile photo for ${idno} is empty`);
-
-  let metadata: sharp.Metadata;
-  try {
-    metadata = await sharp(source, { failOn: "error" }).metadata();
-  } catch (error) {
-    throw new Error(`FCGS profile photo for ${idno} cannot be decoded: ${error instanceof Error ? error.message : String(error)}`);
+  if (source.length > FACE_TARGET_MAX_BYTES) {
+    throw new Error(`Prepared FCGS profile photo for ${idno} is ${source.length} bytes; portal normalization must keep it below ${FACE_TARGET_MAX_BYTES} bytes`);
   }
-
-  const attempts = [
-    { width: FACE_MAX_WIDTH, height: FACE_MAX_HEIGHT, quality: 84 },
-    { width: Math.min(FACE_MAX_WIDTH, 640), height: Math.min(FACE_MAX_HEIGHT, 854), quality: 80 },
-    { width: Math.min(FACE_MAX_WIDTH, 560), height: Math.min(FACE_MAX_HEIGHT, 746), quality: 76 },
-    { width: Math.min(FACE_MAX_WIDTH, 480), height: Math.min(FACE_MAX_HEIGHT, 640), quality: 72 },
-  ];
-
-  let output: Buffer | null = null;
-  let used = attempts[attempts.length - 1];
-  for (const attempt of attempts) {
-    used = attempt;
-    output = await sharp(source, { failOn: "error" })
-      .rotate()
-      .resize({ width: attempt.width, height: attempt.height, fit: "inside", withoutEnlargement: true })
-      .flatten({ background: { r: 255, g: 255, b: 255 } })
-      .toColorspace("srgb")
-      .jpeg({ quality: attempt.quality, chromaSubsampling: "4:2:0", progressive: false })
-      .toBuffer();
-    if (output.length <= FACE_TARGET_MAX_BYTES) break;
-  }
-
-  if (!output) throw new Error(`Could not normalize FCGS profile photo for ${idno}`);
-  if (output.length > FACE_TARGET_MAX_BYTES) {
-    // Final safety pass: preserve dimensions but reduce JPEG quality enough to
-    // protect the embedded terminal HTTP service from oversized JSON payloads.
-    output = await sharp(output)
-      .jpeg({ quality: 62, chromaSubsampling: "4:2:0", progressive: false })
-      .toBuffer();
-  }
-
-  const normalizedMeta = await sharp(output).metadata();
-  return {
-    base64: output.toString("base64"),
-    sourceBytes: source.length,
-    outputBytes: output.length,
-    sourceWidth: metadata.width || null,
-    sourceHeight: metadata.height || null,
-    outputWidth: normalizedMeta.width || null,
-    outputHeight: normalizedMeta.height || null,
-    quality: used.quality,
-  };
+  return { base64, outputBytes: source.length };
 }
 
 function normalizeIp(value: string | undefined | null) {
@@ -251,12 +209,33 @@ async function loadRecognitionQueue() {
   }
 }
 
+let lastLogPruneDay = "";
+
+async function pruneLocalLogs() {
+  const day = new Date().toISOString().slice(0, 10);
+  if (lastLogPruneDay === day) return;
+  lastLogPruneDay = day;
+  const cutoff = Date.now() - localLogRetentionDays * 24 * 60 * 60 * 1000;
+  try {
+    const names = await readdir(logDir);
+    for (const name of names) {
+      if (!/^gate-bridge-\d{4}-\d{2}-\d{2}\.log$/.test(name)) continue;
+      const filePath = path.join(logDir, name);
+      const info = await stat(filePath);
+      if (info.mtimeMs < cutoff) await unlink(filePath).catch(() => undefined);
+    }
+  } catch {
+    // Retention cleanup must never interrupt gate operation.
+  }
+}
+
 async function writeLocalLog(level: string, message: string, details?: Record<string, unknown>) {
   try {
     if (!localLogReady) {
       await mkdir(logDir, { recursive: true });
       localLogReady = true;
     }
+    await pruneLocalLogs();
     const day = new Date().toISOString().slice(0, 10);
     await appendFile(path.join(logDir, `gate-bridge-${day}.log`), `${JSON.stringify({ time: new Date().toISOString(), level, message, details: details || null })}\n`, "utf8");
   } catch {
@@ -396,6 +375,33 @@ async function openGate(config: DeviceConfig) {
   });
 }
 
+async function getPersonnelIdList(config: DeviceConfig) {
+  return runDeviceExclusive(config, async () => {
+    const token = await login(config);
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    let page = 1;
+    let faceCount = 0;
+    // Vendor HTTP V3.1: getPersonnelIDList uses one-based pages with max 100 IDs/page.
+    while (page <= 1000) {
+      const payload = await devicePost(config, "/getPersonnelIDList", { token, page }, Math.max(deviceReadTimeoutMs, 12_000));
+      if (Number(payload?.result) !== 0) throw new Error(payload?.message || "Personnel ID list query failed");
+      faceCount = Number(payload?.faceCount || faceCount || 0);
+      const data = normalizeDeviceData(payload?.data);
+      const pageIds = Array.isArray((data as any).idList) ? (data as any).idList.map((value: unknown) => String(value || "").trim()).filter(Boolean) : [];
+      for (const id of pageIds) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+      if (pageIds.length < 100 || (faceCount > 0 && ids.length >= faceCount)) break;
+      page += 1;
+    }
+    return { idList: ids, faceCount: faceCount || ids.length, pagesRead: page };
+  });
+}
+
 async function deleteIdentity(config: DeviceConfig, idno: string) {
   return runDeviceExclusive(config, async () => {
     const token = await login(config);
@@ -435,7 +441,7 @@ async function syncIdentity(config: DeviceConfig, payloadData: Record<string, an
   // however, is an embedded device with a small HTTP service and can reset its
   // API process when multi-megabyte Base64 JSON bodies are posted. Normalize
   // only the copy sent to the terminal.
-  const facePhoto = await normalizeFacePhoto(picData1, idno);
+  const facePhoto = prepareFacePhoto(picData1, idno);
 
   return runDeviceExclusive(config, async () => {
     const token = await login(config);
@@ -484,14 +490,14 @@ async function syncIdentity(config: DeviceConfig, payloadData: Record<string, an
       picData1: facePhoto.base64,
     };
 
-    logInfo(`prepared face for ${idno}: ${facePhoto.sourceBytes} bytes ${facePhoto.sourceWidth || "?"}x${facePhoto.sourceHeight || "?"} -> ${facePhoto.outputBytes} bytes ${facePhoto.outputWidth || "?"}x${facePhoto.outputHeight || "?"} JPEG`);
+    logInfo(`prepared face for ${idno}: ${facePhoto.outputBytes} normalized JPEG bytes`);
     logInfo(`uploading face for ${idno} to ${config.name} (${facePhoto.outputBytes} image bytes; ${Buffer.byteLength(JSON.stringify({ token, data }), "utf8")} request bytes)`);
 
     // Face-image validation/feature extraction is substantially slower than the
     // terminal's normal status/open-gate APIs, so it needs a separate timeout.
     const result = await devicePost(config, "/addDeviceWhiteList", { token, data }, deviceWriteTimeoutMs);
     if (Number(result?.result) !== 0) throw new Error(result?.message || `Identity enrollment failed for ${idno}`);
-    return { idno, usertype: data.usertype, TimeGroupId: data.TimeGroupId, result: Number(result?.result), photoBytes: facePhoto.outputBytes, sourcePhotoBytes: facePhoto.sourceBytes };
+    return { idno, usertype: data.usertype, TimeGroupId: data.TimeGroupId, result: Number(result?.result), photoBytes: facePhoto.outputBytes };
   });
 }
 
@@ -695,7 +701,7 @@ async function sendHeartbeat() {
   try {
     await portalRequest("/api/gate-bridge/heartbeat", {
       method: "POST",
-      body: JSON.stringify({ softwareVersion: BRIDGE_VERSION, configRevision: currentConfigRevision, devices: Array.from(health.values()) }),
+      body: JSON.stringify({ softwareVersion: BRIDGE_VERSION, installationId: installationId || null, machineName, serviceStartedAt, configRevision: currentConfigRevision, devices: Array.from(health.values()) }),
     });
     if (portalConnectionState === "offline") {
       queueEvent("bridge.portal_connection_restored", "warning", "Connection from the Gate Bridge to FCGS was restored.");
@@ -749,6 +755,13 @@ async function executeCommand(command: any) {
       health.set(key, { deviceKey: key, status: "online", versionInfo, error: null });
       await completeCommand(Number(command.id), true, versionInfo);
       logInfo(`connection test passed for ${config.gateName ? `${config.gateName} · ` : ""}${config.name}`);
+      return;
+    }
+    if (command.commandType === "get_personnel_id_list") {
+      const result = await getPersonnelIdList(config);
+      health.set(key, { ...health.get(key), deviceKey: key, status: "online", error: null });
+      await completeCommand(Number(command.id), true, result);
+      logInfo(`read ${result.idList.length} personnel ID(s) from ${config.gateName ? `${config.gateName} · ` : ""}${config.name}`);
       return;
     }
     if (command.commandType === "sync_identity") {
@@ -819,8 +832,8 @@ async function main() {
   logInfo(`legacy credential/device overrides: ${legacyDeviceConfigs.length}`);
   logInfo(`terminal HTTP timeouts: read ${deviceReadTimeoutMs}ms, face/write ${deviceWriteTimeoutMs}ms`);
   logInfo("identity sync mode: query-before-replace; fresh HTTP connection per terminal request");
-  logInfo(`face normalization: JPEG <= ${FACE_MAX_WIDTH}x${FACE_MAX_HEIGHT}, target <= ${FACE_TARGET_MAX_BYTES} bytes`);
-  queueEvent("bridge.service_started", "info", `${BRIDGE_VERSION} started.`, null, { portal: serverUrl, legacyOverrides: legacyDeviceConfigs.length });
+  logInfo(`face payload mode: portal-normalized JPEG, maximum ${FACE_TARGET_MAX_BYTES} bytes`);
+  queueEvent("bridge.service_started", "info", `${BRIDGE_VERSION} started.`, null, { portal: serverUrl, installationId: installationId || null, machineName, legacyOverrides: legacyDeviceConfigs.length });
   await loadRecognitionQueue();
   const recognitionServer = startRecognitionServer();
 
