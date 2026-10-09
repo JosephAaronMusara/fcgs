@@ -6,6 +6,7 @@ import { db } from "./db";
 import { requirePermission } from "./auth";
 import {
   accessGates,
+  accessIdentities,
   activityLogs,
   gateBridges,
   gateCommands,
@@ -88,6 +89,9 @@ const manualOpenSchema = z.object({
 
 const heartbeatSchema = z.object({
   softwareVersion: z.string().trim().max(100).optional().nullable(),
+  installationId: z.string().uuid().optional().nullable(),
+  machineName: z.string().trim().max(120).optional().nullable(),
+  serviceStartedAt: z.string().datetime().optional().nullable(),
   configRevision: z.coerce.number().int().nonnegative().optional().nullable(),
   error: z.string().trim().max(1000).optional().nullable(),
   devices: z.array(z.object({
@@ -121,6 +125,11 @@ function hashBridgeToken(token: string) {
 
 function createBridgeToken() {
   return `fcgs_gb_${randomBytes(32).toString("base64url")}`;
+}
+
+function identityRetryDelayMs(retryCount: number) {
+  const schedule = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+  return schedule[Math.min(Math.max(0, retryCount - 1), schedule.length - 1)];
 }
 
 function isRecent(value: Date | string | null | undefined, windowMs = ONLINE_WINDOW_MS) {
@@ -333,6 +342,7 @@ export function registerAccessControlRoutes(app: Express) {
     try {
       const scope = await portalScope(req);
       const staleProcessingBefore = new Date(Date.now() - 2 * 60_000);
+      const staleInventoryBefore = new Date(Date.now() - 20 * 60_000);
       await db.update(gateCommands).set({
         status: "failed",
         errorMessage: "Gate Bridge did not complete the command before the processing timeout.",
@@ -340,7 +350,18 @@ export function registerAccessControlRoutes(app: Express) {
       }).where(and(
         eq(gateCommands.schoolId, scope.schoolId),
         eq(gateCommands.status, "processing"),
+        sql`${gateCommands.commandType} <> 'get_personnel_id_list'`,
         lt(gateCommands.claimedAt, staleProcessingBefore),
+      ));
+      await db.update(gateCommands).set({
+        status: "failed",
+        errorMessage: "Gate Bridge did not complete the terminal enrollment inventory before the extended processing timeout.",
+        completedAt: new Date(),
+      }).where(and(
+        eq(gateCommands.schoolId, scope.schoolId),
+        eq(gateCommands.status, "processing"),
+        eq(gateCommands.commandType, "get_personnel_id_list"),
+        lt(gateCommands.claimedAt, staleInventoryBefore),
       ));
       await db.update(gateCommands).set({ status: "expired", completedAt: new Date() }).where(and(
         eq(gateCommands.schoolId, scope.schoolId),
@@ -755,6 +776,9 @@ export function registerAccessControlRoutes(app: Express) {
         lastHeartbeatAt: now,
         lastIpAddress: clientIp(req),
         softwareVersion: input.softwareVersion || bridge.softwareVersion,
+        installationId: input.installationId || bridge.installationId,
+        machineName: input.machineName || bridge.machineName,
+        lastServiceStartedAt: input.serviceStartedAt ? new Date(input.serviceStartedAt) : bridge.lastServiceStartedAt,
         lastError: input.error || null,
         lastSyncedRevision: reportedRevision,
         lastConfigSyncAt: revisionSynchronized ? now : bridge.lastConfigSyncAt,
@@ -944,9 +968,15 @@ export function registerAccessControlRoutes(app: Express) {
         if (identityId) {
           const [sync] = await db.select().from(gateIdentitySync).where(and(eq(gateIdentitySync.identityId, identityId), eq(gateIdentitySync.deviceId, command.deviceId))).limit(1);
           if (sync?.lastCommandId === command.id) {
+            const [identity] = await db.select({ photoPath: accessIdentities.photoPath }).from(accessIdentities).where(eq(accessIdentities.id, identityId)).limit(1);
+            const retryCount = input.success ? 0 : (sync.retryCount || 0) + 1;
             await db.update(gateIdentitySync).set({
-              syncStatus: input.success ? (command.commandType === "delete_identity" ? "deleted" : "synced") : "failed",
+              syncStatus: input.success ? (command.commandType === "delete_identity" ? "deleted" : "synced") : "retry_pending",
               lastSyncedAt: input.success ? now : sync.lastSyncedAt,
+              lastAttemptAt: now,
+              retryCount,
+              nextRetryAt: input.success ? null : new Date(now.getTime() + identityRetryDelayMs(retryCount)),
+              lastSyncedPhotoPath: input.success && command.commandType === "sync_identity" ? identity?.photoPath || null : command.commandType === "delete_identity" && input.success ? null : sync.lastSyncedPhotoPath,
               lastError: input.success ? null : input.error || "Identity synchronization failed",
               updatedAt: now,
             }).where(eq(gateIdentitySync.id, sync.id));

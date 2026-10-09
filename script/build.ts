@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile } from "fs/promises";
+import { rm, readFile, mkdir } from "fs/promises";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -56,6 +56,18 @@ async function buildAll() {
     },
     minify: true,
     external: externals,
+    logLevel: "info",
+  });
+
+  console.log("building Windows Gate Bridge runtime...");
+  await mkdir("gate-bridge-windows/assets", { recursive: true });
+  await esbuild({
+    entryPoints: ["script/gate-bridge.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outfile: "gate-bridge-windows/assets/gate-bridge.cjs",
+    minify: true,
     logLevel: "info",
   });
 }

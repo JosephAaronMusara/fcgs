@@ -2,7 +2,8 @@ import type { Express, Request, Response } from "express";
 import { createHash } from "crypto";
 import path from "path";
 import fs from "fs/promises";
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import sharp from "sharp";
+import { and, asc, desc, eq, gte, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
 import { requireAuth, requirePermission } from "./auth";
@@ -22,6 +23,7 @@ import {
   gateCommands,
   gateDevices,
   gateIdentitySync,
+  gateSyncJobs,
   schools,
   schoolDayOverrides,
   schoolDaySchedules,
@@ -39,6 +41,11 @@ import {
 const TZ = "Africa/Harare";
 const FINANCIAL_STALE_MS = 36 * 60 * 60 * 1000;
 const IDENTITY_COMMAND_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const IDENTITY_RECONCILE_INTERVAL_MS = 30 * 60 * 1000;
+const GATE_SYNC_JOB_CHUNK = 20;
+const FACE_TARGET_MAX_BYTES = 220_000;
+const FACE_MAX_WIDTH = 720;
+const FACE_MAX_HEIGHT = 960;
 const EXIT_TIME_GROUP_ID = 90;
 const STANDARD_4_LANE = ["entry_lane_1", "entry_lane_2", "exit_lane_1", "exit_lane_2"] as const;
 const MESSAGE_TEMPLATE_PLACEHOLDERS = ["student_name","admission_no","date","class_name","reason","reason_upper","attendance_status","attendance_status_upper","school_name","school_phone","school_call_centre_phone","school_whatsapp","class_teacher_name","class_teacher_phone","class_teacher_email","contact_line","arrival_time","admission_time","reconciliation_time","absence_detail"] as const;
@@ -291,7 +298,34 @@ async function readPhotoAsBase64(photoPath: string | null) {
   const relative = photoPath.replace(/^\/objects\//, "");
   const absolute = path.resolve(objectRoot, relative);
   if (!absolute.startsWith(`${objectRoot}${path.sep}`)) return null;
-  try { return (await fs.readFile(absolute)).toString("base64"); } catch { return null; }
+  try {
+    const source = await fs.readFile(absolute);
+    if (!source.length) return null;
+    const attempts = [
+      { width: FACE_MAX_WIDTH, height: FACE_MAX_HEIGHT, quality: 84 },
+      { width: 640, height: 854, quality: 80 },
+      { width: 560, height: 746, quality: 76 },
+      { width: 480, height: 640, quality: 72 },
+    ];
+    let output: Buffer | null = null;
+    for (const attempt of attempts) {
+      output = await sharp(source, { failOn: "error" })
+        .rotate()
+        .resize({ width: attempt.width, height: attempt.height, fit: "inside", withoutEnlargement: true })
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .toColorspace("srgb")
+        .jpeg({ quality: attempt.quality, chromaSubsampling: "4:2:0", progressive: false })
+        .toBuffer();
+      if (output.length <= FACE_TARGET_MAX_BYTES) break;
+    }
+    if (!output) return null;
+    if (output.length > FACE_TARGET_MAX_BYTES) {
+      output = await sharp(output).jpeg({ quality: 62, chromaSubsampling: "4:2:0", progressive: false }).toBuffer();
+    }
+    return output.toString("base64");
+  } catch {
+    return null;
+  }
 }
 
 async function currentEarlyRelease(studentId: number, now = new Date()) {
@@ -354,12 +388,17 @@ async function desiredIdentityForDevice(identity: typeof accessIdentities.$infer
   return { enabled, usertype, timeGroupId, photoBase64 };
 }
 
-export async function queueIdentitySync(identityId: number, requestedByUserId?: number | null, reason = "Synchronize access identity") {
+export async function queueIdentitySync(identityId: number, requestedByUserId?: number | null, reason = "Synchronize access identity", onlyDeviceIds?: number[]) {
   const [identity] = await db.select().from(accessIdentities).where(eq(accessIdentities.id, identityId)).limit(1);
   if (!identity) throw new Error("Access identity not found");
   const [school] = await db.select({ enableAccessControl: schools.enableAccessControl }).from(schools).where(eq(schools.id, identity.schoolId)).limit(1);
-  const devices = await db.select().from(gateDevices).where(and(eq(gateDevices.schoolId, identity.schoolId), eq(gateDevices.isActive, true)));
-  const photoBase64 = await readPhotoAsBase64(identity.photoPath);
+  let devices = await db.select().from(gateDevices).where(and(eq(gateDevices.schoolId, identity.schoolId), eq(gateDevices.isActive, true)));
+  if (onlyDeviceIds?.length) {
+    const allowed = new Set(onlyDeviceIds);
+    devices = devices.filter((device) => allowed.has(device.id));
+  }
+  const photoBase64 = identity.isActive ? await readPhotoAsBase64(identity.photoPath) : null;
+  if (identity.isActive && identity.photoPath && !photoBase64) throw new Error(`Could not prepare the FCGS profile photo for ${identity.displayName}`);
   const commands = [];
   for (const device of devices) {
     const desired = await desiredIdentityForDevice(identity, device, photoBase64);
@@ -392,6 +431,9 @@ export async function queueIdentitySync(identityId: number, requestedByUserId?: 
       terminalReportedIdentityNo: null,
       syncStatus: "pending",
       lastCommandId: command.id,
+      lastAttemptAt: new Date(),
+      retryCount: existingSync?.retryCount || 0,
+      nextRetryAt: null,
       lastError: null,
       updatedAt: new Date(),
     };
@@ -400,6 +442,337 @@ export async function queueIdentitySync(identityId: number, requestedByUserId?: 
     commands.push(command);
   }
   return commands;
+}
+
+
+async function gateSyncJobTotal(schoolId: number, personType: "student" | "staff" | "all") {
+  const [studentRows, staffRows] = await Promise.all([
+    personType === "staff" ? Promise.resolve([]) : db.select({ id: students.id }).from(students).where(eq(students.schoolId, schoolId)),
+    personType === "student" ? Promise.resolve([]) : db.select({ id: staff.id }).from(staff).where(eq(staff.schoolId, schoolId)),
+  ]);
+  return studentRows.length + staffRows.length;
+}
+
+async function finishGateSyncJob(jobId: number, status: "completed" | "failed", errorMessage?: string | null) {
+  await db.update(gateSyncJobs).set({
+    status,
+    errorMessage: errorMessage || null,
+    completedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(gateSyncJobs.id, jobId));
+}
+
+async function processBulkEnrollJob(job: typeof gateSyncJobs.$inferSelect) {
+  const personType = (job.personType || "all") as "student" | "staff" | "all";
+  let phase = (job.phase || (personType === "staff" ? "staff" : "student")) as "student" | "staff";
+  let cursorId = job.cursorId || 0;
+  let processed = job.processedItems || 0;
+  let succeeded = job.succeededItems || 0;
+  let skipped = job.skippedItems || 0;
+  let failed = job.failedItems || 0;
+
+  const processStudentChunk = async () => {
+    const rows = await db.select().from(students).where(and(eq(students.schoolId, job.schoolId), gt(students.id, cursorId))).orderBy(asc(students.id)).limit(GATE_SYNC_JOB_CHUNK);
+    for (const student of rows) {
+      cursorId = student.id;
+      processed += 1;
+      try {
+        if (student.status !== "active" || student.archivedAt || !student.photo) { skipped += 1; continue; }
+        const [existing] = await db.select().from(accessIdentities).where(eq(accessIdentities.studentId, student.id)).limit(1);
+        if (existing?.enrollmentRemovedAt) { skipped += 1; continue; }
+        const identity = await ensureIdentityForStudent(student, job.organizationId);
+        if (!identity.isActive || !identity.photoPath) { skipped += 1; continue; }
+        await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk student enrollment job #${job.id}`);
+        succeeded += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return rows.length;
+  };
+
+  const processStaffChunk = async () => {
+    const rows = await db.select().from(staff).where(and(eq(staff.schoolId, job.schoolId), gt(staff.id, cursorId))).orderBy(asc(staff.id)).limit(GATE_SYNC_JOB_CHUNK);
+    for (const person of rows) {
+      cursorId = person.id;
+      processed += 1;
+      try {
+        if (person.status !== "active" || !person.photo) { skipped += 1; continue; }
+        const [existing] = await db.select().from(accessIdentities).where(eq(accessIdentities.staffId, person.id)).limit(1);
+        if (existing?.enrollmentRemovedAt) { skipped += 1; continue; }
+        const identity = await ensureIdentityForStaff(person, job.organizationId);
+        if (!identity.isActive || !identity.photoPath) { skipped += 1; continue; }
+        await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk staff enrollment job #${job.id}`);
+        succeeded += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return rows.length;
+  };
+
+  let count = phase === "student" ? await processStudentChunk() : await processStaffChunk();
+  if (count < GATE_SYNC_JOB_CHUNK) {
+    if (personType === "all" && phase === "student") {
+      phase = "staff";
+      cursorId = 0;
+    } else {
+      await db.update(gateSyncJobs).set({ processedItems: processed, succeededItems: succeeded, skippedItems: skipped, failedItems: failed, cursorId, phase, updatedAt: new Date() }).where(eq(gateSyncJobs.id, job.id));
+      await finishGateSyncJob(job.id, "completed");
+      return;
+    }
+  }
+
+  await db.update(gateSyncJobs).set({
+    status: "running",
+    startedAt: job.startedAt || new Date(),
+    phase,
+    cursorId,
+    processedItems: processed,
+    succeededItems: succeeded,
+    skippedItems: skipped,
+    failedItems: failed,
+    updatedAt: new Date(),
+  }).where(eq(gateSyncJobs.id, job.id));
+}
+
+async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
+  const devices = await db.select().from(gateDevices).where(and(eq(gateDevices.schoolId, job.schoolId), eq(gateDevices.isActive, true)));
+  const phase = String(job.phase || "inventory");
+
+  // Production reconciliation begins by asking each real terminal which personnel IDs it
+  // actually contains. The vendor HTTP V3.1 getPersonnelIDList endpoint is executed by
+  // the Gate Bridge on the LAN, so FCGS does not pretend that a historic "synced" flag
+  // proves terminal state after outages/replacements.
+  const inventoryCommands = await db.select().from(gateCommands).where(and(
+    eq(gateCommands.schoolId, job.schoolId),
+    eq(gateCommands.commandType, "get_personnel_id_list"),
+    sql`${gateCommands.payload}->>'syncJobId' = ${String(job.id)}`,
+  )).orderBy(asc(gateCommands.id));
+
+  if (phase === "inventory") {
+    if (!inventoryCommands.length && devices.length) {
+      for (const device of devices) {
+        await queueCommand(
+          device,
+          "get_personnel_id_list",
+          { syncJobId: job.id },
+          `Terminal enrollment inventory for reconciliation job #${job.id}`,
+          job.requestedByUserId,
+          15 * 60_000,
+        );
+      }
+      await db.update(gateSyncJobs).set({
+        status: "running",
+        startedAt: job.startedAt || new Date(),
+        phase: "inventory",
+        updatedAt: new Date(),
+      }).where(eq(gateSyncJobs.id, job.id));
+      return;
+    }
+
+    const unfinished = inventoryCommands.filter((command) => ["pending", "processing"].includes(command.status));
+    if (unfinished.length) {
+      await db.update(gateSyncJobs).set({
+        status: "running",
+        startedAt: job.startedAt || new Date(),
+        updatedAt: new Date(),
+      }).where(eq(gateSyncJobs.id, job.id));
+      return;
+    }
+
+    const failedInventory = inventoryCommands.filter((command) => command.status !== "succeeded");
+    const existingDetails = (job.details && typeof job.details === "object" ? job.details : {}) as Record<string, unknown>;
+    await db.update(gateSyncJobs).set({
+      status: "running",
+      startedAt: job.startedAt || new Date(),
+      phase: "identities",
+      cursorId: 0,
+      failedItems: (job.failedItems || 0) + failedInventory.length,
+      details: {
+        ...existingDetails,
+        inventoryTerminals: devices.length,
+        inventorySucceeded: inventoryCommands.filter((command) => command.status === "succeeded").length,
+        inventoryFailed: failedInventory.map((command) => ({ deviceId: command.deviceId, error: command.errorMessage || command.status })),
+      },
+      updatedAt: new Date(),
+    }).where(eq(gateSyncJobs.id, job.id));
+    return;
+  }
+
+  const actualIdsByDevice = new Map<number, Set<string>>();
+  for (const command of inventoryCommands.filter((row) => row.status === "succeeded")) {
+    const result = command.result && typeof command.result === "object" ? command.result as Record<string, unknown> : {};
+    const ids = Array.isArray(result.idList) ? result.idList.map((value) => String(value || "").trim()).filter(Boolean) : [];
+    actualIdsByDevice.set(command.deviceId, new Set(ids));
+  }
+
+  const rows = await db.select().from(accessIdentities).where(and(eq(accessIdentities.schoolId, job.schoolId), gt(accessIdentities.id, job.cursorId || 0))).orderBy(asc(accessIdentities.id)).limit(GATE_SYNC_JOB_CHUNK);
+  let processed = job.processedItems || 0;
+  let succeeded = job.succeededItems || 0;
+  let skipped = job.skippedItems || 0;
+  let failed = job.failedItems || 0;
+  let cursorId = job.cursorId || 0;
+
+  for (const identity of rows) {
+    cursorId = identity.id;
+    processed += 1;
+    try {
+      const previous = identity;
+      let refreshed = identity;
+      if (identity.personType === "student" && identity.studentId) {
+        const [student] = await db.select().from(students).where(eq(students.id, identity.studentId)).limit(1);
+        if (!student) { skipped += 1; continue; }
+        refreshed = await ensureIdentityForStudent(student, identity.organizationId);
+      } else if (identity.personType === "staff" && identity.staffId) {
+        const [person] = await db.select().from(staff).where(eq(staff.id, identity.staffId)).limit(1);
+        if (!person) { skipped += 1; continue; }
+        refreshed = await ensureIdentityForStaff(person, identity.organizationId);
+      }
+
+      const syncRows = await db.select().from(gateIdentitySync).where(eq(gateIdentitySync.identityId, refreshed.id));
+      const syncByDevice = new Map(syncRows.map((row) => [row.deviceId, row]));
+      const desiredDeviceIds: number[] = [];
+      for (const device of devices) {
+        const sync = syncByDevice.get(device.id);
+        const actualIds = actualIdsByDevice.get(device.id);
+        const terminalPresenceKnown = !!actualIds;
+        const terminalHasIdentity = actualIds?.has(refreshed.identityNo) === true;
+
+        if (!refreshed.isActive) {
+          // Delete only FCGS-known inactive/removed identities. Unknown terminal IDs are
+          // reported as drift below but never automatically deleted.
+          if ((terminalPresenceKnown && terminalHasIdentity) || (!terminalPresenceKnown && sync && (sync.desiredEnabled || sync.syncStatus !== "deleted"))) {
+            desiredDeviceIds.push(device.id);
+          }
+          continue;
+        }
+        if (!refreshed.photoPath) continue;
+
+        const missingOnTerminal = terminalPresenceKnown && !terminalHasIdentity;
+        const photoChanged = !!sync && sync.lastSyncedPhotoPath !== refreshed.photoPath;
+        const stateChanged = previous.isActive !== refreshed.isActive || previous.desiredEntryAccess !== refreshed.desiredEntryAccess || previous.manualRestrictionActive !== refreshed.manualRestrictionActive;
+        if (!sync || missingOnTerminal || photoChanged || stateChanged || ["failed", "retry_pending"].includes(sync.syncStatus)) {
+          desiredDeviceIds.push(device.id);
+        }
+      }
+      if (desiredDeviceIds.length) {
+        await queueIdentitySync(refreshed.id, job.requestedByUserId, `Enrollment reconciliation job #${job.id}`, desiredDeviceIds);
+        succeeded += 1;
+      } else {
+        skipped += 1;
+      }
+    } catch {
+      failed += 1;
+    }
+  }
+
+  await db.update(gateSyncJobs).set({
+    status: "running",
+    startedAt: job.startedAt || new Date(),
+    phase: "identities",
+    cursorId,
+    processedItems: processed,
+    succeededItems: succeeded,
+    skippedItems: skipped,
+    failedItems: failed,
+    updatedAt: new Date(),
+  }).where(eq(gateSyncJobs.id, job.id));
+
+  if (rows.length < GATE_SYNC_JOB_CHUNK) {
+    const allIdentities = await db.select({ identityNo: accessIdentities.identityNo }).from(accessIdentities).where(eq(accessIdentities.schoolId, job.schoolId));
+    const knownIds = new Set(allIdentities.map((row) => row.identityNo));
+    const unknownByDevice = Array.from(actualIdsByDevice.entries()).map(([deviceId, actualIds]) => ({
+      deviceId,
+      ids: Array.from(actualIds).filter((id) => !knownIds.has(id)).slice(0, 100),
+      count: Array.from(actualIds).filter((id) => !knownIds.has(id)).length,
+    })).filter((row) => row.count > 0);
+
+    const [latestJob] = await db.select().from(gateSyncJobs).where(eq(gateSyncJobs.id, job.id)).limit(1);
+    const details = (latestJob?.details && typeof latestJob.details === "object" ? latestJob.details : {}) as Record<string, unknown>;
+    if (unknownByDevice.length) {
+      await db.update(gateSyncJobs).set({ details: { ...details, unknownTerminalIdentities: unknownByDevice }, updatedAt: new Date() }).where(eq(gateSyncJobs.id, job.id));
+    }
+    await finishGateSyncJob(job.id, "completed");
+    await db.update(gateBridges).set({ lastIdentityReconcileAt: new Date(), updatedAt: new Date() }).where(eq(gateBridges.schoolId, job.schoolId));
+  }
+}
+
+async function processGateSyncJobs() {
+  const jobs = await db.select().from(gateSyncJobs).where(inArray(gateSyncJobs.status, ["pending", "running"])).orderBy(asc(gateSyncJobs.createdAt)).limit(3);
+  for (const job of jobs) {
+    try {
+      if (job.jobType === "bulk_enroll") await processBulkEnrollJob(job);
+      else if (job.jobType === "reconcile") await processReconcileJob(job);
+      else await finishGateSyncJob(job.id, "failed", `Unsupported Gate synchronization job type: ${job.jobType}`);
+    } catch (error) {
+      await finishGateSyncJob(job.id, "failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+function retryDelayMs(retryCount: number) {
+  const schedule = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+  return schedule[Math.min(Math.max(0, retryCount - 1), schedule.length - 1)];
+}
+
+async function processIdentityRetryQueue(now: Date) {
+  const staleProcessingBefore = new Date(now.getTime() - 2 * 60_000);
+  await db.update(gateCommands).set({ status: "failed", completedAt: now, errorMessage: "Gate Bridge restarted or did not finish the identity command; queued for retry." }).where(and(
+    eq(gateCommands.status, "processing"),
+    inArray(gateCommands.commandType, ["sync_identity", "delete_identity"]),
+    lt(gateCommands.claimedAt, staleProcessingBefore),
+  ));
+
+  const pending = await db.select().from(gateIdentitySync).where(eq(gateIdentitySync.syncStatus, "pending")).limit(200);
+  const commandIds = pending.map((row) => row.lastCommandId).filter((id): id is number => !!id);
+  if (commandIds.length) {
+    const commands = await db.select({ id: gateCommands.id, status: gateCommands.status }).from(gateCommands).where(inArray(gateCommands.id, commandIds));
+    const statusById = new Map(commands.map((row) => [row.id, row.status]));
+    for (const sync of pending) {
+      const status = sync.lastCommandId ? statusById.get(sync.lastCommandId) : null;
+      if (status && ["failed", "expired"].includes(status)) {
+        const retries = (sync.retryCount || 0) + 1;
+        await db.update(gateIdentitySync).set({
+          syncStatus: "retry_pending",
+          retryCount: retries,
+          nextRetryAt: new Date(now.getTime() + retryDelayMs(retries)),
+          lastError: status === "expired" ? "Synchronization command expired before completion" : sync.lastError,
+          updatedAt: now,
+        }).where(eq(gateIdentitySync.id, sync.id));
+      }
+    }
+  }
+
+  const due = await db.select().from(gateIdentitySync).where(and(eq(gateIdentitySync.syncStatus, "retry_pending"), lte(gateIdentitySync.nextRetryAt, now))).limit(50);
+  for (const sync of due) {
+    try {
+      await queueIdentitySync(sync.identityId, null, `Automatic Gate synchronization retry #${(sync.retryCount || 0) + 1}`, [sync.deviceId]);
+    } catch (error) {
+      const retries = (sync.retryCount || 0) + 1;
+      await db.update(gateIdentitySync).set({
+        retryCount: retries,
+        nextRetryAt: new Date(now.getTime() + retryDelayMs(retries)),
+        lastError: error instanceof Error ? error.message : String(error),
+        updatedAt: now,
+      }).where(eq(gateIdentitySync.id, sync.id));
+    }
+  }
+}
+
+async function ensureAutomaticReconciliationJobs(now: Date) {
+  const bridges = await db.select().from(gateBridges).where(eq(gateBridges.isActive, true));
+  const schoolIds = Array.from(new Set(bridges.map((row) => row.schoolId)));
+  for (const schoolId of schoolIds) {
+    const schoolBridges = bridges.filter((row) => row.schoolId === schoolId);
+    const last = schoolBridges.map((row) => row.lastIdentityReconcileAt ? new Date(row.lastIdentityReconcileAt).getTime() : 0).sort((a, b) => b - a)[0] || 0;
+    if (last && now.getTime() - last < IDENTITY_RECONCILE_INTERVAL_MS) continue;
+    const active = await db.select({ id: gateSyncJobs.id }).from(gateSyncJobs).where(and(eq(gateSyncJobs.schoolId, schoolId), eq(gateSyncJobs.jobType, "reconcile"), inArray(gateSyncJobs.status, ["pending", "running"]))).limit(1);
+    if (active.length) continue;
+    const [bridge] = schoolBridges;
+    const totalItems = (await db.select({ id: accessIdentities.id }).from(accessIdentities).where(eq(accessIdentities.schoolId, schoolId))).length;
+    await db.insert(gateSyncJobs).values({ organizationId: bridge.organizationId, schoolId, jobType: "reconcile", personType: "all", totalItems, status: "pending", details: { automatic: true } });
+  }
 }
 
 export async function syncStudentPolicy(studentId: number, requestedByUserId?: number | null, reason = "Student access policy changed") {
@@ -975,6 +1348,63 @@ export function registerAccessControlOperations(app: Express) {
     } catch (error) { fail(res, error); }
   });
 
+
+  app.get("/api/access-control/sync-jobs", requireAuth, requirePermission("access_control.view"), async (req, res) => {
+    try {
+      const scope = await scopeOf(req);
+      const jobs = await db.select().from(gateSyncJobs).where(eq(gateSyncJobs.schoolId, scope.schoolId)).orderBy(desc(gateSyncJobs.createdAt)).limit(25);
+      res.json({ jobs });
+    } catch (error) { fail(res, error); }
+  });
+
+  app.post("/api/access-control/sync-jobs/bulk-enroll", requireAuth, requirePermission("access_control.identities.manage"), async (req, res) => {
+    try {
+      const scope = await scopeOf(req);
+      const input = z.object({ personType: z.enum(["student", "staff", "all"]).default("all") }).parse(req.body || {});
+      const existing = await db.select().from(gateSyncJobs).where(and(
+        eq(gateSyncJobs.schoolId, scope.schoolId),
+        eq(gateSyncJobs.jobType, "bulk_enroll"),
+        inArray(gateSyncJobs.status, ["pending", "running"]),
+      )).orderBy(desc(gateSyncJobs.createdAt)).limit(1);
+      if (existing.length) return res.status(409).json({ message: "A bulk Gate enrollment job is already running for this school", job: existing[0] });
+      const totalItems = await gateSyncJobTotal(scope.schoolId, input.personType);
+      const [job] = await db.insert(gateSyncJobs).values({
+        organizationId: scope.organizationId,
+        schoolId: scope.schoolId,
+        jobType: "bulk_enroll",
+        personType: input.personType,
+        phase: input.personType === "staff" ? "staff" : "student",
+        totalItems,
+        requestedByUserId: scope.userId,
+        details: { note: "Manually removed enrollments are preserved and skipped." },
+      }).returning();
+      res.status(202).json({ job });
+    } catch (error) { fail(res, error); }
+  });
+
+  app.post("/api/access-control/sync-jobs/reconcile", requireAuth, requirePermission("access_control.identities.manage"), async (req, res) => {
+    try {
+      const scope = await scopeOf(req);
+      const existing = await db.select().from(gateSyncJobs).where(and(
+        eq(gateSyncJobs.schoolId, scope.schoolId),
+        eq(gateSyncJobs.jobType, "reconcile"),
+        inArray(gateSyncJobs.status, ["pending", "running"]),
+      )).orderBy(desc(gateSyncJobs.createdAt)).limit(1);
+      if (existing.length) return res.status(409).json({ message: "An enrollment reconciliation job is already running for this school", job: existing[0] });
+      const totalItems = (await db.select({ id: accessIdentities.id }).from(accessIdentities).where(eq(accessIdentities.schoolId, scope.schoolId))).length;
+      const [job] = await db.insert(gateSyncJobs).values({
+        organizationId: scope.organizationId,
+        schoolId: scope.schoolId,
+        jobType: "reconcile",
+        personType: "all",
+        totalItems,
+        requestedByUserId: scope.userId,
+        details: { automatic: false },
+      }).returning();
+      res.status(202).json({ job });
+    } catch (error) { fail(res, error); }
+  });
+
   app.post("/api/access-control/identities/enroll", requireAuth, requirePermission("access_control.identities.manage"), async (req, res) => {
     try {
       const scope = await scopeOf(req);
@@ -1268,6 +1698,10 @@ export function registerAccessControlOperations(app: Express) {
 
 export async function runAccessControlSchedulers() {
   const now = new Date();
+  // Build 2 production operations: durable retries and incremental enrollment reconciliation.
+  await processIdentityRetryQueue(now).catch((error) => console.error("Gate identity retry scheduler error:", error));
+  await ensureAutomaticReconciliationJobs(now).catch((error) => console.error("Gate reconciliation scheduler error:", error));
+  await processGateSyncJobs().catch((error) => console.error("Gate synchronization job error:", error));
   // Scheduler fix #1: activate future overrides and expire active/scheduled ones without portal interaction.
   const scheduledOverrides = await db.select().from(financialAccessOverrides).where(and(eq(financialAccessOverrides.status, "scheduled"), lte(financialAccessOverrides.effectiveFrom, now), gtDate(financialAccessOverrides.expiresAt, now)));
   for (const row of scheduledOverrides) {

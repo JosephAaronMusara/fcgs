@@ -3091,6 +3091,11 @@ export const gateBridges = pgTable("gate_bridges", {
   lastHeartbeatAt: timestamp("last_heartbeat_at"),
   lastIpAddress: text("last_ip_address"),
   softwareVersion: text("software_version"),
+  installationId: text("installation_id"),
+  machineName: text("machine_name"),
+  pairedAt: timestamp("paired_at"),
+  lastServiceStartedAt: timestamp("last_service_started_at"),
+  lastIdentityReconcileAt: timestamp("last_identity_reconcile_at"),
   lastError: text("last_error"),
   createdByUserId: integer("created_by_user_id").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),
@@ -3098,6 +3103,23 @@ export const gateBridges = pgTable("gate_bridges", {
 }, (table) => ({
   schoolIdx: index("gate_bridges_school_idx").on(table.schoolId),
   schoolNameUniqueIdx: uniqueIndex("gate_bridges_school_name_uidx").on(table.schoolId, table.name),
+  installationUniqueIdx: uniqueIndex("gate_bridges_installation_uidx").on(table.installationId).where(sql`${table.installationId} IS NOT NULL`),
+}));
+
+export const gateBridgePairingCodes = pgTable("gate_bridge_pairing_codes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  bridgeId: integer("bridge_id").references(() => gateBridges.id).notNull(),
+  codeHash: text("code_hash").notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  bridgeIdx: index("gate_bridge_pairing_bridge_idx").on(table.bridgeId, table.createdAt),
+  schoolIdx: index("gate_bridge_pairing_school_idx").on(table.schoolId, table.createdAt),
+  expiryIdx: index("gate_bridge_pairing_expiry_idx").on(table.expiresAt),
 }));
 
 export const accessGates = pgTable("access_gates", {
@@ -3233,12 +3255,42 @@ export const gateIdentitySync = pgTable("gate_identity_sync", {
   syncStatus: text("sync_status").notNull().default("pending"),
   lastCommandId: integer("last_command_id").references(() => gateCommands.id),
   lastSyncedAt: timestamp("last_synced_at"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  retryCount: integer("retry_count").notNull().default(0),
+  nextRetryAt: timestamp("next_retry_at"),
+  lastSyncedPhotoPath: text("last_synced_photo_path"),
   lastError: text("last_error"),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
   identityDeviceUniqueIdx: uniqueIndex("gate_identity_sync_identity_device_uidx").on(table.identityId, table.deviceId),
   deviceStatusIdx: index("gate_identity_sync_device_status_idx").on(table.deviceId, table.syncStatus),
+  retryIdx: index("gate_identity_sync_retry_idx").on(table.syncStatus, table.nextRetryAt),
   deviceTerminalIdentityIdx: index("gate_identity_sync_device_terminal_identity_idx").on(table.deviceId, table.terminalReportedIdentityNo),
+}));
+
+export const gateSyncJobs = pgTable("gate_sync_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  jobType: text("job_type").notNull(), // bulk_enroll | reconcile
+  personType: text("person_type"), // student | staff | all
+  status: text("status").notNull().default("pending"), // pending | running | completed | failed | cancelled
+  phase: text("phase"),
+  cursorId: integer("cursor_id").notNull().default(0),
+  totalItems: integer("total_items").notNull().default(0),
+  processedItems: integer("processed_items").notNull().default(0),
+  succeededItems: integer("succeeded_items").notNull().default(0),
+  skippedItems: integer("skipped_items").notNull().default(0),
+  failedItems: integer("failed_items").notNull().default(0),
+  details: jsonb("details"),
+  errorMessage: text("error_message"),
+  requestedByUserId: integer("requested_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  schoolStatusIdx: index("gate_sync_jobs_school_status_idx").on(table.schoolId, table.status, table.createdAt),
 }));
 
 export const financialAccessOverrides = pgTable("financial_access_overrides", {
