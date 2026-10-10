@@ -1,17 +1,25 @@
+import type { PoolClient } from "pg";
+import { pool } from "./db";
+
 type LockEntry = {
   tail: Promise<void>;
   pending: number;
 };
 
 const assessmentLocks = new Map<number, LockEntry>();
+const ASSESSMENT_LOCK_NAMESPACE = 1178814292;
 
 /**
  * Serializes mark writes and paper-configuration changes for one assessment.
- * Waiting callers do not occupy PostgreSQL pool connections.
+ *
+ * The in-process queue keeps callers within one worker ordered without opening
+ * multiple waiting PostgreSQL connections. Once at the head of the local
+ * queue, the caller also takes a PostgreSQL advisory lock so the same
+ * assessment cannot be mutated concurrently by another FCGS worker.
  */
-export async function acquireAssessmentMutationLock(assessmentId: number): Promise<() => void> {
+export async function acquireAssessmentMutationLock(assessmentId: number): Promise<() => Promise<void>> {
   const normalizedId = Number(assessmentId);
-  if (!Number.isInteger(normalizedId) || normalizedId <= 0) {
+  if (!Number.isInteger(normalizedId) || normalizedId <= 0 || normalizedId > 2_147_483_647) {
     throw new Error("A valid assessment ID is required for the mutation lock");
   }
 
@@ -29,17 +37,39 @@ export async function acquireAssessmentMutationLock(assessmentId: number): Promi
 
   await previousTail;
 
+  let client: PoolClient | null = null;
+  try {
+    client = await pool.connect();
+    await client.query("SELECT pg_advisory_lock($1, $2)", [ASSESSMENT_LOCK_NAMESPACE, normalizedId]);
+  } catch (error) {
+    client?.release();
+    releaseGate();
+    const current = assessmentLocks.get(normalizedId);
+    if (current) {
+      current.pending -= 1;
+      if (current.pending <= 0 && current === entry) assessmentLocks.delete(normalizedId);
+    }
+    throw error;
+  }
+
   let released = false;
-  return () => {
+  return async () => {
     if (released) return;
     released = true;
-    releaseGate();
+    try {
+      await client!
+        .query("SELECT pg_advisory_unlock($1, $2)", [ASSESSMENT_LOCK_NAMESPACE, normalizedId])
+        .catch((error) => console.error(`Failed to release assessment advisory lock ${normalizedId}:`, error));
+    } finally {
+      client!.release();
+      releaseGate();
 
-    const current = assessmentLocks.get(normalizedId);
-    if (!current) return;
-    current.pending -= 1;
-    if (current.pending <= 0 && current === entry) {
-      assessmentLocks.delete(normalizedId);
+      const current = assessmentLocks.get(normalizedId);
+      if (!current) return;
+      current.pending -= 1;
+      if (current.pending <= 0 && current === entry) {
+        assessmentLocks.delete(normalizedId);
+      }
     }
   };
 }

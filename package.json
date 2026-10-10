@@ -62,7 +62,9 @@
     "internal-transfers:backfill": "tsx script/backfill-internal-transfers.ts --apply",
     "fcgs:upgrade:2026-09-21": "tsx script/apply-2026-09-21-build-schema.ts",
     "fcgs:upgrade:2026-10-01-emergency": "tsx script/apply-2026-10-01-emergency-receipt-schema.ts",
-    "fcgs:upgrade:2026-10-05": "tsx script/apply-2026-10-05-recruitment-transport-schema.ts"
+    "fcgs:upgrade:2026-10-05": "tsx script/apply-2026-10-05-recruitment-transport-schema.ts",
+    "multiworker:source-check": "node script/validate-multiworker-hardening.cjs",
+    "multiworker:load-test": "tsx script/load-test-multiworker.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

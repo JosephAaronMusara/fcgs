@@ -1,5 +1,6 @@
 import type { Request } from "express";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
+import { acquireDistributedSemaphore } from "./distributed-semaphore";
 
 type PDFOptions = NonNullable<Parameters<Page["pdf"]>[0]>;
 export type PdfRenderPriority = "interactive" | "background";
@@ -34,6 +35,13 @@ let assetCacheBytes = 0;
 function numberFromEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+async function acquireGlobalPdfSlot(): Promise<(() => Promise<void>) | null> {
+  const workerCount = numberFromEnv("FCGS_WORKER_COUNT", 1);
+  const globalLimit = numberFromEnv("FCGS_PDF_GLOBAL_CONCURRENCY", 0);
+  if (workerCount <= 1 || globalLimit <= 0) return null;
+  return acquireDistributedSemaphore(globalLimit, { label: "pdf-render" });
 }
 
 function selectNextWaiter(): RenderWaiter | undefined {
@@ -230,6 +238,14 @@ export async function prewarmPdfRenderer(): Promise<void> {
   console.info(`[pdf-renderer] Chromium prewarmed in ${Date.now() - startedAt}ms`);
 }
 
+export async function shutdownPdfRenderer(): Promise<void> {
+  const current = browserPromise;
+  browserPromise = null;
+  if (!current) return;
+  const browser = await current.catch(() => null);
+  if (browser) await browser.close().catch(() => undefined);
+}
+
 export async function renderAppRoutePdf(args: {
   req?: Request;
   schoolId?: number | null;
@@ -240,9 +256,14 @@ export async function renderAppRoutePdf(args: {
 }): Promise<Buffer> {
   const totalStartedAt = Date.now();
   const priority = args.priority || "interactive";
-  const queueWaitMs = await acquireSlot(priority);
+  const localQueueWaitMs = await acquireSlot(priority);
+  let releaseGlobalSlot: (() => Promise<void>) | null = null;
+  let queueWaitMs = localQueueWaitMs;
   let context: BrowserContext | null = null;
   try {
+    const distributedStartedAt = Date.now();
+    releaseGlobalSlot = await acquireGlobalPdfSlot();
+    if (releaseGlobalSlot) queueWaitMs += Date.now() - distributedStartedAt;
     const contextStartedAt = Date.now();
     const created = await createContext({
       cookieHeader: args.req?.headers.cookie,
@@ -278,6 +299,7 @@ export async function renderAppRoutePdf(args: {
     return buffer;
   } finally {
     await context?.close().catch(() => undefined);
+    if (releaseGlobalSlot) await releaseGlobalSlot().catch(() => undefined);
     releaseSlot();
   }
 }
@@ -290,9 +312,14 @@ export async function renderHtmlPdf(args: {
   fitToContent?: { width: string; paddingPx?: number };
 }): Promise<Buffer> {
   const priority = args.priority || "interactive";
-  const queueWaitMs = await acquireSlot(priority);
+  const localQueueWaitMs = await acquireSlot(priority);
+  let releaseGlobalSlot: (() => Promise<void>) | null = null;
+  let queueWaitMs = localQueueWaitMs;
   let context: BrowserContext | null = null;
   try {
+    const distributedStartedAt = Date.now();
+    releaseGlobalSlot = await acquireGlobalPdfSlot();
+    if (releaseGlobalSlot) queueWaitMs += Date.now() - distributedStartedAt;
     const created = await createContext();
     context = created.context;
     const page = await context.newPage();
@@ -336,6 +363,7 @@ export async function renderHtmlPdf(args: {
     return buffer;
   } finally {
     await context?.close().catch(() => undefined);
+    if (releaseGlobalSlot) await releaseGlobalSlot().catch(() => undefined);
     releaseSlot();
   }
 }

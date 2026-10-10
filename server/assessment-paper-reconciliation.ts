@@ -512,7 +512,7 @@ export async function reconcileAssessmentPapersAndMarks(args: {
       };
     });
   } finally {
-    releaseMutationLock();
+    await releaseMutationLock();
   }
 }
 
