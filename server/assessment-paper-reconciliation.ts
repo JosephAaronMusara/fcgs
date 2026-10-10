@@ -167,7 +167,10 @@ async function loadGradingContext(
   const applicableGrades = operationalProfile.profileKey
     ? getProfileAwareGradeCandidates(allGrades, operationalProfile.profileKey, args.classId)
     : [];
-  const commentByGradeId = new Map(comments.map((comment: any) => [Number(comment.gradeId), comment]));
+  const commentByGradeId = new Map<number, typeof assessmentComments.$inferSelect>();
+  for (const comment of comments as Array<typeof assessmentComments.$inferSelect>) {
+    commentByGradeId.set(Number(comment.gradeId), comment);
+  }
 
   return {
     profileKey: operationalProfile.profileKey,

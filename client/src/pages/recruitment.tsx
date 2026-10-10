@@ -26,6 +26,7 @@ import {
 import { apiRequest, queryClient, schoolFetch } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1079,7 +1080,7 @@ export default function RecruitmentPage() {
           data={data}
           saving={actionMutation.isPending}
           onClose={() => setModal(null)}
-          onSave={(body) => {
+          onSave={(body: any) => {
             const isEdit = Boolean(modal.record?.id);
             actionMutation.mutate(
               {
@@ -1138,7 +1139,7 @@ export default function RecruitmentPage() {
           record={modal.record}
           saving={actionMutation.isPending}
           onClose={() => setModal({ type: "application", record: modal.application })}
-          onSave={(body) => {
+          onSave={(body: any) => {
             const isEdit = Boolean(modal.record?.id);
             actionMutation.mutate(
               {
@@ -1164,7 +1165,7 @@ export default function RecruitmentPage() {
           recruiters={data.recruiters || []}
           saving={actionMutation.isPending}
           onClose={() => setModal(null)}
-          onSave={(body) => {
+          onSave={(body: any) => {
             const isEdit = Boolean(modal.record?.id);
             actionMutation.mutate(
               {
@@ -1189,7 +1190,7 @@ export default function RecruitmentPage() {
           record={modal.record}
           saving={actionMutation.isPending}
           onClose={() => setModal(null)}
-          onSave={(body) => {
+          onSave={(body: any) => {
             const isEdit = Boolean(modal.record?.id);
             actionMutation.mutate(
               {
@@ -1228,7 +1229,7 @@ export default function RecruitmentPage() {
           data={data}
           saving={actionMutation.isPending}
           onClose={() => setModal(null)}
-          onSave={(body) => {
+          onSave={(body: any) => {
             const isEdit = Boolean(modal.record?.id);
             actionMutation.mutate(
               {
@@ -1249,7 +1250,7 @@ export default function RecruitmentPage() {
           data={data}
           saving={actionMutation.isPending}
           onClose={() => setModal(null)}
-          onSave={(body) => {
+          onSave={(body: any) => {
             const isEdit = Boolean(modal.record?.id);
             actionMutation.mutate(
               {

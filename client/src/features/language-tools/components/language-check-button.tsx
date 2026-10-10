@@ -11,7 +11,7 @@ interface Props {
   fields: LanguageFieldBinding[];
   label?: string;
   size?: "default" | "sm" | "lg" | "icon";
-  variant?: "default" | "destructive" | "outline" | "secondary" | "ghost" | "link";
+  variant?: "default" | "destructive" | "outline" | "secondary" | "ghost";
   disabled?: boolean;
   className?: string;
   showProviderStatus?: boolean;

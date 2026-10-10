@@ -25,6 +25,7 @@ declare global {
       firstName: string | null;
       lastName: string | null;
       phone: string | null;
+      photo: string | null;
       createdAt: Date | null;
       organizationId: number | null;
       schoolId: number | null;

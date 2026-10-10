@@ -309,20 +309,22 @@ async function readPhotoAsBase64(photoPath: string | null) {
     ];
     let output: Buffer | null = null;
     for (const attempt of attempts) {
-      output = await sharp(source, { failOn: "error" })
+      const candidate = await sharp(source, { failOn: "error" })
         .rotate()
         .resize({ width: attempt.width, height: attempt.height, fit: "inside", withoutEnlargement: true })
         .flatten({ background: { r: 255, g: 255, b: 255 } })
         .toColorspace("srgb")
         .jpeg({ quality: attempt.quality, chromaSubsampling: "4:2:0", progressive: false })
         .toBuffer();
-      if (output.length <= FACE_TARGET_MAX_BYTES) break;
+      output = candidate;
+      if (candidate.length <= FACE_TARGET_MAX_BYTES) break;
     }
     if (!output) return null;
-    if (output.length > FACE_TARGET_MAX_BYTES) {
-      output = await sharp(output).jpeg({ quality: 62, chromaSubsampling: "4:2:0", progressive: false }).toBuffer();
+    let finalOutput: Buffer = output;
+    if (finalOutput.length > FACE_TARGET_MAX_BYTES) {
+      finalOutput = await sharp(finalOutput).jpeg({ quality: 62, chromaSubsampling: "4:2:0", progressive: false }).toBuffer();
     }
-    return output.toString("base64");
+    return finalOutput.toString("base64");
   } catch {
     return null;
   }
