@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs/promises";
 import { OPERATIONAL_GRADING_POLICY_VERSION } from "@shared/academic-profiles";
 import { getTemporaryStrictGradingExclusions } from "./grading-exclusions";
+import { FCGS_LOCK_KEYS, withDistributedLock } from "./distributed-lock";
 
 const cleanupState = { lastRunAt: 0, running: null as Promise<void> | null };
 
@@ -214,7 +215,7 @@ export function queueAcademicReportCacheCleanup(): void {
   const intervalMs = 24 * 60 * 60 * 1000;
   if (cleanupState.running || now - cleanupState.lastRunAt < intervalMs) return;
   cleanupState.lastRunAt = now;
-  cleanupState.running = (async () => {
+  cleanupState.running = withDistributedLock(FCGS_LOCK_KEYS.academicReportCacheCleanup, async () => {
     const days = Math.max(1, Number(process.env.ACADEMIC_REPORT_CACHE_DAYS || 30));
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const maxSinglePdfBytes = Math.max(10, Number(process.env.ACADEMIC_REPORT_SINGLE_PDF_CACHE_MAX_MB || 80)) * 1024 * 1024;
@@ -236,7 +237,7 @@ export function queueAcademicReportCacheCleanup(): void {
         `[academic-report-cache] removed pdf=${pdfRemoved + pdfTrim.removed} data=${dataRemoved + dataTrim.removed} preparation=${preparationRemoved} trimmedBytes=${pdfTrim.bytesRemoved + dataTrim.bytesRemoved}`,
       );
     }
-  })().catch((error) => {
+  }).then(() => undefined).catch((error) => {
     console.warn("[academic-report-cache] cleanup failed:", error);
   }).finally(() => {
     cleanupState.running = null;

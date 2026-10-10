@@ -14887,7 +14887,7 @@ ${schoolName}`;
 
   // Save/update marks for a student
   app.post("/api/marks-entry", requireAuth, async (req, res, next) => {
-    let releaseAssessmentLock: (() => void) | null = null;
+    let releaseAssessmentLock: (() => Promise<void>) | null = null;
     try {
       const scoped = await getScopedAssessmentOrRespond(req, res, Number(req.body.assessmentId));
       if (!scoped) return;
@@ -15128,13 +15128,13 @@ ${schoolName}`;
     } catch (error) {
       next(error);
     } finally {
-      if (releaseAssessmentLock) releaseAssessmentLock();
+      if (releaseAssessmentLock) await releaseAssessmentLock();
     }
   });
 
   // Delete a mark
   app.delete("/api/marks-entry/:markId", requireAuth, async (req, res, next) => {
-    let releaseAssessmentLock: (() => void) | null = null;
+    let releaseAssessmentLock: (() => Promise<void>) | null = null;
     try {
       const scopedMark = await getScopedAssessmentMarkOrRespond(req, res, parseIdParam(req.params.markId));
       if (!scopedMark) return;
@@ -15146,7 +15146,7 @@ ${schoolName}`;
     } catch (error) {
       next(error);
     } finally {
-      if (releaseAssessmentLock) releaseAssessmentLock();
+      if (releaseAssessmentLock) await releaseAssessmentLock();
     }
   });
 

@@ -1,0 +1,26 @@
+[Unit]
+Description=FCGS Portal Worker %i
+After=network-online.target
+Wants=network-online.target
+PartOf=fcgs-workers.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/fcgs_repo
+Environment=NODE_ENV=production
+Environment=FCGS_WORKER_COUNT=4
+EnvironmentFile=/opt/fcgs_repo/.env
+EnvironmentFile=/etc/fcgs/workers/%i.env
+ExecStart=/usr/bin/node /opt/fcgs_repo/dist/index.cjs
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=40
+LimitNOFILE=65535
+UMask=0027
+SyslogIdentifier=fcgs-worker-%i
+
+[Install]
+WantedBy=fcgs-workers.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=FCGS Portal Four-Worker Target
+Wants=fcgs-worker@1.service fcgs-worker@2.service fcgs-worker@3.service fcgs-worker@4.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

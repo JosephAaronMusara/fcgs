@@ -8,12 +8,17 @@ import { ensureRbacBaseline } from "./rbac-bootstrap";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import { prewarmPdfRenderer } from "./pdf-renderer";
+import { prewarmPdfRenderer, shutdownPdfRenderer } from "./pdf-renderer";
 import { scanAllTransportCompliance } from "./transport-compliance";
 import { runAccessControlSchedulers } from "./access-control-operations";
+import { pool } from "./db";
+import { FCGS_LOCK_KEYS, withDistributedLock } from "./distributed-lock";
+import { getWorkerIdentity, registerHealthRoutes, setApplicationReady } from "./health";
 
 const app = express();
 const httpServer = createServer(app);
+const schedulerHandles: NodeJS.Timeout[] = [];
+let shuttingDown = false;
 
 declare module "http" {
   interface IncomingMessage {
@@ -39,10 +44,24 @@ app.use(cors({
 }));
 
 app.set("trust proxy", 1);
+registerHealthRoutes(app);
 
+function positiveIntegerEnv(name: string, fallback: number) {
+  const parsed = Number.parseInt(String(process.env[name] || ""), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const configuredWorkerCount = positiveIntegerEnv("FCGS_WORKER_COUNT", 1);
+const loginGlobalMax = positiveIntegerEnv("FCGS_LOGIN_RATE_LIMIT_MAX", 20);
+const apiGlobalMax = positiveIntegerEnv("FCGS_API_RATE_LIMIT_MAX", 200);
+
+// In multi-worker production, each worker receives an equal share of the
+// existing global request budget. Nginx is the only externally reachable
+// ingress and distributes requests across the workers, so the aggregate limit
+// remains close to the single-process limits instead of multiplying by four.
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: Math.max(1, Math.ceil(loginGlobalMax / configuredWorkerCount)),
   message: { message: "Too many login attempts. Please try again in 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -51,7 +70,7 @@ const loginLimiter = rateLimit({
 
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
-  max: 200,
+  max: Math.max(1, Math.ceil(apiGlobalMax / configuredWorkerCount)),
   message: { message: "Too many requests. Please slow down." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -79,7 +98,8 @@ export function log(message: string, source = "express") {
     hour12: true,
   });
 
-  console.log(`${formattedTime} [${source}] ${message}`);
+  const { workerId } = getWorkerIdentity();
+  console.log(`${formattedTime} [${source}] [${workerId}] ${message}`);
 }
 
 function sanitizeApiLogPayload(value: unknown): unknown {
@@ -115,7 +135,8 @@ app.use((req, res, next) => {
         && res.statusCode < 400
         && Array.isArray(capturedJsonResponse?.commands)
         && capturedJsonResponse.commands.length === 0;
-      if (quietSuccessfulHeartbeat || quietEmptyBridgePoll) return;
+      const quietHealthCheck = path === "/api/health/live" || path === "/api/health/ready";
+      if (quietSuccessfulHeartbeat || quietEmptyBridgePoll || quietHealthCheck) return;
 
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
@@ -129,9 +150,84 @@ app.use((req, res, next) => {
   next();
 });
 
-(async () => {
+function scheduleJob(callback: () => void, delayMs: number, recurring = false) {
+  const handle = recurring ? setInterval(callback, delayMs) : setTimeout(callback, delayMs);
+  schedulerHandles.push(handle);
+  return handle;
+}
+
+function startSchedulers() {
+  const runTransportCompliance = () => {
+    void withDistributedLock(
+      FCGS_LOCK_KEYS.transportCompliance,
+      () => scanAllTransportCompliance(),
+    ).catch((error) => console.error("Transport compliance scan failed:", error));
+  };
+  scheduleJob(runTransportCompliance, 30_000);
+  scheduleJob(runTransportCompliance, 24 * 60 * 60 * 1000, true);
+
+  const runSchoolTerminationCleanup = () => {
+    void withDistributedLock(FCGS_LOCK_KEYS.schoolTerminationCleanup, async () => {
+      const pendingSchools = await storage.getSchoolsPendingTermination();
+      const now = Date.now();
+      for (const school of pendingSchools) {
+        if (school.terminationAt && new Date(school.terminationAt).getTime() <= now) {
+          log(`Archiving school: ${school.name} (ID: ${school.id})`);
+          await storage.archiveSchool(school.id);
+          log(`School archived: ${school.name}`);
+        }
+      }
+    }).catch((err) => console.error("School cleanup job error:", err));
+  };
+  scheduleJob(runSchoolTerminationCleanup, 5 * 60 * 1000, true);
+
+  const runAccessControlJobs = () => {
+    void withDistributedLock(
+      FCGS_LOCK_KEYS.accessControlScheduler,
+      () => runAccessControlSchedulers(),
+    ).catch((err) => console.error("Access Control scheduler error:", err));
+  };
+  scheduleJob(runAccessControlJobs, 15_000);
+  scheduleJob(runAccessControlJobs, 60 * 1000, true);
+}
+
+async function gracefulShutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  setApplicationReady(false);
+  log(`received ${signal}; draining worker`, "shutdown");
+
+  for (const handle of schedulerHandles.splice(0)) clearTimeout(handle);
+
+  const forceExit = setTimeout(() => {
+    console.error(`[shutdown] ${signal} grace period expired; forcing worker exit`);
+    httpServer.closeAllConnections?.();
+    process.exit(1);
+  }, 30_000);
+  forceExit.unref();
+
+  try {
+    await new Promise<void>((resolve) => {
+      if (!httpServer.listening) return resolve();
+      httpServer.close(() => resolve());
+      httpServer.closeIdleConnections?.();
+    });
+    await shutdownPdfRenderer().catch((error) => console.warn("PDF renderer shutdown warning:", error));
+    await pool.end();
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (error) {
+    console.error("Graceful shutdown failed:", error);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
+
+async function main() {
   initializeCommunication();
-  await ensureRbacBaseline();
+  await withDistributedLock(FCGS_LOCK_KEYS.rbacBaseline, ensureRbacBaseline, { wait: true });
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
@@ -157,49 +253,30 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
+  // Each production worker receives its own loopback port from systemd.
   const port = parseInt(process.env.PORT || "5000", 10);
+  const host = process.env.HOST || "0.0.0.0";
   httpServer.listen(
     {
       port,
-      host: "0.0.0.0",
+      host,
       reusePort: true,
     },
     () => {
-      log(`serving on port ${port}`);
-      void prewarmPdfRenderer().catch((error) => {
-        console.warn("PDF renderer prewarm was skipped:", error instanceof Error ? error.message : error);
-      });
-      const runTransportCompliance = () => {
-        void scanAllTransportCompliance().catch((error) => console.error("Transport compliance scan failed:", error));
-      };
-      setTimeout(runTransportCompliance, 30_000);
-      setInterval(runTransportCompliance, 24 * 60 * 60 * 1000);
-
-      setInterval(async () => {
-        try {
-          const pendingSchools = await storage.getSchoolsPendingTermination();
-          const now = Date.now();
-          for (const school of pendingSchools) {
-            if (school.terminationAt && new Date(school.terminationAt).getTime() <= now) {
-              log(`Archiving school: ${school.name} (ID: ${school.id})`);
-              await storage.archiveSchool(school.id);
-              log(`School archived: ${school.name}`);
-            }
-          }
-        } catch (err) {
-          console.error("School cleanup job error:", err);
-        }
-      }, 5 * 60 * 1000);
-
-      const runAccessControlJobs = () => {
-        void runAccessControlSchedulers().catch((err) => console.error("Access Control scheduler error:", err));
-      };
-      setTimeout(runAccessControlJobs, 15_000);
-      setInterval(runAccessControlJobs, 60 * 1000);
+      setApplicationReady(true);
+      log(`serving on ${host}:${port}`);
+      if (process.env.FCGS_PDF_PREWARM !== "false") {
+        void prewarmPdfRenderer().catch((error) => {
+          console.warn("PDF renderer prewarm was skipped:", error instanceof Error ? error.message : error);
+        });
+      }
+      startSchedulers();
     },
   );
-})();
+}
+
+void main().catch((error) => {
+  setApplicationReady(false);
+  console.error("FCGS worker failed to start:", error);
+  process.exit(1);
+});
