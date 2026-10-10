@@ -161,7 +161,7 @@ export default function AssetsInventoryPage() {
         <TabsContent value="setup" className="grid gap-4 lg:grid-cols-4"><SetupCard icon={Package} title="Categories" rows={data.categories.map((category) => `${title(category.kind)}: ${category.name}`)} action={writable ? () => setDialog({ type: "category" }) : undefined} /><SetupCard icon={Warehouse} title="Stores & Locations" rows={data.locations.map((location) => `${location.name}${location.isStore ? " (Store)" : ""}`)} action={writable ? () => setDialog({ type: "location" }) : undefined} /><SetupCard icon={Settings} title="Procurement Controls" rows={[`Currency: ${data.settings?.currency || "USD"}`, `Request approval threshold: ${data.settings?.purchaseRequestApprovalThreshold || "100"}`, `HQ purchase threshold: ${data.settings?.purchaseOrderHqThreshold || "1000"}`, `Low-stock notifications: ${data.settings?.lowStockNotificationsEnabled === false ? "Off" : "On"}`]} action={hasPermission("assets.setup.manage") ? () => setDialog({ type: "settings", record: data.settings || {} }) : undefined} /><SetupCard icon={Settings} title="Operating Centre" rows={[data.scope.centre?.name || "All Organisation", `Type: ${title(data.scope.centre?.centreType || "consolidated")}`, "Vehicle is reserved as a stable asset class for future Fleet integration."]} /></TabsContent>
       </Tabs>
 
-      {dialog && <RecordDialog state={dialog} setState={setDialog} data={data} submit={(url, body) => mutation.mutate({ url, body })} pending={mutation.isPending} />}
+      {dialog && <RecordDialog state={dialog} setState={setDialog} data={data} submit={(url: string, body: unknown) => mutation.mutate({ url, body })} pending={mutation.isPending} />}
     </div>
   );
 }

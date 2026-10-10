@@ -82,7 +82,7 @@ interface LoginDetailsBulkDialogProps {
   classFilter?: string;
   statusFilter?: string;
   triggerLabel?: string;
-  triggerVariant?: "default" | "outline" | "secondary" | "ghost" | "link" | "destructive";
+  triggerVariant?: "default" | "outline" | "secondary" | "ghost" | "destructive";
   triggerSize?: "default" | "sm" | "lg" | "icon";
 }
 

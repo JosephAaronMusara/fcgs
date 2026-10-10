@@ -1670,10 +1670,10 @@ function registerMasterCrud(
       const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const requestedDestinationIds = entityType === "vehicle"
-        ? Array.from(new Set((Array.isArray(req.body?.destinationIds) ? req.body.destinationIds : []).map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        ? Array.from(new Set<number>((Array.isArray(req.body?.destinationIds) ? req.body.destinationIds : []).map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
         : [];
       const requestedAlternativeDriverIds = entityType === "vehicle"
-        ? Array.from(new Set((Array.isArray(req.body?.alternativeDriverIds) ? req.body.alternativeDriverIds : []).map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        ? Array.from(new Set<number>((Array.isArray(req.body?.alternativeDriverIds) ? req.body.alternativeDriverIds : []).map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
         : [];
       const raw = clean(schema.parse(req.body));
       if (entityType === "vehicle") delete (raw as any).alternativeDriverIds;
@@ -1786,11 +1786,11 @@ function registerMasterCrud(
       if (!previous) return res.status(404).json({ message: "Record not found" });
       const destinationIdsProvided = entityType === "vehicle" && Array.isArray(req.body?.destinationIds);
       const requestedDestinationIds = destinationIdsProvided
-        ? Array.from(new Set(req.body.destinationIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        ? Array.from(new Set<number>(req.body.destinationIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
         : [];
       const alternativeDriverIdsProvided = entityType === "vehicle" && Array.isArray(req.body?.alternativeDriverIds);
       const requestedAlternativeDriverIds = alternativeDriverIdsProvided
-        ? Array.from(new Set(req.body.alternativeDriverIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
+        ? Array.from(new Set<number>(req.body.alternativeDriverIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)))
         : [];
       const partial: any = clean(schema.partial().parse(req.body));
       if (entityType === "vehicle") delete partial.alternativeDriverIds;

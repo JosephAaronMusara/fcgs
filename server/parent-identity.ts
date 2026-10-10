@@ -43,7 +43,7 @@ type ParentIdentityRow = {
 
 async function identityPoolForSchool(schoolId: number): Promise<ParentIdentityRow[]> {
   const [school] = await db.select({ organizationId: schools.organizationId }).from(schools).where(eq(schools.id, schoolId)).limit(1);
-  if (!school) return [];
+  if (!school?.organizationId) return [];
   return db.select({
     parent: parents,
     schoolName: schools.name,

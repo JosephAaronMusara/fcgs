@@ -5828,12 +5828,12 @@ export async function registerRoutes(
       }
 
       if (user.role === "student" && student.userId !== user.id) {
-        logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to access another student's record", targetType: "student", targetId: String(student.id) });
+        logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to access another student's record", targetType: "student", targetId: student.id });
         return res.status(403).json({ message: "Access denied" });
       }
       if (user.role === "parent") {
         if (!(await parentUserCanAccessStudent(user.id, student.id))) {
-          logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access an unlinked student record", targetType: "student", targetId: String(student.id) });
+          logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access an unlinked student record", targetType: "student", targetId: student.id });
           return res.status(403).json({ message: "Access denied" });
         }
       }
@@ -8613,7 +8613,7 @@ ${schoolName}`;
         eq(notifications.userId, currentUser.id),
       )).limit(1);
       if (!owned) {
-        logActivity(req, { action: "access_denied", category: "security", description: "User attempted to mark another user's notification as read", targetType: "notification", targetId: String(notificationId) });
+        logActivity(req, { action: "access_denied", category: "security", description: "User attempted to mark another user's notification as read", targetType: "notification", targetId: notificationId });
         return res.status(404).json({ message: "Notification not found" });
       }
       const updated = await storage.markNotificationRead(notificationId);
@@ -14481,7 +14481,6 @@ ${schoolName}`;
             customCommentText: usePool ? null : row.commentText,
             autoCommentSnapshot: poolComment?.commentText ?? null,
             commentSource: usePool ? "pool" : "custom",
-            updatedAt: new Date(),
           }).where(and(
             eq(assessmentMarksSchema.id, mark.id),
             eq(assessmentMarksSchema.schoolId, schoolId),
@@ -16879,7 +16878,7 @@ async function buildReportCardMessage(
       headers: { cookie: cookieHeader, "x-school-id": schoolHeader },
       protocol: args.req.protocol,
       get: (name: string) => args.req.get(name),
-    } as Request;
+    } as unknown as Request;
     const context = await loadReportPdfContext(args);
     if (!context.shouldCache) throw new Error("Publish the class reports before preparing the PDF cache");
     const learners = await storage.getStudentsByClass(args.classId);
@@ -20346,7 +20345,11 @@ async function buildReportCardMessage(
       if (!commentEntries.length) doc.fillColor(MUTED).font("Helvetica").fontSize(9).text("No subject QC comments have been entered.", PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
       for (const [subjectIdText, comment] of commentEntries) {
         const subjectName = subjectMap.get(Number(subjectIdText)) || allSubjects.find((subject) => String(subject.id) === subjectIdText)?.name || `Subject ${subjectIdText}`;
-        const estimated = Math.max(48, doc.heightOfString(String(comment), { width: CONTENT_WIDTH - 12, fontSize: 9 }) + 34); ensureSpace(estimated);
+        doc.save();
+        doc.font("Helvetica").fontSize(9);
+        const estimated = Math.max(48, doc.heightOfString(String(comment), { width: CONTENT_WIDTH - 12 }) + 34);
+        doc.restore();
+        ensureSpace(estimated);
         doc.save().strokeColor("#b8bec9").moveTo(PAGE_LEFT, doc.y).lineTo(PAGE_RIGHT, doc.y).stroke().restore(); doc.moveDown(0.35);
         doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(9.5).text(subjectName, PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
         doc.fillColor("#111111").font("Helvetica").fontSize(9).text(String(comment), PAGE_LEFT, doc.y + 3, { width: CONTENT_WIDTH, lineGap: 2 }); doc.moveDown(0.7);
@@ -20668,26 +20671,13 @@ async function buildReportCardMessage(
       const studentId = parseIdParam(req.params.studentId);
       const currentUser = await storage.getUser((req.user as any).id);
       if (currentUser?.role === "student" || currentUser?.role === "parent") {
-        logActivity(req, { action: "access_denied", category: "security", description: "Portal user attempted to access the administrative Student 360 endpoint", targetType: "student", targetId: String(studentId) });
+        logActivity(req, { action: "access_denied", category: "security", description: "Portal user attempted to access the administrative Student 360 endpoint", targetType: "student", targetId: studentId });
         return res.status(403).json({ message: "Use the portal self-service pages for student information" });
       }
       let schoolId = getSchoolContext(req) || currentUser?.schoolId;
 
       const student = await storage.getStudent(studentId);
       if (!student) return res.status(404).json({ message: "Student not found" });
-
-      if (currentUser?.role === "student" && student.userId !== currentUser.id) {
-        logActivity(req, { action: "access_denied", category: "security", description: "Student attempted to access another student's 360 profile", targetType: "student", targetId: String(student.id) });
-        return res.status(403).json({ message: "Access denied" });
-      }
-      if (currentUser?.role === "parent") {
-        const parentRows = await storage.getAllParents();
-        const parentRecord = parentRows.find((row) => row.userId === currentUser.id);
-        if (!parentRecord || student.parentId !== parentRecord.id) {
-          logActivity(req, { action: "access_denied", category: "security", description: "Parent attempted to access an unlinked student's 360 profile", targetType: "student", targetId: String(student.id) });
-          return res.status(403).json({ message: "Access denied" });
-        }
-      }
 
       if (!schoolId && currentUser?.organizationId && student.schoolId) {
         const orgSchools = await storage.getSchoolsByOrganization(currentUser.organizationId);
