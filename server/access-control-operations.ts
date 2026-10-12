@@ -42,7 +42,8 @@ const TZ = "Africa/Harare";
 const FINANCIAL_STALE_MS = 36 * 60 * 60 * 1000;
 const IDENTITY_COMMAND_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IDENTITY_RECONCILE_INTERVAL_MS = 30 * 60 * 1000;
-const GATE_SYNC_JOB_CHUNK = 20;
+const GATE_SYNC_JOB_CHUNK = Math.max(10, Math.min(100, Number.parseInt(process.env.FCGS_GATE_SYNC_JOB_CHUNK || "40", 10) || 40));
+const GATE_SYNC_JOB_CONCURRENCY = Math.max(1, Math.min(8, Number.parseInt(process.env.FCGS_GATE_SYNC_JOB_CONCURRENCY || "4", 10) || 4));
 const FACE_TARGET_MAX_BYTES = 220_000;
 const FACE_MAX_WIDTH = 720;
 const FACE_MAX_HEIGHT = 960;
@@ -447,6 +448,25 @@ export async function queueIdentitySync(identityId: number, requestedByUserId?: 
 }
 
 
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(concurrency, Math.max(1, items.length)) }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+function mergeJobDetails(current: unknown, patch: Record<string, unknown>) {
+  const base = current && typeof current === "object" ? current as Record<string, unknown> : {};
+  return { ...base, ...patch };
+}
+
 async function gateSyncJobTotal(schoolId: number, personType: "student" | "staff" | "all") {
   const [studentRows, staffRows] = await Promise.all([
     personType === "staff" ? Promise.resolve([]) : db.select({ id: students.id }).from(students).where(eq(students.schoolId, schoolId)),
@@ -472,54 +492,70 @@ async function processBulkEnrollJob(job: typeof gateSyncJobs.$inferSelect) {
   let succeeded = job.succeededItems || 0;
   let skipped = job.skippedItems || 0;
   let failed = job.failedItems || 0;
+  const chunkStartedAt = Date.now();
 
   const processStudentChunk = async () => {
     const rows = await db.select().from(students).where(and(eq(students.schoolId, job.schoolId), gt(students.id, cursorId))).orderBy(asc(students.id)).limit(GATE_SYNC_JOB_CHUNK);
-    for (const student of rows) {
-      cursorId = student.id;
-      processed += 1;
+    const results = await mapWithConcurrency(rows, GATE_SYNC_JOB_CONCURRENCY, async (student) => {
       try {
-        if (student.status !== "active" || student.archivedAt || !student.photo) { skipped += 1; continue; }
+        if (student.status !== "active" || student.archivedAt || !student.photo) return { status: "skipped" as const, id: student.id };
         const [existing] = await db.select().from(accessIdentities).where(eq(accessIdentities.studentId, student.id)).limit(1);
-        if (existing?.enrollmentRemovedAt) { skipped += 1; continue; }
+        if (existing?.enrollmentRemovedAt) return { status: "skipped" as const, id: student.id };
         const identity = await ensureIdentityForStudent(student, job.organizationId);
-        if (!identity.isActive || !identity.photoPath) { skipped += 1; continue; }
+        if (!identity.isActive || !identity.photoPath) return { status: "skipped" as const, id: student.id };
         await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk student enrollment job #${job.id}`);
-        succeeded += 1;
-      } catch {
-        failed += 1;
+        return { status: "succeeded" as const, id: student.id };
+      } catch (error) {
+        return { status: "failed" as const, id: student.id, label: `${student.firstName} ${student.lastName} · ${student.admissionNo}`, error: error instanceof Error ? error.message : String(error) };
       }
-    }
-    return rows.length;
+    });
+    return { rows, results };
   };
 
   const processStaffChunk = async () => {
     const rows = await db.select().from(staff).where(and(eq(staff.schoolId, job.schoolId), gt(staff.id, cursorId))).orderBy(asc(staff.id)).limit(GATE_SYNC_JOB_CHUNK);
-    for (const person of rows) {
-      cursorId = person.id;
-      processed += 1;
+    const results = await mapWithConcurrency(rows, GATE_SYNC_JOB_CONCURRENCY, async (person) => {
       try {
-        if (person.status !== "active" || !person.photo) { skipped += 1; continue; }
+        if (person.status !== "active" || !person.photo) return { status: "skipped" as const, id: person.id };
         const [existing] = await db.select().from(accessIdentities).where(eq(accessIdentities.staffId, person.id)).limit(1);
-        if (existing?.enrollmentRemovedAt) { skipped += 1; continue; }
+        if (existing?.enrollmentRemovedAt) return { status: "skipped" as const, id: person.id };
         const identity = await ensureIdentityForStaff(person, job.organizationId);
-        if (!identity.isActive || !identity.photoPath) { skipped += 1; continue; }
+        if (!identity.isActive || !identity.photoPath) return { status: "skipped" as const, id: person.id };
         await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk staff enrollment job #${job.id}`);
-        succeeded += 1;
-      } catch {
-        failed += 1;
+        return { status: "succeeded" as const, id: person.id };
+      } catch (error) {
+        return { status: "failed" as const, id: person.id, label: `${person.firstName} ${person.lastName} · ${person.staffNo}`, error: error instanceof Error ? error.message : String(error) };
       }
-    }
-    return rows.length;
+    });
+    return { rows, results };
   };
 
-  let count = phase === "student" ? await processStudentChunk() : await processStaffChunk();
-  if (count < GATE_SYNC_JOB_CHUNK) {
+  const chunk = phase === "student" ? await processStudentChunk() : await processStaffChunk();
+  const rows = chunk.rows;
+  const results = chunk.results;
+  if (rows.length) cursorId = rows[rows.length - 1].id;
+  processed += results.length;
+  succeeded += results.filter((result) => result.status === "succeeded").length;
+  skipped += results.filter((result) => result.status === "skipped").length;
+  failed += results.filter((result) => result.status === "failed").length;
+  const recentFailures = results.filter((result): result is Extract<typeof result, { status: "failed" }> => result.status === "failed")
+    .map((result) => ({ personId: result.id, person: result.label, error: result.error }));
+  const durationMs = Math.max(1, Date.now() - chunkStartedAt);
+  const details = mergeJobDetails(job.details, {
+    chunkSize: GATE_SYNC_JOB_CHUNK,
+    concurrency: GATE_SYNC_JOB_CONCURRENCY,
+    lastChunkDurationMs: durationMs,
+    lastChunkItems: results.length,
+    lastChunkItemsPerSecond: Number(((results.length * 1000) / durationMs).toFixed(2)),
+    ...(recentFailures.length ? { recentFailures: recentFailures.slice(-20) } : {}),
+  });
+
+  if (rows.length < GATE_SYNC_JOB_CHUNK) {
     if (personType === "all" && phase === "student") {
       phase = "staff";
       cursorId = 0;
     } else {
-      await db.update(gateSyncJobs).set({ processedItems: processed, succeededItems: succeeded, skippedItems: skipped, failedItems: failed, cursorId, phase, updatedAt: new Date() }).where(eq(gateSyncJobs.id, job.id));
+      await db.update(gateSyncJobs).set({ processedItems: processed, succeededItems: succeeded, skippedItems: skipped, failedItems: failed, cursorId, phase, details, updatedAt: new Date() }).where(eq(gateSyncJobs.id, job.id));
       await finishGateSyncJob(job.id, "completed");
       return;
     }
@@ -534,6 +570,7 @@ async function processBulkEnrollJob(job: typeof gateSyncJobs.$inferSelect) {
     succeededItems: succeeded,
     skippedItems: skipped,
     failedItems: failed,
+    details,
     updatedAt: new Date(),
   }).where(eq(gateSyncJobs.id, job.id));
 }
@@ -616,19 +653,18 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
   let failed = job.failedItems || 0;
   let cursorId = job.cursorId || 0;
 
-  for (const identity of rows) {
-    cursorId = identity.id;
-    processed += 1;
+  const reconcileChunkStartedAt = Date.now();
+  const reconcileResults = await mapWithConcurrency(rows, GATE_SYNC_JOB_CONCURRENCY, async (identity) => {
     try {
       const previous = identity;
       let refreshed = identity;
       if (identity.personType === "student" && identity.studentId) {
         const [student] = await db.select().from(students).where(eq(students.id, identity.studentId)).limit(1);
-        if (!student) { skipped += 1; continue; }
+        if (!student) return { status: "skipped" as const, id: identity.id };
         refreshed = await ensureIdentityForStudent(student, identity.organizationId);
       } else if (identity.personType === "staff" && identity.staffId) {
         const [person] = await db.select().from(staff).where(eq(staff.id, identity.staffId)).limit(1);
-        if (!person) { skipped += 1; continue; }
+        if (!person) return { status: "skipped" as const, id: identity.id };
         refreshed = await ensureIdentityForStaff(person, identity.organizationId);
       }
 
@@ -642,11 +678,7 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
         const terminalHasIdentity = actualIds?.has(refreshed.identityNo) === true;
 
         if (!refreshed.isActive) {
-          // Delete only FCGS-known inactive/removed identities. Unknown terminal IDs are
-          // reported as drift below but never automatically deleted.
-          if ((terminalPresenceKnown && terminalHasIdentity) || (!terminalPresenceKnown && sync && (sync.desiredEnabled || sync.syncStatus !== "deleted"))) {
-            desiredDeviceIds.push(device.id);
-          }
+          if ((terminalPresenceKnown && terminalHasIdentity) || (!terminalPresenceKnown && sync && (sync.desiredEnabled || sync.syncStatus !== "deleted"))) desiredDeviceIds.push(device.id);
           continue;
         }
         if (!refreshed.photoPath) continue;
@@ -654,20 +686,33 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
         const missingOnTerminal = terminalPresenceKnown && !terminalHasIdentity;
         const photoChanged = !!sync && sync.lastSyncedPhotoPath !== refreshed.photoPath;
         const stateChanged = previous.isActive !== refreshed.isActive || previous.desiredEntryAccess !== refreshed.desiredEntryAccess || previous.manualRestrictionActive !== refreshed.manualRestrictionActive;
-        if (!sync || missingOnTerminal || photoChanged || stateChanged || ["failed", "retry_pending"].includes(sync.syncStatus)) {
-          desiredDeviceIds.push(device.id);
-        }
+        if (!sync || missingOnTerminal || photoChanged || stateChanged || ["failed", "retry_pending"].includes(sync.syncStatus)) desiredDeviceIds.push(device.id);
       }
       if (desiredDeviceIds.length) {
         await queueIdentitySync(refreshed.id, job.requestedByUserId, `Enrollment reconciliation job #${job.id}`, desiredDeviceIds);
-        succeeded += 1;
-      } else {
-        skipped += 1;
+        return { status: "succeeded" as const, id: identity.id };
       }
-    } catch {
-      failed += 1;
+      return { status: "skipped" as const, id: identity.id };
+    } catch (error) {
+      return { status: "failed" as const, id: identity.id, label: `${identity.displayName} · ${identity.identityNo}`, error: error instanceof Error ? error.message : String(error) };
     }
-  }
+  });
+  if (rows.length) cursorId = rows[rows.length - 1].id;
+  processed += reconcileResults.length;
+  succeeded += reconcileResults.filter((result) => result.status === "succeeded").length;
+  skipped += reconcileResults.filter((result) => result.status === "skipped").length;
+  failed += reconcileResults.filter((result) => result.status === "failed").length;
+  const reconcileDurationMs = Math.max(1, Date.now() - reconcileChunkStartedAt);
+  const reconcileFailures = reconcileResults.filter((result): result is Extract<typeof result, { status: "failed" }> => result.status === "failed")
+    .map((result) => ({ identityId: result.id, person: result.label, error: result.error }));
+  const reconcileDetails = mergeJobDetails(job.details, {
+    chunkSize: GATE_SYNC_JOB_CHUNK,
+    concurrency: GATE_SYNC_JOB_CONCURRENCY,
+    lastChunkDurationMs: reconcileDurationMs,
+    lastChunkItems: reconcileResults.length,
+    lastChunkItemsPerSecond: Number(((reconcileResults.length * 1000) / reconcileDurationMs).toFixed(2)),
+    ...(reconcileFailures.length ? { recentFailures: reconcileFailures.slice(-20) } : {}),
+  });
 
   await db.update(gateSyncJobs).set({
     status: "running",
@@ -678,6 +723,7 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
     succeededItems: succeeded,
     skippedItems: skipped,
     failedItems: failed,
+    details: reconcileDetails,
     updatedAt: new Date(),
   }).where(eq(gateSyncJobs.id, job.id));
 
@@ -1342,11 +1388,60 @@ export function registerAccessControlOperations(app: Express) {
   app.get("/api/access-control/identities", requireAuth, requirePermission("access_control.view"), async (req, res) => {
     try {
       const scope = await scopeOf(req);
-      const [identityRows, syncRows] = await Promise.all([
-        db.select().from(accessIdentities).where(eq(accessIdentities.schoolId, scope.schoolId)).orderBy(asc(accessIdentities.displayName)),
-        db.select().from(gateIdentitySync),
-      ]);
-      res.json({ identities: identityRows.map(row => ({ ...row, sync: syncRows.filter(sync => sync.identityId === row.id) })) });
+      const query = z.object({
+        personType: z.enum(["student", "staff", "all"]).default("all"),
+        search: z.string().trim().max(120).optional().default(""),
+        status: z.enum(["all", "synced", "pending", "failed", "inactive"]).default("all"),
+        page: z.coerce.number().int().min(1).default(1),
+        pageSize: z.coerce.number().int().refine((value) => [25, 50, 100].includes(value), "Page size must be 25, 50 or 100").default(25),
+      }).parse(req.query);
+      const activeDevices = await db.select({ id: gateDevices.id }).from(gateDevices).where(and(
+        eq(gateDevices.schoolId, scope.schoolId),
+        eq(gateDevices.isActive, true),
+      ));
+      const activeDeviceIds = activeDevices.map((row) => row.id);
+      const activeTerminalCount = activeDeviceIds.length;
+      const activeDeviceList = activeDeviceIds.length
+        ? sql.join(activeDeviceIds.map((id) => sql`${id}`), sql`, `)
+        : sql`NULL`;
+      const failedOnActiveTerminal = activeTerminalCount > 0
+        ? sql`EXISTS (SELECT 1 FROM gate_identity_sync gis WHERE gis.identity_id = ${accessIdentities.id} AND gis.device_id IN (${activeDeviceList}) AND gis.sync_status IN ('failed','retry_pending'))`
+        : sql`FALSE`;
+      const fullySyncedToActiveTerminals = activeTerminalCount > 0
+        ? sql`(SELECT COUNT(DISTINCT gis.device_id)::int FROM gate_identity_sync gis WHERE gis.identity_id = ${accessIdentities.id} AND gis.device_id IN (${activeDeviceList}) AND gis.sync_status = 'synced') = ${activeTerminalCount}`
+        : sql`FALSE`;
+
+      const conditions: any[] = [eq(accessIdentities.schoolId, scope.schoolId)];
+      if (query.personType !== "all") conditions.push(eq(accessIdentities.personType, query.personType));
+      if (query.search) {
+        const pattern = `%${query.search.toLowerCase().replace(/[%_]/g, "\\$&")}%`;
+        conditions.push(sql`(LOWER(${accessIdentities.displayName}) LIKE ${pattern} ESCAPE '\\' OR LOWER(${accessIdentities.identityNo}) LIKE ${pattern} ESCAPE '\\')`);
+      }
+      if (query.status === "inactive") conditions.push(eq(accessIdentities.isActive, false));
+      if (query.status === "failed") conditions.push(and(eq(accessIdentities.isActive, true), failedOnActiveTerminal));
+      if (query.status === "pending") conditions.push(and(
+        eq(accessIdentities.isActive, true),
+        sql`NOT (${failedOnActiveTerminal})`,
+        sql`NOT (${fullySyncedToActiveTerminals})`,
+      ));
+      if (query.status === "synced") conditions.push(and(eq(accessIdentities.isActive, true), fullySyncedToActiveTerminals));
+      const where = and(...conditions)!;
+      const [{ count: total }] = await db.select({ count: sql<number>`count(*)::int` }).from(accessIdentities).where(where);
+      const pageCount = Math.max(1, Math.ceil(Number(total || 0) / query.pageSize));
+      const page = Math.min(query.page, pageCount);
+      const identityRows = await db.select().from(accessIdentities).where(where).orderBy(asc(accessIdentities.displayName), asc(accessIdentities.id)).limit(query.pageSize).offset((page - 1) * query.pageSize);
+      const ids = identityRows.map((row) => row.id);
+      const syncRows = ids.length && activeDeviceIds.length
+        ? await db.select().from(gateIdentitySync).where(and(
+          inArray(gateIdentitySync.identityId, ids),
+          inArray(gateIdentitySync.deviceId, activeDeviceIds),
+        ))
+        : [];
+      res.json({
+        identities: identityRows.map((row) => ({ ...row, sync: syncRows.filter((sync) => sync.identityId === row.id) })),
+        activeTerminalCount,
+        pagination: { page, pageSize: query.pageSize, total: Number(total || 0), pageCount },
+      });
     } catch (error) { fail(res, error); }
   });
 

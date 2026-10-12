@@ -38,6 +38,7 @@ export type HighSchoolEligibilityEvaluation = {
 };
 
 export type PrimarySchoolEligibilityPolicy = {
+  maxAge: number;
   teachingQualificationRequired: boolean;
   maximumOLevelSittings: number;
   minimumOLevelSubjects: number;
@@ -48,6 +49,7 @@ export type PrimarySchoolEligibilityPolicy = {
 
 export type PrimarySchoolEligibilityEvaluation = {
   passed: boolean;
+  age: number | null;
   oLevelSittingCount: number;
   oLevelQualifyingSubjectCount: number;
   route: "primary_policy" | null;
@@ -269,12 +271,18 @@ function oLevelFailureCodeForMandatorySubject(subject: string): string {
 }
 
 export function evaluatePrimarySchoolEligibility(input: {
+  dateOfBirth: string | null | undefined;
   oLevelResults: OLevelResultInput[];
   holdsTeachingQualification: boolean;
   policy: PrimarySchoolEligibilityPolicy;
+  asOf?: Date;
 }): PrimarySchoolEligibilityEvaluation {
   const failedCodes: string[] = [];
+  const age = input.dateOfBirth ? calculateAgeOnDate(input.dateOfBirth, input.asOf ?? new Date()) : null;
   const results = Array.isArray(input.oLevelResults) ? input.oLevelResults : [];
+
+  if (age == null) failedCodes.push("core:date_of_birth_required");
+  else if (age > input.policy.maxAge) failedCodes.push("core:age_over_limit");
 
   if (input.policy.teachingQualificationRequired && !input.holdsTeachingQualification) {
     failedCodes.push("core:primary_teaching_qualification_required");
@@ -282,7 +290,7 @@ export function evaluatePrimarySchoolEligibility(input: {
 
   if (!results.length) {
     failedCodes.push("core:o_level_results_required");
-    return { passed: false, oLevelSittingCount: 0, oLevelQualifyingSubjectCount: 0, route: null, failedCodes };
+    return { passed: false, age, oLevelSittingCount: 0, oLevelQualifyingSubjectCount: 0, route: null, failedCodes };
   }
 
   const seenWithinSitting = new Set<string>();
@@ -333,6 +341,7 @@ export function evaluatePrimarySchoolEligibility(input: {
   const uniqueFailedCodes = Array.from(new Set(failedCodes));
   return {
     passed: uniqueFailedCodes.length === 0,
+    age,
     oLevelSittingCount,
     oLevelQualifyingSubjectCount,
     route: uniqueFailedCodes.length === 0 ? "primary_policy" : null,
@@ -351,6 +360,7 @@ export function publicHighSchoolEligibilityPolicy(policy: HighSchoolEligibilityP
 
 export function publicPrimarySchoolEligibilityPolicy(policy: PrimarySchoolEligibilityPolicy) {
   return {
+    maxAge: policy.maxAge,
     teachingQualificationRequired: policy.teachingQualificationRequired,
     maximumOLevelSittings: policy.maximumOLevelSittings,
     minimumOLevelSubjects: policy.minimumOLevelSubjects,

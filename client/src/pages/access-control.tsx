@@ -206,7 +206,7 @@ function gateStatus(gate: Gate, devices: Device[]) {
 export default function AccessControlPage() {
   const { currentSchoolId, hasPermission } = useAuth();
   const { toast } = useToast();
-  const [activeTab, setActiveTab] = useState("gates");
+  const [activeTab, setActiveTab] = useState(() => hasPermission("access_control.view") ? "people" : "gates");
   const [bridgeDialogOpen, setBridgeDialogOpen] = useState(false);
   const [installDialogOpen, setInstallDialogOpen] = useState(false);
   const [installBridgeId, setInstallBridgeId] = useState("");
@@ -508,13 +508,15 @@ export default function AccessControlPage() {
       </Card>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-5 md:w-[760px]">
-          <TabsTrigger value="gates">Gates</TabsTrigger>
-          <TabsTrigger value="bridges">Gate Bridges</TabsTrigger>
-          <TabsTrigger value="history">Command History</TabsTrigger>
-          <TabsTrigger value="people">People & Access</TabsTrigger>
-          <TabsTrigger value="logs" disabled={!hasPermission("access_control.audit.view")}>Logs</TabsTrigger>
-        </TabsList>
+        <div className="overflow-x-auto pb-1">
+          <TabsList className="h-auto w-max min-w-full justify-start gap-1 p-1 md:min-w-0">
+            <TabsTrigger value="people" className="min-h-10 shrink-0">People & Access</TabsTrigger>
+            <TabsTrigger value="gates" className="min-h-10 shrink-0">Gates</TabsTrigger>
+            <TabsTrigger value="bridges" className="min-h-10 shrink-0">Gate Bridges</TabsTrigger>
+            <TabsTrigger value="history" className="min-h-10 shrink-0">Command History</TabsTrigger>
+            <TabsTrigger value="logs" className="min-h-10 shrink-0" disabled={!hasPermission("access_control.audit.view")}>Logs</TabsTrigger>
+          </TabsList>
+        </div>
 
         <TabsContent value="gates" className="space-y-4">
           <div className="flex justify-end">{hasPermission("access_control.manage_devices") && <Button onClick={() => setGateDialogOpen(true)} disabled={!data.bridges.length}><Plus className="mr-2 h-4 w-4" />Add Gate</Button>}</div>

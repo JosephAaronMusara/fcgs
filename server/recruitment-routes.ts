@@ -195,6 +195,7 @@ const settingsInput = z.object({
   highSchoolMinimumALevelPoints: z.coerce.number().int().min(0).max(30),
   highSchoolTeachingQualifiedMinimumALevelPoints: z.coerce.number().int().min(0).max(30),
   highSchoolTeachingQualificationExceptionEnabled: z.boolean(),
+  primarySchoolMaxAge: z.coerce.number().int().min(18).max(80),
   primaryTeachingQualificationRequired: z.boolean(),
   primaryMaximumOLevelSittings: z.coerce.number().int().min(1).max(10),
   primaryMinimumOLevelSubjects: z.coerce.number().int().min(1).max(20),
@@ -767,6 +768,7 @@ function publicRecruitmentContextResponse(context: Awaited<ReturnType<typeof pub
       teachingQualificationExceptionEnabled: context.settings.highSchoolTeachingQualificationExceptionEnabled,
     }),
     primarySchoolEligibility: publicPrimarySchoolEligibilityPolicy({
+      maxAge: context.settings.primarySchoolMaxAge,
       teachingQualificationRequired: context.settings.primaryTeachingQualificationRequired,
       maximumOLevelSittings: context.settings.primaryMaximumOLevelSittings,
       minimumOLevelSubjects: context.settings.primaryMinimumOLevelSubjects,
@@ -1073,9 +1075,11 @@ export function registerRecruitmentRoutes(app: Express): void {
         : null;
       const primarySchoolEligibility = categoryCode === "primary_teaching"
         ? evaluatePrimarySchoolEligibility({
+            dateOfBirth: input.dateOfBirth,
             oLevelResults: input.oLevelResults,
             holdsTeachingQualification: input.holdsTeachingQualification,
             policy: {
+              maxAge: context.settings.primarySchoolMaxAge,
               teachingQualificationRequired: context.settings.primaryTeachingQualificationRequired,
               maximumOLevelSittings: context.settings.primaryMaximumOLevelSittings,
               minimumOLevelSubjects: context.settings.primaryMinimumOLevelSubjects,
@@ -2157,10 +2161,28 @@ export function registerRecruitmentRoutes(app: Express): void {
         return res.status(403).json({ message: "Recruitment settings are managed at organization level." });
       }
       const input = settingsInput.parse(req.body);
-      const [updated] = await db.insert(recruitmentSettings).values({ organizationId, ...input }).onConflictDoUpdate({
-        target: recruitmentSettings.organizationId,
-        set: { ...input, updatedAt: new Date() },
-      }).returning();
+      const previous = await ensureSettings(organizationId);
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx.insert(recruitmentSettings).values({ organizationId, ...input }).onConflictDoUpdate({
+          target: recruitmentSettings.organizationId,
+          set: { ...input, updatedAt: new Date() },
+        }).returning();
+        await tx.insert(recruitmentActivity).values({
+          organizationId,
+          applicationId: null,
+          vacancyId: null,
+          activityType: "recruitment_settings_updated",
+          summary: "Recruitment eligibility settings updated.",
+          details: {
+            primarySchoolMaxAge: { from: previous.primarySchoolMaxAge, to: row.primarySchoolMaxAge },
+            highSchoolMaxAge: { from: previous.highSchoolMaxAge, to: row.highSchoolMaxAge },
+            primaryTeachingQualificationRequired: { from: previous.primaryTeachingQualificationRequired, to: row.primaryTeachingQualificationRequired },
+            primaryMaximumOLevelSittings: { from: previous.primaryMaximumOLevelSittings, to: row.primaryMaximumOLevelSittings },
+          },
+          actorUserId: user.id,
+        });
+        return row;
+      });
       res.json(updated);
     } catch (error) { next(error); }
   });

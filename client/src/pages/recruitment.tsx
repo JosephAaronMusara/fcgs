@@ -2441,6 +2441,7 @@ function RecruitmentSettings({
     highSchoolMinimumALevelPoints: settings.highSchoolMinimumALevelPoints ?? 13,
     highSchoolTeachingQualifiedMinimumALevelPoints: settings.highSchoolTeachingQualifiedMinimumALevelPoints ?? 10,
     highSchoolTeachingQualificationExceptionEnabled: settings.highSchoolTeachingQualificationExceptionEnabled ?? true,
+    primarySchoolMaxAge: settings.primarySchoolMaxAge ?? 35,
     primaryTeachingQualificationRequired: settings.primaryTeachingQualificationRequired ?? true,
     primaryMaximumOLevelSittings: settings.primaryMaximumOLevelSittings ?? 2,
     primaryMinimumOLevelSubjects: settings.primaryMinimumOLevelSubjects ?? 5,
@@ -2461,6 +2462,7 @@ function RecruitmentSettings({
       highSchoolMinimumALevelPoints: settings.highSchoolMinimumALevelPoints ?? 13,
       highSchoolTeachingQualifiedMinimumALevelPoints: settings.highSchoolTeachingQualifiedMinimumALevelPoints ?? 10,
       highSchoolTeachingQualificationExceptionEnabled: settings.highSchoolTeachingQualificationExceptionEnabled ?? true,
+      primarySchoolMaxAge: settings.primarySchoolMaxAge ?? 35,
       primaryTeachingQualificationRequired: settings.primaryTeachingQualificationRequired ?? true,
       primaryMaximumOLevelSittings: settings.primaryMaximumOLevelSittings ?? 2,
       primaryMinimumOLevelSubjects: settings.primaryMinimumOLevelSubjects ?? 5,
@@ -2515,7 +2517,10 @@ function RecruitmentSettings({
             <CardDescription>Primary applications are screened automatically against these configurable O-Level and teaching-qualification requirements.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <div className="md:col-span-2 lg:col-span-4">
+            <Field label="Maximum age">
+              <Input type="number" min="18" max="80" value={form.primarySchoolMaxAge} onChange={(event) => setForm((current: any) => ({ ...current, primarySchoolMaxAge: Number(event.target.value) }))} />
+            </Field>
+            <div className="md:col-span-2 lg:col-span-3">
               <Toggle
                 label="Teaching qualification required"
                 checked={form.primaryTeachingQualificationRequired}

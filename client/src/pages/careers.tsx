@@ -248,6 +248,7 @@ export default function CareersPage() {
       }
       const enteredOLevelResults = form.oLevelResults.filter((row) => row.subject.trim() || row.grade.trim());
       if (isPrimary) {
+        if (!form.dateOfBirth) throw new Error("Date of birth is required for Primary School Teaching applications.");
         if (enteredOLevelResults.length === 0) throw new Error("Enter your O-Level subjects, grades and sittings.");
         if (enteredOLevelResults.some((row) => !row.subject.trim() || !row.grade.trim() || !Number.isInteger(Number(row.sitting)) || Number(row.sitting) < 1)) {
           throw new Error("Complete the subject, grade and sitting for every O-Level result entered.");
@@ -506,6 +507,7 @@ export default function CareersPage() {
               </CardHeader>
               <CardContent>
                 <ul className="list-disc space-y-2 pl-5 text-sm">
+                  <li><strong>{data.primarySchoolEligibility.maxAge} years old or below</strong> on the date of application.</li>
                   {data.primarySchoolEligibility.teachingQualificationRequired && <li>A <strong>recognised teaching qualification</strong> is required.</li>}
                   <li>A maximum of <strong>{data.primarySchoolEligibility.maximumOLevelSittings} O-Level sitting(s)</strong>.</li>
                   <li>At least <strong>{data.primarySchoolEligibility.minimumOLevelSubjects} O-Level subjects at {data.primarySchoolEligibility.minimumOLevelGrade} or better</strong>.</li>
@@ -523,8 +525,8 @@ export default function CareersPage() {
               <Field label="Email *"><Input required type="email" value={form.email} onChange={(event) => set("email", event.target.value)} /></Field>
               <Field label="Phone *"><Input required value={form.phone} onChange={(event) => set("phone", event.target.value)} /></Field>
               <Field label="National ID *"><Input required value={form.nationalId} onChange={(event) => set("nationalId", event.target.value.toUpperCase())} /></Field>
-              <Field label={`Date of birth${isHighSchool ? " *" : ""}`}>
-                <Input required={isHighSchool} type="date" max={new Date().toISOString().slice(0, 10)} value={form.dateOfBirth} onChange={(event) => set("dateOfBirth", event.target.value)} />
+              <Field label={`Date of birth${isTeaching ? " *" : ""}`}>
+                <Input required={isTeaching} type="date" max={new Date().toISOString().slice(0, 10)} value={form.dateOfBirth} onChange={(event) => set("dateOfBirth", event.target.value)} />
               </Field>
               <Field label="Gender">
                 <Select value={form.gender || "none"} onValueChange={(value) => set("gender", value === "none" ? "" : value)}>

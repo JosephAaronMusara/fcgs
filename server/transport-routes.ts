@@ -333,10 +333,8 @@ const cashupInput = z.object({
   cashupDate: dateString,
   paymentIds: z.array(z.coerce.number().int().positive()).optional().default([]),
   refundIds: z.array(z.coerce.number().int().positive()).optional().default([]),
-  // These retain their historical field names for API compatibility, but at the
-  // school preparation stage they represent the Receptionist's declaration.
-  actualCash: z.coerce.number().finite().min(0),
-  actualNonCash: z.coerce.number().finite().min(0),
+  // Handover totals are always calculated by the server from the selected
+  // payments/refunds. Any legacy/manipulated amount fields sent by a client are ignored.
   depositReference: optionalText,
   notes: optionalText,
 });
@@ -344,10 +342,13 @@ const cashupInput = z.object({
 const cashupSignInput = z.object({ password: z.string().min(1) });
 
 const cashupVerifyInput = z.object({
-  receivedCash: z.coerce.number().finite().min(0),
-  receivedNonCash: z.coerce.number().finite().min(0).default(0),
   notes: optionalText,
-  discrepancyReason: optionalText,
+  password: z.string().min(1),
+});
+
+const cashupDiscrepancyInput = z.object({
+  discrepancyReason: z.string().trim().min(3).max(1000),
+  notes: optionalText,
   password: z.string().min(1),
 });
 
@@ -1365,6 +1366,21 @@ function schoolCashupView(row: any) {
   return safe;
 }
 
+function calculateCashupHandover(payments: any[], refunds: any[]) {
+  const cashReceipts = payments.filter((row) => row.paymentMethod === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+  const nonCashReceipts = payments.filter((row) => row.paymentMethod !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+  const cashRefunds = refunds.filter((row) => row.method === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+  const nonCashRefunds = refunds.filter((row) => row.method !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
+  const cash = rounded(cashReceipts - cashRefunds);
+  const nonCash = rounded(nonCashReceipts - nonCashRefunds);
+  if (cash < -0.009 || nonCash < -0.009) {
+    const error: any = new Error("Selected refunds would make a cash-up handover amount negative. Adjust the selected transactions before continuing.");
+    error.status = 409;
+    throw error;
+  }
+  return { cash: Math.max(0, cash), nonCash: Math.max(0, nonCash) };
+}
+
 
 const canonicalDestinationKey = (value: unknown) => String(value || "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
 
@@ -2080,6 +2096,49 @@ export function registerTransportRoutes(app: Express) {
       next(error);
     }
   });
+  app.get("/api/transport/payments", requireAuth, requirePermission("transport.view"), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      if (!school) return res.status(400).json({ message: "Select a school" });
+      const query = z.object({
+        from: dateString.optional(),
+        to: dateString.optional(),
+      }).refine((value) => !value.from || !value.to || value.from <= value.to, {
+        message: "The From date cannot be after the To date.",
+      }).parse(req.query);
+      if (!query.from && !query.to) return res.status(400).json({ message: "Select a From date, To date, or both." });
+      const dateConditions = [sql`p.school_id=${school.id}`];
+      if (query.from) dateConditions.push(sql`p.payment_date >= ${query.from}`);
+      if (query.to) dateConditions.push(sql`p.payment_date <= ${query.to}`);
+      const payments = await db.execute(sql`
+        SELECT p.*,
+          p.student_id AS "studentId", p.payment_date AS "paymentDate", p.payment_method AS "paymentMethod",
+          p.academic_year AS "academicYear", p.receipt_no AS "receiptNo", p.verification_status AS "verificationStatus",
+          p.external_reference AS "externalReference", p.received_by_user_id AS "receivedByUserId", p.verified_at AS "verifiedAt",
+          p.verified_by_user_id AS "verifiedByUserId", p.reconciled_at AS "reconciledAt", p.reconciled_by_user_id AS "reconciledByUserId",
+          p.reversed_at AS "reversedAt", p.reversed_by_user_id AS "reversedByUserId", p.reversal_reason AS "reversalReason",
+          s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo",
+          COALESCE(SUM(a.amount),0)::text AS "allocatedAmount",
+          (p.amount-COALESCE(SUM(a.amount),0))::text AS "unallocatedAmount",
+          (SELECT COUNT(*) FROM transport_receipt_events re WHERE re.payment_id=p.id AND re.event_type='reprint')::int AS "reprintCount",
+          ca.claim_id AS "claimId", cl.claim_number AS "claimNumber", po.payout_number AS "payoutNumber",
+          cp.cashup_id AS "cashupId", cu.status AS "cashupStatus"
+        FROM transport_payments p
+        JOIN students s ON s.id=p.student_id
+        LEFT JOIN transport_payment_allocations a ON a.payment_id=p.id
+        LEFT JOIN transport_claim_allocations ca ON ca.allocation_id=a.id
+        LEFT JOIN transport_claims cl ON cl.id=ca.claim_id
+        LEFT JOIN transport_payouts po ON po.claim_id=cl.id
+        LEFT JOIN transport_cashup_payments cp ON cp.payment_id=p.id
+        LEFT JOIN transport_cashups cu ON cu.id=cp.cashup_id
+        WHERE ${sql.join(dateConditions, sql` AND `)}
+        GROUP BY p.id,s.id,ca.claim_id,cl.claim_number,po.payout_number,cp.cashup_id,cu.status
+        ORDER BY p.created_at DESC
+      `);
+      res.json({ payments: payments.rows });
+    } catch (error) { routeError(res, error); }
+  });
+
   app.get("/api/transport/bootstrap", requireAuth, requirePermission("transport.view"), async (req, res) => {
     try {
       const school = await schoolContext(req);
@@ -4137,7 +4196,7 @@ export function registerTransportRoutes(app: Express) {
             remaining = rounded(remaining - allocated);
           }
         }
-        await tx.insert(transportReceiptEvents).values({ schoolId: school.id, paymentId: payment.id, eventType: "issued", copyType: "customer_and_service_provider", createdByUserId: user.id, metadata: { receiptNo } });
+        await tx.insert(transportReceiptEvents).values({ schoolId: school.id, paymentId: payment.id, eventType: "issued", copyType: "single_receipt", createdByUserId: user.id, metadata: { receiptNo } });
         const [activeAssignment] = await tx.select().from(transportAssignments).where(and(
           eq(transportAssignments.schoolId, school.id), eq(transportAssignments.studentId, parsed.studentId), eq(transportAssignments.isActive, true),
         )).orderBy(desc(transportAssignments.startDate)).limit(1);
@@ -4233,7 +4292,7 @@ export function registerTransportRoutes(app: Express) {
         schoolId: school.id,
         paymentId: id,
         eventType,
-        copyType: "customer_and_service_provider",
+        copyType: "single_receipt",
         createdByUserId: user.id,
         metadata: { printNumber: priorPrintCount + 1, format: printFormat, formatOverride: Boolean(queryFormat?.success) },
       });
@@ -4335,13 +4394,13 @@ export function registerTransportRoutes(app: Express) {
       let pdf: Buffer;
       if (printFormat === "thermal80") {
         const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${receiptNo}</title><style>
-          *{box-sizing:border-box}html,body{width:80mm;margin:0;padding:0;font-family:Arial,sans-serif;color:#111;background:#fff}body{overflow-wrap:anywhere;word-break:normal}.receipt{position:relative;width:80mm;padding:3.5mm 4mm;overflow:visible}.thermal-receipt+.thermal-receipt{border-top:1px dashed #555;margin-top:3mm;padding-top:5mm}.logo{text-align:center;margin:0 auto 2mm}.logo img{display:inline-block;max-width:34mm;max-height:20mm;width:auto;height:auto;object-fit:contain}.school{text-align:center;font-size:9.5px;line-height:1.35;overflow-wrap:anywhere}.school h1{font-size:13px;line-height:1.2;margin:0 0 1mm}.copy{margin:3mm auto 1.5mm;text-align:center;font-weight:700;font-size:10px;border:1px solid #222;padding:1.5mm 2mm;max-width:60mm}.thermal-receipt h2{text-align:center;font-size:13px;letter-spacing:.5px;margin:2mm 0 3mm}.details,.handover{border-top:1px solid #999}.row{padding:1.5mm 0;border-bottom:1px dotted #aaa}.label{font-size:8.5px;font-weight:700;margin-bottom:.6mm}.value{font-size:10px;line-height:1.35;white-space:normal;overflow-wrap:anywhere}.amount{text-align:center;font-size:21px;font-weight:700;margin:4mm 0 2mm}.totals{font-size:9.5px;border-top:1px solid #999;border-bottom:1px solid #999;padding:1.5mm 0;margin-bottom:3mm}.totals div{display:flex;justify-content:space-between;gap:3mm;padding:.7mm 0}.totals span{text-align:right;white-space:nowrap}.handover{margin-top:2mm}.qr{text-align:center;margin:3mm auto 2mm}.qr img{display:block;width:25mm;height:25mm;margin:0 auto 1mm}.qr small{font-size:8px}.notice{font-size:8px;line-height:1.35;border-top:1px solid #aaa;padding-top:2mm;margin:2mm 0 0;white-space:normal;overflow-wrap:anywhere}.watermark{position:absolute;z-index:0;transform:rotate(-25deg);font-size:25mm;font-weight:700;color:rgba(180,0,0,.07);top:42%;left:7mm;pointer-events:none}.receipt>*:not(.watermark){position:relative;z-index:1}@media print{html,body{width:80mm}}
-        </style></head><body>${thermalCopy("CUSTOMER COPY")}${thermalCopy("SERVICE PROVIDER COPY")}</body></html>`;
+          *{box-sizing:border-box}html,body{width:80mm;margin:0;padding:0;font-family:Arial,sans-serif;color:#111;background:#fff}body{overflow-wrap:anywhere;word-break:normal}.receipt{position:relative;width:80mm;padding:3.5mm 4mm;overflow:visible}.thermal-receipt+.thermal-receipt{border-top:1px dashed #555;margin-top:3mm;padding-top:5mm}.logo{text-align:center;margin:0 auto 2mm}.logo img{display:inline-block;max-width:34mm;max-height:20mm;width:auto;height:auto;object-fit:contain}.school{text-align:center;font-size:10.5px;font-weight:600;line-height:1.4;overflow-wrap:anywhere}.school h1{font-size:14.5px;font-weight:800;line-height:1.2;margin:0 0 1mm}.copy{margin:3mm auto 1.5mm;text-align:center;font-weight:800;font-size:11px;border:1.4px solid #111;padding:1.5mm 2mm;max-width:60mm}.thermal-receipt h2{text-align:center;font-size:14.5px;font-weight:800;letter-spacing:.5px;margin:2mm 0 3mm}.details,.handover{border-top:1.2px solid #555}.row{padding:1.7mm 0;border-bottom:1px dotted #777}.label{font-size:9.5px;font-weight:800;margin-bottom:.6mm}.value{font-size:11px;font-weight:600;line-height:1.4;white-space:normal;overflow-wrap:anywhere}.amount{text-align:center;font-size:23px;font-weight:800;margin:4mm 0 2mm}.totals{font-size:10.5px;font-weight:600;border-top:1.2px solid #555;border-bottom:1.2px solid #555;padding:1.5mm 0;margin-bottom:3mm}.totals div{display:flex;justify-content:space-between;gap:3mm;padding:.7mm 0}.totals span{text-align:right;white-space:nowrap}.handover{margin-top:2mm}.qr{text-align:center;margin:3mm auto 2mm}.qr img{display:block;width:25mm;height:25mm;margin:0 auto 1mm}.qr small{font-size:9px;font-weight:600}.notice{font-size:9px;font-weight:600;line-height:1.4;border-top:1px solid #777;padding-top:2mm;margin:2mm 0 0;white-space:normal;overflow-wrap:anywhere}.watermark{position:absolute;z-index:0;transform:rotate(-25deg);font-size:25mm;font-weight:700;color:rgba(180,0,0,.07);top:42%;left:7mm;pointer-events:none}.receipt>*:not(.watermark){position:relative;z-index:1}@media print{html,body{width:80mm}}
+        </style></head><body>${thermalCopy("RECEIPT")}</body></html>`;
         pdf = await renderHtmlPdf({ html, pdfOptions: { printBackground: true }, fitToContent: { width: "80mm", paddingPx: 2 } });
       } else {
         const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${receiptNo}</title><style>
           @page{size:A4;margin:10mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;margin:0}.receipt{position:relative;border:1.5px solid #222;padding:16px;margin-bottom:12px;min-height:122mm;overflow:hidden}.receipt:first-child{border-bottom-style:dashed}.logo{text-align:center;margin:0 auto 8px}.logo img{display:inline-block;max-width:42mm;max-height:22mm;width:auto;height:auto;object-fit:contain}header{position:relative;display:flex;justify-content:center;align-items:flex-start;gap:20px;font-size:12px;min-height:48px}.school{text-align:center;max-width:70%}.school h1{font-size:19px;margin:0 0 4px;overflow-wrap:anywhere}.copy{position:absolute;right:0;top:0;font-weight:bold;border:1px solid #111;padding:7px;max-width:28%;text-align:center;overflow-wrap:anywhere}h2{text-align:center;font-size:16px;letter-spacing:1.2px;margin:13px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 20px;font-size:12px}.grid div{display:flex;justify-content:space-between;gap:12px;border-bottom:1px dotted #bbb;padding-bottom:3px;min-width:0}.grid b{flex:0 0 auto}.grid span{text-align:right;overflow-wrap:anywhere;min-width:0}.amount{text-align:center;font-size:28px;font-weight:bold;margin:14px 0 4px}.small{text-align:center;font-size:11px}footer{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-top:10px;font-size:11px;overflow-wrap:anywhere}.qr{text-align:center;flex:0 0 auto}.qr img{width:75px;display:block}.notice{font-size:9px;border-top:1px solid #ddd;padding-top:6px;overflow-wrap:anywhere}.watermark{position:absolute;transform:rotate(-25deg);font-size:82px;font-weight:bold;color:rgba(180,0,0,.09);top:42%;left:17%;pointer-events:none}@media print{button{display:none}}
-        </style></head><body>${a4Copy("CUSTOMER COPY")}${a4Copy("SERVICE PROVIDER COPY")}</body></html>`;
+        </style></head><body>${a4Copy("RECEIPT")}</body></html>`;
         pdf = await renderHtmlPdf({ html, pdfOptions: { format: "A4", printBackground: true, preferCSSPageSize: true } });
       }
 
@@ -4480,15 +4539,9 @@ export function registerTransportRoutes(app: Express) {
         .where(and(inArray(transportCashupRefunds.refundId, parsed.refundIds), eq(transportCashups.status, "verified"))) : [];
       if (historicallyAccountedRefunds.length) return res.status(409).json({ message: "One or more selected refunds were already accounted for by a completed cash-up. Refresh the list and select only unaccounted refunds." });
 
-      // Expected values are calculated and retained for HQ reconciliation only.
-      // They are deliberately not returned to the Receptionist or Accounts Clerk.
-      const cashReceipts = payments.filter((p) => p.paymentMethod === "cash").reduce((sum, p) => sum + amount(p.amount), 0);
-      const nonCashReceipts = payments.filter((p) => p.paymentMethod !== "cash").reduce((sum, p) => sum + amount(p.amount), 0);
-      const cashRefunds = refunds.filter((r) => r.method === "cash").reduce((sum, r) => sum + amount(r.amount), 0);
-      const nonCashRefunds = refunds.filter((r) => r.method !== "cash").reduce((sum, r) => sum + amount(r.amount), 0);
-      const expectedCash = rounded(cashReceipts - cashRefunds);
-      const expectedNonCash = rounded(nonCashReceipts - nonCashRefunds);
-      const expectedVarianceAgainstDeclaration = rounded(parsed.actualCash + parsed.actualNonCash - expectedCash - expectedNonCash);
+      const handover = calculateCashupHandover(payments, refunds);
+      const expectedCash = handover.cash;
+      const expectedNonCash = handover.nonCash;
       const created = await db.transaction(async (tx) => {
         const [cashup] = await tx.insert(transportCashups).values({
           schoolId: school.id,
@@ -4496,10 +4549,10 @@ export function registerTransportRoutes(app: Express) {
           cashupDate: parsed.cashupDate,
           cashierUserId: user.id,
           expectedCash: String(expectedCash),
-          actualCash: String(parsed.actualCash),
+          actualCash: String(expectedCash),
           expectedNonCash: String(expectedNonCash),
-          actualNonCash: String(parsed.actualNonCash),
-          variance: String(expectedVarianceAgainstDeclaration),
+          actualNonCash: String(expectedNonCash),
+          variance: "0",
           depositReference: parsed.depositReference,
           notes: parsed.notes,
         }).returning();
@@ -4530,17 +4583,14 @@ export function registerTransportRoutes(app: Express) {
       if (conflictingPayments.length) return res.status(409).json({ message: "One or more selected payments were included in another cash-up while this draft was open." });
       const conflictingRefunds = parsed.refundIds.length ? await db.select({ refundId: transportCashupRefunds.refundId, cashupId: transportCashupRefunds.cashupId }).from(transportCashupRefunds).innerJoin(transportCashups, eq(transportCashups.id, transportCashupRefunds.cashupId)).where(and(inArray(transportCashupRefunds.refundId, parsed.refundIds), ne(transportCashupRefunds.cashupId, id), eq(transportCashups.status, "verified"))) : [];
       if (conflictingRefunds.length) return res.status(409).json({ message: "One or more selected refunds were already accounted for by another completed cash-up." });
-      const cashReceipts = payments.filter((row) => row.paymentMethod === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
-      const nonCashReceipts = payments.filter((row) => row.paymentMethod !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
-      const cashRefunds = refunds.filter((row) => row.method === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
-      const nonCashRefunds = refunds.filter((row) => row.method !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
-      const expectedCash = rounded(cashReceipts - cashRefunds);
-      const expectedNonCash = rounded(nonCashReceipts - nonCashRefunds);
+      const handover = calculateCashupHandover(payments, refunds);
+      const expectedCash = handover.cash;
+      const expectedNonCash = handover.nonCash;
       const updated = await db.transaction(async (tx) => {
         const [row] = await tx.update(transportCashups).set({
-          cashupDate: parsed.cashupDate, expectedCash: String(expectedCash), actualCash: String(parsed.actualCash),
-          expectedNonCash: String(expectedNonCash), actualNonCash: String(parsed.actualNonCash),
-          variance: String(rounded(parsed.actualCash + parsed.actualNonCash - expectedCash - expectedNonCash)),
+          cashupDate: parsed.cashupDate, expectedCash: String(expectedCash), actualCash: String(expectedCash),
+          expectedNonCash: String(expectedNonCash), actualNonCash: String(expectedNonCash),
+          variance: "0",
           depositReference: parsed.depositReference || null, notes: parsed.notes || null,
         }).where(and(eq(transportCashups.id, id), eq(transportCashups.status, "draft"))).returning();
         if (!row) throw Object.assign(new Error("Draft changed while you were editing it. Refresh and try again."), { status: 409 });
@@ -4647,8 +4697,8 @@ export function registerTransportRoutes(app: Express) {
       if (Number((linkedCount.rows[0] as any)?.count || 0) === 0) return res.status(409).json({ message: "This draft no longer contains any receipts or paid refunds. Reopen and edit it before submitting." });
       const signature = await preparedElectronicSignature(
         user.id, password, "transport_cashup", id, "receptionist",
-        `I confirm that I handed over the amounts declared on cash-up ${previous.cashupNumber}.`,
-        { declaredCash: previous.actualCash, declaredNonCash: previous.actualNonCash, cashupNumber: previous.cashupNumber }
+        `I confirm that I handed over the system-calculated amounts recorded on cash-up ${previous.cashupNumber}.`,
+        { systemCash: previous.actualCash, systemNonCash: previous.actualNonCash, cashupNumber: previous.cashupNumber }
       );
       const updated = await db.transaction(async (tx) => {
         const [row] = await tx.update(transportCashups).set({ status: "submitted", submittedAt: new Date() }).where(eq(transportCashups.id, id)).returning();
@@ -4660,6 +4710,33 @@ export function registerTransportRoutes(app: Express) {
     } catch (error) { return routeError(res, error); }
   });
 
+  app.post("/api/transport/cashups/:id/flag-discrepancy", requireAuth, requireAnyPermission("transport.cashups.verify", "transport.edit"), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: "Select a school" });
+      const parsed = cashupDiscrepancyInput.parse(req.body);
+      const id = Number(req.params.id); const previous = await assertSchoolRecord(transportCashups, id, school.id);
+      if (!previous || previous.status !== "submitted") return res.status(409).json({ message: "Only submitted cash-ups can be flagged for discrepancy" });
+      if (previous.cashierUserId === user.id) return res.status(409).json({ message: "The person who prepared the cash-up cannot perform Accounts verification actions on the same cash-up" });
+      const signature = await preparedElectronicSignature(
+        user.id, parsed.password, "transport_cashup", id, "accounts_clerk",
+        `I flag a discrepancy requiring investigation on cash-up ${previous.cashupNumber}.`,
+        { discrepancyReason: parsed.discrepancyReason, cashupNumber: previous.cashupNumber },
+      );
+      const [row] = await db.transaction(async (tx) => {
+        const [updated] = await tx.update(transportCashups).set({
+          accountsVerificationNotes: parsed.notes || null,
+          accountsDiscrepancyReason: parsed.discrepancyReason,
+        }).where(and(eq(transportCashups.id, id), eq(transportCashups.status, "submitted"))).returning();
+        if (!updated) throw Object.assign(new Error("Cash-up changed while the discrepancy was being recorded. Refresh and try again."), { status: 409 });
+        await tx.insert(electronicSignatures).values(signature);
+        await writeAudit(tx, school.id, user.id, "cashup", id, "accounts_flag_discrepancy", schoolCashupView(previous), schoolCashupView(updated), parsed.discrepancyReason);
+        return [updated];
+      });
+      return res.json({ ...schoolCashupView(row), discrepancyFlagged: true });
+    } catch (error) { return routeError(res, error); }
+  });
+
   app.post("/api/transport/cashups/:id/verify", requireAuth, requireAnyPermission("transport.cashups.verify", "transport.edit"), async (req, res) => {
     try {
       const school = await schoolContext(req); const user = userOf(req);
@@ -4668,24 +4745,42 @@ export function registerTransportRoutes(app: Express) {
       const id = Number(req.params.id); const previous = await assertSchoolRecord(transportCashups, id, school.id);
       if (!previous || previous.status !== "submitted") return res.status(409).json({ message: "Only submitted cash-ups can be verified" });
       if (previous.cashierUserId === user.id) return res.status(409).json({ message: "The person who prepared the cash-up cannot verify the same cash-up" });
-      const declarationDifference = rounded(parsed.receivedCash + parsed.receivedNonCash - amount(previous.actualCash) - amount(previous.actualNonCash));
+
+      const invalidPayments = await db.execute(sql`
+        SELECT p.receipt_no AS "receiptNo"
+        FROM transport_cashup_payments cp
+        JOIN transport_payments p ON p.id=cp.payment_id
+        WHERE cp.cashup_id=${id}
+          AND (p.school_id<>${school.id} OR p.reversed_at IS NOT NULL OR p.status='reversed')
+      `);
+      const invalidRefunds = await db.execute(sql`
+        SELECT r.refund_number AS "refundNumber"
+        FROM transport_cashup_refunds cr
+        JOIN transport_refunds r ON r.id=cr.refund_id
+        WHERE cr.cashup_id=${id}
+          AND (r.school_id<>${school.id} OR r.status<>'paid' OR r.method='credit')
+      `);
       const unchecked = await db.execute(sql`
         SELECT COUNT(*)::int AS count
         FROM transport_payments p LEFT JOIN transport_cashup_payments cp ON cp.payment_id=p.id
         WHERE p.school_id=${school.id} AND p.payment_date=${previous.cashupDate} AND p.reversed_at IS NULL AND p.status <> 'reversed' AND cp.payment_id IS NULL
       `);
       const uncheckedCount = Number((unchecked.rows[0] as any)?.count || 0);
-      if ((Math.abs(declarationDifference) > 0.009 || uncheckedCount > 0) && !parsed.discrepancyReason?.trim()) {
-        return res.status(400).json({ message: "Enter a discrepancy reason because the handover differs from the Receptionist declaration or receipts remain unchecked." });
+      if (invalidPayments.rows.length || invalidRefunds.rows.length || uncheckedCount > 0) {
+        return res.status(409).json({
+          message: "This cash-up cannot be verified because its transaction set no longer reconciles cleanly. Use Flag Discrepancy so the issue is investigated without substituting financial amounts.",
+          invalidReceipts: invalidPayments.rows,
+          invalidRefunds: invalidRefunds.rows,
+          uncheckedCount,
+        });
       }
+
       const signature = await preparedElectronicSignature(
         user.id, parsed.password, "transport_cashup", id, "accounts_clerk",
-        `I confirm that I received and counted the amounts recorded for cash-up ${previous.cashupNumber}.`,
-        { receivedCash: parsed.receivedCash, receivedNonCash: parsed.receivedNonCash, cashupNumber: previous.cashupNumber }
+        `I confirm the handover against the system-calculated amounts recorded for cash-up ${previous.cashupNumber}.`,
+        { systemCash: previous.actualCash, systemNonCash: previous.actualNonCash, cashupNumber: previous.cashupNumber },
       );
       const updated = await db.transaction(async (tx) => {
-        // Refunds are only consumed when a cash-up successfully completes verification.
-        // Lock them first so stale tabs/concurrent cash-ups cannot deduct the same refund twice.
         const linkedRefundRows = await tx.execute(sql`
           SELECT r.id, r.accounted_cashup_id AS "accountedCashupId"
           FROM transport_cashup_refunds cr
@@ -4695,7 +4790,7 @@ export function registerTransportRoutes(app: Express) {
         `);
         const conflictingRefund = (linkedRefundRows.rows as any[]).find((item) => item.accountedCashupId && Number(item.accountedCashupId) !== id);
         if (conflictingRefund) {
-          const conflict: any = new Error("One or more paid refunds were already accounted for by another completed cash-up. Refresh and prepare a new cash-up.");
+          const conflict: any = new Error("One or more paid refunds were already accounted for by another completed cash-up. Use Flag Discrepancy and investigate before verification.");
           conflict.status = 409;
           throw conflict;
         }
@@ -4706,7 +4801,7 @@ export function registerTransportRoutes(app: Express) {
             .innerJoin(transportCashups, eq(transportCashups.id, transportCashupRefunds.cashupId))
             .where(and(inArray(transportCashupRefunds.refundId, refundIds), eq(transportCashups.status, "verified"), ne(transportCashups.id, id)));
           if (legacyCompletedLinks.length) {
-            const conflict: any = new Error("One or more paid refunds were already accounted for by another completed cash-up. Refresh and prepare a new cash-up.");
+            const conflict: any = new Error("One or more paid refunds were already accounted for by another completed cash-up. Use Flag Discrepancy and investigate before verification.");
             conflict.status = 409;
             throw conflict;
           }
@@ -4716,16 +4811,18 @@ export function registerTransportRoutes(app: Express) {
 
         const [row] = await tx.update(transportCashups).set({
           status: "verified",
-          accountsReceivedCash: String(parsed.receivedCash),
-          accountsReceivedNonCash: String(parsed.receivedNonCash),
+          // Historical compatibility columns remain, but Accounts cannot enter substitute values.
+          accountsReceivedCash: String(previous.actualCash),
+          accountsReceivedNonCash: String(previous.actualNonCash),
           accountsVerificationNotes: parsed.notes,
-          accountsDiscrepancyReason: parsed.discrepancyReason,
+          accountsDiscrepancyReason: null,
           verifiedAt: new Date(), verifiedByUserId: user.id,
-        }).where(eq(transportCashups.id, id)).returning();
+        }).where(and(eq(transportCashups.id, id), eq(transportCashups.status, "submitted"))).returning();
+        if (!row) throw Object.assign(new Error("Cash-up changed while verification was in progress. Refresh and try again."), { status: 409 });
         await tx.insert(electronicSignatures).values(signature);
         const linked = await tx.select({ paymentId: transportCashupPayments.paymentId }).from(transportCashupPayments).where(eq(transportCashupPayments.cashupId, id));
         if (linked.length) await tx.update(transportPayments).set({ verificationStatus: "reconciled", reconciledAt: new Date(), reconciledByUserId: user.id }).where(inArray(transportPayments.id, linked.map((item) => item.paymentId)));
-        await writeAudit(tx, school.id, user.id, "cashup", id, "accounts_verify_and_sign", schoolCashupView(previous), schoolCashupView(row), parsed.discrepancyReason, { uncheckedCount, declarationDifference });
+        await writeAudit(tx, school.id, user.id, "cashup", id, "accounts_verify_and_sign", schoolCashupView(previous), schoolCashupView(row), null, { uncheckedCount });
         return row;
       });
       return res.json(schoolCashupView(updated));
@@ -4752,7 +4849,7 @@ export function registerTransportRoutes(app: Express) {
       const signatureBlock = (row: any, label: string) => row
         ? `<div class="signature"><b>${escapeHtml(label)}</b><div class="signline"><img src="${row.signatureSnapshot}" alt="signature"/><div><strong>${escapeHtml(row.signerName)}</strong><br/><span>${escapeHtml(new Date(row.signedAt).toLocaleString("en-ZW", { timeZone: "Africa/Harare" }))}</span></div></div></div>`
         : `<div class="signature"><b>${escapeHtml(label)}</b><div class="unsigned">Not yet signed</div></div>`;
-      const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${escapeHtml(cashup.cashupNumber)}</title><style>@page{size:A4;margin:12mm}body{font-family:Arial,sans-serif;color:#111}h1,h2{text-align:center;margin:0 0 8px}.meta{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;border:1px solid #bbb;padding:12px;margin:16px 0}.totals{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:15px 0}.box{border:1px solid #bbb;padding:10px}.box b{display:block;font-size:11px;color:#555}.box span{font-size:17px;font-weight:bold}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #bbb;padding:7px;text-align:left}th{background:#eee}.small{font-size:9px;color:#555}.signatures{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:32px}.signature{border:1px solid #bbb;padding:10px;min-height:115px}.signline{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center;margin-top:8px}.signline img{max-width:145px;max-height:70px}.signline span,.unsigned{font-size:10px;color:#555}</style></head><body><h1>${escapeHtml(school.name)}</h1><h2>TRANSPORT DAILY CASH HANDOVER & ACKNOWLEDGEMENT</h2><div class="meta"><div><b>Cash-up:</b> ${escapeHtml(cashup.cashupNumber)}</div><div><b>Status:</b> ${escapeHtml(cashup.status)}</div><div><b>Cash-up date:</b> ${escapeHtml(cashup.cashupDate)}</div><div><b>Reference:</b> ${escapeHtml(cashup.depositReference || "—")}</div></div><div class="totals"><div class="box"><b>Receptionist declared</b><span>USD ${rounded(amount(cashup.actualCash)+amount(cashup.actualNonCash)).toFixed(2)}</span></div><div class="box"><b>Accounts Clerk received</b><span>USD ${rounded(amount(cashup.accountsReceivedCash)+amount(cashup.accountsReceivedNonCash)).toFixed(2)}</span></div></div><table><thead><tr><th>Receipt</th><th>Learner</th><th>Payment date</th><th>Method</th><th>Amount</th></tr></thead><tbody>${paymentRows || '<tr><td colspan="5">No linked payments.</td></tr>'}</tbody></table><p><b>Receptionist notes:</b> ${escapeHtml(cashup.notes || "—")}</p><p><b>Accounts notes:</b> ${escapeHtml(cashup.accountsVerificationNotes || "—")}</p>${cashup.accountsDiscrepancyReason ? `<p><b>Discrepancy:</b> ${escapeHtml(cashup.accountsDiscrepancyReason)}</p>` : ""}<div class="signatures">${signatureBlock(receptionist,"Receptionist acknowledgement")}${signatureBlock(accounts,"Accounts Clerk acknowledgement")}</div></body></html>`;
+      const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${escapeHtml(cashup.cashupNumber)}</title><style>@page{size:A4;margin:12mm}body{font-family:Arial,sans-serif;color:#111}h1,h2{text-align:center;margin:0 0 8px}.meta{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;border:1px solid #bbb;padding:12px;margin:16px 0}.totals{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:15px 0}.box{border:1px solid #bbb;padding:10px}.box b{display:block;font-size:11px;color:#555}.box span{font-size:17px;font-weight:bold}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #bbb;padding:7px;text-align:left}th{background:#eee}.small{font-size:9px;color:#555}.signatures{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:32px}.signature{border:1px solid #bbb;padding:10px;min-height:115px}.signline{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center;margin-top:8px}.signline img{max-width:145px;max-height:70px}.signline span,.unsigned{font-size:10px;color:#555}</style></head><body><h1>${escapeHtml(school.name)}</h1><h2>TRANSPORT DAILY CASH HANDOVER & ACKNOWLEDGEMENT</h2><div class="meta"><div><b>Cash-up:</b> ${escapeHtml(cashup.cashupNumber)}</div><div><b>Status:</b> ${escapeHtml(cashup.status)}</div><div><b>Cash-up date:</b> ${escapeHtml(cashup.cashupDate)}</div><div><b>Reference:</b> ${escapeHtml(cashup.depositReference || "—")}</div></div><div class="totals"><div class="box"><b>System-calculated handover</b><span>USD ${rounded(amount(cashup.actualCash)+amount(cashup.actualNonCash)).toFixed(2)}</span></div><div class="box"><b>Accounts verification</b><span>${cashup.verifiedAt ? `Verified · USD ${rounded(amount(cashup.actualCash)+amount(cashup.actualNonCash)).toFixed(2)}` : cashup.accountsDiscrepancyReason ? "Discrepancy flagged" : "Awaiting verification"}</span></div></div><table><thead><tr><th>Receipt</th><th>Learner</th><th>Payment date</th><th>Method</th><th>Amount</th></tr></thead><tbody>${paymentRows || '<tr><td colspan="5">No linked payments.</td></tr>'}</tbody></table><p><b>Receptionist notes:</b> ${escapeHtml(cashup.notes || "—")}</p><p><b>Accounts notes:</b> ${escapeHtml(cashup.accountsVerificationNotes || "—")}</p>${cashup.accountsDiscrepancyReason ? `<p><b>Discrepancy:</b> ${escapeHtml(cashup.accountsDiscrepancyReason)}</p>` : ""}<div class="signatures">${signatureBlock(receptionist,"Receptionist acknowledgement")}${signatureBlock(accounts,"Accounts action / signature")}</div></body></html>`;
       const pdf = await renderHtmlPdf({ html, pdfOptions: { format: "A4", printBackground: true, preferCSSPageSize: true } });
       const filename = reportPdfFilename(`Transport_Cashup_${cashup.cashupNumber}`);
       res.setHeader("Content-Type", "application/pdf");
