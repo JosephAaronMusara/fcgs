@@ -1975,6 +1975,7 @@ export const recruitmentSettings = pgTable("recruitment_settings", {
   highSchoolMinimumALevelPoints: integer("high_school_minimum_a_level_points").notNull().default(13),
   highSchoolTeachingQualifiedMinimumALevelPoints: integer("high_school_teaching_qualified_minimum_a_level_points").notNull().default(10),
   highSchoolTeachingQualificationExceptionEnabled: boolean("high_school_teaching_qualification_exception_enabled").notNull().default(true),
+  primarySchoolMaxAge: integer("primary_school_max_age").notNull().default(35),
   primaryTeachingQualificationRequired: boolean("primary_teaching_qualification_required").notNull().default(true),
   primaryMaximumOLevelSittings: integer("primary_maximum_o_level_sittings").notNull().default(2),
   primaryMinimumOLevelSubjects: integer("primary_minimum_o_level_subjects").notNull().default(5),

@@ -102,6 +102,7 @@ assert.equal("teachingQualifiedMinimumALevelPoints" in publicPolicy, false);
 assert.equal("teachingQualificationExceptionEnabled" in publicPolicy, false);
 
 const primaryPolicy = {
+  maxAge: 35,
   teachingQualificationRequired: true,
   maximumOLevelSittings: 2,
   minimumOLevelSubjects: 5,
@@ -117,6 +118,7 @@ const eligiblePrimaryResults = [
   { subject: "History", grade: "B", sitting: 2 },
 ];
 const primaryPass = evaluatePrimarySchoolEligibility({
+  dateOfBirth: "1995-06-15",
   oLevelResults: eligiblePrimaryResults,
   holdsTeachingQualification: true,
   policy: primaryPolicy,
@@ -127,6 +129,7 @@ assert.equal(primaryPass.oLevelSittingCount, 2);
 assert.equal(primaryPass.oLevelQualifyingSubjectCount, 5);
 
 const noPrimaryQualification = evaluatePrimarySchoolEligibility({
+  dateOfBirth: "1995-06-15",
   oLevelResults: eligiblePrimaryResults,
   holdsTeachingQualification: false,
   policy: primaryPolicy,
@@ -134,6 +137,7 @@ const noPrimaryQualification = evaluatePrimarySchoolEligibility({
 assert.ok(noPrimaryQualification.failedCodes.includes("core:primary_teaching_qualification_required"));
 
 const tooManySittings = evaluatePrimarySchoolEligibility({
+  dateOfBirth: "1995-06-15",
   oLevelResults: [...eligiblePrimaryResults, { subject: "Shona", grade: "C", sitting: 3 }],
   holdsTeachingQualification: true,
   policy: primaryPolicy,
@@ -141,6 +145,7 @@ const tooManySittings = evaluatePrimarySchoolEligibility({
 assert.ok(tooManySittings.failedCodes.includes("core:o_level_too_many_sittings"));
 
 const scienceBelowMinimum = evaluatePrimarySchoolEligibility({
+  dateOfBirth: "1995-06-15",
   oLevelResults: eligiblePrimaryResults.map((row) => row.subject === "Science" ? { ...row, grade: "D" } : row),
   holdsTeachingQualification: true,
   policy: primaryPolicy,
@@ -149,13 +154,35 @@ assert.ok(scienceBelowMinimum.failedCodes.includes("core:o_level_science_require
 assert.ok(scienceBelowMinimum.failedCodes.includes("core:o_level_insufficient_qualifying_subjects"));
 
 const insufficientSubjects = evaluatePrimarySchoolEligibility({
+  dateOfBirth: "1995-06-15",
   oLevelResults: eligiblePrimaryResults.slice(0, 4),
   holdsTeachingQualification: true,
   policy: primaryPolicy,
 });
 assert.ok(insufficientSubjects.failedCodes.includes("core:o_level_insufficient_qualifying_subjects"));
 
+
+const primaryOverAge = evaluatePrimarySchoolEligibility({
+  dateOfBirth: "1980-01-01",
+  oLevelResults: eligiblePrimaryResults,
+  holdsTeachingQualification: true,
+  policy: primaryPolicy,
+  asOf: new Date("2026-10-11T10:00:00+02:00"),
+});
+assert.ok(primaryOverAge.failedCodes.includes("core:age_over_limit"));
+
+const primaryAtLimit = evaluatePrimarySchoolEligibility({
+  dateOfBirth: "1991-10-11",
+  oLevelResults: eligiblePrimaryResults,
+  holdsTeachingQualification: true,
+  policy: primaryPolicy,
+  asOf: new Date("2026-10-11T10:00:00+02:00"),
+});
+assert.equal(primaryAtLimit.age, 35);
+assert.equal(primaryAtLimit.passed, true);
+
 const primaryPublicPolicy = publicPrimarySchoolEligibilityPolicy(primaryPolicy);
+assert.equal(primaryPublicPolicy.maxAge, 35);
 assert.equal(primaryPublicPolicy.maximumOLevelSittings, 2);
 assert.equal(primaryPublicPolicy.minimumOLevelSubjects, 5);
 assert.deepEqual(primaryPublicPolicy.mandatoryOLevelSubjects, ["Mathematics", "Science", "English"]);
