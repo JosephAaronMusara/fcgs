@@ -57,6 +57,8 @@ export const RBAC_PERMISSIONS_DATA = [
 
   // Attendance
   { code: "attendance.view", name: "View Attendance", description: "View attendance records", category: "Attendance" },
+  { code: "attendance.reports.view", name: "View Attendance Reports", description: "View read-only attendance reports and absenteeism analysis", category: "Attendance" },
+  { code: "attendance.reports.export", name: "Export Attendance Reports", description: "Export authorised attendance reports to Excel and PDF", category: "Attendance" },
   { code: "attendance.create", name: "Record Attendance", description: "Take and record attendance", category: "Attendance" },
   { code: "attendance.edit", name: "Edit Attendance", description: "Modify attendance records", category: "Attendance" },
 
@@ -365,7 +367,6 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "school_expenses.view", name: "View School Expenses", description: "Open the school expenses module", category: "School Expenses" },
   { code: "school_incomes.view", name: "View School Incomes", description: "Open the school incomes module", category: "School Incomes" },
   { code: "financial_statements.view", name: "View Financial Statements", description: "Open the financial statements module", category: "Financial Statements" },
-  { code: "arrears.view", name: "View Arrears", description: "Open the arrears module", category: "Arrears" },
 
   // Calendar
   { code: "calendar.view", name: "View Calendar", description: "View calendar events", category: "Calendar" },

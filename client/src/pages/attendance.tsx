@@ -11,6 +11,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import AttendanceReports from "@/components/attendance-reports";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
 import { Textarea } from "@/components/ui/textarea";
@@ -212,6 +214,9 @@ export default function AttendancePage() {
   const { hasPermission } = useAuth();
   const canCorrectGateEvidence = hasPermission("access_control.attendance_correction");
   const canViewGateAudit = hasPermission("access_control.audit.view");
+  const canViewRegister = hasPermission("attendance.view");
+  const canViewReports = hasPermission("attendance.reports.view");
+  const [workspaceTab, setWorkspaceTab] = useState<"register" | "reports">(() => canViewRegister ? "register" : canViewReports ? "reports" : "register");
   const [selectedClass, setSelectedClass] = useState("all");
   const [studentSearch, setStudentSearch] = useState("");
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split("T")[0]);
@@ -232,6 +237,11 @@ export default function AttendancePage() {
   const [correctionStatus, setCorrectionStatus] = useState("present");
   const [correctionReason, setCorrectionReason] = useState("");
   const [correctedGateRecord, setCorrectedGateRecord] = useState<AttendanceRecordLite | null>(null);
+
+  useEffect(() => {
+    if (!canViewRegister && canViewReports) setWorkspaceTab("reports");
+    else if (canViewRegister && !canViewReports) setWorkspaceTab("register");
+  }, [canViewRegister, canViewReports]);
 
   const { data: classes } = useQuery<Class[]>({ queryKey: ["/api/classes"] });
 
@@ -726,13 +736,34 @@ export default function AttendancePage() {
     </div>
   );
 
+  if (workspaceTab === "reports" && canViewReports) {
+    return (
+      <div className="p-3 sm:p-4 lg:p-6 space-y-6 overflow-x-hidden">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2" style={{ color: "#1b2a5c" }}>
+            <ClipboardList className="h-8 w-8" style={{ color: "#1b2a5c" }} />
+            Class Attendance
+          </h1>
+          <p className="text-muted-foreground">Attendance recording and read-only attendance reporting</p>
+        </div>
+        <Tabs value={workspaceTab} onValueChange={(value) => setWorkspaceTab(value as "register" | "reports")}>
+          <TabsList className="h-auto w-full justify-start overflow-x-auto sm:w-auto">
+            {canViewRegister && <TabsTrigger value="register">Attendance Register</TabsTrigger>}
+            <TabsTrigger value="reports">Attendance Reports</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <AttendanceReports />
+      </div>
+    );
+  }
+
   return (
     <div className="p-3 sm:p-4 lg:p-6 space-y-6 overflow-x-hidden">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2" style={{ color: "#1b2a5c" }} data-testid="text-attendance-title">
             <ClipboardList className="h-8 w-8" style={{ color: "#1b2a5c" }} />
-            Attendance Register
+            Class Attendance
           </h1>
           <p className="text-muted-foreground">Mark and review student attendance records</p>
         </div>
@@ -747,6 +778,13 @@ export default function AttendancePage() {
           </Button>
         </div>
       </div>
+
+      <Tabs value={workspaceTab} onValueChange={(value) => setWorkspaceTab(value as "register" | "reports")}>
+        <TabsList className="h-auto w-full justify-start overflow-x-auto sm:w-auto">
+          {canViewRegister && <TabsTrigger value="register">Attendance Register</TabsTrigger>}
+          {canViewReports && <TabsTrigger value="reports">Attendance Reports</TabsTrigger>}
+        </TabsList>
+      </Tabs>
 
       <div className="grid grid-cols-3 gap-2 sm:gap-4">
         <Card>

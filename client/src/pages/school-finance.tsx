@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { queryClient, apiRequest, schoolFetch } from "@/lib/queryClient";
+import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import FeeBalanceImportDialog from "@/components/fee-balance-import-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -19,7 +20,6 @@ import { useTableSort } from "@/hooks/use-table-sort";
 import { SortableTableHead } from "@/components/sortable-table-head";
 import {
   AlertTriangle,
-  Banknote,
   BarChart3,
   CheckCircle2,
   Clock,
@@ -29,7 +29,6 @@ import {
   Search,
   Send,
   TrendingUp,
-  Upload,
   Users,
   Plus,
   Printer,
@@ -38,7 +37,6 @@ import type { FeesPayment, Student } from "@shared/schema";
 
 const SCHOOL_FINANCE_TABS = [
   { value: "student-payments", label: "Student Payments", icon: DollarSign, permission: "fees.view" },
-  { value: "parents-with-arrears", label: "Parents With Arrears", icon: Banknote, permission: "arrears.view" },
   { value: "school-expenses", label: "School Expenses", icon: Receipt, permission: "school_expenses.view" },
   { value: "school-incomes", label: "School Incomes", icon: TrendingUp, permission: "school_incomes.view" },
   { value: "financial-statements", label: "Financial Statements", icon: BarChart3, permission: "financial_statements.view" },
@@ -139,7 +137,7 @@ export default function SchoolFinancePage() {
       </div>
 
       <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as SchoolFinanceTabValue)} className="space-y-4">
-        <TabsList className="grid h-auto w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        <TabsList className="grid h-auto w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {visibleTabs.map((tab) => (
             <TabsTrigger
               key={tab.value}
@@ -156,16 +154,6 @@ export default function SchoolFinancePage() {
         {visibleTabs.some((tab) => tab.value === "student-payments") && (
           <TabsContent value="student-payments" className="mt-0">
             <StudentPaymentsTabContent isActive={activeTab === "student-payments"} />
-          </TabsContent>
-        )}
-
-        {visibleTabs.some((tab) => tab.value === "parents-with-arrears") && (
-          <TabsContent value="parents-with-arrears" className="mt-0">
-            <FinancePlaceholderTab
-              title="Parents With Arrears"
-              description="The Parents With Arrears workspace will be implemented inside this School Finance page file. The tab and navigation are now already in place."
-              icon={Banknote}
-            />
           </TabsContent>
         )}
 
@@ -245,7 +233,6 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
   const [selectedStudent, setSelectedStudent] = useState<FeesSummaryStudent | null>(null);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: feesSummary = [], isLoading: summaryLoading } = useQuery<FeesSummaryStudent[]>({
     queryKey: ["/api/fees/summary"],
@@ -260,32 +247,6 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
   const { data: students = [] } = useQuery<Student[]>({
     queryKey: ["/api/students"],
     enabled: isActive && canViewStudentPayments,
-  });
-
-  const importMutation = useMutation({
-    mutationFn: async (formData: FormData) => {
-      const res = await schoolFetch("/api/fees/import-csv", {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message || "Import failed");
-      }
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/fees/summary"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/students"] });
-      setIsImportOpen(false);
-      toast({
-        title: "Import Complete",
-        description: `${data.updated} student(s) updated. ${data.not_found} not matched.`,
-      });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Import Failed", description: error.message, variant: "destructive" });
-    },
   });
 
   const notifyMutation = useMutation({
@@ -357,12 +318,6 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
     if (checked) newSet.add(id);
     else newSet.delete(id);
     setSelectedIds(newSet);
-  };
-
-  const handleImportSubmit = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const formData = new FormData(e.currentTarget);
-    importMutation.mutate(formData);
   };
 
   const handleNotifySelected = () => {
@@ -464,70 +419,12 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
           <div>
             <h1 className="text-2xl font-bold tracking-tight sm:text-3xl" style={{ color: "#1b2a5c" }} data-testid="text-fees-title">Student Payments</h1>
             <p className="text-muted-foreground">
-              Upload the latest Excel fees (saved as CSV), update balances, and send SMS / email reminders.
+              Upload the latest CSV or Excel fee balances, review matches before processing, and send SMS / email reminders.
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" data-testid="button-import-csv">
-                <Upload className="w-4 h-4 mr-2" />
-                Upload from CSV
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">
-              <DialogHeader>
-                <DialogTitle>Upload / Update from Excel (CSV)</DialogTitle>
-                <DialogDescription>
-                  In Excel use File &rarr; Save As &rarr; CSV (Comma delimited), then upload that CSV here.
-                  Required columns: <strong>Name</strong>, <strong>Balance</strong>.
-                </DialogDescription>
-              </DialogHeader>
-              <form onSubmit={handleImportSubmit} className="space-y-4">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label>Term total fee amount</Label>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      name="term_total_fee"
-                      placeholder="e.g. 650.00"
-                      required
-                      data-testid="input-term-total-fee"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Maximum allowed balance for "Up to date"</Label>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      name="term_max_balance"
-                      placeholder="e.g. 100.00"
-                      required
-                      data-testid="input-term-max-balance"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label>CSV file (from Excel)</Label>
-                  <Input
-                    ref={fileInputRef}
-                    type="file"
-                    name="fees_csv"
-                    accept=".csv"
-                    required
-                    data-testid="input-csv-file"
-                  />
-                </div>
-                <Button type="submit" className="w-full" disabled={importMutation.isPending} data-testid="button-submit-import">
-                  {importMutation.isPending ? "Uploading..." : "Upload / Update Balances"}
-                </Button>
-              </form>
-            </DialogContent>
-          </Dialog>
+          <FeeBalanceImportDialog open={isImportOpen} onOpenChange={setIsImportOpen} />
           <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
             <DialogTrigger asChild>
               <Button data-testid="button-add-payment">
@@ -550,7 +447,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Card>
           <CardContent className="pt-4 pb-3">
             <div className="flex items-center gap-3">

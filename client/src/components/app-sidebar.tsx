@@ -75,7 +75,6 @@ type MenuGroup = {
 const POS_MENU_PERMISSIONS = ["pos.view", "products.view"];
 const SCHOOL_FINANCE_MENU_PERMISSIONS = [
   "fees.view",
-  "arrears.view",
   "school_expenses.view",
   "school_incomes.view",
   "financial_statements.view",
@@ -106,7 +105,7 @@ const staffMenuGroups: MenuGroup[] = [
   {
     label: "Library & E-Learning",
     items: [
-      { title: "Kund-Ai", url: "/kundai", icon: Bot, requiredPermissions: ["kundai.view"], comingSoon: true },
+      { title: "Kund-Ai", url: "/kundai", icon: Bot, requiredPermissions: ["kundai.view"] },
       { title: "Library", url: "/library", icon: Library, requiredPermissions: ["library.view"], featureKey: "enableELibrary" },
     ],
   },
@@ -118,7 +117,7 @@ const staffMenuGroups: MenuGroup[] = [
       { title: "Clinic Records", url: "/clinic", icon: Stethoscope, requiredPermissions: ["clinic.view"], featureKey: "enableHostel" },
       { title: "Disciplinary Records", url: "/discipline", icon: Shield, requiredPermissions: ["discipline.view"] },
       { title: "Quality Control Reports", url: "/qc-reports", icon: ClipboardList, requiredPermissions: ["qc_reports.view"] },
-      { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view"] },
+      { title: "Class Attendance Register", url: "/attendance", icon: ClipboardCheck, requiredPermissions: ["attendance.view", "attendance.reports.view"] },
       { title: "Hostel Attendance Register", url: "/hostel", icon: Building, requiredPermissions: ["hostel.view"], featureKey: "enableHostel" },
     ],
   },
@@ -137,7 +136,7 @@ const staffMenuGroups: MenuGroup[] = [
   {
     label: "Accounting & Finance",
     items: [
-      { title: "Point of Sale", url: "/pos", icon: ShoppingCart, requiredPermissions: POS_MENU_PERMISSIONS, featureKey: "enableFinance", badge: "In Production" },
+      { title: "Point of Sale", url: "/pos", icon: ShoppingCart, requiredPermissions: POS_MENU_PERMISSIONS, featureKey: "enableFinance" },
       { title: "School Finance", url: "/school-finance", icon: DollarSign, requiredPermissions: SCHOOL_FINANCE_MENU_PERMISSIONS, featureKey: "enableFinance" },
       { title: "Assets & Inventory", url: "/assets-inventory", icon: Package, requiredPermissions: ASSETS_INVENTORY_MENU_PERMISSIONS },
     ],

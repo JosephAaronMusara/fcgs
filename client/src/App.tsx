@@ -86,7 +86,6 @@ type RoutePermissionRule = {
 const POS_ROUTE_PERMISSIONS = ["pos.view", "products.view"];
 const SCHOOL_FINANCE_ROUTE_PERMISSIONS = [
   "fees.view",
-  "arrears.view",
   "school_expenses.view",
   "school_incomes.view",
   "financial_statements.view",
@@ -108,7 +107,7 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/marks-entry$/, permissions: ["marks.view", "marks.create"] },
   { pattern: /^\/academic-reports$/, permissions: ["reports.view"] },
   { pattern: /^\/qc-reports(\/.*)?$/, permissions: ["qc_reports.view"] },
-  { pattern: /^\/attendance$/, permissions: ["attendance.view"] },
+  { pattern: /^\/attendance$/, permissions: ["attendance.view", "attendance.reports.view"] },
   { pattern: /^\/fees$/, permissions: ["fees.view"], allowRoles: ["parent"] },
   { pattern: /^\/clinic$/, permissions: ["clinic.view"] },
   { pattern: /^\/discipline$/, permissions: ["discipline.view"] },
@@ -119,7 +118,6 @@ const ROUTE_PERMISSION_RULES: RoutePermissionRule[] = [
   { pattern: /^\/transport$/, permissions: ["transport.view"] },
   { pattern: /^\/fleet-management$/, permissions: FLEET_ROUTE_PERMISSIONS },
   { pattern: /^\/access-control$/, permissions: ["access_control.view"] },
-  { pattern: /^\/arrears$/, permissions: ["arrears.view"] },
   { pattern: /^\/school-finance$/, permissions: SCHOOL_FINANCE_ROUTE_PERMISSIONS },
   { pattern: /^\/assets-inventory$/, permissions: ASSETS_INVENTORY_ROUTE_PERMISSIONS },
   { pattern: /^\/school-expenses$/, permissions: ["school_expenses.view"] },
@@ -219,9 +217,6 @@ function DashboardRoutePage() {
   return <Dashboard />;
 }
 
-function ParentsWithArrearsRedirectPage() {
-  return <Redirect to="/school-finance?tab=parents-with-arrears" />;
-}
 
 function SchoolExpensesRedirectPage() {
   return <Redirect to="/school-finance?tab=school-expenses" />;
@@ -869,7 +864,6 @@ function AuthenticatedRoutes() {
         <Route path="/fleet-management"><ProtectedRoute component={FleetManagementPage} /></Route>
         <Route path="/access-control"><ProtectedRoute component={AccessControlPage} /></Route>
         <Route path="/school-finance"><ProtectedRoute component={SchoolFinancePage} /></Route>
-        <Route path="/arrears"><ProtectedRoute component={ParentsWithArrearsRedirectPage} /></Route>
         <Route path="/school-expenses"><ProtectedRoute component={SchoolExpensesRedirectPage} /></Route>
         <Route path="/school-incomes"><ProtectedRoute component={SchoolIncomesRedirectPage} /></Route>
         <Route path="/products"><ProtectedRoute component={ProductsRedirectPage} /></Route>

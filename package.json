@@ -66,7 +66,9 @@
     "multiworker:source-check": "node script/validate-multiworker-hardening.cjs",
     "multiworker:load-test": "tsx script/load-test-multiworker.ts",
     "fcgs:upgrade:2026-10-11": "tsx script/apply-2026-10-11-comprehensive-build.ts",
-    "comprehensive-build:source-check": "node script/validate-comprehensive-build.cjs"
+    "comprehensive-build:source-check": "node script/validate-comprehensive-build.cjs",
+    "fcgs:upgrade:2026-10-13": "tsx script/apply-2026-10-13-combined-build.ts",
+    "combined-build:source-check": "node script/validate-2026-10-13-combined-build.cjs"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",
