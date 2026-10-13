@@ -11,6 +11,7 @@ import rateLimit from "express-rate-limit";
 import { prewarmPdfRenderer, shutdownPdfRenderer } from "./pdf-renderer";
 import { scanAllTransportCompliance } from "./transport-compliance";
 import { runAccessControlSchedulers } from "./access-control-operations";
+import { runFeeImportProcessorTick } from "./fees-import-routes";
 import { pool } from "./db";
 import { FCGS_LOCK_KEYS, withDistributedLock } from "./distributed-lock";
 import { getWorkerIdentity, registerHealthRoutes, setApplicationReady } from "./health";
@@ -189,6 +190,12 @@ function startSchedulers() {
   };
   scheduleJob(runAccessControlJobs, 15_000);
   scheduleJob(runAccessControlJobs, 60 * 1000, true);
+
+  const runFeeImportJobs = () => {
+    void runFeeImportProcessorTick().catch((error) => console.error("Fee balance import processor error:", error));
+  };
+  scheduleJob(runFeeImportJobs, 1_500);
+  scheduleJob(runFeeImportJobs, 3_000, true);
 }
 
 async function gracefulShutdown(signal: string) {

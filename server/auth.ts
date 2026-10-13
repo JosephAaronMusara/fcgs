@@ -137,7 +137,6 @@ const LEGACY_ROUTE_PERMISSION_RULES: Array<{
   { method: "POST", pattern: /^\/api\/clinic\/import$/, requirement: "clinic.create" },
 
   { method: "POST", pattern: /^\/api\/fees$/, requirement: ["fees.create", "fees.manage_structure"] },
-  { method: "POST", pattern: /^\/api\/fees\/import-csv$/, requirement: "fees.manage_structure" },
   { method: "POST", pattern: /^\/api\/fees\/notify$/, requirement: ["fees.view", "communication.send"] },
 
   { method: "GET", pattern: /^\/api\/organizations$/, requirement: "settings.view" },
@@ -155,6 +154,10 @@ const LEGACY_ROUTE_PERMISSION_RULES: Array<{
   { method: "POST", pattern: /^\/api\/staff\/import$/, requirement: "staff.import" },
   { method: "POST", pattern: /^\/api\/clinic\/import$/, requirement: "clinic.import" },
   { method: "POST", pattern: /^\/api\/fees\/import-csv$/, requirement: "fees.import" },
+  { method: "POST", pattern: /^\/api\/fees\/import-csv\/preview$/, requirement: "fees.import" },
+  { method: "POST", pattern: /^\/api\/fees\/import-csv\/\d+\/commit$/, requirement: "fees.import" },
+  { method: "POST", pattern: /^\/api\/fees\/import-file\/preview$/, requirement: "fees.import" },
+  { method: "POST", pattern: /^\/api\/fees\/import-file\/\d+\/commit$/, requirement: "fees.import" },
   { method: "POST", pattern: /^\/api\/library\/resources$/, requirement: "library.resources.manage" },
   { method: "PUT", pattern: /^\/api\/library\/resources\/\d+$/, requirement: "library.resources.manage" },
   { method: "DELETE", pattern: /^\/api\/library\/resources\/\d+$/, requirement: "library.catalogue.delete" },

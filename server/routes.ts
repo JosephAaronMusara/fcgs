@@ -6,7 +6,6 @@ import { compareStudentsByFirstName, sortStudentsByFirstName, studentFirstNameOr
 import { db } from "./db";
 import { staffSubjects, users, qcReports, qcRecords, assessmentMarks as assessmentMarksSchema, assessmentComments as assessmentCommentsSchema, assessments as assessmentsSchema, assessmentTypes as assessmentTypesSchema, assessmentPapers as assessmentPapersSchema, assessmentMarkPapers as assessmentMarkPapersSchema, assessmentPublications, assessmentPublicationEvents, classSubjects as classSubjectsSchema, studentSubjects as studentSubjectsSchema, students as studentsTable, staff as staffTable, classes as classesTable, subjects as subjectsTable, libraryLoans as libraryLoansTable, timetableSlots as timetableSlotsTable, staffRoles, organizations, userSchoolAccess, reportComments, communicationJobs, libraryShelves as libraryShelvesTable, classTeacherAssignments as classTeacherAssignmentsTable, userAccessGroups, accessGroupPermissions, permissions, userPermissionOverrides, notifications, studentEnrollmentEvents, internalTransfers, gradeProfileSettings, ecdAssessmentRecords, ecdAssessmentResponses } from "@shared/schema";
 import multer from "multer";
-import { parse as csvParse } from "csv-parse/sync";
 import { eq, and, or, inArray, sql, like, desc, isNull, count as drizzleCount } from "drizzle-orm";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { registerCalendarRoutes } from "./calendar-routes";
@@ -20,6 +19,8 @@ import { registerFleetRoutes } from "./fleet-routes";
 import { registerAccessControlRoutes } from "./access-control-routes";
 import { registerGateBridgeBuild2Routes } from "./gate-bridge-build2";
 import { registerAccessControlOperations, getSchoolDaySchedule, sendAttendanceTemplate, syncSchoolAccessPolicies, syncStudentPolicy } from "./access-control-operations";
+import { registerAttendanceReportingRoutes } from "./attendance-reporting";
+import { registerFeesImportRoutes } from "./fees-import-routes";
 import { registerPortalRoutes } from "./portal-routes";
 import { describeParentIdentityMatch, existingUserForParentIdentity, getAccessibleSchoolIdsForParentUser, getChildrenForParentUser, getParentIdsForUser, linkParentIdentityToUser, normalizeParentPhone, parentUserCanAccessStudent } from "./parent-identity";
 import { fleetRequirementForSchool } from "./school-feature-flags";
@@ -3584,6 +3585,7 @@ export async function registerRoutes(
   registerAccessControlRoutes(app);
   registerGateBridgeBuild2Routes(app);
   registerAccessControlOperations(app);
+  registerAttendanceReportingRoutes(app);
   registerPortalRoutes(app);
   await ensureEcdSeedData();
 
@@ -7737,218 +7739,8 @@ export async function registerRoutes(
     return "in_arrears";
   }
 
-  // Student Fees Management - CSV Import
-  const feesUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
-
-  type FeesCsvPreviewRow = {
-    rowNumber: number;
-    customer: string;
-    name: string;
-    group: string;
-    area: string;
-    balanceDue: number;
-    matchedStudent: any | null;
-    matchMethod: "customer_code" | "exact_name" | "fuzzy_name" | "unmatched";
-    calculatedStatus: string | null;
-  };
-
-  async function parseAndMatchFeesCsv(file: Express.Multer.File, schoolId: number, termMaxBalance: number): Promise<FeesCsvPreviewRow[]> {
-    const csvContent = file.buffer.toString("utf-8");
-    let records: string[][];
-    try { records = csvParse(csvContent, { relax_column_count: true, skip_empty_lines: true, trim: true }); }
-    catch { throw new Error("Invalid CSV format. Please ensure it is a valid comma-delimited file."); }
-    if (records.length < 2) throw new Error("CSV file is empty or has no data rows");
-    const header = records[0].map(h => h.toLowerCase().trim());
-    const colMap: Record<string, number | null> = { customer: null, name: null, group: null, area: null, balance: null };
-    header.forEach((col, index) => {
-      if (["customer", "customer id", "customer code"].includes(col)) colMap.customer = index;
-      else if (["name", "student", "student name"].includes(col)) colMap.name = index;
-      else if (["group", "form", "stream"].includes(col)) colMap.group = index;
-      else if (["area", "class", "class name"].includes(col)) colMap.area = index;
-      else if (["balance", "balance due", "fees balance"].includes(col)) colMap.balance = index;
-    });
-    if (colMap.name === null || colMap.balance === null) throw new Error('CSV must contain at least "Name" and "Balance" / "Balance due" columns.');
-    const allStudents = await storage.getStudentsBySchool(schoolId);
-    const output: FeesCsvPreviewRow[] = [];
-    for (let i = 1; i < records.length; i++) {
-      const row = records[i];
-      const name = colMap.name !== null && row[colMap.name] ? row[colMap.name].trim() : "";
-      if (!name) continue;
-      let balanceRaw = colMap.balance !== null && row[colMap.balance] ? row[colMap.balance].trim() : "0";
-      balanceRaw = balanceRaw.replace(/[, ]/g, "");
-      const balanceDue = parseFloat(balanceRaw) || 0;
-      const customer = colMap.customer !== null && row[colMap.customer] ? row[colMap.customer].trim() : "";
-      const group = colMap.group !== null && row[colMap.group] ? row[colMap.group].trim() : "";
-      const area = colMap.area !== null && row[colMap.area] ? row[colMap.area].trim() : "";
-      let matchedStudent: any = null;
-      let matchMethod: FeesCsvPreviewRow["matchMethod"] = "unmatched";
-      // IMPORTANT: intentionally preserves the existing matcher exactly. Accuracy hardening is a later build.
-      if (customer) { matchedStudent = allStudents.find(st => st.feesCustomerId === customer); if (matchedStudent) matchMethod = "customer_code"; }
-      if (!matchedStudent) {
-        const nameLower = name.toLowerCase();
-        matchedStudent = allStudents.find(st => `${st.firstName} ${st.lastName}`.toLowerCase() === nameLower);
-        if (matchedStudent) matchMethod = "exact_name";
-      }
-      if (!matchedStudent) {
-        const nameLower = name.toLowerCase();
-        matchedStudent = allStudents.find(st => { const fullName = `${st.firstName} ${st.lastName}`.toLowerCase(); return fullName.includes(nameLower) || nameLower.includes(fullName); });
-        if (matchedStudent) matchMethod = "fuzzy_name";
-      }
-      output.push({ rowNumber: i + 1, customer, name, group, area, balanceDue, matchedStudent, matchMethod, calculatedStatus: matchedStudent ? computeFeesStatusKey(balanceDue, termMaxBalance) : null });
-    }
-    return output;
-  }
-
-  app.post("/api/fees/import-csv/preview", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), feesUpload.single("fees_csv"), async (req, res, next) => {
-    try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "No school context" });
-      if (!req.file) return res.status(400).json({ message: "No CSV file uploaded" });
-      const termTotalFee = parseFloat(req.body.term_total_fee || "0");
-      const termMaxBalance = parseFloat(req.body.term_max_balance || "0");
-      const rows = await parseAndMatchFeesCsv(req.file, schoolId, termMaxBalance);
-      const school = await storage.getSchool(schoolId);
-      const stats = {
-        totalRows: rows.length, matchedRows: rows.filter(r => r.matchedStudent).length,
-        customerCodeMatches: rows.filter(r => r.matchMethod === "customer_code").length,
-        exactNameMatches: rows.filter(r => r.matchMethod === "exact_name").length,
-        fuzzyNameMatches: rows.filter(r => r.matchMethod === "fuzzy_name").length,
-        unmatchedRows: rows.filter(r => r.matchMethod === "unmatched").length,
-      };
-      const [batch] = await db.insert(feesImportBatches).values({ schoolId, organizationId: school?.organizationId || null, fileName: req.file.originalname, termTotalFee: termTotalFee.toFixed(2), termMaxBalance: termMaxBalance.toFixed(2), status: "preview", ...stats, uploadedByUserId: (req.user as any)?.id || null }).returning();
-      if (rows.length) await db.insert(feesImportItems).values(rows.map(r => ({ batchId: batch.id, rowNumber: r.rowNumber, csvCustomerCode: r.customer || null, csvName: r.name, csvGroup: r.group || null, csvArea: r.area || null, balanceDue: r.balanceDue.toFixed(2), matchedStudentId: r.matchedStudent?.id || null, matchedAdmissionNo: r.matchedStudent?.admissionNo || null, matchedStudentName: r.matchedStudent ? `${r.matchedStudent.firstName} ${r.matchedStudent.lastName}` : null, matchMethod: r.matchMethod, calculatedStatus: r.calculatedStatus })));
-      res.json({ success: true, batch, stats, items: rows.map(r => ({ rowNumber: r.rowNumber, csvCustomerCode: r.customer, csvName: r.name, csvGroup: r.group, csvArea: r.area, balanceDue: r.balanceDue, matchedStudentId: r.matchedStudent?.id || null, matchedAdmissionNo: r.matchedStudent?.admissionNo || null, matchedStudentName: r.matchedStudent ? `${r.matchedStudent.firstName} ${r.matchedStudent.lastName}` : null, matchMethod: r.matchMethod, calculatedStatus: r.calculatedStatus })) });
-    } catch (error) { next(error); }
-  });
-
-  app.post("/api/fees/import-csv/:batchId/commit", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), async (req, res, next) => {
-    try {
-      const schoolId = getSchoolContext(req); if (!schoolId) return res.status(400).json({ message: "No school context" });
-      const batchId = Number(req.params.batchId);
-      const [batch] = await db.select().from(feesImportBatches).where(and(eq(feesImportBatches.id, batchId), eq(feesImportBatches.schoolId, schoolId))).limit(1);
-      if (!batch) return res.status(404).json({ message: "Fees import preview not found" });
-      if (batch.status === "committed") return res.status(409).json({ message: "This fees import has already been committed" });
-      const items = await db.select().from(feesImportItems).where(eq(feesImportItems.batchId, batch.id));
-      const snapshotAt = new Date(); let updated = 0;
-      for (const item of items) {
-        if (!item.matchedStudentId) continue;
-        const balanceDue = parseFloat(item.balanceDue || "0") || 0;
-        const termTotalFee = parseFloat(batch.termTotalFee || "0") || 0;
-        const termMaxBalance = parseFloat(batch.termMaxBalance || "0") || 0;
-        const paid = Math.max(0, termTotalFee - balanceDue);
-        const updateData: Record<string, any> = { feesTotalTerm: termTotalFee.toFixed(2), feesPaidSoFar: paid.toFixed(2), feesBalance: balanceDue.toFixed(2), feesMaxBalance: termMaxBalance.toFixed(2), feesStatus: item.calculatedStatus || computeFeesStatusKey(balanceDue, termMaxBalance), feesSource: "student_payments_csv", feesSnapshotAt: snapshotAt, feesImportBatchId: batch.id };
-        if (item.csvCustomerCode) updateData.feesCustomerId = item.csvCustomerCode;
-        await db.update(studentsTable).set(updateData).where(and(eq(studentsTable.id, item.matchedStudentId), eq(studentsTable.schoolId, schoolId)));
-        await syncStudentPolicy(item.matchedStudentId, (req.user as any)?.id || null, `Student Payments CSV import #${batch.id}`).catch(() => undefined);
-        updated++;
-      }
-      await db.update(feesImportBatches).set({ status: "committed", committedAt: snapshotAt }).where(eq(feesImportBatches.id, batch.id));
-      res.json({ success: true, batchId: batch.id, updated, not_found: Number(batch.unmatchedRows || 0), snapshotAt });
-    } catch (error) { next(error); }
-  });
-
-  app.post("/api/fees/import-csv", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), feesUpload.single("fees_csv"), async (req, res, next) => {
-    try {
-      const schoolId = getSchoolContext(req);
-      if (!schoolId) return res.status(400).json({ message: "No school context" });
-
-      const termTotalFee = parseFloat(req.body.term_total_fee || "0");
-      const termMaxBalance = parseFloat(req.body.term_max_balance || "0");
-
-      if (!req.file) return res.status(400).json({ message: "No CSV file uploaded" });
-
-      const csvContent = req.file.buffer.toString("utf-8");
-      let records: string[][];
-      try {
-        records = csvParse(csvContent, { relax_column_count: true, skip_empty_lines: true, trim: true });
-      } catch {
-        return res.status(400).json({ message: "Invalid CSV format. Please ensure it is a valid comma-delimited file." });
-      }
-
-      if (records.length < 2) return res.status(400).json({ message: "CSV file is empty or has no data rows" });
-
-      const header = records[0].map(h => h.toLowerCase().trim());
-
-      const colMap: Record<string, number | null> = { customer: null, name: null, group: null, area: null, balance: null };
-
-      header.forEach((col, index) => {
-        if (["customer", "customer id", "customer code"].includes(col)) colMap.customer = index;
-        else if (["name", "student", "student name"].includes(col)) colMap.name = index;
-        else if (["group", "form", "stream"].includes(col)) colMap.group = index;
-        else if (["area", "class", "class name"].includes(col)) colMap.area = index;
-        else if (["balance", "balance due", "fees balance"].includes(col)) colMap.balance = index;
-      });
-
-      if (colMap.name === null || colMap.balance === null) {
-        return res.status(400).json({ message: 'CSV must contain at least "Name" and "Balance" / "Balance due" columns.' });
-      }
-
-      const allStudents = await storage.getStudentsBySchool(schoolId);
-      let updated = 0;
-      let notFound = 0;
-
-      for (let i = 1; i < records.length; i++) {
-        const row = records[i];
-        const name = colMap.name !== null && row[colMap.name] ? row[colMap.name].trim() : "";
-        if (!name) continue;
-
-        let balanceRaw = colMap.balance !== null && row[colMap.balance] ? row[colMap.balance].trim() : "0";
-        balanceRaw = balanceRaw.replace(/[, ]/g, "");
-        const balanceDue = parseFloat(balanceRaw) || 0;
-
-        const customer = colMap.customer !== null && row[colMap.customer] ? row[colMap.customer].trim() : "";
-
-        let matchedStudent = null;
-
-        if (customer) {
-          matchedStudent = allStudents.find(s => s.feesCustomerId === customer);
-        }
-
-        if (!matchedStudent) {
-          const nameLower = name.toLowerCase();
-          matchedStudent = allStudents.find(s => {
-            const fullName = `${s.firstName} ${s.lastName}`.toLowerCase();
-            return fullName === nameLower;
-          });
-        }
-
-        if (!matchedStudent) {
-          const nameLower = name.toLowerCase();
-          matchedStudent = allStudents.find(s => {
-            const fullName = `${s.firstName} ${s.lastName}`.toLowerCase();
-            return fullName.includes(nameLower) || nameLower.includes(fullName);
-          });
-        }
-
-        if (!matchedStudent) {
-          notFound++;
-          continue;
-        }
-
-        const paid = Math.max(0, termTotalFee - balanceDue);
-        const statusKey = computeFeesStatusKey(balanceDue, termMaxBalance);
-
-        const updateData: Record<string, any> = {
-          feesTotalTerm: termTotalFee.toFixed(2),
-          feesPaidSoFar: paid.toFixed(2),
-          feesBalance: balanceDue.toFixed(2),
-          feesMaxBalance: termMaxBalance.toFixed(2),
-          feesStatus: statusKey,
-          feesSource: "student_payments_csv",
-          feesSnapshotAt: new Date(),
-        };
-        if (customer) updateData.feesCustomerId = customer;
-
-        await db.update(studentsTable).set(updateData).where(eq(studentsTable.id, matchedStudent.id));
-        await syncStudentPolicy(matchedStudent.id, (req.user as any)?.id || null, "Student Payments CSV direct import").catch(() => undefined);
-        updated++;
-      }
-
-      res.json({ success: true, updated, not_found: notFound });
-    } catch (error) {
-      next(error);
-    }
-  });
+  // Student Fees Management - multi-format preview + background import
+  registerFeesImportRoutes(app);
 
   // Student Fees Management - Send fee reminders (SMS + Email)
   app.post("/api/fees/notify", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {

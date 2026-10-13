@@ -4649,20 +4649,10 @@ export function registerTransportRoutes(app: Express) {
         WHERE cr.cashup_id=${cashup.id}
         ORDER BY r.effective_date, r.refund_number
       `);
-      const uncheckedPayments = await db.execute(sql`
-        SELECT p.id, p.receipt_no AS "receiptNo", p.payment_date AS "paymentDate", p.payment_method AS "paymentMethod", p.amount::text,
-               s.first_name AS "firstName", s.last_name AS "lastName", s.admission_no AS "admissionNo"
-        FROM transport_payments p
-        LEFT JOIN students s ON s.id=p.student_id
-        LEFT JOIN transport_cashup_payments cp ON cp.payment_id=p.id
-        WHERE p.school_id=${school.id} AND p.payment_date=${cashup.cashupDate} AND p.reversed_at IS NULL AND p.status <> 'reversed'
-          AND cp.payment_id IS NULL
-        ORDER BY p.receipt_no
-      `);
       const signatures = await db.select().from(electronicSignatures)
         .where(and(eq(electronicSignatures.entityType, "transport_cashup"), eq(electronicSignatures.entityId, cashup.id)))
         .orderBy(asc(electronicSignatures.signedAt));
-      return res.json({ cashup: schoolCashupView(cashup), linkedPayments: linkedPayments.rows, linkedRefunds: linkedRefunds.rows, uncheckedPayments: uncheckedPayments.rows, signatures });
+      return res.json({ cashup: schoolCashupView(cashup), linkedPayments: linkedPayments.rows, linkedRefunds: linkedRefunds.rows, signatures });
     } catch (error) { return routeError(res, error); }
   });
 
@@ -4760,18 +4750,11 @@ export function registerTransportRoutes(app: Express) {
         WHERE cr.cashup_id=${id}
           AND (r.school_id<>${school.id} OR r.status<>'paid' OR r.method='credit')
       `);
-      const unchecked = await db.execute(sql`
-        SELECT COUNT(*)::int AS count
-        FROM transport_payments p LEFT JOIN transport_cashup_payments cp ON cp.payment_id=p.id
-        WHERE p.school_id=${school.id} AND p.payment_date=${previous.cashupDate} AND p.reversed_at IS NULL AND p.status <> 'reversed' AND cp.payment_id IS NULL
-      `);
-      const uncheckedCount = Number((unchecked.rows[0] as any)?.count || 0);
-      if (invalidPayments.rows.length || invalidRefunds.rows.length || uncheckedCount > 0) {
+      if (invalidPayments.rows.length || invalidRefunds.rows.length) {
         return res.status(409).json({
-          message: "This cash-up cannot be verified because its transaction set no longer reconciles cleanly. Use Flag Discrepancy so the issue is investigated without substituting financial amounts.",
+          message: "This cash-up cannot be verified because one or more transactions included in the cash-up are no longer valid. Use Flag Discrepancy so the issue can be investigated without substituting financial amounts.",
           invalidReceipts: invalidPayments.rows,
           invalidRefunds: invalidRefunds.rows,
-          uncheckedCount,
         });
       }
 
@@ -4822,7 +4805,7 @@ export function registerTransportRoutes(app: Express) {
         await tx.insert(electronicSignatures).values(signature);
         const linked = await tx.select({ paymentId: transportCashupPayments.paymentId }).from(transportCashupPayments).where(eq(transportCashupPayments.cashupId, id));
         if (linked.length) await tx.update(transportPayments).set({ verificationStatus: "reconciled", reconciledAt: new Date(), reconciledByUserId: user.id }).where(inArray(transportPayments.id, linked.map((item) => item.paymentId)));
-        await writeAudit(tx, school.id, user.id, "cashup", id, "accounts_verify_and_sign", schoolCashupView(previous), schoolCashupView(row), null, { uncheckedCount });
+        await writeAudit(tx, school.id, user.id, "cashup", id, "accounts_verify_and_sign", schoolCashupView(previous), schoolCashupView(row), null, { linkedTransactionsRevalidated: true });
         return row;
       });
       return res.json(schoolCashupView(updated));
