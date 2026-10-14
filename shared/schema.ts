@@ -3035,6 +3035,40 @@ export const schoolDayOverrides = pgTable("school_day_overrides", {
 
 export type SchoolDayOverride = typeof schoolDayOverrides.$inferSelect;
 
+// School Finance term fee schedules. A schedule is scoped to one school, academic year and term.
+export const feeTermSchedules = pgTable("fee_term_schedules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  organizationId: integer("organization_id").references(() => organizations.id),
+  academicYear: text("academic_year").notNull(),
+  term: text("term").notNull(),
+  createdByUserId: integer("created_by_user_id").references(() => users.id),
+  updatedByUserId: integer("updated_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  schoolYearTermUniqueIdx: uniqueIndex("fee_term_schedules_school_year_term_uidx").on(table.schoolId, table.academicYear, table.term),
+  schoolIdx: index("fee_term_schedules_school_idx").on(table.schoolId),
+}));
+
+export const feeTermInstallments = pgTable("fee_term_installments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  scheduleId: integer("schedule_id").references(() => feeTermSchedules.id, { onDelete: "cascade" }).notNull(),
+  installmentNumber: integer("installment_number").notNull(),
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  arrearsEffectiveDate: date("arrears_effective_date").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  scheduleInstallmentUniqueIdx: uniqueIndex("fee_term_installments_schedule_number_uidx").on(table.scheduleId, table.installmentNumber),
+  scheduleIdx: index("fee_term_installments_schedule_idx").on(table.scheduleId),
+  amountPositiveCheck: check("fee_term_installments_amount_positive_chk", sql`${table.amount} > 0`),
+  installmentNumberCheck: check("fee_term_installments_number_chk", sql`${table.installmentNumber} BETWEEN 1 AND 3`),
+}));
+
+export type FeeTermSchedule = typeof feeTermSchedules.$inferSelect;
+export type FeeTermInstallment = typeof feeTermInstallments.$inferSelect;
+
 // Student Payments CSV import review/snapshots. This deliberately does not alter fees_payments.
 export const feesImportBatches = pgTable("fees_import_batches", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -3047,6 +3081,11 @@ export const feesImportBatches = pgTable("fees_import_batches", {
   sheetName: text("sheet_name"),
   termTotalFee: decimal("term_total_fee", { precision: 10, scale: 2 }).notNull().default("0"),
   termMaxBalance: decimal("term_max_balance", { precision: 10, scale: 2 }).notNull().default("0"),
+  academicYear: text("academic_year"),
+  term: text("term"),
+  feeScheduleId: integer("fee_schedule_id").references(() => feeTermSchedules.id),
+  feePositionDate: date("fee_position_date"),
+  amountDueToDate: decimal("amount_due_to_date", { precision: 10, scale: 2 }),
   status: text("status").notNull().default("preview"),
   totalRows: integer("total_rows").notNull().default(0),
   matchedRows: integer("matched_rows").notNull().default(0),

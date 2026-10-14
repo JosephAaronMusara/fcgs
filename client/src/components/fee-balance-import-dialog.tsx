@@ -6,6 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -13,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import type { FeeSchedulePosition } from "@/components/fee-schedule-dialog";
 
 type PreviewItem = {
   rowNumber: number;
@@ -45,6 +47,12 @@ type BatchView = {
   invalidRows: number;
   processedRows: number;
   failedRows: number;
+  academicYear?: string | null;
+  term?: string | null;
+  feePositionDate?: string | null;
+  termTotalFee?: number;
+  amountDueToDate?: number;
+  termMaxBalance?: number;
   progressPercent: number;
   progressMessage?: string | null;
   lastError?: string | null;
@@ -83,8 +91,6 @@ function readableError(text: string, fallback: string) {
 export default function FeeBalanceImportDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const { toast } = useToast();
   const [file, setFile] = useState<File | null>(null);
-  const [termTotalFee, setTermTotalFee] = useState("");
-  const [termMaxBalance, setTermMaxBalance] = useState("");
   const [selectedSheet, setSelectedSheet] = useState("");
   const [candidateSheets, setCandidateSheets] = useState<string[]>([]);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
@@ -92,10 +98,20 @@ export default function FeeBalanceImportDialog({ open, onOpenChange }: { open: b
   const [confirmDuplicate, setConfirmDuplicate] = useState(false);
   const completionNotified = useRef<number | null>(null);
 
+  const scheduleQuery = useQuery<FeeSchedulePosition>({
+    queryKey: ["/api/fees/schedule/current"],
+    queryFn: async () => {
+      const response = await schoolFetch("/api/fees/schedule/current");
+      const text = await response.text();
+      if (!response.ok) throw new Error(readableError(text, "Unable to load the current fee schedule"));
+      return JSON.parse(text);
+    },
+    enabled: open,
+    staleTime: 0,
+  });
+
   const reset = () => {
     setFile(null);
-    setTermTotalFee("");
-    setTermMaxBalance("");
     setSelectedSheet("");
     setCandidateSheets([]);
     setPreview(null);
@@ -109,8 +125,6 @@ export default function FeeBalanceImportDialog({ open, onOpenChange }: { open: b
       if (!file) throw new Error("Choose a CSV or Excel file first.");
       const formData = new FormData();
       formData.set("fees_file", file);
-      formData.set("term_total_fee", termTotalFee);
-      formData.set("term_max_balance", termMaxBalance);
       if (selectedSheet) formData.set("sheet_name", selectedSheet);
       const response = await schoolFetch("/api/fees/import-file/preview", { method: "POST", body: formData });
       const text = await response.text();
@@ -207,19 +221,34 @@ export default function FeeBalanceImportDialog({ open, onOpenChange }: { open: b
 
         {!preview && (
           <div className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2"><Label>Term total fee amount</Label><Input type="number" min="0" step="0.01" value={termTotalFee} onChange={(event) => setTermTotalFee(event.target.value)} placeholder="850" /></div>
-              <div className="space-y-2"><Label>Maximum allowed balance for “Up to date”</Label><Input type="number" min="0" step="0.01" value={termMaxBalance} onChange={(event) => setTermMaxBalance(event.target.value)} placeholder="280" /></div>
-            </div>
+            {scheduleQuery.isLoading ? (
+              <div className="flex items-center justify-center rounded-lg border p-5 text-sm text-muted-foreground"><Loader2 className="mr-2 h-4 w-4 animate-spin" />Loading current fee schedule…</div>
+            ) : scheduleQuery.isError ? (
+              <Alert variant="destructive"><AlertTriangle className="h-4 w-4" /><AlertTitle>Fee schedule unavailable</AlertTitle><AlertDescription>{scheduleQuery.error instanceof Error ? scheduleQuery.error.message : "Unable to load the current fee schedule."}</AlertDescription></Alert>
+            ) : !scheduleQuery.data?.configured ? (
+              <Alert className="border-amber-400"><AlertTriangle className="h-4 w-4" /><AlertTitle>Fee schedule required</AlertTitle><AlertDescription>A fee schedule has not been configured for {scheduleQuery.data?.termLabel || "the current term"} {scheduleQuery.data?.academicYear || ""}. Configure the term fee schedule before importing balances.</AlertDescription></Alert>
+            ) : (
+              <div className="rounded-lg border bg-muted/30 p-4">
+                <div className="mb-3 font-medium">Using {scheduleQuery.data.termLabel} {scheduleQuery.data.academicYear} Fee Schedule</div>
+                <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                  <div><div className="text-xs text-muted-foreground">Total term fees</div><div className="font-semibold">${scheduleQuery.data.totalTermFee.toFixed(2)}</div></div>
+                  <div><div className="text-xs text-muted-foreground">Required paid to date</div><div className="font-semibold">${scheduleQuery.data.amountDueToDate.toFixed(2)}</div></div>
+                  <div><div className="text-xs text-muted-foreground">Up-to-date balance limit</div><div className="font-semibold">${scheduleQuery.data.maxUpToDateBalance.toFixed(2)}</div></div>
+                  <div><div className="text-xs text-muted-foreground">Fee position date</div><div className="font-semibold">{scheduleQuery.data.asOfDate}</div></div>
+                </div>
+              </div>
+            )}
             <div className="space-y-2"><Label>Fee balance file</Label><Input type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0] || null); setPreview(null); setCandidateSheets([]); setSelectedSheet(""); }} /></div>
             {candidateSheets.length > 1 && <div className="space-y-2"><Label>Worksheet</Label><Select value={selectedSheet} onValueChange={setSelectedSheet}><SelectTrigger><SelectValue placeholder="Choose worksheet" /></SelectTrigger><SelectContent>{candidateSheets.map((sheet) => <SelectItem key={sheet} value={sheet}>{sheet}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">Multiple worksheets contain recognizable fee-balance columns, so the system will not guess which one you intend.</p></div>}
-            <Button className="w-full" disabled={!file || !termTotalFee || termMaxBalance === "" || previewMutation.isPending} onClick={() => previewMutation.mutate()}>{previewMutation.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Reading file…</> : <><FileSpreadsheet className="mr-2 h-4 w-4" />Preview Import</>}</Button>
+            <Button className="w-full" disabled={!file || !scheduleQuery.data?.configured || previewMutation.isPending} onClick={() => previewMutation.mutate()}>{previewMutation.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Reading file…</> : <><FileSpreadsheet className="mr-2 h-4 w-4" />Preview Import</>}</Button>
           </div>
         )}
 
         {preview?.batch && (
           <div className="space-y-5">
             <div className="flex flex-wrap items-center gap-2 text-sm"><Badge variant="outline">{String(preview.detectedFormat || preview.batch.detectedFormat || "file").toUpperCase()}</Badge>{preview.selectedSheet && <Badge variant="secondary">Sheet: {preview.selectedSheet}</Badge>}<span className="text-muted-foreground">{preview.batch.fileName}</span></div>
+
+            {typeof preview.batch.termTotalFee === "number" && <div className="rounded-lg border bg-muted/30 p-3 text-sm"><span className="font-medium">Fee basis:</span> {preview.batch.term ? preview.batch.term.replace("term", "Term ") : "Current term"} {preview.batch.academicYear || ""} · Total ${preview.batch.termTotalFee.toFixed(2)} · Due ${Number(preview.batch.amountDueToDate || 0).toFixed(2)} · Up-to-date balance limit ${Number(preview.batch.termMaxBalance || 0).toFixed(2)}{preview.batch.feePositionDate ? ` · Position date ${preview.batch.feePositionDate}` : ""}</div>}
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               {[["Rows detected", preview.stats?.totalRows || 0], ["Matched", preview.stats?.matchedRows || 0], ["Unmatched", preview.stats?.unmatchedRows || 0], ["Skipped summary/header", preview.stats?.skippedRows || 0], ["Invalid", preview.stats?.invalidRows || 0]].map(([label, value]) => <div key={String(label)} className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">{label}</div><div className="text-xl font-semibold">{value}</div></div>)}

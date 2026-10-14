@@ -21,6 +21,7 @@ import { registerGateBridgeBuild2Routes } from "./gate-bridge-build2";
 import { registerAccessControlOperations, getSchoolDaySchedule, sendAttendanceTemplate, syncSchoolAccessPolicies, syncStudentPolicy } from "./access-control-operations";
 import { registerAttendanceReportingRoutes } from "./attendance-reporting";
 import { registerFeesImportRoutes } from "./fees-import-routes";
+import { registerFeeScheduleRoutes, resolveStudentFeePosition } from "./fees-schedule";
 import { registerPortalRoutes } from "./portal-routes";
 import { describeParentIdentityMatch, existingUserForParentIdentity, getAccessibleSchoolIdsForParentUser, getChildrenForParentUser, getParentIdsForUser, linkParentIdentityToUser, normalizeParentPhone, parentUserCanAccessStudent } from "./parent-identity";
 import { fleetRequirementForSchool } from "./school-feature-flags";
@@ -7732,15 +7733,9 @@ export async function registerRoutes(
     }
   });
 
-  // Centralized fee status calculation (matches PHP logic)
-  function computeFeesStatusKey(balanceDue: number, maxBalance: number): string {
-    if (balanceDue <= 0.01) return "fully_paid";
-    if (maxBalance > 0 && balanceDue <= maxBalance + 0.01) return "up_to_date";
-    return "in_arrears";
-  }
-
   // Student Fees Management - multi-format preview + background import
   registerFeesImportRoutes(app);
+  registerFeeScheduleRoutes(app);
 
   // Student Fees Management - Send fee reminders (SMS + Email)
   app.post("/api/fees/notify", requireAuth, requireRole("school_admin", "org_admin"), async (req, res, next) => {
@@ -7779,12 +7774,13 @@ export async function registerRoutes(
             if (!student || student.schoolId !== schoolId) { missing++; continue; }
 
             const name = `${student.firstName} ${student.lastName}`;
-            const total = parseFloat(student.feesTotalTerm || "0");
-            const paid = parseFloat(student.feesPaidSoFar || "0");
-            const balance = parseFloat(student.feesBalance || "0");
-            const maxBalance = parseFloat(student.feesMaxBalance || "0");
+            const feeSnapshot = await resolveStudentFeePosition(student);
+            const total = feeSnapshot.total;
+            const paid = feeSnapshot.paid;
+            const balance = feeSnapshot.balance;
+            const maxBalance = feeSnapshot.maxBalance;
 
-            const statusKey = computeFeesStatusKey(balance, maxBalance);
+            const statusKey = feeSnapshot.feesStatus;
             const statusTxt = statusKey === "fully_paid" ? "fully paid" : statusKey === "up_to_date" ? "up to date" : "in arrears";
 
             let classLabel = "N/A";
@@ -7934,9 +7930,9 @@ ${schoolName}`;
 
         presentCount++;
 
-        const balance = parseFloat(student.feesBalance || "0");
-        const maxBalance = parseFloat(student.feesMaxBalance || "0");
-        const statusKey = computeFeesStatusKey(balance, maxBalance);
+        const feeSnapshot = await resolveStudentFeePosition(student);
+        const balance = feeSnapshot.balance;
+        const statusKey = feeSnapshot.feesStatus;
 
         if (statusKey === "in_arrears") {
           arrearsPresentCount++;
@@ -7996,6 +7992,7 @@ ${schoolName}`;
           inArray(financialAccessOverrides.status, ["active", "scheduled"]),
           sql`${financialAccessOverrides.expiresAt} > now()`
         )).orderBy(desc(financialAccessOverrides.createdAt)).limit(1);
+        const feeSnapshot = await resolveStudentFeePosition(student);
 
         return {
           id: student.id,
@@ -8003,11 +8000,11 @@ ${schoolName}`;
           admissionNo: student.admissionNo,
           classLabel: student.classId ? (classMap.get(student.classId) || "-") : "-",
           photo: student.photo || null,
-          total: parseFloat(student.feesTotalTerm || "0"),
-          paid: parseFloat(student.feesPaidSoFar || "0"),
-          balance: parseFloat(student.feesBalance || "0"),
-          maxBalance: parseFloat(student.feesMaxBalance || "0"),
-          feesStatus: student.feesStatus || "n/a",
+          total: feeSnapshot.total,
+          paid: feeSnapshot.paid,
+          balance: feeSnapshot.balance,
+          maxBalance: feeSnapshot.maxBalance,
+          feesStatus: feeSnapshot.feesStatus,
           financialAccessOverride: financialAccessOverride ? {
             id: financialAccessOverride.id, status: financialAccessOverride.status, reason: financialAccessOverride.reason,
             effectiveFrom: financialAccessOverride.effectiveFrom, expiresAt: financialAccessOverride.expiresAt,
