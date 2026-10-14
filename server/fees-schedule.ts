@@ -229,11 +229,14 @@ export function registerFeeScheduleRoutes(app: Express) {
 
       const rawInstallments = Array.isArray(req.body?.installments) ? req.body.installments : [];
       if (rawInstallments.length !== 3) return res.status(400).json({ message: "The current fee schedule requires exactly three instalments." });
-      const installments = rawInstallments.map((row: any, index: number) => ({
+      const installments: Array<{ installmentNumber: number; amount: number; arrearsEffectiveDate: string }> = rawInstallments.map((row: unknown, index: number) => {
+        const item = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+        return ({
         installmentNumber: index + 1,
-        amount: Number.parseFloat(String(row?.amount ?? "")),
-        arrearsEffectiveDate: String(row?.arrearsEffectiveDate || "").trim(),
-      }));
+        amount: Number.parseFloat(String(item.amount ?? "")),
+        arrearsEffectiveDate: String(item.arrearsEffectiveDate || "").trim(),
+      });
+      });
       for (const row of installments) {
         if (!Number.isFinite(row.amount) || row.amount <= 0) return res.status(400).json({ message: `Instalment ${row.installmentNumber} amount must be greater than zero.` });
         if (!validDateKey(row.arrearsEffectiveDate)) return res.status(400).json({ message: `Instalment ${row.installmentNumber} has an invalid arrears-effective date.` });

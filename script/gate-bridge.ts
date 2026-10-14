@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { appendFile, mkdir, readFile, readdir, stat, unlink, writeFile } from "fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "fs/promises";
 import path from "path";
 import os from "os";
 import http from "http";
@@ -124,6 +124,12 @@ let portalConnectionState: "unknown" | "online" | "offline" = "unknown";
 let localLogReady = false;
 let recognitionQueue: QueuedRecognition[] = [];
 let recognitionFlushRunning = false;
+let recognitionWriteTail: Promise<void> = Promise.resolve();
+const completionDir = path.join(logDir, "completion-outbox");
+let currentCallbackConfig: { mode: "automatic" | "manual"; host: string | null; port: number } = { mode: "automatic", host: null, port: callbackPort };
+let activeCallbackUrl: string | null = null;
+let callbackError: string | null = null;
+const activeCommands = new Set<number>();
 
 // Linux face terminals have a small HTTP service and their login token/session can
 // be disturbed by overlapping requests. Keep every conversation with a given
@@ -187,16 +193,30 @@ function detectCallbackHost() {
 }
 
 function callbackUrl() {
+  if (currentCallbackConfig.mode === "manual" && currentCallbackConfig.host) {
+    const configured = currentCallbackConfig.host;
+    const ips = Object.values(os.networkInterfaces()).flatMap((entries) => entries || [])
+      .filter((entry) => entry.family === "IPv4").map((entry) => entry.address);
+    if (!ips.includes(configured)) throw new Error(`Manually configured callback IPv4 address ${configured} is not assigned to this Windows computer`);
+    if (currentCallbackConfig.port !== callbackPort) throw new Error(`Callback port ${currentCallbackConfig.port} does not match active listener port ${callbackPort}`);
+    return `http://${configured}:${callbackPort}/uploadDeviceRecogRecord`;
+  }
   return explicitCallbackUrl || `http://${detectCallbackHost()}:${callbackPort}/uploadDeviceRecogRecord`;
 }
 
 async function persistRecognitionQueue() {
+  // Serialize writes and atomically replace the durable queue file. Never ACK a
+  // terminal before fs persistence succeeds.
+  const previous = recognitionWriteTail;
+  let release!: () => void;
+  recognitionWriteTail = new Promise<void>((resolve) => { release = resolve; });
+  await previous.catch(() => undefined);
   try {
     await mkdir(path.dirname(recognitionQueueFile), { recursive: true });
-    await writeFile(recognitionQueueFile, JSON.stringify(recognitionQueue, null, 2), "utf8");
-  } catch (error) {
-    logError(`failed to persist recognition queue: ${error instanceof Error ? error.message : String(error)}`);
-  }
+    const tempFile = `${recognitionQueueFile}.${process.pid}.tmp`;
+    await writeFile(tempFile, JSON.stringify(recognitionQueue), "utf8");
+    await rename(tempFile, recognitionQueueFile);
+  } finally { release(); }
 }
 
 async function loadRecognitionQueue() {
@@ -366,9 +386,11 @@ async function getVersion(config: DeviceConfig) {
   });
 }
 
-async function openGate(config: DeviceConfig) {
+async function openGate(config: DeviceConfig, deadline?: number) {
   return runDeviceExclusive(config, async () => {
+    if (deadline && Date.now() >= deadline) throw new Error("Manual open expired before terminal execution");
     const token = await login(config);
+    if (deadline && Date.now() >= deadline) throw new Error("Manual open expired before terminal execution");
     const payload = await devicePost(config, "/setDeviceRemoteOpen", { token });
     if (Number(payload?.result) !== 0) throw new Error(payload?.message || "Remote gate-open command failed");
     return { message: payload?.message || "OK", result: Number(payload?.result) };
@@ -399,6 +421,16 @@ async function getPersonnelIdList(config: DeviceConfig) {
       page += 1;
     }
     return { idList: ids, faceCount: faceCount || ids.length, pagesRead: page };
+  });
+}
+
+async function verifyIdentity(config: DeviceConfig, idno: string) {
+  return runDeviceExclusive(config, async () => {
+    const token = await login(config);
+    const identity = await getExistingIdentity(config, token, idno);
+    const group = identity?.data?.TimeGroupId ?? identity?.data?.timeGroupId ?? identity?.data?.timegroupid;
+    return { idno, found: Boolean(identity), usertype: identity?.usertype || null,
+      TimeGroupId: group === undefined || group === null ? null : Number(group) };
   });
 }
 
@@ -544,8 +576,8 @@ async function flushRecognitionQueue() {
       recognitionQueue = recognitionQueue.slice(batch.length);
       await persistRecognitionQueue();
     }
-  } catch {
-    // Keep durable queue for retry after portal/network recovery.
+  } catch (error) {
+    logError(`recognition delivery failed (queue retained): ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     recognitionFlushRunning = false;
   }
@@ -577,16 +609,18 @@ function startRecognitionServer() {
       try {
         const parsed = raw ? JSON.parse(raw) : {};
         const records = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.data) ? parsed.data : [parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed];
+        const incoming: QueuedRecognition[] = [];
         for (const record of records) {
-          if (!record || typeof record !== "object") continue;
+          if (!record || typeof record !== "object") throw new Error("Malformed recognition record");
           const device = findDeviceForCallback(String(req.socket.remoteAddress || ""), record);
           if (!device) {
             queueEvent("recognition.unmapped_terminal", "warning", "A recognition callback arrived from an unmapped terminal.", null, { remoteAddress: normalizeIp(req.socket.remoteAddress), sn: record.sn || null, mac: record.mac || null });
-            continue;
+            throw new Error("Recognition callback could not be matched to a registered terminal");
           }
-          recognitionQueue.push({ deviceKey: device.deviceKey, record, receivedAt: new Date().toISOString() });
-          if (recognitionQueue.length > 50000) recognitionQueue = recognitionQueue.slice(-50000);
+          incoming.push({ deviceKey: device.deviceKey, record, receivedAt: new Date().toISOString() });
         }
+        if (!incoming.length || recognitionQueue.length + incoming.length > 50_000) throw new Error("Recognition queue unavailable or full; terminal must retry callback");
+        recognitionQueue.push(...incoming);
         // Persist before acknowledging so terminal retries are not needed after a portal outage.
         await persistRecognitionQueue();
         res.statusCode = 200;
@@ -594,13 +628,17 @@ function startRecognitionServer() {
         res.end(JSON.stringify({ message: "Success", result: 0 }));
         void flushRecognitionQueue();
       } catch (error) {
-        res.statusCode = 400;
+        logError(`recognition callback rejected: ${error instanceof Error ? error.message : String(error)}`);
+        res.statusCode = 503;
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ message: error instanceof Error ? error.message : "Invalid recognition payload", result: 1 }));
+        res.end(JSON.stringify({ message: "Recognition callback not durably accepted; retry required", result: 1 }));
       }
     });
   });
-  server.listen(callbackPort, "0.0.0.0", () => logInfo(`recognition callback listener: ${callbackUrl()}`));
+  server.listen(callbackPort, "0.0.0.0", () => {
+    try { logInfo(`recognition callback listener: ${callbackUrl()}`); }
+    catch (error) { logError(`recognition listener active, but callback address configuration is invalid: ${error instanceof Error ? error.message : String(error)}`); }
+  });
   server.on("error", (error) => logError(`recognition callback listener failed: ${error.message}`));
   return server;
 }
@@ -613,7 +651,13 @@ async function syncConfig() {
     const next = portalDevices.map((device) => ({ ...device, ...credentialFor(String(device.deviceKey)) }));
     const oldSignature = JSON.stringify(deviceConfigs.map((device) => [device.deviceKey, device.host, device.port, device.name]).sort());
     const newSignature = JSON.stringify(next.map((device) => [device.deviceKey, device.host, device.port, device.name]).sort());
-    const changed = revision !== currentConfigRevision || oldSignature !== newSignature;
+    const incomingCallback = payload?.bridge || {};
+    const callbackMode = incomingCallback.callbackMode === "manual" ? "manual" : "automatic";
+    const callbackHost = String(incomingCallback.callbackHost || "").trim() || null;
+    const callbackPortFromPortal = Number(incomingCallback.callbackPort || callbackPort);
+    const lastCallbackUrl = callbackUrl();
+    currentCallbackConfig = { mode: callbackMode, host: callbackHost, port: callbackPortFromPortal };
+    const changed = revision !== currentConfigRevision || oldSignature !== newSignature || lastCallbackUrl !== callbackUrl() || activeCallbackUrl !== callbackUrl() || callbackError !== null;
 
     deviceConfigs = next;
     byKey = new Map(deviceConfigs.map((device) => [device.deviceKey, device]));
@@ -627,15 +671,20 @@ async function syncConfig() {
 
     if (changed) {
       logInfo(`configuration synchronized: revision ${currentConfigRevision}, ${deviceConfigs.length} device(s)`);
+      const failures: string[] = [];
       for (const device of deviceConfigs) {
         try {
           const configuredUrl = await configureRecognitionCallback(device);
           logInfo(`recognition callback configured for ${device.gateName ? `${device.gateName} · ` : ""}${device.name} -> ${configuredUrl}`);
         } catch (error) {
-          logError(`callback configuration failed for ${device.name}: ${error instanceof Error ? error.message : String(error)}`);
+          const failure = `Callback configuration failed on ${device.name}: ${error instanceof Error ? error.message : String(error)}`;
+          failures.push(failure);
+          logError(failure);
         }
       }
-      queueEvent("bridge.configuration_synchronized", "info", `Configuration revision ${currentConfigRevision} synchronized with ${deviceConfigs.length} terminal(s).`, null, { revision: currentConfigRevision, devices: deviceConfigs.length });
+      callbackError = failures.length ? failures.join("; ").slice(0, 1000) : null;
+      if (!failures.length) activeCallbackUrl = callbackUrl();
+      queueEvent(failures.length ? "bridge.configuration_partial" : "bridge.configuration_synchronized", failures.length ? "warning" : "info", failures.length ? `${failures.length} terminal callback configuration(s) failed.` : `Configuration revision ${currentConfigRevision} synchronized with ${deviceConfigs.length} terminal(s).`, null, { revision: currentConfigRevision, devices: deviceConfigs.length, failures });
       await sendHeartbeat();
     }
     await flushEvents();
@@ -643,7 +692,8 @@ async function syncConfig() {
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logError(`configuration sync failed: ${message}`);
+    callbackError = `Configuration sync failed: ${message}`;
+    logError(callbackError);
     return false;
   }
 }
@@ -654,7 +704,7 @@ async function configLoop() {
   try {
     while (!stopped) {
       await syncConfig();
-      await sleep(Math.max(3000, configMs));
+      await sleep(callbackError ? Math.max(30_000, configMs) : Math.max(3000, configMs));
     }
   } finally {
     configLoopRunning = false;
@@ -685,10 +735,7 @@ async function probeLoop() {
   try {
     while (!stopped) {
       const snapshot = [...deviceConfigs];
-      for (const config of snapshot) {
-        if (stopped) break;
-        await probeDevice(config);
-      }
+      await Promise.all(snapshot.map(async (config) => { if (!stopped) await probeDevice(config); }));
       await sendHeartbeat();
       await sleep(Math.max(10_000, probeMs));
     }
@@ -701,7 +748,11 @@ async function sendHeartbeat() {
   try {
     await portalRequest("/api/gate-bridge/heartbeat", {
       method: "POST",
-      body: JSON.stringify({ softwareVersion: BRIDGE_VERSION, installationId: installationId || null, machineName, serviceStartedAt, configRevision: currentConfigRevision, devices: Array.from(health.values()) }),
+      body: JSON.stringify({ softwareVersion: BRIDGE_VERSION, installationId: installationId || null, machineName, serviceStartedAt, configRevision: currentConfigRevision, activeCallbackUrl, callbackError,
+        availableCallbackHosts: Object.entries(os.networkInterfaces()).flatMap(([interfaceName, list]) =>
+          (list || []).filter((item) => item.family === "IPv4" && !item.internal)
+            .map((item) => ({ address: item.address, interfaceName }))),
+        devices: Array.from(health.values()) }),
     });
     if (portalConnectionState === "offline") {
       queueEvent("bridge.portal_connection_restored", "warning", "Connection from the Gate Bridge to FCGS was restored.");
@@ -719,48 +770,83 @@ async function sendHeartbeat() {
   }
 }
 
-async function completeCommand(commandId: number, success: boolean, result?: Record<string, unknown>, error?: string) {
+type CompletionOutboxRecord = { commandId: number; claimToken: string; success: boolean; result: Record<string, unknown> | null; error: string | null };
+async function submitCompletion(row: CompletionOutboxRecord) {
+  await portalRequest(`/api/gate-bridge/commands/${row.commandId}/complete`, {
+    method: "POST", body: JSON.stringify({ success: row.success, result: row.result, error: row.error, claimToken: row.claimToken }),
+  });
+  await unlink(path.join(completionDir, `${row.commandId}.json`)).catch((error) => logError(`completion outbox cleanup failed: ${String(error)}`));
+}
+async function completeCommand(commandId: number, success: boolean, result?: Record<string, unknown>, error?: string, claimToken = "") {
+  const row: CompletionOutboxRecord = { commandId, success, result: result || null, error: error || null, claimToken };
+  await mkdir(completionDir, { recursive: true });
+  const destination = path.join(completionDir, `${commandId}.json`);
+  const tempFile = `${destination}.${process.pid}.tmp`;
+  await writeFile(tempFile, JSON.stringify(row), "utf8");
+  await rename(tempFile, destination);
+  try { await submitCompletion(row); }
+  catch (error) { logError(`completion ${commandId} awaiting durable retry: ${error instanceof Error ? error.message : String(error)}`); }
+}
+async function flushCompletionOutbox() {
   try {
-    await portalRequest(`/api/gate-bridge/commands/${commandId}/complete`, {
-      method: "POST",
-      body: JSON.stringify({ success, result: result || null, error: error || null }),
-    });
-  } catch (completionError) {
-    logError(`failed to report completion for command ${commandId}: ${completionError instanceof Error ? completionError.message : String(completionError)}`);
-  }
+    await mkdir(completionDir, { recursive: true });
+    const files = (await readdir(completionDir)).filter((name) => /^\d+\.json$/.test(name)).slice(0, 100);
+    for (const file of files) {
+      const row = JSON.parse(await readFile(path.join(completionDir, file), "utf8")) as CompletionOutboxRecord;
+      try { await submitCompletion(row); } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/HTTP 409/.test(message)) {
+          // The server's lease may have expired while offline. Never overwrite a
+          // newer execution. Quarantine the evidence instead of retrying forever.
+          await mkdir(path.join(logDir, "completion-conflicts"), { recursive: true });
+          await rename(path.join(completionDir, file), path.join(logDir, "completion-conflicts", file));
+          logError(`completion ${row.commandId} rejected by server; quarantined for operator verification: ${message}`);
+          continue;
+        }
+        logError(`completion retry ${row.commandId} failed: ${message}`);
+        break;
+      }
+    }
+  } catch (error) { logError(`completion outbox unavailable: ${error instanceof Error ? error.message : String(error)}`); }
 }
 
 async function executeCommand(command: any) {
+  const reportCompletion = (success: boolean, result?: Record<string, unknown>, error?: string) => completeCommand(Number(command.id), success, result, error, String(command.claimToken || ""));
   const key = String(command?.device?.deviceKey || "");
   const config = byKey.get(key);
   if (!config) {
-    await completeCommand(Number(command.id), false, undefined, `Device ${key || "(missing key)"} is not in the current portal configuration for this Gate Bridge`);
+    await reportCompletion(false, undefined, `Device ${key || "(missing key)"} is not in the current portal configuration for this Gate Bridge`);
     return;
   }
   if (command.expiresAt && new Date(command.expiresAt).getTime() <= Date.now()) {
-    await completeCommand(Number(command.id), false, undefined, "Command expired before execution");
+    await reportCompletion(false, undefined, "Command expired before execution");
     return;
   }
 
   try {
     if (command.commandType === "open_gate") {
-      const result = await openGate(config);
+      const result = await openGate(config, command.expiresAt ? new Date(command.expiresAt).getTime() : undefined);
       health.set(key, { ...health.get(key), deviceKey: key, status: "online", error: null });
-      await completeCommand(Number(command.id), true, result);
+      await reportCompletion(true, result);
       logInfo(`opened ${config.gateName ? `${config.gateName} · ` : ""}${config.name} for command ${command.id}`);
       return;
     }
     if (command.commandType === "get_version") {
       const versionInfo = await getVersion(config);
       health.set(key, { deviceKey: key, status: "online", versionInfo, error: null });
-      await completeCommand(Number(command.id), true, versionInfo);
+      await reportCompletion(true, versionInfo);
       logInfo(`connection test passed for ${config.gateName ? `${config.gateName} · ` : ""}${config.name}`);
+      return;
+    }
+    if (command.commandType === "verify_identity") {
+      const result = await verifyIdentity(config, String(command.payload?.idno || ""));
+      await reportCompletion(true, result);
       return;
     }
     if (command.commandType === "get_personnel_id_list") {
       const result = await getPersonnelIdList(config);
       health.set(key, { ...health.get(key), deviceKey: key, status: "online", error: null });
-      await completeCommand(Number(command.id), true, result);
+      await reportCompletion(true, result);
       logInfo(`read ${result.idList.length} personnel ID(s) from ${config.gateName ? `${config.gateName} · ` : ""}${config.name}`);
       return;
     }
@@ -769,31 +855,42 @@ async function executeCommand(command: any) {
       logInfo(`synchronizing identity ${identityNo} to ${config.gateName ? `${config.gateName} · ` : ""}${config.name} for command ${command.id}`);
       const result = await syncIdentity(config, command.payload || {});
       health.set(key, { ...health.get(key), deviceKey: key, status: "online", error: null });
-      await completeCommand(Number(command.id), true, result);
+      await reportCompletion(true, result);
       logInfo(`identity ${identityNo} synchronized to ${config.gateName ? `${config.gateName} · ` : ""}${config.name}`);
       return;
     }
     if (command.commandType === "delete_identity") {
       const result = await deleteIdentity(config, String(command.payload?.idno || ""));
       health.set(key, { ...health.get(key), deviceKey: key, status: "online", error: null });
-      await completeCommand(Number(command.id), true, result as any);
+      await reportCompletion(true, result as any);
       return;
     }
     if (command.commandType === "set_time_groups") {
       const result = await setTimeGroups(config, command.payload || {});
       health.set(key, { ...health.get(key), deviceKey: key, status: "online", error: null });
-      await completeCommand(Number(command.id), true, result);
+      await reportCompletion(true, result);
       return;
     }
-    await completeCommand(Number(command.id), false, undefined, `Unsupported command type: ${String(command.commandType)}`);
+    await reportCompletion(false, undefined, `Unsupported command type: ${String(command.commandType)}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // A command failure is not proof that a terminal is offline. In particular,
     // face-image processing can fail/timeout while the terminal remains reachable.
     // Only the dedicated probe loop owns online/offline state.
-    await completeCommand(Number(command.id), false, undefined, message);
+    await reportCompletion(false, undefined, message);
     logError(`command ${command.id} failed for ${config.name}: ${message}`);
   }
+}
+
+async function executeLeasedCommand(command: any) {
+  const id = Number(command.id);
+  activeCommands.add(id);
+  const leaseRenewal = setInterval(() => {
+    void portalRequest(`/api/gate-bridge/commands/${id}/lease`, { method: "POST", body: JSON.stringify({ claimToken: command.claimToken }) })
+      .catch((error) => logError(`command lease ${id} renewal failed: ${error instanceof Error ? error.message : String(error)}`));
+  }, 15_000);
+  try { await executeCommand(command); }
+  finally { clearInterval(leaseRenewal); activeCommands.delete(id); }
 }
 
 async function commandLoop() {
@@ -802,20 +899,19 @@ async function commandLoop() {
   try {
     while (!stopped) {
       try {
-        const payload = await portalRequest("/api/gate-bridge/commands/claim", { method: "POST", body: "{}" });
-        const commands = Array.isArray(payload?.commands) ? payload.commands : [];
-        for (const command of commands) {
-          if (stopped) break;
-          await executeCommand(command);
+        await flushCompletionOutbox();
+        if (activeCommands.size < 16) {
+          const payload = await portalRequest("/api/gate-bridge/commands/claim", { method: "POST", body: "{}" });
+          const commands = Array.isArray(payload?.commands) ? payload.commands : [];
+          for (const command of commands) {
+            if (stopped) break;
+            void executeLeasedCommand(command).catch((error) => logError(`command ${command.id} execution failed: ${error instanceof Error ? error.message : String(error)}`));
+          }
         }
-      } catch (error) {
-        logError(`command poll failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      } catch (error) { logError(`command poll failed: ${error instanceof Error ? error.message : String(error)}`); }
       await sleep(Math.max(500, pollMs));
     }
-  } finally {
-    commandLoopRunning = false;
-  }
+  } finally { commandLoopRunning = false; }
 }
 
 function stop(signal: string) {

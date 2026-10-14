@@ -473,12 +473,12 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
               <span><span className="text-muted-foreground">Up-to-date balance limit:</span> <strong>${feePosition.maxUpToDateBalance.toFixed(2)}</strong></span>
               {feePosition.nextThresholdDate && <span><span className="text-muted-foreground">Next threshold:</span> <strong>{feePosition.nextThresholdDate}</strong></span>}
             </div>
-            {canManageFeeSchedule && <Button variant="link" className="h-auto justify-start p-0 lg:justify-end" onClick={() => setIsFeeScheduleOpen(true)}>Manage Fee Schedule</Button>}
+            {canManageFeeSchedule && <Button variant="ghost" className="h-auto justify-start p-0 lg:justify-end" onClick={() => setIsFeeScheduleOpen(true)}>Manage Fee Schedule</Button>}
           </div>
         ) : (
           <div className="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
             <span className="text-muted-foreground">No fee schedule is configured for the current school term. Balance imports are disabled until the schedule is configured.</span>
-            {canManageFeeSchedule && <Button variant="link" className="h-auto justify-start p-0" onClick={() => setIsFeeScheduleOpen(true)}>Configure Fee Schedule</Button>}
+            {canManageFeeSchedule && <Button variant="ghost" className="h-auto justify-start p-0" onClick={() => setIsFeeScheduleOpen(true)}>Configure Fee Schedule</Button>}
           </div>
         )}
       </div>
