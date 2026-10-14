@@ -68,7 +68,9 @@
     "fcgs:upgrade:2026-10-11": "tsx script/apply-2026-10-11-comprehensive-build.ts",
     "comprehensive-build:source-check": "node script/validate-comprehensive-build.cjs",
     "fcgs:upgrade:2026-10-13": "tsx script/apply-2026-10-13-combined-build.ts",
-    "combined-build:source-check": "node script/validate-2026-10-13-combined-build.cjs"
+    "combined-build:source-check": "node script/validate-2026-10-13-combined-build.cjs",
+    "fcgs:upgrade:2026-10-14": "tsx script/apply-2026-10-14-fee-schedule.ts",
+    "fee-schedule:source-check": "node script/validate-2026-10-14-fee-schedule.cjs"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

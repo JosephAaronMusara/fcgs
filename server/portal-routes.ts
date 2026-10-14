@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { db } from "./db";
 import { requireAuth } from "./auth";
 import { storage } from "./storage";
+import { resolveStudentFeePosition } from "./fees-schedule";
 import { getChildrenForParentUser, getParentRecordsForUser } from "./parent-identity";
 import {
   accessEvents,
@@ -79,12 +80,13 @@ async function financeSnapshot(student: typeof students.$inferSelect, includePay
   const paymentRows = includePayments
     ? await db.select().from(feesPayments).where(eq(feesPayments.studentId, student.id)).orderBy(desc(feesPayments.paymentDate), desc(feesPayments.id))
     : [];
+  const feeSnapshot = await resolveStudentFeePosition(student, now);
   return {
-    totalTerm: money(student.feesTotalTerm),
-    paidSoFar: money(student.feesPaidSoFar),
-    balance: money(student.feesBalance),
-    maxBalance: money(student.feesMaxBalance),
-    status: student.feesStatus || "n/a",
+    totalTerm: feeSnapshot.total,
+    paidSoFar: feeSnapshot.paid,
+    balance: feeSnapshot.balance,
+    maxBalance: feeSnapshot.maxBalance,
+    status: feeSnapshot.feesStatus,
     source: student.feesSource || null,
     snapshotAt: student.feesSnapshotAt || null,
     temporaryAccessOverride: override ? {

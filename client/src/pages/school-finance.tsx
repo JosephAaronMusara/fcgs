@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import FeeBalanceImportDialog from "@/components/fee-balance-import-dialog";
+import FeeScheduleDialog, { type FeeSchedulePosition } from "@/components/fee-schedule-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -226,6 +227,7 @@ function formatCurrency(amount: number) {
 function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
   const { hasPermission } = useAuth();
   const canViewStudentPayments = hasPermission("fees.view");
+  const canManageFeeSchedule = hasPermission("fees.manage_structure");
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("overview");
   const [searchQuery, setSearchQuery] = useState("");
@@ -233,6 +235,19 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
   const [selectedStudent, setSelectedStudent] = useState<FeesSummaryStudent | null>(null);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [isFeeScheduleOpen, setIsFeeScheduleOpen] = useState(false);
+
+  const { data: feePosition } = useQuery<FeeSchedulePosition>({
+    queryKey: ["/api/fees/schedule/current"],
+    enabled: isActive && canViewStudentPayments,
+    staleTime: 0,
+    refetchInterval: isActive && canViewStudentPayments ? 60_000 : false,
+  });
+
+  useEffect(() => {
+    if (!feePosition?.asOfDate) return;
+    void queryClient.invalidateQueries({ queryKey: ["/api/fees/summary"] });
+  }, [feePosition?.asOfDate]);
 
   const { data: feesSummary = [], isLoading: summaryLoading } = useQuery<FeesSummaryStudent[]>({
     queryKey: ["/api/fees/summary"],
@@ -424,6 +439,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {canManageFeeSchedule && <FeeScheduleDialog open={isFeeScheduleOpen} onOpenChange={setIsFeeScheduleOpen} />}
           <FeeBalanceImportDialog open={isImportOpen} onOpenChange={setIsImportOpen} />
           <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
             <DialogTrigger asChild>
@@ -447,7 +463,27 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="rounded-lg border bg-muted/20 px-4 py-3">
+        {feePosition?.configured ? (
+          <div className="flex flex-col gap-2 text-sm lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
+              <span className="font-semibold">{feePosition.termLabel} {feePosition.academicYear}</span>
+              <span><span className="text-muted-foreground">Total fees:</span> <strong>${feePosition.totalTermFee.toFixed(2)}</strong></span>
+              <span><span className="text-muted-foreground">Due to date:</span> <strong>${feePosition.amountDueToDate.toFixed(2)}</strong></span>
+              <span><span className="text-muted-foreground">Up-to-date balance limit:</span> <strong>${feePosition.maxUpToDateBalance.toFixed(2)}</strong></span>
+              {feePosition.nextThresholdDate && <span><span className="text-muted-foreground">Next threshold:</span> <strong>{feePosition.nextThresholdDate}</strong></span>}
+            </div>
+            {canManageFeeSchedule && <Button variant="link" className="h-auto justify-start p-0 lg:justify-end" onClick={() => setIsFeeScheduleOpen(true)}>Manage Fee Schedule</Button>}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <span className="text-muted-foreground">No fee schedule is configured for the current school term. Balance imports are disabled until the schedule is configured.</span>
+            {canManageFeeSchedule && <Button variant="link" className="h-auto justify-start p-0" onClick={() => setIsFeeScheduleOpen(true)}>Configure Fee Schedule</Button>}
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <Card>
           <CardContent className="pt-4 pb-3">
             <div className="flex items-center gap-3">

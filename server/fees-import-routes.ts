@@ -7,6 +7,7 @@ import { db } from "./db";
 import { requireAuth, requirePermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { syncStudentPolicy } from "./access-control-operations";
+import { getCurrentFeePosition } from "./fees-schedule";
 import { feesImportBatches, feesImportItems, students as studentsTable, schools, type User } from "@shared/schema";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -399,6 +400,13 @@ function batchPublicView(batch: typeof feesImportBatches.$inferSelect) {
     invalidRows: Number(batch.invalidRows || 0),
     processedRows: Number(batch.processedRows || 0),
     failedRows: Number(batch.failedRows || 0),
+    academicYear: batch.academicYear,
+    term: batch.term,
+    feeScheduleId: batch.feeScheduleId,
+    feePositionDate: batch.feePositionDate,
+    termTotalFee: Number.parseFloat(batch.termTotalFee || "0") || 0,
+    amountDueToDate: Number.parseFloat(batch.amountDueToDate || "0") || 0,
+    termMaxBalance: Number.parseFloat(batch.termMaxBalance || "0") || 0,
     progressPercent: processableRows ? Math.min(100, Math.round((Number(batch.processedRows || 0) / processableRows) * 100)) : batch.status === "committed" ? 100 : 0,
     progressMessage: batch.progressMessage,
     lastError: batch.lastError,
@@ -414,10 +422,12 @@ async function previewHandler(req: Request, res: Response, next: NextFunction) {
     const schoolId = await schoolIdFromRequest(req, res);
     if (!schoolId) { if (res.headersSent) return; return res.status(400).json({ message: "No school context" }); }
     if (!req.file) return res.status(400).json({ message: "No fee balance file uploaded" });
-    const termTotalFee = Number.parseFloat(String(req.body.term_total_fee || "0"));
-    const termMaxBalance = Number.parseFloat(String(req.body.term_max_balance || "0"));
-    if (!Number.isFinite(termTotalFee) || termTotalFee < 0) return res.status(400).json({ message: "Term total fee amount must be a valid non-negative number" });
-    if (!Number.isFinite(termMaxBalance) || termMaxBalance < 0) return res.status(400).json({ message: "Maximum allowed balance must be a valid non-negative number" });
+    const feePosition = await getCurrentFeePosition(schoolId);
+    if (!feePosition.configured || !feePosition.scheduleId) {
+      return res.status(409).json({ message: `A fee schedule has not been configured for ${feePosition.termLabel} ${feePosition.academicYear || ""}. Configure the term fee schedule before importing balances.` });
+    }
+    const termTotalFee = feePosition.totalTermFee;
+    const termMaxBalance = feePosition.maxUpToDateBalance;
     const requestedSheet = String(req.body.sheet_name || "").trim() || null;
     const { parsed, rows } = await parseAndMatchFile(req.file, schoolId, termMaxBalance, requestedSheet);
     if (!parsed.matrix) {
@@ -437,6 +447,11 @@ async function previewHandler(req: Request, res: Response, next: NextFunction) {
       sheetName: parsed.selectedSheet,
       termTotalFee: termTotalFee.toFixed(2),
       termMaxBalance: termMaxBalance.toFixed(2),
+      academicYear: feePosition.academicYear,
+      term: feePosition.term,
+      feeScheduleId: feePosition.scheduleId,
+      feePositionDate: feePosition.asOfDate,
+      amountDueToDate: feePosition.amountDueToDate.toFixed(2),
       status: "preview",
       ...stats,
       progressMessage: "Preview ready — confirm to start background processing",

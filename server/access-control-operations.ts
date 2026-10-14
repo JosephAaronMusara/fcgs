@@ -8,6 +8,7 @@ import { z } from "zod";
 import { db } from "./db";
 import { requireAuth, requirePermission } from "./auth";
 import { communicationService } from "./communication";
+import { resolveStudentFeePosition } from "./fees-schedule";
 import {
   accessEvents,
   accessGates,
@@ -225,14 +226,15 @@ async function activeOverride(studentId: number, now = new Date()) {
 function gtDate(column: any, date: Date) { return sql`${column} > ${date}`; }
 
 export async function evaluateStudentFinancialAccess(student: typeof students.$inferSelect, now = new Date()) {
+  const feeSnapshot = await resolveStudentFeePosition(student, now);
+  const status = String(feeSnapshot.feesStatus || "n/a").toLowerCase();
   const override = await activeOverride(student.id, now);
-  if (override) return { allowed: true, reason: "Temporary financial access override", override, stale: false };
+  if (override) return { allowed: true, reason: "Temporary financial access override", override, stale: false, status };
   if (!student.feesSnapshotAt || !isFreshFinancialSnapshot(student, now)) {
-    return { allowed: true, reason: "Financial data missing or older than 36 hours; fail-open", override: null, stale: true };
+    return { allowed: true, reason: "Financial data missing or older than 36 hours; fail-open", override: null, stale: true, status };
   }
-  const status = String(student.feesStatus || "n/a").toLowerCase();
-  if (status === "in_arrears") return { allowed: false, reason: "Financial restriction", override: null, stale: false };
-  return { allowed: true, reason: status === "fully_paid" ? "Fully paid" : status === "up_to_date" ? "Up to date" : "Financial status does not restrict access", override: null, stale: false };
+  if (status === "in_arrears") return { allowed: false, reason: "Financial restriction", override: null, stale: false, status };
+  return { allowed: true, reason: status === "fully_paid" ? "Fully paid" : status === "up_to_date" ? "Up to date" : "Financial status does not restrict access", override: null, stale: false, status };
 }
 
 async function ensureIdentityForStudent(student: typeof students.$inferSelect, organizationId: number, explicitEnrollment = false) {
@@ -1315,7 +1317,7 @@ async function processRecognition(bridge: typeof gateBridges.$inferSelect, input
     recognized,
     accessDecision: decision,
     decisionReason: reason,
-    financialStatus: student?.feesStatus || null,
+    financialStatus: financial?.status || student?.feesStatus || null,
     financialSource: student?.feesSource || null,
     financialSnapshotAt: student?.feesSnapshotAt || null,
     financialImportBatchId: student?.feesImportBatchId || null,

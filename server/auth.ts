@@ -138,6 +138,8 @@ const LEGACY_ROUTE_PERMISSION_RULES: Array<{
 
   { method: "POST", pattern: /^\/api\/fees$/, requirement: ["fees.create", "fees.manage_structure"] },
   { method: "POST", pattern: /^\/api\/fees\/notify$/, requirement: ["fees.view", "communication.send"] },
+  { method: "GET", pattern: /^\/api\/fees\/schedule\/current$/, requirement: "fees.view" },
+  { method: "PUT", pattern: /^\/api\/fees\/schedule\/current$/, requirement: "fees.manage_structure" },
 
   { method: "GET", pattern: /^\/api\/organizations$/, requirement: "settings.view" },
   { method: "POST", pattern: /^\/api\/organizations$/, requirement: "settings.edit" },
