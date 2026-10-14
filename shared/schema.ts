@@ -3156,6 +3156,12 @@ export const gateBridges = pgTable("gate_bridges", {
   lastServiceStartedAt: timestamp("last_service_started_at"),
   lastIdentityReconcileAt: timestamp("last_identity_reconcile_at"),
   lastError: text("last_error"),
+  callbackMode: text("callback_mode").notNull().default("automatic"),
+  callbackHost: text("callback_host"),
+  callbackPort: integer("callback_port").notNull().default(9191),
+  activeCallbackUrl: text("active_callback_url"),
+  callbackError: text("callback_error"),
+  availableCallbackHosts: jsonb("available_callback_hosts"),
   createdByUserId: integer("created_by_user_id").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -3248,6 +3254,9 @@ export const gateCommands = pgTable("gate_commands", {
   expiresAt: timestamp("expires_at").notNull(),
   claimedAt: timestamp("claimed_at"),
   completedAt: timestamp("completed_at"),
+  priority: integer("priority").notNull().default(30),
+  claimToken: text("claim_token"),
+  leaseExpiresAt: timestamp("lease_expires_at"),
 }, (table) => ({
   bridgeStatusIdx: index("gate_commands_bridge_status_idx").on(table.bridgeId, table.status, table.requestedAt),
   deviceIdx: index("gate_commands_device_idx").on(table.deviceId, table.requestedAt),
@@ -3318,6 +3327,11 @@ export const gateIdentitySync = pgTable("gate_identity_sync", {
   retryCount: integer("retry_count").notNull().default(0),
   nextRetryAt: timestamp("next_retry_at"),
   lastSyncedPhotoPath: text("last_synced_photo_path"),
+  confirmedFingerprint: text("confirmed_fingerprint"),
+  desiredFingerprint: text("desired_fingerprint"),
+  lastVerifiedAt: timestamp("last_verified_at"),
+  verificationStatus: text("verification_status").notNull().default("unverified"),
+  verificationDetails: jsonb("verification_details"),
   lastError: text("last_error"),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
@@ -3326,6 +3340,15 @@ export const gateIdentitySync = pgTable("gate_identity_sync", {
   retryIdx: index("gate_identity_sync_retry_idx").on(table.syncStatus, table.nextRetryAt),
   deviceTerminalIdentityIdx: index("gate_identity_sync_device_terminal_identity_idx").on(table.deviceId, table.terminalReportedIdentityNo),
 }));
+
+export const gateSchoolSettings = pgTable("gate_school_settings", {
+  schoolId: integer("school_id").primaryKey().references(() => schools.id),
+  organizationId: integer("organization_id").notNull().references(() => organizations.id),
+  reconciliationEnabled: boolean("reconciliation_enabled").notNull().default(true),
+  reconciliationTime: text("reconciliation_time").notNull().default("23:00"),
+  updatedByUserId: integer("updated_by_user_id").references(() => users.id),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
 
 export const gateSyncJobs = pgTable("gate_sync_jobs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -3350,6 +3373,22 @@ export const gateSyncJobs = pgTable("gate_sync_jobs", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
   schoolStatusIdx: index("gate_sync_jobs_school_status_idx").on(table.schoolId, table.status, table.createdAt),
+}));
+
+export const gateSyncJobItems = pgTable("gate_sync_job_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  jobId: integer("job_id").notNull().references(() => gateSyncJobs.id),
+  personType: text("person_type").notNull(),
+  personId: integer("person_id").notNull(),
+  identityId: integer("identity_id").references(() => accessIdentities.id),
+  personLabel: text("person_label").notNull(),
+  outcome: text("outcome").notNull(),
+  explanation: text("explanation"),
+  deviceIds: jsonb("device_ids"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  jobPersonUnique: uniqueIndex("gate_sync_job_items_job_person_uidx").on(table.jobId, table.personType, table.personId),
+  outcomeIdx: index("gate_sync_job_items_outcome_idx").on(table.jobId, table.outcome),
 }));
 
 export const financialAccessOverrides = pgTable("financial_access_overrides", {

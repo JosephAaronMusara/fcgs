@@ -24,7 +24,9 @@ import {
   gateCommands,
   gateDevices,
   gateIdentitySync,
+  gateSchoolSettings,
   gateSyncJobs,
+  gateSyncJobItems,
   schools,
   schoolDayOverrides,
   schoolDaySchedules,
@@ -42,7 +44,7 @@ import {
 const TZ = "Africa/Harare";
 const FINANCIAL_STALE_MS = 36 * 60 * 60 * 1000;
 const IDENTITY_COMMAND_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const IDENTITY_RECONCILE_INTERVAL_MS = 30 * 60 * 1000;
+// Full reconciliation follows the school-configured 23:00 local schedule.
 const GATE_SYNC_JOB_CHUNK = Math.max(10, Math.min(100, Number.parseInt(process.env.FCGS_GATE_SYNC_JOB_CHUNK || "40", 10) || 40));
 const GATE_SYNC_JOB_CONCURRENCY = Math.max(1, Math.min(8, Number.parseInt(process.env.FCGS_GATE_SYNC_JOB_CONCURRENCY || "4", 10) || 4));
 const FACE_TARGET_MAX_BYTES = 220_000;
@@ -352,6 +354,9 @@ async function queueCommand(device: typeof gateDevices.$inferSelect, commandType
     deviceId: device.id,
     commandType,
     status: "pending",
+    priority: commandType === "set_time_groups" ? 10 : commandType === "verify_identity" ? 40 :
+      /reconcil|bulk/i.test(reason) ? 40 : requestedByUserId ? 20 :
+      /retry/i.test(reason) ? 30 : 10,
     requestedByUserId: requestedByUserId || null,
     requestReason: reason,
     payload,
@@ -374,6 +379,12 @@ async function configureExitScheduleForDevice(device: typeof gateDevices.$inferS
   return queueCommand(device, "set_time_groups", {
     TimeGroup: [{ TimeGroupId: String(EXIT_TIME_GROUP_ID), TimeGroupName: "FCGS Student Normal Dismissal", TimeGroup: week }],
   }, "Synchronize configured student dismissal schedule", null);
+}
+
+export async function configureExitScheduleForTerminal(deviceId: number) {
+  const [device] = await db.select().from(gateDevices).where(eq(gateDevices.id, deviceId)).limit(1);
+  if (!device || !device.isActive || device.direction !== "exit") return null;
+  return configureExitScheduleForDevice(device);
 }
 
 async function desiredIdentityForDevice(identity: typeof accessIdentities.$inferSelect, device: typeof gateDevices.$inferSelect, photoBase64: string | null, now = new Date()) {
@@ -403,7 +414,30 @@ export async function queueIdentitySync(identityId: number, requestedByUserId?: 
     devices = devices.filter((device) => allowed.has(device.id));
   }
   const photoBase64 = identity.isActive ? await readPhotoAsBase64(identity.photoPath) : null;
-  if (identity.isActive && identity.photoPath && !photoBase64) throw new Error(`Could not prepare the FCGS profile photo for ${identity.displayName}`);
+  if (identity.isActive && !photoBase64 && !identity.photoPath) {
+    // A profile with no photo is ineligible for terminal facial recognition.
+    // Keep the identity row and explanation for operators; never enqueue an upload.
+    for (const device of devices) {
+      const [existing] = await db.select().from(gateIdentitySync).where(and(eq(gateIdentitySync.identityId, identity.id), eq(gateIdentitySync.deviceId, device.id))).limit(1);
+      if (existing && existing.syncStatus !== "deleted" && existing.syncStatus !== "pending") {
+        const command = await queueCommand(device, "delete_identity", { identityId: identity.id, idno: identity.identityNo }, "Profile photograph removed; revoke facial enrollment", requestedByUserId);
+        await db.update(gateIdentitySync).set({ desiredEnabled: false, syncStatus: "pending", lastCommandId: command.id, lastError: "Profile photograph unavailable; terminal face removal requested", nextRetryAt: null, updatedAt: new Date() }).where(eq(gateIdentitySync.id, existing.id));
+      } else if (!existing) {
+        await db.insert(gateIdentitySync).values({ identityId: identity.id, deviceId: device.id, desiredEnabled: false, syncStatus: "failed", lastError: "Profile photograph required before enrollment" });
+      }
+    }
+    return [];
+  }
+  if (identity.isActive && !photoBase64) {
+    // Photo file inaccessible/invalid: preserve existing terminal access and flag
+    // the data defect; do not delete a working face because of storage failure.
+    for (const device of devices) {
+      const [existing] = await db.select().from(gateIdentitySync).where(and(eq(gateIdentitySync.identityId, identity.id), eq(gateIdentitySync.deviceId, device.id))).limit(1);
+      if (existing && existing.syncStatus !== "synced") await db.update(gateIdentitySync).set({ syncStatus: "failed", lastError: "A usable FCGS profile photograph is required before enrollment", nextRetryAt: null, updatedAt: new Date() }).where(eq(gateIdentitySync.id, existing.id));
+    }
+    return []; // Never create a command that cannot succeed.
+  }
+  const photoHash = photoBase64 ? createHash("sha256").update(photoBase64).digest("hex") : "";
   const commands = [];
   for (const device of devices) {
     const desired = await desiredIdentityForDevice(identity, device, photoBase64);
@@ -413,7 +447,31 @@ export async function queueIdentitySync(identityId: number, requestedByUserId?: 
       if (device.direction === "entry") desired.timeGroupId = 0;
     }
     const [existingSync] = await db.select().from(gateIdentitySync).where(and(eq(gateIdentitySync.identityId, identity.id), eq(gateIdentitySync.deviceId, device.id))).limit(1);
-    // Supersede old pending commands for this identity/device to make future activation/expiry deterministic.
+    // Content-address the *terminal-relevant* state: fee balance updates that do not
+    // change access policy do not re-enroll an unchanged face.
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      idno: identity.identityNo, name: identity.displayName, enabled: desired.enabled,
+      usertype: desired.usertype, timeGroupId: desired.timeGroupId, photoHash,
+    })).digest("hex");
+    const lastCommand = existingSync?.lastCommandId
+      ? (await db.select().from(gateCommands).where(eq(gateCommands.id, existingSync.lastCommandId)).limit(1))[0]
+      : null;
+    const samePending = existingSync?.desiredFingerprint === fingerprint && lastCommand && ["pending", "processing"].includes(lastCommand.status);
+    const sameConfirmed = existingSync?.syncStatus === "synced" &&
+      (existingSync.confirmedFingerprint === fingerprint ||
+       (!existingSync.confirmedFingerprint && existingSync.lastSyncedPhotoPath === identity.photoPath &&
+        existingSync.desiredListType === desired.usertype && existingSync.desiredEnabled === desired.enabled &&
+        existingSync.desiredTimeGroup === desired.timeGroupId));
+    const sameDeleted = !desired.enabled && existingSync?.syncStatus === "deleted";
+    if (sameConfirmed && existingSync && !existingSync.confirmedFingerprint) {
+      // Preserve the last acknowledged deployment on upgrade, while establishing
+      // the baseline needed to detect subsequent changes to name/photo/policy.
+      // This is a migration baseline, NOT an independent terminal read-back.
+      await db.update(gateIdentitySync).set({ confirmedFingerprint: fingerprint, desiredFingerprint: fingerprint, updatedAt: new Date() }).where(eq(gateIdentitySync.id, existingSync.id));
+    }
+    if (samePending || sameConfirmed || sameDeleted) continue;
+    // Supersede only pending commands. An executing command cannot be preempted;
+    // the latest desired state is re-checked once that execution acknowledges.
     await db.update(gateCommands).set({ status: "superseded", completedAt: new Date(), errorMessage: "Superseded by newer identity policy" }).where(and(
       eq(gateCommands.deviceId, device.id), eq(gateCommands.status, "pending"), sql`${gateCommands.payload}->>'identityId' = ${String(identity.id)}`,
     )).catch(() => undefined);
@@ -426,13 +484,15 @@ export async function queueIdentitySync(identityId: number, requestedByUserId?: 
       passAlgo: false,
       picData1: desired.photoBase64,
       policyVersion: Date.now(),
-    } : { identityId: identity.id, idno: identity.identityNo, policyVersion: Date.now() }, reason, requestedByUserId);
+      stateFingerprint: fingerprint,
+    } : { identityId: identity.id, idno: identity.identityNo, stateFingerprint: fingerprint, policyVersion: Date.now() }, reason, requestedByUserId);
     const syncValues = {
       identityId: identity.id,
       deviceId: device.id,
       desiredListType: desired.usertype,
       desiredEnabled: desired.enabled,
       desiredTimeGroup: desired.timeGroupId,
+      desiredFingerprint: fingerprint,
       terminalReportedIdentityNo: null,
       syncStatus: "pending",
       lastCommandId: command.id,
@@ -469,6 +529,26 @@ function mergeJobDetails(current: unknown, patch: Record<string, unknown>) {
   return { ...base, ...patch };
 }
 
+type GateJobResult = {
+  status: "succeeded" | "skipped" | "failed";
+  id: number;
+  label?: string;
+  error?: string;
+  explanation?: string;
+  identityId?: number;
+  deviceIds?: number[];
+};
+async function recordJobItems(jobId: number, personType: "student" | "staff", results: GateJobResult[], identities = false) {
+  if (!results.length) return;
+  await db.insert(gateSyncJobItems).values(results.map((row) => ({
+    jobId, personType, personId: row.id, identityId: identities ? row.id : row.identityId || null,
+    personLabel: row.label || `${personType === "student" ? "Student" : "Staff"} #${row.id}`,
+    outcome: row.status === "succeeded" ? "queued" : row.status === "failed" ? "failed" : "skipped",
+    explanation: row.error || row.explanation || (row.status === "succeeded" ? "Terminal work was requested, not yet confirmed" : "Already correct or not applicable"),
+    deviceIds: row.deviceIds || null,
+  }))).onConflictDoNothing();
+}
+
 async function gateSyncJobTotal(schoolId: number, personType: "student" | "staff" | "all") {
   const [studentRows, staffRows] = await Promise.all([
     personType === "staff" ? Promise.resolve([]) : db.select({ id: students.id }).from(students).where(eq(students.schoolId, schoolId)),
@@ -500,13 +580,14 @@ async function processBulkEnrollJob(job: typeof gateSyncJobs.$inferSelect) {
     const rows = await db.select().from(students).where(and(eq(students.schoolId, job.schoolId), gt(students.id, cursorId))).orderBy(asc(students.id)).limit(GATE_SYNC_JOB_CHUNK);
     const results = await mapWithConcurrency(rows, GATE_SYNC_JOB_CONCURRENCY, async (student) => {
       try {
-        if (student.status !== "active" || student.archivedAt || !student.photo) return { status: "skipped" as const, id: student.id };
+        if (student.status !== "active" || student.archivedAt) return { status: "skipped" as const, id: student.id, explanation: "Inactive or archived" };
+        if (!student.photo) return { status: "skipped" as const, id: student.id, explanation: "Profile photograph missing" };
         const [existing] = await db.select().from(accessIdentities).where(eq(accessIdentities.studentId, student.id)).limit(1);
-        if (existing?.enrollmentRemovedAt) return { status: "skipped" as const, id: student.id };
+        if (existing?.enrollmentRemovedAt) return { status: "skipped" as const, id: student.id, explanation: "Enrollment intentionally removed" };
         const identity = await ensureIdentityForStudent(student, job.organizationId);
-        if (!identity.isActive || !identity.photoPath) return { status: "skipped" as const, id: student.id };
-        await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk student enrollment job #${job.id}`);
-        return { status: "succeeded" as const, id: student.id };
+        if (!identity.isActive || !identity.photoPath) return { status: "skipped" as const, id: student.id, explanation: "Inactive or missing photograph" };
+        const commands = await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk student enrollment job #${job.id}`);
+        return commands.length ? { status: "succeeded" as const, id: student.id, identityId: identity.id, deviceIds: commands.map(c => c.deviceId) } : { status: "skipped" as const, id: student.id, explanation: "No terminal state changes required" };
       } catch (error) {
         return { status: "failed" as const, id: student.id, label: `${student.firstName} ${student.lastName} · ${student.admissionNo}`, error: error instanceof Error ? error.message : String(error) };
       }
@@ -518,13 +599,14 @@ async function processBulkEnrollJob(job: typeof gateSyncJobs.$inferSelect) {
     const rows = await db.select().from(staff).where(and(eq(staff.schoolId, job.schoolId), gt(staff.id, cursorId))).orderBy(asc(staff.id)).limit(GATE_SYNC_JOB_CHUNK);
     const results = await mapWithConcurrency(rows, GATE_SYNC_JOB_CONCURRENCY, async (person) => {
       try {
-        if (person.status !== "active" || !person.photo) return { status: "skipped" as const, id: person.id };
+        if (person.status !== "active") return { status: "skipped" as const, id: person.id, explanation: "Inactive" };
+        if (!person.photo) return { status: "skipped" as const, id: person.id, explanation: "Profile photograph missing" };
         const [existing] = await db.select().from(accessIdentities).where(eq(accessIdentities.staffId, person.id)).limit(1);
-        if (existing?.enrollmentRemovedAt) return { status: "skipped" as const, id: person.id };
+        if (existing?.enrollmentRemovedAt) return { status: "skipped" as const, id: person.id, explanation: "Enrollment intentionally removed" };
         const identity = await ensureIdentityForStaff(person, job.organizationId);
-        if (!identity.isActive || !identity.photoPath) return { status: "skipped" as const, id: person.id };
-        await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk staff enrollment job #${job.id}`);
-        return { status: "succeeded" as const, id: person.id };
+        if (!identity.isActive || !identity.photoPath) return { status: "skipped" as const, id: person.id, explanation: "Inactive or missing photograph" };
+        const commands = await queueIdentitySync(identity.id, job.requestedByUserId, `Bulk staff enrollment job #${job.id}`);
+        return commands.length ? { status: "succeeded" as const, id: person.id, identityId: identity.id, deviceIds: commands.map(c => c.deviceId) } : { status: "skipped" as const, id: person.id, explanation: "No terminal state changes required" };
       } catch (error) {
         return { status: "failed" as const, id: person.id, label: `${person.firstName} ${person.lastName} · ${person.staffNo}`, error: error instanceof Error ? error.message : String(error) };
       }
@@ -535,6 +617,7 @@ async function processBulkEnrollJob(job: typeof gateSyncJobs.$inferSelect) {
   const chunk = phase === "student" ? await processStudentChunk() : await processStaffChunk();
   const rows = chunk.rows;
   const results = chunk.results;
+  await recordJobItems(job.id, phase, results);
   if (rows.length) cursorId = rows[rows.length - 1].id;
   processed += results.length;
   succeeded += results.filter((result) => result.status === "succeeded").length;
@@ -581,71 +664,34 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
   const devices = await db.select().from(gateDevices).where(and(eq(gateDevices.schoolId, job.schoolId), eq(gateDevices.isActive, true)));
   const phase = String(job.phase || "inventory");
 
-  // Production reconciliation begins by asking each real terminal which personnel IDs it
-  // actually contains. The vendor HTTP V3.1 getPersonnelIDList endpoint is executed by
-  // the Gate Bridge on the LAN, so FCGS does not pretend that a historic "synced" flag
-  // proves terminal state after outages/replacements.
-  const inventoryCommands = await db.select().from(gateCommands).where(and(
-    eq(gateCommands.schoolId, job.schoolId),
-    eq(gateCommands.commandType, "get_personnel_id_list"),
-    sql`${gateCommands.payload}->>'syncJobId' = ${String(job.id)}`,
-  )).orderBy(asc(gateCommands.id));
-
+  // Installed F550 terminals return HTTP 404 for /getPersonnelIDList.
+  // Do not call this unsupported API. Reconcile known Portal state here; terminal
+  // presence is independently verified via per-identity read commands below.
   if (phase === "inventory") {
-    if (!inventoryCommands.length && devices.length) {
-      for (const device of devices) {
-        await queueCommand(
-          device,
-          "get_personnel_id_list",
-          { syncJobId: job.id },
-          `Terminal enrollment inventory for reconciliation job #${job.id}`,
-          job.requestedByUserId,
-          15 * 60_000,
-        );
-      }
-      await db.update(gateSyncJobs).set({
-        status: "running",
-        startedAt: job.startedAt || new Date(),
-        phase: "inventory",
-        updatedAt: new Date(),
-      }).where(eq(gateSyncJobs.id, job.id));
-      return;
-    }
-
-    const unfinished = inventoryCommands.filter((command) => ["pending", "processing"].includes(command.status));
-    if (unfinished.length) {
-      await db.update(gateSyncJobs).set({
-        status: "running",
-        startedAt: job.startedAt || new Date(),
-        updatedAt: new Date(),
-      }).where(eq(gateSyncJobs.id, job.id));
-      return;
-    }
-
-    const failedInventory = inventoryCommands.filter((command) => command.status !== "succeeded");
-    const existingDetails = (job.details && typeof job.details === "object" ? job.details : {}) as Record<string, unknown>;
-    await db.update(gateSyncJobs).set({
-      status: "running",
-      startedAt: job.startedAt || new Date(),
-      phase: "identities",
-      cursorId: 0,
-      failedItems: (job.failedItems || 0) + failedInventory.length,
-      details: {
-        ...existingDetails,
-        inventoryTerminals: devices.length,
-        inventorySucceeded: inventoryCommands.filter((command) => command.status === "succeeded").length,
-        inventoryFailed: failedInventory.map((command) => ({ deviceId: command.deviceId, error: command.errorMessage || command.status })),
-      },
-      updatedAt: new Date(),
-    }).where(eq(gateSyncJobs.id, job.id));
+    const details = mergeJobDetails(job.details, {
+      inventoryMethod: "individual_lookup",
+      inventoryCapability: "bulk_inventory_unsupported",
+      verificationScope: "known_portal_identities_only",
+    });
+    await db.update(gateSyncJobs).set({ status: "running", phase: "identities", startedAt: job.startedAt || new Date(), details, updatedAt: new Date() }).where(eq(gateSyncJobs.id, job.id));
     return;
   }
-
   const actualIdsByDevice = new Map<number, Set<string>>();
-  for (const command of inventoryCommands.filter((row) => row.status === "succeeded")) {
-    const result = command.result && typeof command.result === "object" ? command.result as Record<string, unknown> : {};
-    const ids = Array.isArray(result.idList) ? result.idList.map((value) => String(value || "").trim()).filter(Boolean) : [];
-    actualIdsByDevice.set(command.deviceId, new Set(ids));
+  if (phase === "verification") {
+    const relevant = await db.execute(sql`SELECT status, count(*)::int AS count FROM gate_commands WHERE school_id=${job.schoolId} AND command_type='verify_identity' AND request_reason=${`Nightly verification job #${job.id}`} GROUP BY status`);
+    const statuses = new Map(relevant.rows.map((row: any) => [String(row.status), Number(row.count)]));
+    const unfinished = (statuses.get("pending") || 0) + (statuses.get("processing") || 0);
+    if (unfinished) return;
+    const failed = (statuses.get("failed") || 0) + (statuses.get("expired") || 0) + (statuses.get("uncertain") || 0);
+    const completed = statuses.get("succeeded") || 0;
+    const verificationMode = "known_portal_identities_only";
+    await db.update(gateSyncJobs).set({
+      status: "completed_with_exceptions", completedAt: new Date(), phase: "complete",
+      details: mergeJobDetails(job.details, { verificationScope: verificationMode, verificationSucceeded: completed, verificationFailed: failed,
+        disclaimer: "Full terminal inventory enumeration is unsupported on this firmware; unknown terminal-only identities are not verified." }), updatedAt: new Date(),
+    }).where(eq(gateSyncJobs.id, job.id));
+    await db.update(gateBridges).set({ lastIdentityReconcileAt: new Date(), updatedAt: new Date() }).where(eq(gateBridges.schoolId, job.schoolId));
+    return;
   }
 
   const rows = await db.select().from(accessIdentities).where(and(eq(accessIdentities.schoolId, job.schoolId), gt(accessIdentities.id, job.cursorId || 0))).orderBy(asc(accessIdentities.id)).limit(GATE_SYNC_JOB_CHUNK);
@@ -662,11 +708,11 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
       let refreshed = identity;
       if (identity.personType === "student" && identity.studentId) {
         const [student] = await db.select().from(students).where(eq(students.id, identity.studentId)).limit(1);
-        if (!student) return { status: "skipped" as const, id: identity.id };
+        if (!student) return { status: "skipped" as const, id: identity.id, explanation: "Student profile no longer exists" };
         refreshed = await ensureIdentityForStudent(student, identity.organizationId);
       } else if (identity.personType === "staff" && identity.staffId) {
         const [person] = await db.select().from(staff).where(eq(staff.id, identity.staffId)).limit(1);
-        if (!person) return { status: "skipped" as const, id: identity.id };
+        if (!person) return { status: "skipped" as const, id: identity.id, explanation: "Staff profile no longer exists" };
         refreshed = await ensureIdentityForStaff(person, identity.organizationId);
       }
 
@@ -686,19 +732,32 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
         if (!refreshed.photoPath) continue;
 
         const missingOnTerminal = terminalPresenceKnown && !terminalHasIdentity;
+        // Targeted verification is safe and read-only. Keep it below bulk priority.
+        if (refreshed.isActive && refreshed.photoPath && sync?.syncStatus === "synced" &&
+            (!sync.lastVerifiedAt || (Date.now() - new Date(sync.lastVerifiedAt).getTime() > 24 * 60 * 60 * 1000))) {
+          await queueCommand(device, "verify_identity", { identityId: refreshed.id, idno: refreshed.identityNo, expectedTimeGroup: sync.desiredTimeGroup }, `Nightly verification job #${job.id}`, job.requestedByUserId, 24 * 60 * 60_000);
+        }
         const photoChanged = !!sync && sync.lastSyncedPhotoPath !== refreshed.photoPath;
         const stateChanged = previous.isActive !== refreshed.isActive || previous.desiredEntryAccess !== refreshed.desiredEntryAccess || previous.manualRestrictionActive !== refreshed.manualRestrictionActive;
         if (!sync || missingOnTerminal || photoChanged || stateChanged || ["failed", "retry_pending"].includes(sync.syncStatus)) desiredDeviceIds.push(device.id);
       }
       if (desiredDeviceIds.length) {
-        await queueIdentitySync(refreshed.id, job.requestedByUserId, `Enrollment reconciliation job #${job.id}`, desiredDeviceIds);
-        return { status: "succeeded" as const, id: identity.id };
+        const commands = await queueIdentitySync(refreshed.id, job.requestedByUserId, `Enrollment reconciliation job #${job.id}`, desiredDeviceIds);
+        if (commands.length) return { status: "succeeded" as const, id: identity.id, deviceIds: commands.map(c => c.deviceId) };
       }
-      return { status: "skipped" as const, id: identity.id };
+      return { status: "skipped" as const, id: identity.id,
+        explanation: !refreshed.isActive ? "Inactive identity; no terminal update needed" :
+          !refreshed.photoPath ? "Profile photograph missing" : "Already correct, pending, or awaiting terminal verification" };
     } catch (error) {
       return { status: "failed" as const, id: identity.id, label: `${identity.displayName} · ${identity.identityNo}`, error: error instanceof Error ? error.message : String(error) };
     }
   });
+  for (const personType of ["student", "staff"] as const) {
+    await recordJobItems(job.id, personType, reconcileResults.filter((row) => rows.find((identity) => identity.id === row.id)?.personType === personType).map((row) => {
+      const item: GateJobResult = row;
+      return { ...item, label: item.label || rows.find((identity) => identity.id === item.id)?.displayName };
+    }), true);
+  }
   if (rows.length) cursorId = rows[rows.length - 1].id;
   processed += reconcileResults.length;
   succeeded += reconcileResults.filter((result) => result.status === "succeeded").length;
@@ -730,22 +789,9 @@ async function processReconcileJob(job: typeof gateSyncJobs.$inferSelect) {
   }).where(eq(gateSyncJobs.id, job.id));
 
   if (rows.length < GATE_SYNC_JOB_CHUNK) {
-    const allIdentities = await db.select({ identityNo: accessIdentities.identityNo }).from(accessIdentities).where(eq(accessIdentities.schoolId, job.schoolId));
-    const knownIds = new Set(allIdentities.map((row) => row.identityNo));
-    const unknownByDevice = Array.from(actualIdsByDevice.entries()).map(([deviceId, actualIds]) => ({
-      deviceId,
-      ids: Array.from(actualIds).filter((id) => !knownIds.has(id)).slice(0, 100),
-      count: Array.from(actualIds).filter((id) => !knownIds.has(id)).length,
-    })).filter((row) => row.count > 0);
-
-    const [latestJob] = await db.select().from(gateSyncJobs).where(eq(gateSyncJobs.id, job.id)).limit(1);
-    const details = (latestJob?.details && typeof latestJob.details === "object" ? latestJob.details : {}) as Record<string, unknown>;
-    if (unknownByDevice.length) {
-      await db.update(gateSyncJobs).set({ details: { ...details, unknownTerminalIdentities: unknownByDevice }, updatedAt: new Date() }).where(eq(gateSyncJobs.id, job.id));
-    }
-    await finishGateSyncJob(job.id, "completed");
-    await db.update(gateBridges).set({ lastIdentityReconcileAt: new Date(), updatedAt: new Date() }).where(eq(gateBridges.schoolId, job.schoolId));
+    await db.update(gateSyncJobs).set({ phase: "verification", details: mergeJobDetails(reconcileDetails, { verificationScope: "known_portal_identities_only", inventoryMethod: "individual_lookup" }), updatedAt: new Date() }).where(eq(gateSyncJobs.id, job.id));
   }
+
 }
 
 async function processGateSyncJobs() {
@@ -767,11 +813,12 @@ function retryDelayMs(retryCount: number) {
 }
 
 async function processIdentityRetryQueue(now: Date) {
-  const staleProcessingBefore = new Date(now.getTime() - 2 * 60_000);
-  await db.update(gateCommands).set({ status: "failed", completedAt: now, errorMessage: "Gate Bridge restarted or did not finish the identity command; queued for retry." }).where(and(
+  const staleProcessingBefore = new Date(now.getTime() - 20 * 60_000);
+  await db.update(gateCommands).set({ status: "uncertain", completedAt: now, errorMessage: "Execution acknowledgement lost or lease expired; verify terminal state before retrying." }).where(and(
     eq(gateCommands.status, "processing"),
-    inArray(gateCommands.commandType, ["sync_identity", "delete_identity"]),
-    lt(gateCommands.claimedAt, staleProcessingBefore),
+    // Also unblock a terminal when an urgent open, read-only verification, or
+    // configuration command loses its lease. Never automatically replay an open.
+    sql`(${gateCommands.leaseExpiresAt} < ${now} OR (${gateCommands.leaseExpiresAt} IS NULL AND ${gateCommands.claimedAt} < ${staleProcessingBefore}))`,
   ));
 
   const pending = await db.select().from(gateIdentitySync).where(eq(gateIdentitySync.syncStatus, "pending")).limit(200);
@@ -781,7 +828,13 @@ async function processIdentityRetryQueue(now: Date) {
     const statusById = new Map(commands.map((row) => [row.id, row.status]));
     for (const sync of pending) {
       const status = sync.lastCommandId ? statusById.get(sync.lastCommandId) : null;
-      if (status && ["failed", "expired"].includes(status)) {
+      if (status && ["failed", "expired", "uncertain"].includes(status)) {
+        const [command] = await db.select({ errorMessage: gateCommands.errorMessage }).from(gateCommands).where(eq(gateCommands.id, sync.lastCommandId!)).limit(1);
+        const permanent = status === "uncertain" || /photo|unsupported|HTTP 404|authenticat|storage full|invalid image/i.test(command?.errorMessage || "");
+        if (permanent || (sync.retryCount || 0) >= 5) {
+          await db.update(gateIdentitySync).set({ syncStatus: "failed", nextRetryAt: null, lastError: command?.errorMessage || "Retry requires administrator review", updatedAt: now }).where(eq(gateIdentitySync.id, sync.id));
+          continue;
+        }
         const retries = (sync.retryCount || 0) + 1;
         await db.update(gateIdentitySync).set({
           syncStatus: "retry_pending",
@@ -813,15 +866,28 @@ async function processIdentityRetryQueue(now: Date) {
 async function ensureAutomaticReconciliationJobs(now: Date) {
   const bridges = await db.select().from(gateBridges).where(eq(gateBridges.isActive, true));
   const schoolIds = Array.from(new Set(bridges.map((row) => row.schoolId)));
+  const zimbabweClock = new Intl.DateTimeFormat("en-GB", { timeZone: "Africa/Harare", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now);
+  const dayParts = new Intl.DateTimeFormat("en-GB", { timeZone: "Africa/Harare", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+  const part = (name: string) => dayParts.find((item) => item.type === name)?.value || "";
+  const zimbabweDay = `${part("year")}-${part("month")}-${part("day")}`;
   for (const schoolId of schoolIds) {
-    const schoolBridges = bridges.filter((row) => row.schoolId === schoolId);
-    const last = schoolBridges.map((row) => row.lastIdentityReconcileAt ? new Date(row.lastIdentityReconcileAt).getTime() : 0).sort((a, b) => b - a)[0] || 0;
-    if (last && now.getTime() - last < IDENTITY_RECONCILE_INTERVAL_MS) continue;
+    // Prevent unsupported verification commands while the installed Bridge is
+    // still on the legacy release during a staggered deployment.
+    const schoolBridges = bridges.filter((bridge) => bridge.schoolId === schoolId);
+    if (schoolBridges.some((bridge) => bridge.softwareVersion !== "fcgs-gate-bridge/1.1.0")) continue;
+    const [settings] = await db.select().from(gateSchoolSettings).where(eq(gateSchoolSettings.schoolId, schoolId)).limit(1);
+    if (settings?.reconciliationEnabled === false || zimbabweClock < (settings?.reconciliationTime || "23:00")) continue;
+    const todaysJobs = await db.select({ id: gateSyncJobs.id }).from(gateSyncJobs).where(and(
+      eq(gateSyncJobs.schoolId, schoolId), eq(gateSyncJobs.jobType, "reconcile"),
+      sql`(${gateSyncJobs.details}->>'automatic') = 'true'`,
+      sql`to_char(${gateSyncJobs.createdAt} + INTERVAL '2 hours', 'YYYY-MM-DD') = ${zimbabweDay}`,
+    )).limit(1);
+    if (todaysJobs.length) continue;
     const active = await db.select({ id: gateSyncJobs.id }).from(gateSyncJobs).where(and(eq(gateSyncJobs.schoolId, schoolId), eq(gateSyncJobs.jobType, "reconcile"), inArray(gateSyncJobs.status, ["pending", "running"]))).limit(1);
     if (active.length) continue;
-    const [bridge] = schoolBridges;
-    const totalItems = (await db.select({ id: accessIdentities.id }).from(accessIdentities).where(eq(accessIdentities.schoolId, schoolId))).length;
-    await db.insert(gateSyncJobs).values({ organizationId: bridge.organizationId, schoolId, jobType: "reconcile", personType: "all", totalItems, status: "pending", details: { automatic: true } });
+    const bridge = bridges.find((row) => row.schoolId === schoolId)!;
+    const [total] = await db.select({ count: sql<number>`count(*)::int` }).from(accessIdentities).where(eq(accessIdentities.schoolId, schoolId));
+    await db.insert(gateSyncJobs).values({ organizationId: bridge.organizationId, schoolId, jobType: "reconcile", personType: "all", totalItems: total?.count || 0, status: "pending", details: { automatic: true, scheduledDay: zimbabweDay } });
   }
 }
 
@@ -1453,6 +1519,23 @@ export function registerAccessControlOperations(app: Express) {
       const scope = await scopeOf(req);
       const jobs = await db.select().from(gateSyncJobs).where(eq(gateSyncJobs.schoolId, scope.schoolId)).orderBy(desc(gateSyncJobs.createdAt)).limit(25);
       res.json({ jobs });
+    } catch (error) { fail(res, error); }
+  });
+
+  app.get("/api/access-control/sync-jobs/:id/items", requireAuth, requirePermission("access_control.view"), async (req, res) => {
+    try {
+      const scope = await scopeOf(req);
+      const jobId = Number(req.params.id);
+      const [job] = await db.select({ id: gateSyncJobs.id }).from(gateSyncJobs).where(and(eq(gateSyncJobs.id, jobId), eq(gateSyncJobs.schoolId, scope.schoolId))).limit(1);
+      if (!job) return res.status(404).json({ message: "Job not found" });
+      const status = String(req.query.status || "all");
+      const page = Math.max(1, Math.min(100_000, Number(req.query.page || 1)));
+      const conditions = and(eq(gateSyncJobItems.jobId, jobId), ...(status === "all" ? [] : [eq(gateSyncJobItems.outcome, status)]));
+      const [items, countRows] = await Promise.all([
+        db.select().from(gateSyncJobItems).where(conditions).orderBy(asc(gateSyncJobItems.id)).limit(50).offset((page - 1) * 50),
+        db.select({ count: sql<number>`count(*)::int` }).from(gateSyncJobItems).where(conditions),
+      ]);
+      res.json({ items, page, total: Number(countRows[0]?.count || 0) });
     } catch (error) { fail(res, error); }
   });
 

@@ -627,29 +627,34 @@ function sendReportMeta(ctx: ReportingContext) {
   return { schoolId: ctx.school.id, schoolName: ctx.school.name, from: ctx.filters.from, to: ctx.filters.to, generatedAt: new Date().toISOString(), calendarConfidence: ctx.calendarConfidence };
 }
 
+// Export mode supplies complete arrays; the normal API returns paginated objects.
+function exportRows<T>(value: T[] | { rows: T[]; pagination: unknown }): T[] {
+  return Array.isArray(value) ? value : value.rows;
+}
+
 function reportRowsForExport(report: string, ctx: ReportingContext): { title: string; headers: string[]; rows: Array<Array<string | number | null>> } {
   if (report === "absenteeism") {
     const payload = absenteeismPayload(ctx, true);
-    return { title: "Frequent Absenteeism", headers: ["Admission No.", "Student", "Class", "Absent Days", "Present Days", "Consecutive Absences", "Attendance %", "Not Recorded"], rows: payload.frequent.map((row) => [row.admissionNo, row.studentName, row.className, row.absentDays, row.presentDays, row.consecutiveAbsentDays, row.attendancePercentage, row.notRecordedDays]) };
+    return { title: "Frequent Absenteeism", headers: ["Admission No.", "Student", "Class", "Absent Days", "Present Days", "Consecutive Absences", "Attendance %", "Not Recorded"], rows: exportRows(payload.frequent).map((row) => [row.admissionNo, row.studentName, row.className, row.absentDays, row.presentDays, row.consecutiveAbsentDays, row.attendancePercentage, row.notRecordedDays]) };
   }
   if (report === "consecutive") {
     const payload = absenteeismPayload(ctx, true);
-    return { title: "Consecutive Absences", headers: ["Admission No.", "Student", "Class", "Consecutive Absences", "Last Present", "Absent Days", "Attendance %", "Not Recorded"], rows: payload.consecutive.map((row) => [row.admissionNo, row.studentName, row.className, row.consecutiveAbsentDays, row.lastPresent, row.absentDays, row.attendancePercentage, row.notRecordedDays]) };
+    return { title: "Consecutive Absences", headers: ["Admission No.", "Student", "Class", "Consecutive Absences", "Last Present", "Absent Days", "Attendance %", "Not Recorded"], rows: exportRows(payload.consecutive).map((row) => [row.admissionNo, row.studentName, row.className, row.consecutiveAbsentDays, row.lastPresent, row.absentDays, row.attendancePercentage, row.notRecordedDays]) };
   }
   if (report === "non-attendance") {
     const payload = nonAttendancePayload(ctx, true);
-    return { title: "Term Non-Attendance", headers: ["Admission No.", "Student", "Class", "Present", "Absent", "Not Recorded", "Student Status", "Review Indicator"], rows: payload.students.map((row) => [row.admissionNo, row.studentName, row.className, row.presentDays, row.absentDays, row.notRecordedDays, row.currentStatus, row.reviewIndicator || ""]) };
+    return { title: "Term Non-Attendance", headers: ["Admission No.", "Student", "Class", "Present", "Absent", "Not Recorded", "Student Status", "Review Indicator"], rows: exportRows(payload.students).map((row) => [row.admissionNo, row.studentName, row.className, row.presentDays, row.absentDays, row.notRecordedDays, row.currentStatus, row.reviewIndicator || ""]) };
   }
   if (report === "stopped-attending") {
     const payload = stoppedAttendingPayload(ctx, true);
-    return { title: "Students Who Stopped Attending", headers: ["Admission No.", "Student", "Class", "Last Present", "Absent Days Since", "Student Status", "Not Recorded"], rows: payload.students.map((row) => [row.admissionNo, row.studentName, row.className, row.lastPresent, row.absentDaysSinceLastPresent, row.currentStatus, row.notRecordedDays]) };
+    return { title: "Students Who Stopped Attending", headers: ["Admission No.", "Student", "Class", "Last Present", "Absent Days Since", "Student Status", "Not Recorded"], rows: exportRows(payload.students).map((row) => [row.admissionNo, row.studentName, row.className, row.lastPresent, row.absentDaysSinceLastPresent, row.currentStatus, row.notRecordedDays]) };
   }
   if (report === "classes") {
     const rows = classSummaryPayload(ctx);
     return { title: "Class Attendance Summary", headers: ["Class", "Students", "Present Days", "Absent Days", "Not Recorded", "Attendance Rate %", "Incomplete Students"], rows: rows.map((row) => [row.className, row.students, row.presentDays, row.absentDays, row.notRecordedDays, row.attendanceRate, row.incompleteStudents]) };
   }
   const payload = overviewPayload(ctx, true);
-  return { title: "Attendance Overview", headers: ["Admission No.", "Student", "Class", "Present", "Absent", "Not Recorded", "Attendance %", "Completeness %", "Student Status"], rows: payload.students.map((row) => [row.admissionNo, row.studentName, row.className, row.presentDays, row.absentDays, row.notRecordedDays, row.attendancePercentage, row.dataCompletenessPercentage, row.currentStatus]) };
+  return { title: "Attendance Overview", headers: ["Admission No.", "Student", "Class", "Present", "Absent", "Not Recorded", "Attendance %", "Completeness %", "Student Status"], rows: exportRows(payload.students).map((row) => [row.admissionNo, row.studentName, row.className, row.presentDays, row.absentDays, row.notRecordedDays, row.attendancePercentage, row.dataCompletenessPercentage, row.currentStatus]) };
 }
 
 export function registerAttendanceReportingRoutes(app: Express) {

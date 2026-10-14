@@ -72,8 +72,8 @@ expect('server/access-control-routes.ts', 'retry_pending', 'Failed identity sync
 // Scale / reconciliation / cleanup.
 expect('server/access-control-operations.ts', 'bulk-enroll', 'Bulk enrollment endpoint exists');
 expect('server/access-control-operations.ts', 'sync-jobs/reconcile', 'Manual reconciliation endpoint exists');
-expect('server/access-control-operations.ts', 'get_personnel_id_list', 'Reconciliation first requests actual terminal inventory');
-expect('server/access-control-operations.ts', /unknownTerminalIdentities/, 'Unknown terminal identities are surfaced as drift');
+expect('server/access-control-operations.ts', 'inventoryCapability: "bulk_inventory_unsupported"', 'F550 reconciliation explicitly handles unsupported bulk inventory');
+expect('server/access-control-operations.ts', 'unknown terminal-only identities are not verified', 'Unsupported terminal-only inventory is explicitly disclosed');
 expect('server/access-control-operations.ts', /enrollmentRemovedAt/, 'Manual enrollment removal remains authoritative during production sync');
 expect('server/access-control-operations.ts', /lastSyncedPhotoPath/, 'Photo changes trigger enrollment reconciliation');
 expect('server/access-control-operations.ts', /nextRetryAt/, 'Offline/failed enrollment retries are scheduled');

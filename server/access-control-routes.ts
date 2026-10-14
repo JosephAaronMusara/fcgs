@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from "crypto";
 import { and, asc, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
+import { configureExitScheduleForTerminal, queueIdentitySync } from "./access-control-operations";
 import { requirePermission } from "./auth";
 import {
   accessGates,
@@ -12,6 +13,8 @@ import {
   gateCommands,
   gateDevices,
   gateIdentitySync,
+  gateSchoolSettings,
+  accessEvents,
   gateLogs,
   schools,
   users,
@@ -34,7 +37,7 @@ type PortalScope = {
 
 const ONLINE_WINDOW_MS = 45_000;
 const DEVICE_ONLINE_WINDOW_MS = 90_000;
-const OPEN_COMMAND_TTL_MS = 20_000;
+const OPEN_COMMAND_TTL_MS = 15_000;
 const TEST_COMMAND_TTL_MS = 60_000;
 const STANDARD_GATE_TEMPLATE = "standard_4_lane";
 
@@ -94,6 +97,9 @@ const heartbeatSchema = z.object({
   serviceStartedAt: z.string().datetime().optional().nullable(),
   configRevision: z.coerce.number().int().nonnegative().optional().nullable(),
   error: z.string().trim().max(1000).optional().nullable(),
+  activeCallbackUrl: z.string().trim().max(256).optional().nullable(),
+  callbackError: z.string().trim().max(1000).optional().nullable(),
+  availableCallbackHosts: z.array(z.object({ address: z.string().trim().max(60), interfaceName: z.string().trim().max(120) })).max(30).optional(),
   devices: z.array(z.object({
     deviceKey: z.string().uuid(),
     status: z.enum(["online", "offline", "unknown"]),
@@ -117,6 +123,7 @@ const completeCommandSchema = z.object({
   success: z.boolean(),
   result: z.record(z.unknown()).optional().nullable(),
   error: z.string().trim().max(2000).optional().nullable(),
+  claimToken: z.string().uuid().optional(),
 });
 
 function hashBridgeToken(token: string) {
@@ -341,34 +348,7 @@ export function registerAccessControlRoutes(app: Express) {
   app.get("/api/access-control/bootstrap", requirePermission("access_control.view"), async (req, res) => {
     try {
       const scope = await portalScope(req);
-      const staleProcessingBefore = new Date(Date.now() - 2 * 60_000);
-      const staleInventoryBefore = new Date(Date.now() - 20 * 60_000);
-      await db.update(gateCommands).set({
-        status: "failed",
-        errorMessage: "Gate Bridge did not complete the command before the processing timeout.",
-        completedAt: new Date(),
-      }).where(and(
-        eq(gateCommands.schoolId, scope.schoolId),
-        eq(gateCommands.status, "processing"),
-        sql`${gateCommands.commandType} <> 'get_personnel_id_list'`,
-        lt(gateCommands.claimedAt, staleProcessingBefore),
-      ));
-      await db.update(gateCommands).set({
-        status: "failed",
-        errorMessage: "Gate Bridge did not complete the terminal enrollment inventory before the extended processing timeout.",
-        completedAt: new Date(),
-      }).where(and(
-        eq(gateCommands.schoolId, scope.schoolId),
-        eq(gateCommands.status, "processing"),
-        eq(gateCommands.commandType, "get_personnel_id_list"),
-        lt(gateCommands.claimedAt, staleInventoryBefore),
-      ));
-      await db.update(gateCommands).set({ status: "expired", completedAt: new Date() }).where(and(
-        eq(gateCommands.schoolId, scope.schoolId),
-        eq(gateCommands.status, "pending"),
-        lt(gateCommands.expiresAt, new Date()),
-      ));
-
+      // Status retrieval MUST NOT mutate live command execution state.
       const [bridges, gates, devices, commands] = await Promise.all([
         db.select().from(gateBridges).where(eq(gateBridges.schoolId, scope.schoolId)).orderBy(asc(gateBridges.name)),
         db.select().from(accessGates).where(eq(accessGates.schoolId, scope.schoolId)).orderBy(asc(accessGates.name)),
@@ -479,6 +459,73 @@ export function registerAccessControlRoutes(app: Express) {
     }
   });
 
+  const callbackConfigurationSchema = z.object({
+    callbackMode: z.enum(["automatic", "manual"]),
+    callbackHost: z.string().trim().max(120).nullable().optional(),
+    // The Windows service listener is installed on 9191; advertising a different
+    // port without reconfiguring the local listener would silently break attendance.
+    callbackPort: z.literal(9191).default(9191),
+  }).superRefine((data, ctx) => {
+    if (data.callbackMode === "manual" && !/^(?:(?:\d{1,3}\.){3}\d{1,3})$/.test(data.callbackHost || "")) {
+      ctx.addIssue({ code: "custom", message: "Enter a valid IPv4 callback address", path: ["callbackHost"] });
+    }
+    if (data.callbackMode === "manual" && (data.callbackHost || "").split(".").some((part) => Number(part) > 255)) {
+      ctx.addIssue({ code: "custom", message: "Invalid IPv4 address", path: ["callbackHost"] });
+    }
+  });
+
+  app.patch("/api/access-control/bridges/:id/callback", requirePermission("access_control.manage_devices"), async (req, res) => {
+    try {
+      const scope = await portalScope(req);
+      const bridge = await bridgeInScope(scope, Number(req.params.id));
+      if (!bridge) return res.status(404).json({ message: "Gate Bridge not found" });
+      if (bridge.softwareVersion !== "fcgs-gate-bridge/1.1.0") return res.status(409).json({ message: "Update the Gate Bridge to v1.1.0 before configuring its callback address" });
+      const input = callbackConfigurationSchema.parse(req.body);
+      const [updated] = await db.update(gateBridges).set({
+        callbackMode: input.callbackMode,
+        callbackHost: input.callbackMode === "manual" ? input.callbackHost : null,
+        callbackPort: input.callbackPort,
+        callbackError: null,
+        configurationRevision: bridge.configurationRevision + 1,
+        updatedAt: new Date(),
+      }).where(eq(gateBridges.id, bridge.id)).returning();
+      await logPortalAction(req, scope, "gate_bridge.callback_update", `Updated callback configuration for ${bridge.name}`, "gate_bridge", bridge.id, bridge.name, { mode: input.callbackMode, port: input.callbackPort });
+      res.json({ bridge: { ...updated, bridgeKeyHash: undefined } });
+    } catch (error) { fail(res, error); }
+  });
+
+  app.get("/api/access-control/settings", requirePermission("access_control.view"), async (req, res) => {
+    try {
+      const scope = await portalScope(req);
+      const [settings] = await db.select().from(gateSchoolSettings).where(eq(gateSchoolSettings.schoolId, scope.schoolId)).limit(1);
+      res.json({ reconciliationEnabled: settings?.reconciliationEnabled ?? true, reconciliationTime: settings?.reconciliationTime ?? "23:00", timezone: "Africa/Harare" });
+    } catch (error) { fail(res, error); }
+  });
+
+  app.put("/api/access-control/settings", requirePermission("access_control.manage_devices"), async (req, res) => {
+    try {
+      const scope = await portalScope(req);
+      const input = z.object({ reconciliationEnabled: z.boolean(), reconciliationTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/) }).parse(req.body);
+      const [settings] = await db.insert(gateSchoolSettings).values({ schoolId: scope.schoolId, organizationId: scope.organizationId, ...input, updatedByUserId: scope.userId, updatedAt: new Date() }).onConflictDoUpdate({ target: gateSchoolSettings.schoolId, set: { ...input, updatedByUserId: scope.userId, updatedAt: new Date() } }).returning();
+      await logPortalAction(req, scope, "gate.reconciliation_schedule_update", "Updated nightly reconciliation schedule", "school", scope.schoolId, undefined, { ...input });
+      res.json(settings);
+    } catch (error) { fail(res, error); }
+  });
+
+  app.get("/api/access-control/health", requirePermission("access_control.view"), async (req, res) => {
+    try {
+      const scope = await portalScope(req);
+      const [identityCounts, commandCounts, eventCounts] = await Promise.all([
+        db.execute(sql`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE is_active AND photo_path IS NOT NULL AND enrollment_removed_at IS NULL)::int AS eligible, COUNT(*) FILTER (WHERE is_active AND photo_path IS NULL)::int AS missing_photo FROM access_identities WHERE school_id=${scope.schoolId}`),
+        db.execute(sql`SELECT device_id, status, COUNT(*)::int AS count, MIN(requested_at) AS oldest FROM gate_commands WHERE school_id=${scope.schoolId} AND status IN ('pending','processing','failed','uncertain') GROUP BY device_id,status`),
+        db.execute(sql`SELECT device_id, MAX(created_at) AS latest, COUNT(*)::int AS total FROM access_events WHERE school_id=${scope.schoolId} GROUP BY device_id`),
+      ]);
+      const identitySync = await db.execute(sql`SELECT s.device_id, s.sync_status, COUNT(*)::int AS count FROM gate_identity_sync s JOIN access_identities i ON i.id=s.identity_id WHERE i.school_id=${scope.schoolId} GROUP BY s.device_id,s.sync_status`);
+      const verified = await db.execute(sql`SELECT s.device_id, s.verification_status, COUNT(*)::int AS count FROM gate_identity_sync s JOIN access_identities i ON i.id=s.identity_id WHERE i.school_id=${scope.schoolId} GROUP BY s.device_id,s.verification_status`);
+      res.json({ identities: identityCounts.rows[0] || { total: 0, eligible: 0, missing_photo: 0 }, commandCounts: commandCounts.rows, identitySync: identitySync.rows, verificationCounts: verified.rows, eventCounts: eventCounts.rows, verification: "Only known Portal identities can be checked; firmware does not support full inventory enumeration." });
+    } catch (error) { fail(res, error); }
+  });
+
   app.post("/api/access-control/bridges/:id/rotate-key", requirePermission("access_control.manage_devices"), async (req, res) => {
     try {
       const scope = await portalScope(req);
@@ -577,6 +624,7 @@ export function registerAccessControlRoutes(app: Express) {
         createdByUserId: scope.userId,
       }).returning();
       await bumpBridgeRevision(bridge.id);
+      if (device.direction === "exit" && device.isActive) await configureExitScheduleForTerminal(device.id);
       await logPortalAction(req, scope, "gate_device.create", `Registered ${gate.name} · ${device.name}`, "gate_device", device.id, device.name, { bridgeId: bridge.id, gateId: gate.id, lanePosition: input.lanePosition });
       await logGateEvent({ organizationId: scope.organizationId, schoolId: scope.schoolId, bridgeId: bridge.id, gateId: gate.id, deviceId: device.id, sourceType: "portal", eventType: "terminal.registered", message: `${gate.name} · ${device.name} was registered at ${device.localAddress}:${device.localPort}.` });
       res.status(201).json({ device });
@@ -613,6 +661,7 @@ export function registerAccessControlRoutes(app: Express) {
       }).where(eq(gateDevices.id, existing.id)).returning();
       await bumpBridgeRevision(gate.bridgeId);
       if (oldBridgeId !== gate.bridgeId) await bumpBridgeRevision(oldBridgeId);
+      if (device.direction === "exit" && device.isActive) await configureExitScheduleForTerminal(device.id);
       await logPortalAction(req, scope, "gate_device.update", `Updated ${gate.name} · ${device.name}`, "gate_device", device.id, device.name, { gateId: gate.id, localAddress: input.localAddress, localPort: input.localPort });
       await logGateEvent({ organizationId: scope.organizationId, schoolId: scope.schoolId, bridgeId: gate.bridgeId, gateId: gate.id, deviceId: device.id, sourceType: "portal", eventType: "terminal.configuration_changed", message: `${gate.name} · ${device.name} configuration changed to ${device.localAddress}:${device.localPort}.`, details: { previousAddress: existing.localAddress, previousPort: existing.localPort, active: device.isActive } });
       res.json({ device });
@@ -664,6 +713,22 @@ export function registerAccessControlRoutes(app: Express) {
     }
   });
 
+  app.get("/api/access-control/commands/:id/status", requirePermission("access_control.control_gates"), async (req, res) => {
+    try {
+      const scope = await portalScope(req);
+      const commandId = Number(req.params.id);
+      // Only pending open commands are expired during this read. This cannot
+      // preempt an executing command, and the Bridge independently enforces TTL.
+      await db.update(gateCommands).set({ status: "expired", completedAt: new Date(), errorMessage: "Manual opening deadline elapsed before execution" }).where(and(
+        eq(gateCommands.id, commandId), eq(gateCommands.schoolId, scope.schoolId), eq(gateCommands.commandType, "open_gate"),
+        eq(gateCommands.status, "pending"), lt(gateCommands.expiresAt, new Date()),
+      ));
+      const [command] = await db.select({ id: gateCommands.id, status: gateCommands.status, errorMessage: gateCommands.errorMessage, completedAt: gateCommands.completedAt, claimedAt: gateCommands.claimedAt }).from(gateCommands).where(and(eq(gateCommands.id, commandId), eq(gateCommands.schoolId, scope.schoolId), eq(gateCommands.commandType, "open_gate"))).limit(1);
+      if (!command) return res.status(404).json({ message: "Manual gate-opening request not found" });
+      res.json(command);
+    } catch (error) { fail(res, error); }
+  });
+
   app.post("/api/access-control/devices/:id/open", requirePermission("access_control.control_gates"), async (req, res) => {
     try {
       const scope = await portalScope(req);
@@ -678,18 +743,15 @@ export function registerAccessControlRoutes(app: Express) {
       if (bridge.lastSyncedRevision !== bridge.configurationRevision) {
         return res.status(409).json({ message: "Gate Bridge configuration is still synchronizing. Wait a few seconds before sending a physical open command." });
       }
-      const [existingCommand] = await db.select({ id: gateCommands.id }).from(gateCommands).where(and(
-        eq(gateCommands.deviceId, device.id),
-        inArray(gateCommands.status, ["pending", "processing"]),
-        gt(gateCommands.expiresAt, new Date()),
-      )).limit(1);
-      if (existingCommand) return res.status(409).json({ message: "A gate command is already in progress for this terminal." });
+      // Background work does not block an urgent manual opening request.
+      // The atomic claim dispatcher waits for the terminal to become idle.
       const [command] = await db.insert(gateCommands).values({
         organizationId: scope.organizationId,
         schoolId: scope.schoolId,
         bridgeId: device.bridgeId,
         deviceId: device.id,
         commandType: "open_gate",
+        priority: 0,
         status: "pending",
         requestedByUserId: scope.userId,
         requestReason: input.reason,
@@ -742,7 +804,7 @@ export function registerAccessControlRoutes(app: Express) {
       const gateMap = new Map(gates.map((gate) => [gate.id, gate]));
       res.json({
         revision: bridge.configurationRevision,
-        bridge: { id: bridge.id, name: bridge.name, schoolId: bridge.schoolId },
+        bridge: { id: bridge.id, name: bridge.name, schoolId: bridge.schoolId, callbackMode: bridge.callbackMode, callbackHost: bridge.callbackHost, callbackPort: bridge.callbackPort },
         devices: devices.filter((device) => !!device.localAddress && (!device.gateId || gateMap.has(device.gateId))).map((device) => ({
           deviceKey: device.deviceKey,
           name: device.name,
@@ -771,7 +833,7 @@ export function registerAccessControlRoutes(app: Express) {
       const now = new Date();
       const bridgeWasOnline = isRecent(bridge.lastHeartbeatAt);
       const reportedRevision = input.configRevision == null ? bridge.lastSyncedRevision : Math.min(input.configRevision, bridge.configurationRevision);
-      const revisionSynchronized = reportedRevision === bridge.configurationRevision;
+      const revisionSynchronized = reportedRevision === bridge.configurationRevision && !input.callbackError;
       await db.update(gateBridges).set({
         lastHeartbeatAt: now,
         lastIpAddress: clientIp(req),
@@ -780,7 +842,10 @@ export function registerAccessControlRoutes(app: Express) {
         machineName: input.machineName || bridge.machineName,
         lastServiceStartedAt: input.serviceStartedAt ? new Date(input.serviceStartedAt) : bridge.lastServiceStartedAt,
         lastError: input.error || null,
-        lastSyncedRevision: reportedRevision,
+        activeCallbackUrl: input.activeCallbackUrl || bridge.activeCallbackUrl,
+        callbackError: input.callbackError || null,
+        availableCallbackHosts: input.availableCallbackHosts || [],
+        lastSyncedRevision: revisionSynchronized ? reportedRevision : bridge.lastSyncedRevision,
         lastConfigSyncAt: revisionSynchronized ? now : bridge.lastConfigSyncAt,
         updatedAt: now,
       }).where(eq(gateBridges.id, bridge.id));
@@ -885,43 +950,54 @@ export function registerAccessControlRoutes(app: Express) {
         return res.json({ commands: [], configurationPending: true, configurationRevision: bridge.configurationRevision, serverTime: now.toISOString() });
       }
 
-      const candidates = await db.select().from(gateCommands).where(and(
-        eq(gateCommands.bridgeId, bridge.id),
-        eq(gateCommands.status, "pending"),
-        gt(gateCommands.expiresAt, now),
-      )).orderBy(asc(gateCommands.requestedAt)).limit(10);
-
-      const deviceIds = Array.from(new Set(candidates.map((row) => row.deviceId)));
-      const devices = deviceIds.length
-        ? await db.select({ id: gateDevices.id, deviceKey: gateDevices.deviceKey, name: gateDevices.name, gateId: gateDevices.gateId, lanePosition: gateDevices.lanePosition }).from(gateDevices).where(inArray(gateDevices.id, deviceIds))
-        : [];
-      const deviceMap = new Map(devices.map((row) => [row.id, row]));
+      // Atomic, high-priority first, one in-flight command per terminal.
+      // SKIP LOCKED makes claims safe when Bridge requests overlap.
       const claimed: Array<Record<string, unknown>> = [];
-
-      for (const candidate of candidates) {
-        const [row] = await db.update(gateCommands).set({ status: "processing", claimedAt: now }).where(and(
-          eq(gateCommands.id, candidate.id),
-          eq(gateCommands.status, "pending"),
-        )).returning();
-        if (!row) continue;
-        const device = deviceMap.get(row.deviceId);
+      for (let i = 0; i < 8; i++) {
+        // Keep the deployed 1.0.0 Bridge compatible while the new runtime is
+        // installed. Legacy commands have no claim token and cannot renew leases.
+        const claimToken = bridge.softwareVersion === "fcgs-gate-bridge/1.1.0" ? randomUUID() : null;
+        const result = await db.execute(sql`
+          WITH next AS (
+            SELECT c.id FROM gate_commands c
+            WHERE c.bridge_id = ${bridge.id} AND c.status = 'pending' AND c.expires_at > NOW()
+              AND NOT EXISTS (SELECT 1 FROM gate_commands active WHERE active.device_id=c.device_id AND active.status='processing')
+              AND NOT EXISTS (
+                SELECT 1 FROM gate_commands first
+                WHERE first.device_id=c.device_id AND first.status='pending' AND first.expires_at > NOW()
+                  AND (first.priority < c.priority OR (first.priority = c.priority AND first.id < c.id))
+              )
+            ORDER BY c.priority ASC, c.requested_at ASC, c.id ASC
+            LIMIT 1 FOR UPDATE OF c SKIP LOCKED
+          )
+          UPDATE gate_commands c SET status='processing', claimed_at=NOW(), claim_token=${claimToken}, lease_expires_at=NOW()+INTERVAL '90 seconds'
+          FROM next WHERE c.id=next.id
+          RETURNING c.id,c.device_id,c.command_type,c.payload,c.expires_at,c.claim_token
+        `);
+        const row = result.rows[0] as any;
+        if (!row) break;
+        const [device] = await db.select({ deviceKey: gateDevices.deviceKey, name: gateDevices.name, gateId: gateDevices.gateId, lanePosition: gateDevices.lanePosition }).from(gateDevices).where(eq(gateDevices.id, row.device_id)).limit(1);
         if (!device) {
-          await db.update(gateCommands).set({ status: "failed", completedAt: now, errorMessage: "Gate device no longer exists" }).where(eq(gateCommands.id, row.id));
+          await db.update(gateCommands).set({ status: "failed", completedAt: new Date(), errorMessage: "Gate device no longer exists" }).where(eq(gateCommands.id, row.id));
           continue;
         }
-        claimed.push({
-          id: row.id,
-          commandType: row.commandType,
-          payload: row.payload,
-          expiresAt: row.expiresAt,
-          device: { deviceKey: device.deviceKey, name: device.name, gateId: device.gateId, lanePosition: device.lanePosition },
-        });
+        claimed.push({ id: row.id, commandType: row.command_type, payload: row.payload, expiresAt: row.expires_at, claimToken: row.claim_token, device: { deviceKey: device.deviceKey, name: device.name, gateId: device.gateId, lanePosition: device.lanePosition } });
       }
 
       res.json({ commands: claimed, serverTime: now.toISOString() });
     } catch (error) {
       fail(res, error);
     }
+  });
+
+  app.post("/api/gate-bridge/commands/:id/lease", async (req, res) => {
+    const bridge = await requireBridge(req, res); if (!bridge) return;
+    try {
+      const token = z.string().uuid().parse(req.body?.claimToken);
+      const result = await db.execute(sql`UPDATE gate_commands SET lease_expires_at=NOW()+INTERVAL '90 seconds' WHERE id=${Number(req.params.id)} AND bridge_id=${bridge.id} AND status='processing' AND claim_token=${token} RETURNING id`);
+      if (!result.rows.length) return res.status(409).json({ message: "Command no longer owned by this Bridge execution" });
+      res.json({ ok: true });
+    } catch (error) { fail(res, error); }
   });
 
   app.post("/api/gate-bridge/commands/:id/complete", async (req, res) => {
@@ -932,7 +1008,11 @@ export function registerAccessControlRoutes(app: Express) {
       const input = completeCommandSchema.parse(req.body);
       const [command] = await db.select().from(gateCommands).where(and(eq(gateCommands.id, commandId), eq(gateCommands.bridgeId, bridge.id))).limit(1);
       if (!command) return res.status(404).json({ message: "Gate command not found" });
-      if (command.status !== "processing") return res.status(409).json({ message: `Gate command is already ${command.status}` });
+      if (command.status === "succeeded" || command.status === "failed") {
+        if (command.claimToken && command.claimToken !== input.claimToken) return res.status(409).json({ message: "Command owned by another execution" });
+        return res.json({ ok: true, alreadyCompleted: true });
+      }
+      if (command.status !== "processing" || (command.claimToken && command.claimToken !== input.claimToken)) return res.status(409).json({ message: `Gate command is ${command.status} or owned by another execution` });
 
       const [device] = await db.select().from(gateDevices).where(eq(gateDevices.id, command.deviceId)).limit(1);
       const now = new Date();
@@ -941,6 +1021,7 @@ export function registerAccessControlRoutes(app: Express) {
         result: input.result || null,
         errorMessage: input.success ? null : input.error || "Gate Bridge reported a command failure",
         completedAt: now,
+        leaseExpiresAt: null,
       }).where(eq(gateCommands.id, command.id));
 
       if (command.commandType === "get_version") {
@@ -973,6 +1054,7 @@ export function registerAccessControlRoutes(app: Express) {
             await db.update(gateIdentitySync).set({
               syncStatus: input.success ? (command.commandType === "delete_identity" ? "deleted" : "synced") : "retry_pending",
               lastSyncedAt: input.success ? now : sync.lastSyncedAt,
+              confirmedFingerprint: input.success ? String((command.payload as any)?.stateFingerprint || "") || sync.confirmedFingerprint : sync.confirmedFingerprint,
               lastAttemptAt: now,
               retryCount,
               nextRetryAt: input.success ? null : new Date(now.getTime() + identityRetryDelayMs(retryCount)),
@@ -984,6 +1066,30 @@ export function registerAccessControlRoutes(app: Express) {
         }
         if (input.success) {
           await db.update(gateDevices).set({ lastSeenAt: now, lastConnectionStatus: "online", lastError: null, updatedAt: now }).where(eq(gateDevices.id, command.deviceId));
+        }
+      } else if (command.commandType === "verify_identity") {
+        const identityId = Number((command.payload as any)?.identityId || 0);
+        const [sync] = identityId ? await db.select().from(gateIdentitySync).where(and(eq(gateIdentitySync.identityId, identityId), eq(gateIdentitySync.deviceId, command.deviceId))).limit(1) : [];
+        if (sync) {
+          const result = (input.result || {}) as Record<string, unknown>;
+          const actualGroup = result.TimeGroupId;
+          const expectedGroup = sync.desiredTimeGroup;
+          const actualType = String(result.usertype || "");
+          const mismatch = input.success && (result.found === false ||
+            (actualGroup !== null && actualGroup !== undefined && Number(actualGroup) !== expectedGroup) ||
+            (actualType && actualType !== sync.desiredListType));
+          const status = !input.success ? "error" : mismatch ? "mismatch" :
+            actualGroup === null || actualGroup === undefined ? "presence_only" : "verified";
+          await db.update(gateIdentitySync).set({ verificationStatus: status,
+            lastVerifiedAt: input.success ? now : sync.lastVerifiedAt,
+            verificationDetails: { found: result.found ?? null, actualTimeGroup: actualGroup ?? null, expectedTimeGroup: expectedGroup, usertype: actualType || null, error: input.error || null },
+            updatedAt: now,
+          }).where(eq(gateIdentitySync.id, sync.id));
+          if (mismatch) {
+            // A supported read proved the terminal differs. Reconcile just this identity.
+            await db.update(gateIdentitySync).set({ syncStatus: "pending", confirmedFingerprint: null, updatedAt: now }).where(eq(gateIdentitySync.id, sync.id));
+            await queueIdentitySync(identityId, null, "Terminal verification mismatch", [command.deviceId]);
+          }
         }
       } else if (command.commandType === "set_time_groups") {
         if (input.success) await db.update(gateDevices).set({ lastSeenAt: now, lastConnectionStatus: "online", lastError: null, updatedAt: now }).where(eq(gateDevices.id, command.deviceId));
