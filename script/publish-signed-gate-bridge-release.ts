@@ -1,7 +1,7 @@
 /** Operator-only release publisher. No AWS signing key or signing permission on Portal. */
 import 'dotenv/config';
-import { createHash, createPublicKey, verify } from 'node:crypto';
-import { readFile, mkdir, cp, rename, rm, stat, lstat } from 'node:fs/promises';
+import { createHash, createPublicKey, randomUUID, verify } from 'node:crypto';
+import { readFile, readdir, mkdir, cp, rename, rm, lstat } from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
 const root=path.resolve(process.cwd(),'gate-bridge-releases');
@@ -14,6 +14,28 @@ const pinnedSha=process.env.FCGS_RELEASE_PUBLISH_PUBLIC_KEY_SHA256;
 const publicPath=process.env.FCGS_RELEASE_PUBLISH_PUBLIC_KEY_PEM;
 const sha=(v:Buffer)=>createHash('sha256').update(v).digest('hex');
 const safeId=(v:string)=>/^[a-zA-Z0-9_-]{5,100}$/.test(v||'');
+/** Verify a complete staged or interrupted release against bytes authenticated by the signed manifest.
+ * Reject symlinks, unexpected entries and altered assets; never auto-delete an unrecognised directory.
+ */
+async function assertExactReleaseTree(dir:string, manifestBytes:Buffer, signature:Buffer, signerBytes:Buffer, assets:{name:string,size:number,sha256:string}[]){
+ const directory=await lstat(dir);
+ if(!directory.isDirectory()||directory.isSymbolicLink())throw new Error('Release destination is not a regular directory');
+ const expectedTop=['assets','manifest.json','manifest.sig','signer-key-id.txt'].sort();
+ const top=(await readdir(dir)).sort();
+ if(JSON.stringify(top)!==JSON.stringify(expectedTop))throw new Error('Unexpected files in the release destination; recovery refused');
+ for(const [name,original] of [['manifest.json',manifestBytes],['manifest.sig',signature],['signer-key-id.txt',signerBytes]] as [string,Buffer][]){
+  const file=path.join(dir,name),info=await lstat(file);
+  if(!info.isFile()||info.isSymbolicLink()||!(await readFile(file)).equals(original))throw new Error(`Release metadata differs from approved package: ${name}`);
+ }
+ const assetDir=path.join(dir,'assets'),assetDirInfo=await lstat(assetDir);
+ if(!assetDirInfo.isDirectory()||assetDirInfo.isSymbolicLink())throw new Error('Release asset directory must not be a symbolic link');
+ const expectedAssets=assets.map(a=>a.name).sort();
+ if(JSON.stringify((await readdir(assetDir)).sort())!==JSON.stringify(expectedAssets))throw new Error('Unexpected files in the release assets; recovery refused');
+ for(const asset of assets){
+  const file=path.join(assetDir,asset.name),info=await lstat(file);
+  if(!info.isFile()||info.isSymbolicLink()||info.size!==asset.size||sha(await readFile(file))!==asset.sha256)throw new Error(`Stored release asset differs from approved manifest: ${asset.name}`);
+ }
+}
 async function main(){
  if(!safeId(id))throw new Error('Require immutable, safe release ID');
  if(!['publish','approve','promote'].includes(mode))throw new Error('Usage: tsx script/publish-signed-gate-bridge-release.ts publish RELEASE_ID SIGNED_PACKAGE_DIR | approve RELEASE_ID APPROVER_CHANGE_REFERENCE');
@@ -26,9 +48,15 @@ async function main(){
    const pub=createPublicKey(await readFile(publicPath));
    const der=pub.export({type:'spki',format:'der'}) as Buffer;
    if(sha(der)!==pinnedSha.toLowerCase())throw new Error('Public verification key does not match independently pinned fingerprint');
+   const metadataNames=['manifest.json','manifest.sig','signer-key-id.txt'];
+   for(const name of metadataNames){
+    const meta=await lstat(path.resolve(source,name));
+    if(!meta.isFile()||meta.isSymbolicLink())throw new Error(`Signed release metadata must be regular files: ${name}`);
+   }
    const manifestBytes=await readFile(path.resolve(source,'manifest.json'));
    const signature=await readFile(path.resolve(source,'manifest.sig'));
-   const signer=(await readFile(path.resolve(source,'signer-key-id.txt'),'utf8')).trim();
+   const signerBytes=await readFile(path.resolve(source,'signer-key-id.txt'));
+   const signer=signerBytes.toString('utf8').trim();
    if(signer!==expectedArn)throw new Error('Signer key ARN differs from independently approved signing authority');
    if(signature.length!==64||!verify(null,manifestBytes,pub,signature))throw new Error('Invalid AWS KMS Ed25519 signature');
    const manifest=JSON.parse(manifestBytes.toString('utf8'));
@@ -44,18 +72,49 @@ async function main(){
    }
    await mkdir(root,{recursive:true});
    const target=path.join(root,id);
-   try{await stat(target);throw new Error('Release directory already exists; immutable publication refused');}catch(e:any){if(e?.code!=='ENOENT')throw e;}
-   const temp=path.join(root,`.pending_${process.pid}_${id}`);
-   await mkdir(temp,{recursive:false});
+   // PostgreSQL controls the publication lock and commit. The immutable filesystem
+   // destination is revalidated and recoverable after an interrupted rename/commit.
+   const temp=path.join(root,`.pending_${process.pid}_${randomUUID()}_${id}`);
+   let transactionOpen=false;
+   let recovery=false;
    try{
-    for(const name of ['manifest.json','manifest.sig','signer-key-id.txt'])await cp(path.resolve(source,name),path.join(temp,name),{errorOnExist:true,force:false});
-    await mkdir(path.join(temp,'assets'));
-    for(const asset of manifest.assets)await cp(path.resolve(source,'assets',asset.name),path.join(temp,'assets',asset.name),{errorOnExist:true,force:false});
-    await rename(temp,target);
+    await client.query('BEGIN');transactionOpen=true;
+    await client.query('SELECT pg_advisory_xact_lock(1180051270, hashtext($1::text))',[id]);
+    const registered=await client.query('SELECT release_id FROM gate_bridge_signed_releases WHERE release_id=$1',[id]);
+    if(registered.rows.length)throw new Error('This signed release is already registered; immutable publication refused');
+    let existing;
+    try{existing=await lstat(target);}catch(e:any){if(e?.code!=='ENOENT')throw e;}
+    if(existing){
+     // A previous process may have been interrupted AFTER installing the complete
+     // directory, but BEFORE committing its database row. Recover only if every
+     // byte and filename matches this independently verified signed release.
+     await assertExactReleaseTree(target,manifestBytes,signature,signerBytes,manifest.assets);
+     recovery=true;
+    }else{
+     await mkdir(temp,{recursive:false});
+     for(const name of metadataNames)await cp(path.resolve(source,name),path.join(temp,name),{errorOnExist:true,force:false});
+     await mkdir(path.join(temp,'assets'));
+     for(const asset of manifest.assets)await cp(path.resolve(source,'assets',asset.name),path.join(temp,'assets',asset.name),{errorOnExist:true,force:false});
+     // Re-verify copied bytes to prevent source changes during staging.
+     await assertExactReleaseTree(temp,manifestBytes,signature,signerBytes,manifest.assets);
+    }
     const result=await client.query(`INSERT INTO gate_bridge_signed_releases (release_id,version,protocol_version,manifest_sha256,signed_by_key_id,approved) VALUES ($1,$2,$3,$4,$5,false) ON CONFLICT DO NOTHING RETURNING release_id`,[id,manifest.version,manifest.protocolVersion,sha(manifestBytes),signer]);
-    if(!result.rows.length)throw new Error('This signed release is already registered; immutable publication refused');
-    console.log(`Published signed release ${id} (${manifest.version}) as NOT APPROVED. No Windows computer will install until explicitly approved.`);
-   }catch(e){await rm(temp,{recursive:true,force:true});throw e;}
+    if(!result.rows.length)throw new Error('Conflicting release ID or version; immutable publication refused');
+    // The DB row is not visible until COMMIT, performed AFTER the complete
+    // verified release tree exists at its final immutable path.
+    if(!recovery)await rename(temp,target);
+    await client.query('COMMIT');transactionOpen=false;
+    console.log(`${recovery?'Recovered interrupted and published':'Published'} signed release ${id} (${manifest.version}) as NOT APPROVED. No Windows computer will install until explicitly approved.`);
+   }catch(e){
+    if(transactionOpen){
+     try{await client.query('ROLLBACK');}catch(rollbackError){console.error('Database rollback could not be confirmed:',rollbackError);}
+    }
+    // If the process stopped after rename, the matching unregistered directory
+    // intentionally remains. The next attempt can verify and safely recover it.
+    throw e;
+   }finally{
+    await rm(temp,{recursive:true,force:true});
+   }
   } else {
    const approver=String(source||'').trim();
    if(approver.length<8||approver.length>200)throw new Error('Explicit approval change reference required (minimum 8 characters)');
