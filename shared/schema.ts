@@ -3123,6 +3123,9 @@ export const feesImportItems = pgTable("fees_import_items", {
   csvGroup: text("csv_group"),
   csvArea: text("csv_area"),
   balanceDue: decimal("balance_due", { precision: 10, scale: 2 }).notNull().default("0"),
+  balanceProvided: boolean("balance_provided").notNull().default(true),
+  matchingCandidates: jsonb("matching_candidates"),
+  mappingState: text("mapping_state").notNull().default("unresolved"),
   matchedStudentId: integer("matched_student_id").references(() => students.id),
   matchedAdmissionNo: text("matched_admission_no"),
   matchedStudentName: text("matched_student_name"),
@@ -3135,6 +3138,20 @@ export const feesImportItems = pgTable("fees_import_items", {
 
 export type FeesImportBatch = typeof feesImportBatches.$inferSelect;
 export type FeesImportItem = typeof feesImportItems.$inferSelect;
+
+export const sageIdentityLinks = pgTable("sage_identity_links", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  studentId: integer("student_id").references(() => students.id).notNull(),
+  customerCode: text("customer_code").notNull(),
+  normalizedCode: text("normalized_code").notNull(),
+  confirmedByUserId: integer("confirmed_by_user_id").references(() => users.id),
+  confirmedAt: timestamp("confirmed_at").defaultNow().notNull(),
+  source: text("source").notNull().default("reconciliation"),
+}, (table) => ({
+  schoolCodeUnique: uniqueIndex("sage_identity_links_school_code_uidx").on(table.schoolId, table.normalizedCode),
+  schoolStudentUnique: uniqueIndex("sage_identity_links_school_student_uidx").on(table.schoolId, table.studentId),
+}));
 
 // Access Control / Gate integration
 export const gateBridges = pgTable("gate_bridges", {
@@ -3152,6 +3169,9 @@ export const gateBridges = pgTable("gate_bridges", {
   softwareVersion: text("software_version"),
   installationId: text("installation_id"),
   machineName: text("machine_name"),
+  updateAgentVersion: text("update_agent_version"),
+  updateAgentLastSeenAt: timestamp("update_agent_last_seen_at"),
+  updateAgentError: text("update_agent_error"),
   pairedAt: timestamp("paired_at"),
   lastServiceStartedAt: timestamp("last_service_started_at"),
   lastIdentityReconcileAt: timestamp("last_identity_reconcile_at"),
@@ -3169,6 +3189,66 @@ export const gateBridges = pgTable("gate_bridges", {
   schoolIdx: index("gate_bridges_school_idx").on(table.schoolId),
   schoolNameUniqueIdx: uniqueIndex("gate_bridges_school_name_uidx").on(table.schoolId, table.name),
   installationUniqueIdx: uniqueIndex("gate_bridges_installation_uidx").on(table.installationId).where(sql`${table.installationId} IS NOT NULL`),
+}));
+
+// Gate Bridge signed-release automation. Defaults do NOT enable unattended updates.
+export const gateBridgeUpdateSettings = pgTable("gate_bridge_update_settings", {
+  bridgeId: integer("bridge_id").primaryKey().references(() => gateBridges.id),
+  schoolId: integer("school_id").notNull().references(() => schools.id),
+  autoEnabled: boolean("auto_enabled").notNull().default(false),
+  mode: text("mode").notNull().default("scheduled"),
+  checkIntervalHours: integer("check_interval_hours").notNull().default(1),
+  releaseTrack: text("release_track").notNull().default("general"),
+  maintenanceFrom: text("maintenance_from").notNull().default("02:00"),
+  maintenanceTo: text("maintenance_to").notNull().default("04:00"),
+  timeZone: text("time_zone").notNull().default("Africa/Harare"),
+  maxDeferralHours: integer("max_deferral_hours").notNull().default(24),
+  updatedByUserId: integer("updated_by_user_id").references(() => users.id),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export const gateBridgeSignedReleases = pgTable("gate_bridge_signed_releases", {
+  releaseId: text("release_id").primaryKey(),
+  version: text("version").notNull().unique(),
+  protocolVersion: integer("protocol_version").notNull().default(1),
+  manifestSha256: text("manifest_sha256").notNull(),
+  signedByKeyId: text("signed_by_key_id").notNull(),
+  rolloutStage: text("rollout_stage").notNull().default("pilot"),
+  approved: boolean("approved").notNull().default(false),
+  approvedAt: timestamp("approved_at"),
+  approvedBy: text("approved_by"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+export const gateBridgeUpdateRequests = pgTable("gate_bridge_update_requests", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  bridgeId: integer("bridge_id").notNull().references(() => gateBridges.id),
+  schoolId: integer("school_id").notNull().references(() => schools.id),
+  releaseId: text("release_id").notNull().references(() => gateBridgeSignedReleases.releaseId),
+  origin: text("origin").notNull(),
+  status: text("status").notNull().default("queued"),
+  initiatedByUserId: integer("initiated_by_user_id").references(() => users.id),
+  requestedAt: timestamp("requested_at").notNull().defaultNow(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  expiresAt: timestamp("expires_at"),
+  failureCode: text("failure_code"),
+  failureReason: text("failure_reason"),
+  rolledBack: boolean("rolled_back"),
+});
+export const gateBridgeUpdateEvents = pgTable("gate_bridge_update_events", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  bridgeId: integer("bridge_id").notNull().references(() => gateBridges.id),
+  requestId: integer("request_id").references(() => gateBridgeUpdateRequests.id),
+  attemptId: text("attempt_id").notNull(),
+  sequence: integer("sequence").notNull(),
+  stage: text("stage").notNull(),
+  origin: text("origin").notNull().default("automatic"),
+  status: text("status").notNull(),
+  errorCode: text("error_code"),
+  message: text("message"),
+  occurredAt: timestamp("occurred_at").notNull(),
+  receivedAt: timestamp("received_at").notNull().defaultNow(),
+}, (table) => ({
+  uniqueAttemptEvent: uniqueIndex("gate_bridge_update_event_dedupe_idx").on(table.bridgeId, table.attemptId, table.sequence),
 }));
 
 export const gateBridgePairingCodes = pgTable("gate_bridge_pairing_codes", {

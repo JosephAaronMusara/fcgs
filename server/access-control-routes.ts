@@ -1,3 +1,4 @@
+import { gateBridgeSupports } from "@shared/gate-bridge-capabilities";
 import type { Express, Request, Response } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { and, asc, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
@@ -479,7 +480,7 @@ export function registerAccessControlRoutes(app: Express) {
       const scope = await portalScope(req);
       const bridge = await bridgeInScope(scope, Number(req.params.id));
       if (!bridge) return res.status(404).json({ message: "Gate Bridge not found" });
-      if (bridge.softwareVersion !== "fcgs-gate-bridge/1.1.0") return res.status(409).json({ message: "Update the Gate Bridge to v1.1.0 before configuring its callback address" });
+      if (!gateBridgeSupports(bridge.softwareVersion, "1.1.0")) return res.status(409).json({ message: "Update the Gate Bridge to v1.1.0 before configuring its callback address" });
       const input = callbackConfigurationSchema.parse(req.body);
       const [updated] = await db.update(gateBridges).set({
         callbackMode: input.callbackMode,
@@ -956,7 +957,7 @@ export function registerAccessControlRoutes(app: Express) {
       for (let i = 0; i < 8; i++) {
         // Keep the deployed 1.0.0 Bridge compatible while the new runtime is
         // installed. Legacy commands have no claim token and cannot renew leases.
-        const claimToken = bridge.softwareVersion === "fcgs-gate-bridge/1.1.0" ? randomUUID() : null;
+        const claimToken = gateBridgeSupports(bridge.softwareVersion, "1.1.0") ? randomUUID() : null;
         const result = await db.execute(sql`
           WITH next AS (
             SELECT c.id FROM gate_commands c

@@ -4,11 +4,12 @@ import multer from "multer";
 import { parse as csvParse } from "csv-parse/sync";
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { db } from "./db";
-import { requireAuth, requirePermission, requireRole } from "./auth";
+import { requireAuth, requirePermission, requireAnyPermission, requireRole } from "./auth";
 import { storage } from "./storage";
 import { syncStudentPolicy } from "./access-control-operations";
 import { getCurrentFeePosition } from "./fees-schedule";
-import { feesImportBatches, feesImportItems, students as studentsTable, schools, type User } from "@shared/schema";
+import { feesImportBatches, feesImportItems, sageIdentityLinks, students as studentsTable, schools, streams, activityLogs, type User } from "@shared/schema";
+import { sageCode, suggestSageStudents, type SageCandidate } from "./sage-matching";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const STALE_PROCESSING_MINUTES = 5;
@@ -22,7 +23,7 @@ const GROUP_HEADERS = new Set(["group", "form", "stream", "grade"]);
 const AREA_HEADERS = new Set(["area", "class", "class name", "classroom"]);
 const SUMMARY_NAME_RE = /^(?:sub\s*total|subtotal|grand\s+total|total(?:\s+(?:balance|due|fees|amount))?|balance\s+total|carried\s+forward|brought\s+forward|page\s+total|overall\s+total)\b/i;
 
-type MatchMethod = "customer_code" | "exact_name" | "fuzzy_name" | "unmatched" | "skipped" | "invalid";
+type MatchMethod = "customer_code" | "suggested" | "unmatched" | "skipped" | "invalid";
 type RowDisposition = "data" | "skipped" | "invalid";
 type ParsedRow = {
   rowNumber: number;
@@ -32,6 +33,9 @@ type ParsedRow = {
   group: string;
   area: string;
   balanceDue: number;
+  balanceProvided: boolean;
+  matchingCandidates: SageCandidate[];
+  mappingState: "confirmed" | "suggested" | "unresolved";
   matchedStudent: any | null;
   matchMethod: MatchMethod;
   calculatedStatus: string | null;
@@ -185,20 +189,19 @@ function isRepeatedHeaderRow(row: unknown[], header: HeaderMap) {
 }
 
 function classifyRow(row: unknown[], rowIndex: number, header: HeaderMap, formulaAt?: (row: number, col: number) => string | null) {
-  const nonBlank = row.some((value) => cellText(value) !== "");
-  if (!nonBlank) return { disposition: "skipped" as const, reason: "Blank row" };
+  if (!row.some((value) => cellText(value) !== "")) return { disposition: "skipped" as const, reason: "Blank row" };
   if (isRepeatedHeaderRow(row, header)) return { disposition: "skipped" as const, reason: "Repeated column header" };
   const name = cellText(row[header.name]);
+  const customer = header.customer === null ? "" : cellText(row[header.customer]);
   const balanceText = cellText(row[header.balance]);
   const formula = formulaAt?.(rowIndex, header.balance) || "";
-  if (SUMMARY_NAME_RE.test(name) || /^SUM\s*\(/i.test(formula) || /^=\s*SUM\s*\(/i.test(balanceText)) {
-    return { disposition: "skipped" as const, reason: formula ? "Summary/subtotal formula row" : "Summary/subtotal row" };
-  }
-  if (!name && !balanceText) return { disposition: "skipped" as const, reason: "Blank learner row" };
-  if (!name) return { disposition: "invalid" as const, reason: "Learner name is missing" };
+  if (SUMMARY_NAME_RE.test(name) || /^SUM\s*\(/i.test(formula) || /^=\s*SUM\s*\(/i.test(balanceText)) return { disposition: "skipped" as const, reason: "Summary/formula row" };
+  if (!name && !customer) return { disposition: "skipped" as const, reason: "Non-customer row" };
+  if (!name || !customer) return { disposition: "invalid" as const, reason: "Sage Customer and Name are required to identify a student" };
+  if (!balanceText) return { disposition: "data" as const, reason: null, balance: 0, balanceProvided: false };
   const balance = parseMoney(balanceText);
   if (balance === null) return { disposition: "invalid" as const, reason: "Balance is not a valid number" };
-  return { disposition: "data" as const, reason: null, balance };
+  return { disposition: "data" as const, reason: null, balance, balanceProvided: true };
 }
 
 function computeFeesStatusKey(balanceDue: number, maxBalance: number): string {
@@ -211,49 +214,73 @@ async function parseAndMatchFile(file: Express.Multer.File, schoolId: number, te
   const parsed = await parseTabularFile(file, requestedSheet);
   if (!parsed.matrix) return { parsed, header: null, rows: [] as ParsedRow[] };
   const header = findHeader(parsed.matrix);
-  if (!header) throw new Error('File must contain recognizable "Name" and "Balance" columns.');
+  if (!header || header.customer === null) throw new Error('Sage file must contain Customer, Name and Balance columns.');
   const allStudents = await storage.getStudentsBySchool(schoolId);
+  const classesInSchool = await storage.getClassesBySchool(schoolId);
+  const streamIds = [...new Set(classesInSchool.map(c=>c.streamId).filter((v): v is number=>typeof v === "number"))];
+  const allStreams = streamIds.length ? await db.select().from(streams).where(inArray(streams.id,streamIds)) : [];
+  const classesById = new Map(classesInSchool.map(c=>[c.id,c]));
+  const streamsById = new Map(allStreams.map(s=>[s.id,s]));
+  const candidateStudents = allStudents.filter(s=>!s.archivedAt).map(s=>{
+    const cls=s.classId ? classesById.get(s.classId) : null;
+    return {id:s.id,firstName:s.firstName,lastName:s.lastName,admissionNo:s.admissionNo,status:s.status,
+      className:cls?.className || null,streamName:cls?.streamId ? streamsById.get(cls.streamId)?.name || null : null};
+  });
+  const existingLinks = await db.select().from(sageIdentityLinks).where(eq(sageIdentityLinks.schoolId, schoolId));
+  const linkByCode = new Map(existingLinks.map(link => [link.normalizedCode, link]));
+  const byStudent = new Map(allStudents.map(student => [student.id, student]));
   const rows: ParsedRow[] = [];
-
+  const seenCustomer = new Set<string>();
   for (let matrixIndex = header.headerRowIndex + 1; matrixIndex < parsed.matrix.length; matrixIndex++) {
     const row = parsed.matrix[matrixIndex] || [];
     const rowNumber = matrixIndex + 1;
     const classification = classifyRow(row, matrixIndex, header, parsed.formulaAt);
-    const customer = header.customer !== null ? cellText(row[header.customer]) : "";
+    const customer = cellText(row[header.customer]);
     const name = cellText(row[header.name]);
-    const group = header.group !== null ? cellText(row[header.group]) : "";
-    const area = header.area !== null ? cellText(row[header.area]) : "";
-
-    if (classification.disposition === "skipped") {
-      rows.push({ rowNumber, sourceSheet: parsed.selectedSheet, customer, name, group, area, balanceDue: 0, matchedStudent: null, matchMethod: "skipped", calculatedStatus: null, rowDisposition: "skipped", skipReason: classification.reason, validationError: null });
-      continue;
-    }
-    if (classification.disposition === "invalid") {
-      rows.push({ rowNumber, sourceSheet: parsed.selectedSheet, customer, name, group, area, balanceDue: 0, matchedStudent: null, matchMethod: "invalid", calculatedStatus: null, rowDisposition: "invalid", skipReason: null, validationError: classification.reason });
-      continue;
-    }
-
+    const group = header.group === null ? "" : cellText(row[header.group]);
+    const area = header.area === null ? "" : cellText(row[header.area]);
+    const base = { rowNumber, sourceSheet: parsed.selectedSheet, customer, name, group, area, balanceDue: 0, balanceProvided: false, matchingCandidates: [] as SageCandidate[], mappingState: "unresolved" as const, matchedStudent: null, calculatedStatus: null };
+    if (classification.disposition === "skipped") { rows.push({ ...base, matchMethod: "skipped", rowDisposition: "skipped", skipReason: classification.reason, validationError: null }); continue; }
+    if (classification.disposition === "invalid") { rows.push({ ...base, matchMethod: "invalid", rowDisposition: "invalid", skipReason: null, validationError: classification.reason }); continue; }
+    const normalized = sageCode(customer);
+    if (seenCustomer.has(normalized)) { rows.push({ ...base, matchMethod: "invalid", rowDisposition: "invalid", skipReason: null, validationError: "Duplicate Sage Customer in the selected worksheet" }); continue; }
+    seenCustomer.add(normalized);
     const balanceDue = classification.balance;
-    let matchedStudent: any = null;
-    let matchMethod: MatchMethod = "unmatched";
-    if (customer) {
-      matchedStudent = allStudents.find((student) => String(student.feesCustomerId || "").trim().toLowerCase() === customer.toLowerCase());
-      if (matchedStudent) matchMethod = "customer_code";
-    }
-    if (!matchedStudent) {
-      const nameLower = name.toLowerCase();
-      matchedStudent = allStudents.find((student) => `${student.firstName} ${student.lastName}`.trim().toLowerCase() === nameLower);
-      if (matchedStudent) matchMethod = "exact_name";
-    }
-    if (!matchedStudent) {
-      const nameLower = name.toLowerCase();
-      matchedStudent = allStudents.find((student) => {
-        const fullName = `${student.firstName} ${student.lastName}`.trim().toLowerCase();
-        return fullName.length >= 4 && nameLower.length >= 4 && (fullName.includes(nameLower) || nameLower.includes(fullName));
-      });
-      if (matchedStudent) matchMethod = "fuzzy_name";
-    }
-    rows.push({ rowNumber, sourceSheet: parsed.selectedSheet, customer, name, group, area, balanceDue, matchedStudent, matchMethod, calculatedStatus: matchedStudent ? computeFeesStatusKey(balanceDue, termMaxBalance) : null, rowDisposition: "data", skipReason: null, validationError: null });
+    const balanceProvided = classification.balanceProvided;
+    const linked = linkByCode.get(normalized);
+    const linkedStudent = linked ? byStudent.get(linked.studentId) || null : null;
+    const matchedStudent = linkedStudent && !linkedStudent.archivedAt && !["internally_transferred","transferred"].includes(String(linkedStudent.status)) ? linkedStudent : null;
+    // Never treat historic names/legacy fees_customer_id values as VERIFIED automatically.
+    const candidates = matchedStudent ? [] : suggestSageStudents(name, group, area, candidateStudents);
+    const linkConflict = linked && !matchedStudent;
+    rows.push({ ...base, balanceDue, balanceProvided, matchingCandidates: candidates, mappingState: matchedStudent ? "confirmed" : candidates.length ? "suggested" : "unresolved",
+      matchedStudent, matchMethod: matchedStudent ? "customer_code" : candidates.length ? "suggested" : "unmatched",
+      calculatedStatus: matchedStudent && balanceProvided ? computeFeesStatusKey(balanceDue, termMaxBalance) : null,
+      rowDisposition: "data", skipReason: null, validationError: linkConflict ? "Verified Sage ID references a missing student; investigate" : null });
+  }
+  // A duplicated Customer is ambiguous even if its first occurrence matched a verified link.
+  // Quarantine BOTH rows: the first must not be silently processed while the second is rejected.
+  const counts = new Map<string,number>();
+  for(const row of rows) if(row.customer && row.rowDisposition!=="skipped") {
+    const code=sageCode(row.customer);counts.set(code,(counts.get(code)||0)+1);
+  }
+  for(const row of rows) if(row.customer && (counts.get(sageCode(row.customer))||0)>1) {
+    row.validationError="Duplicate Sage Customer in the selected worksheet; resolve both rows";
+    row.rowDisposition="invalid";row.matchedStudent=null;row.matchMethod="invalid";row.mappingState="unresolved";row.calculatedStatus=null;
+  }
+  // A destination student must never receive two different customer balances in one batch.
+  // Quarantine ALL competing rows, not only the second one encountered.
+  const targetCounts = new Map<number,number>();
+  for (const row of rows) if (row.matchedStudent) {
+    targetCounts.set(row.matchedStudent.id, (targetCounts.get(row.matchedStudent.id) || 0) + 1);
+  }
+  for (const row of rows) if (row.matchedStudent && (targetCounts.get(row.matchedStudent.id) || 0) > 1) {
+    row.validationError = "More than one Sage account targets the same student; resolve all competing rows";
+    row.rowDisposition = "invalid";
+    row.matchMethod = "invalid";
+    row.mappingState = "unresolved";
+    row.matchedStudent = null;
+    row.calculatedStatus = null;
   }
   return { parsed, header, rows };
 }
@@ -264,9 +291,9 @@ function previewStats(rows: ParsedRow[]) {
     totalRows: rows.length,
     matchedRows: dataRows.filter((row) => row.matchedStudent).length,
     customerCodeMatches: dataRows.filter((row) => row.matchMethod === "customer_code").length,
-    exactNameMatches: dataRows.filter((row) => row.matchMethod === "exact_name").length,
-    fuzzyNameMatches: dataRows.filter((row) => row.matchMethod === "fuzzy_name").length,
-    unmatchedRows: dataRows.filter((row) => row.matchMethod === "unmatched").length,
+    exactNameMatches: 0, // Name similarity proposes candidates; it does not establish a match.
+    fuzzyNameMatches: 0,
+    unmatchedRows: dataRows.filter((row) => !row.matchedStudent).length,
     skippedRows: rows.filter((row) => row.rowDisposition === "skipped").length,
     invalidRows: rows.filter((row) => row.rowDisposition === "invalid").length,
   };
@@ -285,7 +312,7 @@ async function processBatch(batchId: number) {
   const [batch] = await db.select().from(feesImportBatches).where(eq(feesImportBatches.id, batchId)).limit(1);
   if (!batch || batch.status !== "processing") return;
   const items = await db.select().from(feesImportItems).where(and(eq(feesImportItems.batchId, batchId), eq(feesImportItems.rowDisposition, "data"))).orderBy(asc(feesImportItems.rowNumber), asc(feesImportItems.id));
-  const matched = items.filter((item) => item.matchedStudentId && !item.validationError);
+  const matched = items.filter((item) => item.matchedStudentId && item.balanceProvided && item.mappingState === "confirmed" && !item.validationError);
   let processed = Number(batch.processedRows || 0);
   let failed = Number(batch.failedRows || 0);
   const snapshotAt = new Date();
@@ -305,12 +332,21 @@ async function processBatch(batchId: number) {
           feesMaxBalance: termMaxBalance.toFixed(2),
           feesStatus: item.calculatedStatus || computeFeesStatusKey(balanceDue, termMaxBalance),
           feesSource: "student_payments_csv",
-          feesSnapshotAt: snapshotAt,
+          feesSnapshotAt: batch.previewedAt || snapshotAt,
           feesImportBatchId: batch.id,
         };
-        if (item.csvCustomerCode) updateData.feesCustomerId = item.csvCustomerCode;
-        const updated = await db.update(studentsTable).set(updateData).where(and(eq(studentsTable.id, item.matchedStudentId!), eq(studentsTable.schoolId, batch.schoolId))).returning({ id: studentsTable.id });
-        if (!updated.length) throw new Error("Matched learner is no longer in the import school");
+        // Identity association is established only through explicit approval, never as a side effect of a balance upload.
+        const [verified] = await db.select().from(sageIdentityLinks).where(and(eq(sageIdentityLinks.schoolId, batch.schoolId), eq(sageIdentityLinks.studentId, item.matchedStudentId!), eq(sageIdentityLinks.normalizedCode, sageCode(item.csvCustomerCode)))).limit(1);
+        if (!verified) throw new Error("Sage association is no longer verified");
+        // Atomic compare-and-set: even if another worker commits a newer snapshot simultaneously,
+        // an older balance must never overwrite it. A batch may not reuse its own timestamp
+        // to override a different already-applied batch.
+        const effectiveSnapshotAt = batch.previewedAt || snapshotAt;
+        const updated = await db.update(studentsTable).set(updateData).where(and(
+          eq(studentsTable.id, item.matchedStudentId!), eq(studentsTable.schoolId, batch.schoolId),
+          sql`(${studentsTable.feesSnapshotAt} IS NULL OR ${studentsTable.feesSnapshotAt} < ${effectiveSnapshotAt} OR (${studentsTable.feesSnapshotAt} = ${effectiveSnapshotAt} AND ${studentsTable.feesImportBatchId} = ${batch.id}))`
+        )).returning({ id: studentsTable.id });
+        if (!updated.length) throw new Error("Snapshot is older than or conflicts with the student's latest imported financial data");
         await syncStudentPolicy(item.matchedStudentId!, batch.uploadedByUserId || null, `Student fee balance import #${batch.id}`).catch(() => undefined);
         return true;
       } catch (error) {
@@ -470,6 +506,9 @@ async function previewHandler(req: Request, res: Response, next: NextFunction) {
         csvGroup: row.group || null,
         csvArea: row.area || null,
         balanceDue: row.balanceDue.toFixed(2),
+        balanceProvided: row.balanceProvided,
+        matchingCandidates: row.matchingCandidates,
+        mappingState: row.mappingState,
         matchedStudentId: row.matchedStudent?.id || null,
         matchedAdmissionNo: row.matchedStudent?.admissionNo || null,
         matchedStudentName: row.matchedStudent ? `${row.matchedStudent.firstName} ${row.matchedStudent.lastName}`.trim() : null,
@@ -497,6 +536,9 @@ async function previewHandler(req: Request, res: Response, next: NextFunction) {
         csvGroup: row.group,
         csvArea: row.area,
         balanceDue: row.balanceDue,
+        balanceProvided: row.balanceProvided,
+        matchingCandidates: row.matchingCandidates,
+        mappingState: row.mappingState,
         matchedStudentId: row.matchedStudent?.id || null,
         matchedAdmissionNo: row.matchedStudent?.admissionNo || null,
         matchedStudentName: row.matchedStudent ? `${row.matchedStudent.firstName} ${row.matchedStudent.lastName}`.trim() : null,
@@ -543,6 +585,57 @@ async function commitHandler(req: Request, res: Response, next: NextFunction) {
 }
 
 export function registerFeesImportRoutes(app: Express) {
+  app.get("/api/fees/sage-reconciliation/students", requireAuth, requireAnyPermission("fees.import", "fees.sage_mapping.manage"), async (req,res,next) => {
+    try { const schoolId = await schoolIdFromRequest(req,res); if (!schoolId) return;
+      const learners = await storage.getStudentsBySchool(schoolId);
+      return res.json({students: learners.filter(s=>!s.archivedAt).map(s=>({id:s.id,name:`${s.firstName} ${s.lastName}`.trim(),admissionNo:s.admissionNo, feesCustomerId:s.feesCustomerId,status:s.status}))});
+    } catch(error) { next(error); }
+  });
+  app.get("/api/fees/sage-reconciliation/batches", requireAuth, requireAnyPermission("fees.import", "fees.sage_mapping.manage"), async (req, res, next) => {
+    try { const schoolId = await schoolIdFromRequest(req,res); if (!schoolId) return;
+      const batches = await db.select().from(feesImportBatches).where(eq(feesImportBatches.schoolId,schoolId)).orderBy(desc(feesImportBatches.id)).limit(50);
+      return res.json({ batches: batches.map(batchPublicView) });
+    } catch(error) { next(error); }
+  });
+  app.post("/api/fees/sage-reconciliation/:batchId/approve", requireAuth, requirePermission("fees.sage_mapping.manage"), async (req, res, next) => {
+    try {
+      const schoolId = await schoolIdFromRequest(req, res); if (!schoolId) return;
+      const batchId = Number(req.params.batchId);
+      const selections = req.body?.selections as Array<{ itemId: number; studentId: number }>;
+      if (!Array.isArray(selections) || selections.length < 1 || selections.length > 500 || selections.some(s => !Number.isInteger(s.itemId) || !Number.isInteger(s.studentId))) return res.status(400).json({ message: "Supply 1–500 itemId/studentId selections" });
+      const studentIds = selections.map(s=>s.studentId), itemIds = selections.map(s=>s.itemId);
+      if (new Set(studentIds).size !== studentIds.length || new Set(itemIds).size !== itemIds.length) return res.status(409).json({ message: "Each student and Sage record may be selected only once per batch" });
+      const userId = (req.user as User).id;
+      await db.transaction(async(tx) => {
+        const [batch] = await tx.select().from(feesImportBatches).where(and(eq(feesImportBatches.id,batchId),eq(feesImportBatches.schoolId,schoolId))).limit(1);
+        if (!batch || !["preview","committed","completed_with_errors"].includes(batch.status)) throw new Error("Mapping requires a preview or completed import, not a batch being processed");
+        const items = await tx.select().from(feesImportItems).where(and(eq(feesImportItems.batchId,batchId),inArray(feesImportItems.id,itemIds)));
+        if (items.length !== selections.length) throw new Error("Some import rows do not belong to this batch");
+        const learners = await tx.select().from(studentsTable).where(and(eq(studentsTable.schoolId,schoolId),inArray(studentsTable.id,studentIds)));
+        if (learners.length !== selections.length) throw new Error("Some students do not belong to this school");
+        const byItem = new Map(items.map(x=>[x.id,x])); const byStudent = new Map(learners.map(x=>[x.id,x]));
+        for(const selection of selections) {
+          const item = byItem.get(selection.itemId)!; const student = byStudent.get(selection.studentId)!;
+          if (item.rowDisposition !== "data" || item.validationError || !item.csvCustomerCode) throw new Error(`Row ${item.rowNumber} is not eligible for approval`);
+          if (student.archivedAt || ["internally_transferred","transferred"].includes(String(student.status))) throw new Error(`Student ${student.id} is not an active destination-school record`);
+          if (student.feesCustomerId && sageCode(student.feesCustomerId) !== sageCode(item.csvCustomerCode)) throw new Error(`Student ${student.id} already has another Sage Evolution ID; resolve separately`);
+          const normalized = sageCode(item.csvCustomerCode);
+          const [codeAlready] = await tx.select().from(sageIdentityLinks).where(and(eq(sageIdentityLinks.schoolId,schoolId),eq(sageIdentityLinks.normalizedCode,normalized))).limit(1);
+          const [studentAlready] = await tx.select().from(sageIdentityLinks).where(and(eq(sageIdentityLinks.schoolId,schoolId),eq(sageIdentityLinks.studentId,student.id))).limit(1);
+          if (codeAlready && codeAlready.studentId !== student.id || studentAlready && studentAlready.normalizedCode !== normalized) throw new Error(`Conflicting verified Sage link for ${item.csvCustomerCode}`);
+          if (!codeAlready) await tx.insert(sageIdentityLinks).values({schoolId,studentId:student.id,customerCode:item.csvCustomerCode,normalizedCode:normalized,confirmedByUserId:userId});
+          await tx.update(studentsTable).set({feesCustomerId:item.csvCustomerCode}).where(eq(studentsTable.id,student.id));
+          await tx.update(feesImportItems).set({matchedStudentId:student.id,matchedStudentName:`${student.firstName} ${student.lastName}`,matchedAdmissionNo:student.admissionNo,matchMethod:"customer_code",mappingState:"confirmed",calculatedStatus:item.balanceProvided ? computeFeesStatusKey(Number(item.balanceDue),Number(batch.termMaxBalance)):null}).where(eq(feesImportItems.id,item.id));
+        }
+        const newCount = await tx.select({ id: feesImportItems.id }).from(feesImportItems).where(and(eq(feesImportItems.batchId,batchId),eq(feesImportItems.mappingState,"confirmed")));
+        await tx.update(feesImportBatches).set({matchedRows:newCount.length,unmatchedRows:Math.max(0,Number(batch.totalRows)-Number(batch.skippedRows)-Number(batch.invalidRows)-newCount.length)}).where(eq(feesImportBatches.id,batchId));
+      });
+      await db.insert(activityLogs).values({schoolId, userId, action:"sage_mapping_bulk_confirmed",category:"finance", description:`Confirmed ${selections.length} Sage Evolution identity mappings from import #${batchId}`, metadata:{batchId,itemIds}}).catch(()=>undefined);
+      // Approval after completion intentionally changes ONLY identity mappings and row metadata.
+      // The earlier Sage balance snapshot must never be re-applied through reconciliation.
+      return res.json({success:true, approved:selections.length, balanceUpdatesApplied:0, note:"Identity links confirmed. Historical balances have not been modified. Upload a current Sage balance sheet for financial changes."});
+    } catch(error) { return res.status(409).json({message:error instanceof Error?error.message:"Reconciliation approval failed"}); }
+  });
   app.post("/api/fees/import-file/preview", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), upload.single("fees_file"), previewHandler);
   app.post("/api/fees/import-csv/preview", requireAuth, requireRole("school_admin", "org_admin"), requirePermission("fees.import"), upload.single("fees_csv"), previewHandler);
 
@@ -559,7 +652,7 @@ export function registerFeesImportRoutes(app: Express) {
     } catch (error) { next(error); }
   });
 
-  app.get("/api/fees/import-file/:batchId/items", requireAuth, requirePermission("fees.import"), async (req, res, next) => {
+  app.get("/api/fees/import-file/:batchId/items", requireAuth, requireAnyPermission("fees.import", "fees.sage_mapping.manage"), async (req, res, next) => {
     try {
       const schoolId = await schoolIdFromRequest(req, res); if (!schoolId) { if (res.headersSent) return; return res.status(400).json({ message: "No school context" }); }
       const batchId = Number.parseInt(String(req.params.batchId), 10);

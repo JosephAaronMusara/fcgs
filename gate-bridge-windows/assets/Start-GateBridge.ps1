@@ -24,6 +24,7 @@ $env:FCGS_GATE_DEVICE_USERNAME = [string]$secrets.terminalUsername
 $env:FCGS_GATE_DEVICE_PASSWORD = [string]$secrets.terminalPassword
 $env:FCGS_GATE_DEVICE_PASSWORD_IS_MD5 = if ($secrets.terminalPasswordIsMd5) { "true" } else { "false" }
 $env:FCGS_GATE_BRIDGE_LOG_DIR = $LogRoot
+$env:FCGS_GATE_BRIDGE_UPDATE_SECRET_PATH = Join-Path $DataRoot "update-agent\local-auth.txt"
 $env:FCGS_GATE_BRIDGE_LISTEN_PORT = [string]$config.callbackPort
 
 # Minimise lifetime of the plaintext JSON copy after process environment is populated.

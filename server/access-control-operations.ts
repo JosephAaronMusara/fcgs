@@ -1,3 +1,4 @@
+import { gateBridgeSupports } from "@shared/gate-bridge-capabilities";
 import type { Express, Request, Response } from "express";
 import { createHash } from "crypto";
 import path from "path";
@@ -9,6 +10,7 @@ import { db } from "./db";
 import { requireAuth, requirePermission } from "./auth";
 import { communicationService } from "./communication";
 import { resolveStudentFeePosition } from "./fees-schedule";
+import { getSchoolAcademicCalendar } from "./academic-calendar";
 import {
   accessEvents,
   accessGates,
@@ -190,13 +192,14 @@ async function isAcademicOpenDay(schoolId: number, dateText: string) {
     eq(schoolDayOverrides.overrideDate, dateText),
   )).limit(1);
   if (override) return override.isSchoolDay;
-  const [school] = await db.select().from(schools).where(eq(schools.id, schoolId)).limit(1);
-  if (!school) return false;
-  const inRange = (start?: string | null, end?: string | null) => !!start && !!end && dateText >= start && dateText <= end;
-  // If term dates are configured, only term dates are school days. If not configured, use weekly schedule alone.
-  const configured = !!(school.term1StartDate || school.term2StartDate || school.term3StartDate);
-  if (!configured) return true;
-  return inRange(school.term1StartDate, school.term1EndDate) || inRange(school.term2StartDate, school.term2EndDate) || inRange(school.term3StartDate, school.term3EndDate);
+  const calendar = await getSchoolAcademicCalendar(schoolId);
+  // The HQ dates, not legacy per-campus dates, determine whether the school is in session.
+  // If HQ has no valid calendar, preserve the existing weekly schedule behaviour until configured.
+  if (calendar.error) return true;
+  return ["term1", "term2", "term3"].some(term => {
+    const dates = calendar.ranges[term as "term1" | "term2" | "term3"];
+    return !!dates && dateText >= dates.start && dateText <= dates.end;
+  });
 }
 
 function extractTemplatePlaceholders(value: string | null | undefined) {
@@ -874,7 +877,7 @@ async function ensureAutomaticReconciliationJobs(now: Date) {
     // Prevent unsupported verification commands while the installed Bridge is
     // still on the legacy release during a staggered deployment.
     const schoolBridges = bridges.filter((bridge) => bridge.schoolId === schoolId);
-    if (schoolBridges.some((bridge) => bridge.softwareVersion !== "fcgs-gate-bridge/1.1.0")) continue;
+    if (schoolBridges.some((bridge) => !gateBridgeSupports(bridge.softwareVersion, "1.1.0"))) continue;
     const [settings] = await db.select().from(gateSchoolSettings).where(eq(gateSchoolSettings.schoolId, schoolId)).limit(1);
     if (settings?.reconciliationEnabled === false || zimbabweClock < (settings?.reconciliationTime || "23:00")) continue;
     const todaysJobs = await db.select({ id: gateSyncJobs.id }).from(gateSyncJobs).where(and(
@@ -1695,9 +1698,12 @@ export function registerAccessControlOperations(app: Express) {
       if (input.expiresAt <= input.effectiveFrom) throw new Error("Override expiry must be after its effective start");
       const [student] = await db.select().from(students).where(and(eq(students.id, input.studentId), eq(students.schoolId, scope.schoolId))).limit(1);
       if (!student) throw new Error("Student not found");
-      const [school] = await db.select().from(schools).where(eq(schools.id, scope.schoolId)).limit(1);
-      const academicYear = school?.currentAcademicYear || String(new Date().getFullYear());
-      const term = school?.currentTerm || "term1";
+      const calendar = await getSchoolAcademicCalendar(scope.schoolId);
+      if (calendar.error || !calendar.term || !calendar.academicYear) {
+        throw new Error(calendar.error || "No current Headquarters academic term; financial overrides cannot be created outside a configured term.");
+      }
+      const academicYear = calendar.academicYear;
+      const term = calendar.term;
       const prior = await db.select({ id: financialAccessOverrides.id }).from(financialAccessOverrides).where(and(eq(financialAccessOverrides.studentId, student.id), eq(financialAccessOverrides.academicYear, academicYear), eq(financialAccessOverrides.term, term), sql`${financialAccessOverrides.status} IN ('active','expired','revoked','scheduled')`, sql`${financialAccessOverrides.activatedAt} IS NOT NULL OR ${financialAccessOverrides.effectiveFrom} <= now()`));
       if (prior.length >= 2) throw new Error("Maximum two activated financial access overrides are allowed per student per academic term");
       const now = new Date();

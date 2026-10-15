@@ -3,6 +3,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { db } from "./db";
 import { requireAuth, requirePermission } from "./auth";
 import { storage } from "./storage";
+import { getSchoolAcademicCalendar } from "./academic-calendar";
 import {
   feeTermInstallments,
   feeTermSchedules,
@@ -21,6 +22,8 @@ type FeeSchedulePosition = {
   academicYear: string | null;
   term: string;
   termLabel: string;
+  calendarError: string | null;
+  academicPeriod: string | null;
   termStartDate: string | null;
   termEndDate: string | null;
   asOfDate: string;
@@ -71,11 +74,6 @@ export function feeTermLabel(term: string): string {
   return "Term 1";
 }
 
-function termDates(school: typeof schools.$inferSelect, term: "term1" | "term2" | "term3") {
-  if (term === "term2") return { start: school.term2StartDate, end: school.term2EndDate };
-  if (term === "term3") return { start: school.term3StartDate, end: school.term3EndDate };
-  return { start: school.term1StartDate, end: school.term1EndDate };
-}
 
 export function computeFeeStatus(balanceDue: number, maxUpToDateBalance: number): "fully_paid" | "up_to_date" | "in_arrears" {
   if (balanceDue <= 0.01) return "fully_paid";
@@ -96,12 +94,13 @@ export async function getCurrentFeePosition(schoolId: number, asOf = new Date())
   const [school] = await db.select().from(schools).where(eq(schools.id, schoolId)).limit(1);
   if (!school) throw new Error("School not found");
 
-  const term = normalizeFeeTerm(school.currentTerm);
-  const academicYear = school.currentAcademicYear ? String(school.currentAcademicYear) : null;
-  const dates = termDates(school, term);
+  const calendar = await getSchoolAcademicCalendar(schoolId, asOf);
+  const term = calendar.term;
+  const academicYear = calendar.academicYear;
+  const dates = { start: calendar.start, end: calendar.end };
 
   let schedule: typeof feeTermSchedules.$inferSelect | undefined;
-  if (academicYear) {
+  if (academicYear && term && !calendar.error) {
     [schedule] = await db.select().from(feeTermSchedules).where(and(
       eq(feeTermSchedules.schoolId, schoolId),
       eq(feeTermSchedules.academicYear, academicYear),
@@ -128,8 +127,10 @@ export async function getCurrentFeePosition(schoolId: number, asOf = new Date())
     configured: Boolean(schedule && installments.length),
     schoolId,
     academicYear,
-    term,
-    termLabel: feeTermLabel(term),
+    term: term || calendar.period || "unconfigured",
+    termLabel: calendar.label,
+    calendarError: calendar.error,
+    academicPeriod: calendar.period,
     termStartDate: dates.start || null,
     termEndDate: dates.end || null,
     asOfDate: dateKey,
@@ -191,7 +192,9 @@ async function schoolIdFromRequest(req: Request, res: Response): Promise<number 
 }
 
 function validDateKey(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(`${value}T00:00:00Z`).getTime());
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 function serializeScheduleForAudit(position: FeeSchedulePosition) {
@@ -221,11 +224,17 @@ export function registerFeeScheduleRoutes(app: Express) {
       const user = req.user as User;
       const [school] = await db.select().from(schools).where(eq(schools.id, schoolId)).limit(1);
       if (!school) return res.status(404).json({ message: "School not found" });
-      const term = normalizeFeeTerm(school.currentTerm);
-      const academicYear = school.currentAcademicYear ? String(school.currentAcademicYear) : "";
-      const dates = termDates(school, term);
-      if (!academicYear) return res.status(400).json({ message: "Configure the school's current academic year before creating a fee schedule." });
-      if (!dates.start || !dates.end) return res.status(400).json({ message: `Configure ${feeTermLabel(term)} start and end dates before creating a fee schedule.` });
+      const calendar = await getSchoolAcademicCalendar(schoolId);
+      if (calendar.error) return res.status(400).json({ message: calendar.error });
+      if (!calendar.term || !calendar.start || !calendar.end || !calendar.academicYear) {
+        return res.status(400).json({ message: `No current school term in the Headquarters calendar (${calendar.label}). Fee schedules can only be saved during a configured term.` });
+      }
+      const term = calendar.term;
+      const academicYear = calendar.academicYear;
+      const dates = { start: calendar.start, end: calendar.end };
+      if (req.body?.academicYear !== academicYear || req.body?.term !== term) {
+        return res.status(409).json({ message: "The academic period has changed. Reopen the Fee Schedule to load the latest Headquarters dates." });
+      }
 
       const rawInstallments = Array.isArray(req.body?.installments) ? req.body.installments : [];
       if (rawInstallments.length !== 3) return res.status(400).json({ message: "The current fee schedule requires exactly three instalments." });

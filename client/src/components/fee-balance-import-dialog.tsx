@@ -27,6 +27,9 @@ type PreviewItem = {
   csvGroup?: string;
   csvArea?: string;
   balanceDue: number;
+  balanceProvided?: boolean;
+  matchingCandidates?: Array<{studentId:number;name:string;score:number;evidence:string[]}>;
+  mappingState?: string;
   matchedStudentId?: number | null;
   matchedAdmissionNo?: string | null;
   matchedStudentName?: string | null;
@@ -196,7 +199,7 @@ export default function FeeBalanceImportDialog({ open, onOpenChange }: { open: b
     }
   }, [statusQuery.data, toast]);
 
-  const exceptionRows = useMemo(() => (preview?.items || []).filter((row) => row.rowDisposition === "invalid" || row.matchMethod === "unmatched"), [preview?.items]);
+  const exceptionRows = useMemo(() => (preview?.items || []).filter((row) => row.rowDisposition === "invalid" || !row.matchedStudentId), [preview?.items]);
   const skippedRows = useMemo(() => (preview?.items || []).filter((row) => row.rowDisposition === "skipped"), [preview?.items]);
   const isProcessing = ["queued", "processing"].includes(preview?.batch?.status || "");
   const isComplete = ["committed", "completed_with_errors"].includes(preview?.batch?.status || "");
@@ -260,7 +263,7 @@ export default function FeeBalanceImportDialog({ open, onOpenChange }: { open: b
 
             {isProcessing || isComplete || preview.batch.status === "failed" ? <Card><CardContent className="space-y-3 p-4"><div className="flex items-center justify-between gap-3"><div><div className="font-medium">Background import</div><div className="text-sm text-muted-foreground">{preview.batch.progressMessage || preview.batch.status}</div></div><Badge variant={preview.batch.status === "committed" ? "default" : preview.batch.status === "failed" ? "destructive" : "secondary"}>{preview.batch.status.replace(/_/g, " ")}</Badge></div><Progress value={preview.batch.progressPercent || 0} /><div className="text-xs text-muted-foreground">{preview.batch.processedRows} of {preview.batch.matchedRows} matched rows processed{preview.batch.failedRows ? ` · ${preview.batch.failedRows} failed` : ""}</div>{preview.batch.lastError && <div className="text-sm text-destructive">{preview.batch.lastError}</div>}</CardContent></Card> : null}
 
-            {exceptionRows.length > 0 && <div className="space-y-2"><div className="font-medium">Rows requiring review</div><div className="max-h-64 overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>Row</TableHead><TableHead>Name</TableHead><TableHead>Balance</TableHead><TableHead>Issue</TableHead></TableRow></TableHeader><TableBody>{exceptionRows.map((row) => <TableRow key={`${row.rowNumber}-${row.csvName}`}><TableCell>{row.rowNumber}</TableCell><TableCell>{row.csvName || "—"}</TableCell><TableCell>{row.rowDisposition === "invalid" ? "—" : row.balanceDue.toFixed(2)}</TableCell><TableCell>{row.validationError || "No learner match found"}</TableCell></TableRow>)}</TableBody></Table></div></div>}
+            {exceptionRows.length > 0 && <div className="space-y-2"><div className="font-medium">Rows requiring review</div><div className="max-h-64 overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>Row</TableHead><TableHead>Name</TableHead><TableHead>Balance</TableHead><TableHead>Issue</TableHead></TableRow></TableHeader><TableBody>{exceptionRows.map((row) => <TableRow key={`${row.rowNumber}-${row.csvName}`}><TableCell>{row.rowNumber}</TableCell><TableCell>{row.csvName || "—"}</TableCell><TableCell>{row.rowDisposition === "invalid" ? "—" : row.balanceProvided===false ? "Unknown" : row.balanceDue.toFixed(2)}</TableCell><TableCell>{row.validationError || ((row.matchingCandidates?.length || 0)>1 ? "Multiple possible matches — open Sage Matching & Reconciliation" : "Sage association needs review in Matching & Reconciliation")}</TableCell></TableRow>)}</TableBody></Table></div></div>}
 
             {skippedRows.length > 0 && <div className="space-y-2"><div className="font-medium">Skipped rows</div><p className="text-xs text-muted-foreground">Skipped rows are not counted as unmatched learners. Subtotals are detected from labels/formulas, never from the monetary amount alone.</p><div className="max-h-64 overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>Row</TableHead><TableHead>Label / Name</TableHead><TableHead>Reason</TableHead></TableRow></TableHeader><TableBody>{skippedRows.map((row) => <TableRow key={`${row.rowNumber}-${row.skipReason}`}><TableCell>{row.rowNumber}</TableCell><TableCell>{row.csvName || "—"}</TableCell><TableCell>{row.skipReason || "Skipped"}</TableCell></TableRow>)}</TableBody></Table></div></div>}
 

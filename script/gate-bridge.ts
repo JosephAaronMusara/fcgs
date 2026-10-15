@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 import { appendFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "fs/promises";
 import path from "path";
 import os from "os";
@@ -6,7 +6,7 @@ import http from "http";
 
 import { GATE_BRIDGE_RELEASE_VERSION } from "../shared/gate-bridge-release";
 
-const BRIDGE_VERSION = GATE_BRIDGE_RELEASE_VERSION;
+const BRIDGE_VERSION = process.env.FCGS_SIGNED_BRIDGE_BUILD_VERSION || GATE_BRIDGE_RELEASE_VERSION;
 const DEFAULT_PRODUCTION_URL = "https://portal.firstchoicegroup.co.zw";
 const serverUrl = String(process.env.FCGS_GATE_BRIDGE_URL || DEFAULT_PRODUCTION_URL).replace(/\/$/, "");
 const bridgeToken = String(process.env.FCGS_GATE_BRIDGE_TOKEN || "").trim();
@@ -130,6 +130,17 @@ let currentCallbackConfig: { mode: "automatic" | "manual"; host: string | null; 
 let activeCallbackUrl: string | null = null;
 let callbackError: string | null = null;
 const activeCommands = new Set<number>();
+let updateQuiescing = false;
+let localUpdateSecret = "";
+function isLocalUpdateRequest(req: http.IncomingMessage) {
+  const ip = String(req.socket.remoteAddress||"");
+  if (ip !== "127.0.0.1" && ip !== "::1" && ip !== "::ffff:127.0.0.1") return false;
+  const candidate = String(req.headers["x-fcgs-update-secret"]||"");
+  if (!localUpdateSecret || !candidate) return false;
+  const a=Buffer.from(localUpdateSecret,"utf8"),b=Buffer.from(candidate,"utf8");
+  return a.length===b.length && timingSafeEqual(a,b);
+}
+
 
 // Linux face terminals have a small HTTP service and their login token/session can
 // be disturbed by overlapping requests. Keep every conversation with a given
@@ -599,6 +610,17 @@ function findDeviceForCallback(remoteAddress: string, record: Record<string, any
 
 function startRecognitionServer() {
   const server = http.createServer((req, res) => {
+    const updatePath = String(req.url || "").split("?")[0];
+    if (updatePath.startsWith("/__fcgs_update/")) {
+      if (!isLocalUpdateRequest(req)) { res.statusCode=403; res.end("Forbidden"); return; }
+      if (req.method === "POST" && updatePath === "/__fcgs_update/quiesce") updateQuiescing=true;
+      if (req.method === "POST" && updatePath === "/__fcgs_update/resume") updateQuiescing=false;
+      if (["/__fcgs_update/quiesce","/__fcgs_update/resume","/__fcgs_update/ready"].includes(updatePath)) {
+        const safe = updateQuiescing && activeCommands.size===0 && deviceOperationTails.size===0 && !recognitionFlushRunning && recognitionQueue.length===0;
+        res.statusCode=200;res.setHeader("Content-Type","application/json");res.end(JSON.stringify({quiescing:updateQuiescing,safe,activeCommands:activeCommands.size,terminalOperations:deviceOperationTails.size,pendingRecognitions:recognitionQueue.length}));return;
+      }
+      res.statusCode=404;res.end("Unknown update API");return;
+    }
     if (req.method !== "POST" || !["/uploadDeviceRecogRecord", "/recognition", "/"].includes(String(req.url || "").split("?")[0])) {
       res.statusCode = 404; res.end("Not Found"); return;
     }
@@ -900,7 +922,7 @@ async function commandLoop() {
     while (!stopped) {
       try {
         await flushCompletionOutbox();
-        if (activeCommands.size < 16) {
+        if (!updateQuiescing && activeCommands.size < 16) {
           const payload = await portalRequest("/api/gate-bridge/commands/claim", { method: "POST", body: "{}" });
           const commands = Array.isArray(payload?.commands) ? payload.commands : [];
           for (const command of commands) {
@@ -924,6 +946,11 @@ process.on("SIGTERM", () => stop("SIGTERM"));
 
 async function main() {
   logInfo(`starting ${BRIDGE_VERSION}`);
+  try {
+    const secretPath=String(process.env.FCGS_GATE_BRIDGE_UPDATE_SECRET_PATH||"");
+    if(secretPath) localUpdateSecret=(await readFile(secretPath,"utf8")).trim();
+  } catch (error) { logError("Update quiescence token could not be loaded; unattended updates cannot proceed"); }
+
   logInfo(`portal: ${serverUrl}`);
   logInfo(`legacy credential/device overrides: ${legacyDeviceConfigs.length}`);
   logInfo(`terminal HTTP timeouts: read ${deviceReadTimeoutMs}ms, face/write ${deviceWriteTimeoutMs}ms`);

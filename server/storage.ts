@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { applyHeadquartersCalendar } from "./academic-calendar";
 import { compareStudentsByFirstName, studentFirstNameOrder } from "./student-sort";
 import { eq, ne, desc, asc, and, or, sql, count as drizzleCount, like, gte, lte, lt, isNull, inArray, notLike } from "drizzle-orm";
 import {
@@ -1495,7 +1496,7 @@ export class DatabaseStorage implements IStorage {
       .orderBy(...studentFirstNameOrder);
   }
 
-  async createStudent(studentData: InsertStudent): Promise<Student> {
+  async createStudent(studentData: InsertStudent, onCreated?: (tx: any, newStudent: Student) => Promise<void>): Promise<Student> {
     const { admissionNo: _blockedAdmissionNo, ...safeStudentData } = studentData as InsertStudent & { admissionNo?: unknown };
     const schoolId = requirePositiveSchoolId(safeStudentData.schoolId);
     const issuedAt = new Date();
@@ -1505,6 +1506,7 @@ export class DatabaseStorage implements IStorage {
       // exact same timestamp so a year-boundary request cannot create an audit mismatch.
       const admissionNo = await this.allocateNextPersonNumber(tx, "student", schoolId, issuedAt);
       const [newStudent] = await tx.insert(students).values({ ...safeStudentData, schoolId, admissionNo, createdAt: issuedAt }).returning();
+      if (onCreated) await onCreated(tx, newStudent);
       return newStudent;
     });
   }
@@ -2441,18 +2443,25 @@ export class DatabaseStorage implements IStorage {
 
   // School methods
   async getAllSchools(): Promise<School[]> {
-    return db.select().from(schools).where(
-      or(isNull(schools.terminationStatus), ne(schools.terminationStatus, "archived"))
-    ).orderBy(schools.name);
+    const rows = await db.select({ school: schools, organization: organizations })
+      .from(schools).leftJoin(organizations, eq(schools.organizationId, organizations.id))
+      .where(or(isNull(schools.terminationStatus), ne(schools.terminationStatus, "archived")))
+      .orderBy(schools.name);
+    return rows.map(({ school, organization }) => applyHeadquartersCalendar(school, organization));
   }
 
   async getSchool(id: number): Promise<School | undefined> {
-    const [school] = await db.select().from(schools).where(eq(schools.id, id));
-    return school;
+    const [row] = await db.select({ school: schools, organization: organizations })
+      .from(schools).leftJoin(organizations, eq(schools.organizationId, organizations.id))
+      .where(eq(schools.id, id));
+    return row ? applyHeadquartersCalendar(row.school, row.organization) : undefined;
   }
 
   async getSchoolsByOrganization(orgId: number): Promise<School[]> {
-    return db.select().from(schools).where(eq(schools.organizationId, orgId));
+    const rows = await db.select({ school: schools, organization: organizations })
+      .from(schools).leftJoin(organizations, eq(schools.organizationId, organizations.id))
+      .where(eq(schools.organizationId, orgId));
+    return rows.map(({ school, organization }) => applyHeadquartersCalendar(school, organization));
   }
 
   async createSchool(schoolData: InsertSchool): Promise<School> {

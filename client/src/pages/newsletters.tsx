@@ -28,6 +28,7 @@ import { SearchableMultiSelect, type SearchableSelectOption } from "@/components
 import { Newspaper, Plus, Calendar, Send, Eye, Trash2, Mail, MessageSquare, Bell, CheckCircle2, AlertCircle, FileText } from "lucide-react";
 import type { Class, Newsletter, School, Staff, Stream, Student } from "@shared/schema";
 import { LanguageCheckButton } from "@/features/language-tools";
+import { newsletterSmsText, estimateSmsSegments } from "@shared/sms-segments";
 
 type NewsletterAudience = "all" | "parents" | "students" | "staff";
 type NewsletterScope = "all" | "streams" | "classes" | "individuals";
@@ -66,6 +67,7 @@ export default function NewslettersPage() {
   const { toast } = useToast();
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [viewNewsletter, setViewNewsletter] = useState<Newsletter | null>(null);
+  const [publishCandidate, setPublishCandidate] = useState<Newsletter | null>(null);
   const [selectedChannels, setSelectedChannels] = useState<string[]>(["email"]);
   const [selectedAudience, setSelectedAudience] = useState<NewsletterAudience>("all");
   const [selectedScope, setSelectedScope] = useState<NewsletterScope>("all");
@@ -209,6 +211,28 @@ export default function NewslettersPage() {
     retry: false,
   });
 
+  // Use the same saved targeting as the publishing endpoint, not the draft editor selection.
+  const publishTarget = publishCandidate ? {
+    targetAudience: publishCandidate.targetAudience || "all",
+    targetScope: publishCandidate.targetScope || "all",
+    targetStreamIds: publishCandidate.targetStreamIds || [],
+    targetClassIds: publishCandidate.targetClassIds || [],
+    targetStudentIds: publishCandidate.targetStudentIds || [],
+    targetStaffIds: publishCandidate.targetStaffIds || [],
+  } : null;
+  const publishPreview = useQuery<RecipientPreview>({
+    queryKey: ["/api/newsletters/recipient-preview", "publish", publishCandidate?.id],
+    queryFn: async () => {
+      const response = await apiRequest("POST", "/api/newsletters/recipient-preview", publishTarget);
+      return response.json();
+    },
+    enabled: !!publishCandidate,
+    staleTime: 0,
+    retry: false,
+  });
+  const publishSms = publishCandidate ? estimateSmsSegments(newsletterSmsText(publishCandidate.content || "")) : null;
+  const draftSms = estimateSmsSegments(newsletterSmsText(newsletterContent));
+
   const createNewsletter = useMutation({
     mutationFn: async (data: Partial<Newsletter>) => apiRequest("POST", "/api/newsletters", data),
     onSuccess: () => {
@@ -226,6 +250,7 @@ export default function NewslettersPage() {
     mutationFn: async ({ id, isPublished }: { id: number; isPublished: boolean }) => apiRequest("PUT", `/api/newsletters/${id}`, { isPublished }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/newsletters"] });
+      setPublishCandidate(null);
       toast({ title: "Newsletter updated" });
     },
     onError: (error: Error) => toast({ title: "Failed to publish newsletter", description: error.message, variant: "destructive" }),
@@ -370,7 +395,9 @@ export default function NewslettersPage() {
                 </div>
               </div>
 
-              <div className="space-y-2"><Label htmlFor="content">Content</Label><Textarea id="content" name="content" rows={8} required value={newsletterContent} onChange={(event) => setNewsletterContent(event.target.value)} placeholder="Write your newsletter content here..." data-testid="input-newsletter-content" /></div>
+              <div className="space-y-2"><Label htmlFor="content">Content</Label><Textarea id="content" name="content" rows={8} required value={newsletterContent} onChange={(event) => setNewsletterContent(event.target.value)} placeholder="Write your newsletter content here..." data-testid="input-newsletter-content" />
+                {selectedChannels.includes("sms") && <p className="text-xs text-muted-foreground" data-testid="text-newsletter-sms-segments">SMS: {draftSms.characters} characters · {draftSms.encoding} · approximately {draftSms.segments} segment(s) per recipient. The full message will be sent without shortening.</p>}
+              </div>
               <LanguageCheckButton fields={[
                 { id: "newsletter-title", label: "Newsletter title", text: newsletterTitle, onChange: setNewsletterTitle },
                 { id: "newsletter-content", label: "Newsletter content", text: newsletterContent, onChange: setNewsletterContent },
@@ -415,12 +442,40 @@ export default function NewslettersPage() {
               <CardContent>
                 <p className="text-sm text-muted-foreground line-clamp-3 mb-4">{newsletter.content}</p>
                 <div className="flex items-center gap-2 flex-wrap"><Badge variant="outline">{audienceLabel(newsletter.targetAudience)}</Badge><Badge variant="outline">{scopeLabel(newsletter)}</Badge>{newsletter.channels?.map((channel) => <Badge key={channel} variant="secondary">{channel === "in_app" ? "In-App" : channel.toUpperCase()}</Badge>)}</div>
-                <div className="flex gap-2 mt-4"><Button variant="outline" size="sm" onClick={() => setViewNewsletter(newsletter)} data-testid={`button-view-${newsletter.id}`}><Eye className="h-4 w-4 mr-1" />View</Button>{!newsletter.isPublished && <Button size="sm" onClick={() => updateNewsletter.mutate({ id: newsletter.id, isPublished: true })} data-testid={`button-publish-${newsletter.id}`}><Send className="h-4 w-4 mr-1" />Publish</Button>}</div>
+                <div className="flex gap-2 mt-4"><Button variant="outline" size="sm" onClick={() => setViewNewsletter(newsletter)} data-testid={`button-view-${newsletter.id}`}><Eye className="h-4 w-4 mr-1" />View</Button>{!newsletter.isPublished && <Button size="sm" onClick={() => setPublishCandidate(newsletter)} data-testid={`button-publish-${newsletter.id}`}><Send className="h-4 w-4 mr-1" />Publish</Button>}</div>
               </CardContent>
             </Card>
           ))}
         </div>
       )}
+
+      <Dialog open={!!publishCandidate} onOpenChange={(open) => { if (!open && !updateNewsletter.isPending) setPublishCandidate(null); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Confirm Newsletter Publication</DialogTitle>
+            <DialogDescription>Publishing sends to the selected recipients. Verify SMS usage before continuing; this operation cannot be undone.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            <p><span className="font-medium">Newsletter:</span> {publishCandidate?.title}</p>
+            {publishCandidate?.channels?.includes("sms") && <>
+              <p data-testid="publish-newsletter-segments"><span className="font-medium">SMS:</span> {publishSms?.characters} characters · {publishSms?.encoding} · {publishSms?.segments} estimated segment(s) per recipient</p>
+              <p><span className="font-medium">SMS recipients:</span> {publishPreview.isLoading ? "Calculating…" : publishPreview.data?.sms ?? "Unavailable"}</p>
+              <p><span className="font-medium">Estimated total SMS segments:</span> {publishPreview.data && publishSms ? publishPreview.data.sms * publishSms.segments : "Unavailable"}</p>
+              <p className="text-xs text-muted-foreground">Estimates depend on provider encoding and delivery; no newsletter text will be truncated.</p>
+            </>}
+            {publishPreview.isError && <p role="alert" className="text-destructive">Unable to verify recipients. Publication is blocked until the preview succeeds.</p>}
+            {publishPreview.data && <p>{publishPreview.data.total} matching recipients across selected audience.</p>}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setPublishCandidate(null)} disabled={updateNewsletter.isPending}>Cancel</Button>
+            <Button
+              data-testid="button-confirm-publish-newsletter"
+              disabled={updateNewsletter.isPending || !publishCandidate || !publishPreview.data?.total || publishPreview.isFetching || (publishCandidate.channels?.includes("sms") && (!publishPreview.data?.sms || !publishSms?.segments))}
+              onClick={() => publishCandidate && updateNewsletter.mutate({ id: publishCandidate.id, isPublished: true })}
+            >{updateNewsletter.isPending ? "Publishing…" : "Confirm & Publish"}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!viewNewsletter} onOpenChange={() => setViewNewsletter(null)}>
         <DialogContent className="max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain">

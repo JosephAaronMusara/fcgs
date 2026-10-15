@@ -89,6 +89,8 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "parents.import", name: "Import Parents", description: "Import parent and guardian records from spreadsheets", category: "Parents" },
   { code: "staff.import", name: "Import Staff", description: "Import staff records from spreadsheets", category: "Staff" },
   { code: "clinic.import", name: "Import Clinic Records", description: "Import clinic and health records from spreadsheets", category: "Clinic" },
+  { code: "access_control.bridge_updates.manage", name: "Manage Remote Gate Bridge Updates", description: "Configure automatic updates and initiate signed remote Gate Bridge updates", category: "Access Control" },
+  { code: "fees.sage_mapping.manage", name: "Manage Sage Evolution IDs", description: "Assign, correct and approve Sage student financial-account identifiers", category: "Finance" },
   { code: "fees.import", name: "Import Fees", description: "Import fee balances and payment data from spreadsheets", category: "Finance" },
   { code: "library.download", name: "Download Library Resources", description: "Download digital library resources", category: "Library" },
   { code: "library.catalogue.delete", name: "Delete Library Records", description: "Delete library resources, copies, categories and books", category: "Library" },

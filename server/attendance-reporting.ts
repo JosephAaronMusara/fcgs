@@ -3,6 +3,7 @@ import { and, asc, eq, gte, inArray, isNull, lte, or } from "drizzle-orm";
 import { db } from "./db";
 import { requireAuth, requirePermission } from "./auth";
 import { storage } from "./storage";
+import { getSchoolAcademicCalendar } from "./academic-calendar";
 import {
   attendanceRecords,
   classes,
@@ -233,13 +234,14 @@ async function resolveSchoolDays(school: typeof schools.$inferSelect, from: stri
   ]);
   const scheduleByDay = new Map(schedules.map((row) => [row.dayOfWeek, row.isSchoolDay]));
   const overrideByDate = new Map(overrides.map((row) => [row.overrideDate, row.isSchoolDay]));
-  const termRanges = [
-    [school.term1StartDate, school.term1EndDate],
-    [school.term2StartDate, school.term2EndDate],
-    [school.term3StartDate, school.term3EndDate],
-  ].filter((pair): pair is [string, string] => Boolean(pair[0] && pair[1]));
+  const calendar = await getSchoolAcademicCalendar(school.id);
+  const termRanges = calendar.error ? [] : (["term1", "term2", "term3"] as const)
+    .map(term => calendar.ranges[term])
+    .filter((range): range is { start: string; end: string } => Boolean(range))
+    .map(({ start, end }) => [start, end] as [string, string]);
   const relevantTermRanges = termRanges.filter(([start, end]) => start <= to && end >= from);
-  const enforceConfiguredTermBoundaries = relevantTermRanges.length > 0;
+  // Even if a requested report falls entirely in vacation, never count vacation weekdays as school days.
+  const enforceConfiguredTermBoundaries = termRanges.length > 0;
 
   const output: string[] = [];
   for (const date of datesBetween(from, to)) {

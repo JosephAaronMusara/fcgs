@@ -22,6 +22,8 @@ export type FeeSchedulePosition = {
   academicYear: string | null;
   term: string;
   termLabel: string;
+  academicPeriod: string | null;
+  calendarError: string | null;
   termStartDate: string | null;
   termEndDate: string | null;
   asOfDate: string;
@@ -102,7 +104,7 @@ export default function FeeScheduleDialog({ open, onOpenChange }: { open: boolea
       const response = await schoolFetch("/api/fees/schedule/current", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ installments: rows }),
+        body: JSON.stringify({ installments: rows, academicYear: query.data?.academicYear, term: query.data?.term }),
       });
       const text = await response.text();
       if (!response.ok) throw new Error(readableError(text, "Unable to save the fee schedule"));
@@ -150,6 +152,9 @@ export default function FeeScheduleDialog({ open, onOpenChange }: { open: boolea
                 <div><span className="text-muted-foreground">Term starts:</span> <span className="font-medium">{position.termStartDate || "Not configured"}</span></div>
                 <div><span className="text-muted-foreground">Term ends:</span> <span className="font-medium">{position.termEndDate || "Not configured"}</span></div>
               </div>
+              {position.calendarError && <p role="alert" className="mt-2 text-destructive">{position.calendarError}</p>}
+              {!position.calendarError && !["term1", "term2", "term3"].includes(position.academicPeriod || "") &&
+                <p role="status" className="mt-2 text-muted-foreground">No active school term. Term fee schedules cannot be saved during a vacation or an unconfigured period.</p>}
             </div>
 
             <div className="space-y-4">
@@ -201,7 +206,7 @@ export default function FeeScheduleDialog({ open, onOpenChange }: { open: boolea
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={!position || query.isLoading || mutation.isPending || !canSave || total <= 0} onClick={() => mutation.mutate()}>
+          <Button disabled={!position || !!position.calendarError || !["term1", "term2", "term3"].includes(position.academicPeriod || "") || query.isLoading || mutation.isPending || !canSave || total <= 0} onClick={() => mutation.mutate()}>
             {mutation.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving…</> : "Save Fee Schedule"}
           </Button>
         </DialogFooter>

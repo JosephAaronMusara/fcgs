@@ -67,6 +67,9 @@ async function buildAll() {
     bundle: true,
     format: "cjs",
     outfile: "gate-bridge-windows/assets/gate-bridge.cjs",
+    define: {
+      "process.env.FCGS_SIGNED_BRIDGE_BUILD_VERSION": JSON.stringify(process.env.FCGS_SIGNED_BRIDGE_BUILD_VERSION || ""),
+    },
     minify: true,
     logLevel: "info",
   });

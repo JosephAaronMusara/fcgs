@@ -24,3 +24,6 @@ gate-bridge.env
 gate-bridge-logs/
 FCGS-deployment-support-*.zip
 REPLACEMENT_MANIFEST.json
+
+# Immutable, environment-managed, signed Bridge releases; not application source.
+gate-bridge-releases/
