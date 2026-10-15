@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import { db } from "./db";
 import { communicationLogs } from "@shared/schema";
+import { estimateSmsSegments } from "@shared/sms-segments";
 
 export interface EmailConfig {
   host: string;
@@ -289,7 +290,7 @@ class CommunicationService {
         senderid: this.smsConfig.senderId,
         schedule: 'no',
         'sending-time': '',
-        unicode: 'no',
+        unicode: estimateSmsSegments(params.message).encoding === 'Unicode' ? 'yes' : 'no',
         'client-sms-ids': `fcgs_${Date.now()}_${Math.random().toString(36).substring(2)}`,
       });
 

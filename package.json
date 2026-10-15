@@ -72,7 +72,12 @@
     "fcgs:upgrade:2026-10-14": "tsx script/apply-2026-10-14-fee-schedule.ts",
     "fee-schedule:source-check": "node script/validate-2026-10-14-fee-schedule.cjs",
     "fcgs:upgrade:access-control-reliability": "tsx script/apply-access-control-reliability.ts",
-    "access-control:reliability-check": "node script/validate-access-control-reliability.cjs"
+    "access-control:reliability-check": "node script/validate-access-control-reliability.cjs",
+    "fcgs:upgrade:access-control-sage": "tsx script/apply-access-control-sage-mapping.ts",
+    "fcgs:upgrade:access-control-bridge-update": "tsx script/apply-access-control-bridge-update.ts",
+    "gate:bridge:publish-signed-release": "tsx script/publish-signed-gate-bridge-release.ts",
+    "access-control:sage-audit": "tsx script/audit-access-control-sage.ts",
+    "access-control:consolidated-test": "node script/test-access-control-build.cjs"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",

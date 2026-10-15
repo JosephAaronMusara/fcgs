@@ -1,4 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { academicDateKey, resolveAcademicCalendar } from "@shared/academic-calendar";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import CalendarPage from "@/pages/calendar";
@@ -101,14 +102,7 @@ function normalizeDate(dateValue: string | null | undefined): string {
   return dateValue.slice(0, 10);
 }
 
-function normalizeTermValue(val: string | number | null | undefined): string {
-  if (!val) return "term1";
-  if (typeof val === "number") return `term${val}`;
-  const s = String(val);
-  if (["term1", "term2", "term3", "vac1", "vac2"].includes(s)) return s;
-  if (/^\d+$/.test(s)) return `term${s}`;
-  return "term1";
-}
+
 
 function getTimeAgo(dateString: string): string {
   const date = new Date(dateString);
@@ -336,7 +330,6 @@ export default function OrgDashboard() {
   const [isHqNavOpen, setIsHqNavOpen] = useState(false);
   const currentYear = new Date().getFullYear();
   const [orgAcademicYear, setOrgAcademicYear] = useState<number>(currentYear);
-  const [orgTerm, setOrgTerm] = useState<string>("term1");
   const [orgTermDates, setOrgTermDates] = useState({
     term1Start: "", term1End: "",
     vac1Start: "", vac1End: "",
@@ -439,7 +432,6 @@ export default function OrgDashboard() {
   useEffect(() => {
     if (orgData) {
       setOrgAcademicYear(orgData.currentAcademicYear ? parseInt(orgData.currentAcademicYear) : currentYear);
-      setOrgTerm(normalizeTermValue(orgData.currentTerm));
       setOrgTermDates({
         term1Start: normalizeDate(orgData.term1StartDate),
         term1End: normalizeDate(orgData.term1EndDate),
@@ -612,15 +604,24 @@ export default function OrgDashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/public/org-branding"] });
       toast({ title: "Settings saved", description: "Organization settings updated successfully." });
     },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to save settings.", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Unable to save settings", description: error.message || "Failed to save settings.", variant: "destructive" });
     },
   });
+
+  // Derived live from HQ dates; the academic year itself remains administrator-controlled.
+  const effectiveOrgPeriod = resolveAcademicCalendar({
+    currentAcademicYear: orgAcademicYear.toString(),
+    term1StartDate: orgTermDates.term1Start, term1EndDate: orgTermDates.term1End,
+    vac1StartDate: orgTermDates.vac1Start, vac1EndDate: orgTermDates.vac1End,
+    term2StartDate: orgTermDates.term2Start, term2EndDate: orgTermDates.term2End,
+    vac2StartDate: orgTermDates.vac2Start, vac2EndDate: orgTermDates.vac2End,
+    term3StartDate: orgTermDates.term3Start, term3EndDate: orgTermDates.term3End,
+  }, academicDateKey());
 
   const handleSaveOrgAcademic = () => {
     updateOrgSettings.mutate({
       currentAcademicYear: orgAcademicYear.toString(),
-      currentTerm: orgTerm,
       term1StartDate: orgTermDates.term1Start || null,
       term1EndDate: orgTermDates.term1End || null,
       vac1StartDate: orgTermDates.vac1Start || null,
@@ -639,7 +640,6 @@ export default function OrgDashboard() {
   const handleCancelOrgAcademic = () => {
     if (orgData) {
       setOrgAcademicYear(orgData.currentAcademicYear ? parseInt(orgData.currentAcademicYear) : currentYear);
-      setOrgTerm(normalizeTermValue(orgData.currentTerm));
       setOrgTermDates({
         term1Start: normalizeDate(orgData.term1StartDate),
         term1End: normalizeDate(orgData.term1EndDate),
@@ -2541,23 +2541,10 @@ export default function OrgDashboard() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label className="text-sm font-semibold">Current Term</Label>
-                  <Select
-                    value={orgTerm}
-                    onValueChange={(v) => setOrgTerm(v)}
-                    disabled={!isEditingAcademic}
-                  >
-                    <SelectTrigger data-testid="select-org-term">
-                      <SelectValue placeholder="Select term" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="term1">Term 1</SelectItem>
-                      <SelectItem value="vac1">Vacation 1</SelectItem>
-                      <SelectItem value="term2">Term 2</SelectItem>
-                      <SelectItem value="vac2">Vacation 2</SelectItem>
-                      <SelectItem value="term3">Term 3</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label className="text-sm font-semibold">Current Academic Period (automatic)</Label>
+                  <Input value={effectiveOrgPeriod.label} readOnly aria-label="Current academic period, calculated from Headquarters dates" data-testid="text-org-term" />
+                  <p className="text-xs text-muted-foreground">Changes automatically according to the dates below (Africa/Harare). No school overrides.</p>
+                  {effectiveOrgPeriod.error && <p role="alert" className="text-xs text-destructive">{effectiveOrgPeriod.error}</p>}
                 </div>
               </div>
 
@@ -2565,7 +2552,7 @@ export default function OrgDashboard() {
                 <div>
                   <Label className="text-sm font-semibold">Term Dates</Label>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Leave blank to use default dates (mid-month transitions)
+                    Set all term dates. Vacations are automatically derived from the gaps if left blank.
                   </p>
                 </div>
 
@@ -2578,7 +2565,7 @@ export default function OrgDashboard() {
                 ].map((period) => (
                   <div key={period.key} className="space-y-4 border rounded-md p-4">
                     <div className="font-medium text-sm flex items-center gap-2 flex-wrap">
-                      <Badge variant={orgTerm === period.key ? "default" : "secondary"}>{period.label}</Badge>
+                      <Badge variant={effectiveOrgPeriod.period === period.key ? "default" : "secondary"}>{period.label}</Badge>
                       {period.isVacation && (
                         <span className="text-muted-foreground text-xs">(auto-derived if blank)</span>
                       )}

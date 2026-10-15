@@ -1,0 +1,104 @@
+# This workflow is MANUAL and guarded by the GitHub gate-bridge-production environment.
+# The production Portal cannot sign code, and this job does not grant it AWS credentials.
+name: FCGS Gate Bridge — approved release signing
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Bridge version, e.g. fcgs-gate-bridge/1.2.0'
+        required: true
+        type: string
+      release_id:
+        description: 'Immutable release ID, e.g. gatebridge_1_2_0_prod_1'
+        required: true
+        type: string
+jobs:
+  sign:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: gate-bridge-production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Source validation
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check
+          npm run access-control:source-check
+          npm run access-control:reliability-check
+          npm run access-control:build2-source-check
+          npm run fee-schedule:source-check
+      - name: Compile versioned Windows runtime
+        env:
+          FCGS_SIGNED_BRIDGE_BUILD_VERSION: ${{ inputs.version }}
+        run: npm run build
+      - name: Download pinned vendor Windows components
+        env:
+          NODE_EXE_URL: ${{ vars.FCGS_NODE_WINDOWS_URL }}
+          NODE_EXE_SHA256: ${{ vars.FCGS_NODE_WINDOWS_SHA256 }}
+          WINSW_EXE_URL: ${{ vars.FCGS_WINSW_WINDOWS_URL }}
+          WINSW_EXE_SHA256: ${{ vars.FCGS_WINSW_WINDOWS_SHA256 }}
+          NODE_LICENSE_URL: ${{ vars.FCGS_NODE_LICENSE_URL }}
+          NODE_LICENSE_SHA256: ${{ vars.FCGS_NODE_LICENSE_SHA256 }}
+          WINSW_LICENSE_URL: ${{ vars.FCGS_WINSW_LICENSE_URL }}
+          WINSW_LICENSE_SHA256: ${{ vars.FCGS_WINSW_LICENSE_SHA256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fcgs-signed-package/assets"
+          cp gate-bridge-windows/assets/{gate-bridge.cjs,Start-GateBridge.ps1,Update-GateBridge.ps1,THIRD_PARTY_NOTICES.md} "$RUNNER_TEMP/fcgs-signed-package/assets/"
+          download_pinned() {
+            local url="$1" expected="$2" dest="$3"
+            [[ "$url" == https://* ]] || { echo 'HTTPS vendor source required'; exit 1; }
+            [[ "$expected" =~ ^[A-Fa-f0-9]{64}$ ]] || { echo 'SHA-256 pin required for vendor component'; exit 1; }
+            curl -fLSs --retry 3 --proto '=https' --tlsv1.2 "$url" -o "$dest"
+            echo "$expected  $dest" | sha256sum -c -
+          }
+          download_pinned "$NODE_EXE_URL" "$NODE_EXE_SHA256" "$RUNNER_TEMP/fcgs-signed-package/assets/node.exe"
+          download_pinned "$WINSW_EXE_URL" "$WINSW_EXE_SHA256" "$RUNNER_TEMP/fcgs-signed-package/assets/FCGSGateBridgeService.exe"
+          download_pinned "$NODE_LICENSE_URL" "$NODE_LICENSE_SHA256" "$RUNNER_TEMP/fcgs-signed-package/assets/LICENSE-Node.txt"
+          download_pinned "$WINSW_LICENSE_URL" "$WINSW_LICENSE_SHA256" "$RUNNER_TEMP/fcgs-signed-package/assets/LICENSE-WinSW.txt"
+      - name: Produce immutable unsigned manifest
+        env:
+          VERSION: ${{ inputs.version }}
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: node script/gate-bridge-create-release-manifest.mjs "$VERSION" "$RELEASE_ID" "$RUNNER_TEMP/fcgs-signed-package/assets" "$RUNNER_TEMP/fcgs-signed-package"
+      - name: Assume narrowly scoped AWS release-signing role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.FCGS_KMS_RELEASE_SIGNER_ROLE_ARN }}
+          aws-region: af-south-1
+      - name: Sign with AWS KMS (private key never exported)
+        env:
+          KEY_ARN: ${{ vars.FCGS_KMS_RELEASE_SIGNING_KEY_ARN }}
+          PINNED_PUB_SHA256: ${{ vars.FCGS_KMS_PUBLIC_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ "$KEY_ARN" == arn:aws:kms:af-south-1:*:key/* ]] || { echo 'Expected an explicit Cape Town KMS key ARN'; exit 1; }
+          [[ "$PINNED_PUB_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]] || { echo 'Missing independently verified public-key fingerprint'; exit 1; }
+          package="$RUNNER_TEMP/fcgs-signed-package"
+          aws kms get-public-key --key-id "$KEY_ARN" --query PublicKey --output text | base64 -d > "$package/key.der"
+          echo "$PINNED_PUB_SHA256  $package/key.der" | sha256sum -c -
+          openssl pkey -pubin -inform DER -in "$package/key.der" -out "$package/key.pem"
+          rm "$package/key.der"
+          aws kms sign --key-id "$KEY_ARN" --message "fileb://$package/manifest.json" --message-type RAW --signing-algorithm ED25519_SHA_512 --query Signature --output text | base64 -d > "$package/manifest.sig"
+          aws kms verify --key-id "$KEY_ARN" --message "fileb://$package/manifest.json" --signature "fileb://$package/manifest.sig" --message-type RAW --signing-algorithm ED25519_SHA_512 --query SignatureValid --output text | grep -qx True
+          node -e 'const c=require("node:crypto"),f=require("node:fs"),p=process.argv[1];if(!c.verify(null,f.readFileSync(`${p}/manifest.json`),f.readFileSync(`${p}/key.pem`),f.readFileSync(`${p}/manifest.sig`)))process.exit(1)' "$package"
+          printf '%s\n' "$KEY_ARN" > "$package/signer-key-id.txt"
+          rm "$package/key.pem"
+      - name: Preserve approved signed release as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-fcgs-${{ inputs.release_id }}
+          path: ${{ runner.temp }}/fcgs-signed-package/
+          if-no-files-found: error
+          retention-days: 30
+# IMPORTANT: Do not auto-enable or auto-publish unattended Windows updates from a PR.
+# Publication is a separate audited step on Ubuntu; windows update installation is
+# disabled by default until the independently pinned Update Agent is bootstrapped.

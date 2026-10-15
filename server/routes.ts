@@ -17,11 +17,16 @@ import { registerRecruitmentRoutes } from "./recruitment-routes";
 import { registerLanguageToolsRoutes } from "./language-tools-routes";
 import { registerFleetRoutes } from "./fleet-routes";
 import { registerAccessControlRoutes } from "./access-control-routes";
+import { registerGateBridgeAutomaticUpdates } from "./gate-bridge-auto-updates";
+import { sageCode } from "./sage-matching";
 import { registerGateBridgeBuild2Routes } from "./gate-bridge-build2";
 import { registerAccessControlOperations, getSchoolDaySchedule, sendAttendanceTemplate, syncSchoolAccessPolicies, syncStudentPolicy } from "./access-control-operations";
 import { registerAttendanceReportingRoutes } from "./attendance-reporting";
 import { registerFeesImportRoutes } from "./fees-import-routes";
-import { registerFeeScheduleRoutes, resolveStudentFeePosition } from "./fees-schedule";
+import { registerFeeScheduleRoutes, resolveStudentFeePosition, invalidateFeeScheduleCache } from "./fees-schedule";
+import { resolveAcademicCalendar, SCHOOL_CALENDAR_FIELDS } from "@shared/academic-calendar";
+import { applyHeadquartersCalendar } from "./academic-calendar";
+import { newsletterSmsText, estimateSmsSegments } from "@shared/sms-segments";
 import { registerPortalRoutes } from "./portal-routes";
 import { describeParentIdentityMatch, existingUserForParentIdentity, getAccessibleSchoolIdsForParentUser, getChildrenForParentUser, getParentIdsForUser, linkParentIdentityToUser, normalizeParentPhone, parentUserCanAccessStudent } from "./parent-identity";
 import { fleetRequirementForSchool } from "./school-feature-flags";
@@ -48,7 +53,7 @@ import {
   insertOrganizationSchema, insertSchoolSchema, insertLibraryResourceSchema, insertLibraryCategorySchema, insertLibraryShelfSchema, insertLibraryBookSchema, insertLibraryLoanSchema, insertLibraryFineSchema, insertLibraryReservationSchema,
   libraryBooks as libraryBooksTable, libraryBookCopies as libraryBookCopiesTable, libraryFines as libraryFinesTable, libraryReservations as libraryReservationsTable,
   insertTimetableSlotSchema, insertLogbookEntrySchema, insertStaffAttendanceLogSchema, insertPosItemSchema,
-  schools as schoolsTable, staff, parents as parentsTable, feesImportBatches, feesImportItems, attendanceRecords, gateDevices, accessGates, accessEvents, financialAccessOverrides,
+  schools as schoolsTable, staff, parents as parentsTable, feesImportBatches, feesImportItems, sageIdentityLinks, activityLogs, attendanceRecords, gateDevices, accessGates, accessEvents, financialAccessOverrides,
   insertNewsletterSchema,
   insertHostelSchema, insertHostelRollCallSchema, insertStudentApplicationSchema,
   hostels as hostelsTable,
@@ -3584,6 +3589,7 @@ export async function registerRoutes(
   registerLanguageToolsRoutes(app);
   registerFleetRoutes(app);
   registerAccessControlRoutes(app);
+  registerGateBridgeAutomaticUpdates(app);
   registerGateBridgeBuild2Routes(app);
   registerAccessControlOperations(app);
   registerAttendanceReportingRoutes(app);
@@ -5906,6 +5912,13 @@ export async function registerRoutes(
       if (!effectiveSchoolId) {
         return res.status(400).json({ message: "School context is required before an admission number can be assigned" });
       }
+      if (Object.prototype.hasOwnProperty.call(data, "feesCustomerId") && !await storage.userHasPermission(currentUser.id, "fees.sage_mapping.manage")) {
+        return res.status(403).json({ message: "Sage Evolution ID management permission required" });
+      }
+      if (data.feesCustomerId) {
+        const collision = await db.select({ id: studentsTable.id }).from(studentsTable).where(and(eq(studentsTable.schoolId, effectiveSchoolId), sql`lower(trim(${studentsTable.feesCustomerId})) = lower(trim(${data.feesCustomerId}))`)).limit(1);
+        if (collision.length) return res.status(409).json({ message: "This Sage Evolution ID is already associated with another learner at this school" });
+      }
       const normalizedData: any = {
         ...data,
         nationalIdNumber: data.nationalIdNumber?.trim() || null,
@@ -5933,7 +5946,9 @@ export async function registerRoutes(
       const newStudent = await storage.createStudent({
         ...normalizedData,
         statusDate: normalizedData.statusDate || normalizedData.enrollmentDate || new Date().toISOString().slice(0, 10),
-      });
+      }, data.feesCustomerId ? async (tx, student) => {
+        await tx.insert(sageIdentityLinks).values({schoolId:effectiveSchoolId,studentId:student.id,customerCode:data.feesCustomerId!.trim(),normalizedCode:sageCode(data.feesCustomerId),confirmedByUserId:currentUser.id,source:"manual_registration"});
+      } : undefined);
       await db.insert(studentEnrollmentEvents).values({
         studentId: newStudent.id, schoolId: newStudent.schoolId, eventType: "enrolled",
         effectiveDate: newStudent.enrollmentDate || newStudent.statusDate || new Date().toISOString().slice(0, 10),
@@ -5944,6 +5959,52 @@ export async function registerRoutes(
     } catch (error) {
       next(error);
     }
+  });
+
+  // Dedicated, field-only financial-identity editor: does NOT confer students.edit.
+  app.patch("/api/students/:id/sage-identity", requireAuth, requirePermission("fees.sage_mapping.manage"), async (req, res, next) => {
+    try {
+      const user = req.user as User;
+      const selectedSchoolId = getSchoolContext(req) || user.schoolId;
+      const studentId = parseIdParam(req.params.id);
+      const existing = await storage.getStudent(studentId);
+      if (!existing || existing.archivedAt) return res.status(404).json({ message: "Student not available" });
+      // Imported/legacy student records may have no school; never link a Sage ID
+      // without a verified campus scope.
+      const studentSchoolId = existing.schoolId;
+      if (studentSchoolId == null) return res.status(409).json({ message: "Student has no school assignment; resolve it before linking Sage identity" });
+      if (selectedSchoolId && studentSchoolId !== selectedSchoolId) return res.status(403).json({ message: "Another campus's Sage identifiers cannot be changed" });
+      const school = await storage.getSchool(studentSchoolId);
+      if (!school) return res.status(404).json({ message: "Student's school not found" });
+      if (user.organizationId && user.organizationId !== school.organizationId) return res.status(403).json({ message: "Organisation access denied" });
+      if (user.role === "org_admin" && !user.organizationId) {
+        const allowed = await storage.getUserSchoolAccess(user.id);
+        if (!allowed.includes(studentSchoolId)) return res.status(403).json({ message: "School access denied" });
+      }
+      if (user.role !== "org_admin" && user.schoolId !== studentSchoolId) return res.status(403).json({ message: "School access denied" });
+      if (typeof req.body?.sageEvolutionId !== "string") return res.status(400).json({ message: "Sage Evolution ID must be a string (empty to clear)" });
+      const newCode = req.body.sageEvolutionId.trim();
+      const reason = String(req.body?.reason || "").trim();
+      if (newCode.length > 120 || reason.length > 500) return res.status(400).json({message:"Invalid ID or reason length"});
+      const oldNormalized = sageCode(existing.feesCustomerId);
+      const newNormalized = sageCode(newCode);
+      if (oldNormalized && newNormalized !== oldNormalized && reason.length < 3) return res.status(400).json({message:"A correction reason is required to change an existing Sage ID"});
+      if (newNormalized && !reason) return res.status(400).json({message:"Record the evidence for the verified Sage association"});
+      const result = await db.transaction(async tx => {
+        const [existingLink] = await tx.select().from(sageIdentityLinks).where(and(eq(sageIdentityLinks.studentId,existing.id),eq(sageIdentityLinks.schoolId,studentSchoolId))).limit(1);
+        const [collision] = newNormalized ? await tx.select().from(sageIdentityLinks).where(and(eq(sageIdentityLinks.schoolId,studentSchoolId),eq(sageIdentityLinks.normalizedCode,newNormalized))).limit(1) : [];
+        if (collision && collision.studentId !== existing.id) throw new Error("Sage ID is already verified against another student at this school");
+        const [legacyCollision] = newNormalized ? await tx.select({id:studentsTable.id}).from(studentsTable).where(and(eq(studentsTable.schoolId,studentSchoolId),sql`lower(trim(${studentsTable.feesCustomerId})) = ${newNormalized}`,sql`${studentsTable.id} <> ${studentId}`)).limit(1) : [];
+        if(legacyCollision)throw new Error("Another student has this legacy Sage ID; investigate before linking");
+        if(existingLink && existingLink.normalizedCode!==newNormalized)await tx.delete(sageIdentityLinks).where(eq(sageIdentityLinks.id,existingLink.id));
+        if(newNormalized && !existingLink)await tx.insert(sageIdentityLinks).values({schoolId:studentSchoolId,studentId,customerCode:newCode,normalizedCode:newNormalized,confirmedByUserId:user.id,source:"manual_student_record"});
+        if(newNormalized && existingLink && existingLink.normalizedCode!==newNormalized)await tx.insert(sageIdentityLinks).values({schoolId:studentSchoolId,studentId,customerCode:newCode,normalizedCode:newNormalized,confirmedByUserId:user.id,source:"manual_student_record"});
+        const [updated] = await tx.update(studentsTable).set({feesCustomerId:newCode||null}).where(and(eq(studentsTable.id,studentId),eq(studentsTable.schoolId,studentSchoolId))).returning();
+        await tx.insert(activityLogs).values({schoolId:studentSchoolId,organizationId:school.organizationId,userId:user.id,userRole:user.role,action:"sage_mapping_student_record",category:"finance",description:`Student ${studentId}: Sage mapping verified or corrected`,targetType:"student",targetId:studentId,metadata:{previousId:existing.feesCustomerId||null,newId:newCode||null,reason,source:"dedicated_sage_editor"}});
+        return updated;
+      });
+      return res.json({studentId:result.id,sageEvolutionId:result.feesCustomerId});
+    } catch(error) { return res.status(409).json({message:error instanceof Error?error.message:"Sage association update failed"}); }
   });
 
   app.put("/api/students/:id", requireAuth, requirePermission("students.edit"), async (req, res, next) => {
@@ -5961,10 +6022,27 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Student not found" });
       }
-      if (schoolId && existing.schoolId !== schoolId) {
+      // A financial identity must only be associated with a known campus.
+      // Capture the validated school ID once for all nested transaction callbacks.
+      const studentSchoolId = existing.schoolId;
+      if (studentSchoolId == null) {
+        return res.status(409).json({ message: "Student has no school assignment; resolve it before editing this record" });
+      }
+      if (schoolId && studentSchoolId !== schoolId) {
         return res.status(403).json({ message: "Access denied" });
       }
-      const normalizedData: any = { ...(req.body || {}) };
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "feesCustomerId")) {
+        if (!await storage.userHasPermission(currentUser.id, "fees.sage_mapping.manage")) return res.status(403).json({ message: "Sage Evolution ID management permission required" });
+        if (req.body.feesCustomerId !== null && typeof req.body.feesCustomerId !== "string") return res.status(400).json({ message: "Invalid Sage Evolution ID" });
+        const sageId = String(req.body.feesCustomerId || "").trim();
+        if (sageId.length > 120) return res.status(400).json({ message: "Sage Evolution ID is too long" });
+        if (sageId) {
+          const collision = await db.select({ id: studentsTable.id }).from(studentsTable).where(and(eq(studentsTable.schoolId, studentSchoolId), sql`lower(trim(${studentsTable.feesCustomerId})) = lower(${sageId.toLowerCase()})`, sql`${studentsTable.id} <> ${studentId}`)).limit(1);
+          if (collision.length) return res.status(409).json({ message: "This Sage Evolution ID is already associated with another learner at this school" });
+        }
+      }
+      const { sageMappingChangeReason, ...studentInput } = (req.body || {});
+      const normalizedData: any = { ...studentInput };
       if (typeof normalizedData.nationalIdNumber === "string") normalizedData.nationalIdNumber = normalizedData.nationalIdNumber.trim() || null;
       if (typeof normalizedData.passportNumber === "string") normalizedData.passportNumber = normalizedData.passportNumber.trim() || null;
       if (Object.prototype.hasOwnProperty.call(normalizedData, "isDayScholar")) {
@@ -5980,7 +6058,7 @@ export async function registerRoutes(
         normalizedData.isDayScholar = false;
       }
       const resolvedGender = normalizedData.gender ?? existing.gender;
-      const resolvedSchoolId = normalizedData.schoolId ?? existing.schoolId;
+      const resolvedSchoolId = normalizedData.schoolId ?? studentSchoolId;
       if (Object.prototype.hasOwnProperty.call(normalizedData, "hostelId") && normalizedData.hostelId) {
         const hostel = await storage.getHostel(Number(normalizedData.hostelId));
         if (!hostel) {
@@ -5995,15 +6073,37 @@ export async function registerRoutes(
       }
       const statusChanged = Object.prototype.hasOwnProperty.call(normalizedData, "status") && normalizedData.status !== existing.status;
       if (statusChanged) normalizedData.statusDate = new Date().toISOString().slice(0, 10);
-      const updated = await storage.updateStudent(studentId, normalizedData);
+      // Sage association and visible student identifier must change in ONE transaction.
+      // Never leave a new identifier in Student Records without a verified identity link.
+      const sageChangeRequested = Object.prototype.hasOwnProperty.call(normalizedData,"feesCustomerId");
+      if (sageChangeRequested && sageCode(existing.feesCustomerId) !== sageCode(normalizedData.feesCustomerId) && existing.feesCustomerId && !String(req.body?.sageMappingChangeReason||"").trim()) {
+        return res.status(400).json({message:"Provide a reason for correcting this student's existing Sage Evolution ID"});
+      }
+      const previousCode = sageCode(existing.feesCustomerId);
+      const proposedCode = sageCode(normalizedData.feesCustomerId);
+      const updated = !sageChangeRequested || previousCode === proposedCode
+        ? await storage.updateStudent(studentId, normalizedData)
+        : await db.transaction(async (tx) => {
+          const [existingLink] = await tx.select().from(sageIdentityLinks).where(and(eq(sageIdentityLinks.schoolId,studentSchoolId),eq(sageIdentityLinks.studentId,studentId))).limit(1);
+          const [conflictingLink] = proposedCode ? await tx.select().from(sageIdentityLinks).where(and(eq(sageIdentityLinks.schoolId,studentSchoolId),eq(sageIdentityLinks.normalizedCode,proposedCode))).limit(1) : [];
+          if(conflictingLink && conflictingLink.studentId!==studentId) throw new Error("This Sage ID is already linked to another student");
+          if(existingLink) await tx.delete(sageIdentityLinks).where(eq(sageIdentityLinks.id,existingLink.id));
+          if(proposedCode) await tx.insert(sageIdentityLinks).values({schoolId:studentSchoolId,studentId,customerCode:String(normalizedData.feesCustomerId).trim(),normalizedCode:proposedCode,confirmedByUserId:currentUser.id,source:"manual_student_edit"});
+          const [row] = await tx.update(studentsTable).set(normalizedData).where(and(eq(studentsTable.id,studentId),eq(studentsTable.schoolId,studentSchoolId),isNull(studentsTable.archivedAt))).returning();
+          if(!row)throw new Error("Student no longer exists");
+          return row;
+        });
       if (updated && statusChanged) {
         await db.insert(studentEnrollmentEvents).values({
-          studentId, schoolId: existing.schoolId, eventType: "status_changed", effectiveDate: normalizedData.statusDate,
+          studentId, schoolId: studentSchoolId, eventType: "status_changed", effectiveDate: normalizedData.statusDate,
           reason: `Status changed to ${normalizedData.status}`, previousStatus: existing.status || null, newStatus: normalizedData.status, createdByUserId: currentUser.id,
         });
       }
       if (!updated) {
         return res.status(404).json({ message: "Student not found" });
+      }
+      if (Object.prototype.hasOwnProperty.call(normalizedData, "feesCustomerId") && String(existing.feesCustomerId || "").trim() !== String(normalizedData.feesCustomerId || "").trim()) {
+        logActivity(req, { action: "sage_mapping_changed", category: "finance", description: `Sage Evolution ID changed for student #${studentId}`, targetType: "student", targetId: studentId, metadata: { previousId: existing.feesCustomerId || null, newId: normalizedData.feesCustomerId || null, reason: String(sageMappingChangeReason || "").trim() || "Initial association" } });
       }
       res.json(updated);
     } catch (error) {
@@ -8023,7 +8123,7 @@ ${schoolName}`;
   app.get("/api/organizations", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
       const orgs = await storage.getAllOrganizations();
-      res.json(orgs);
+      res.json(orgs.map(org => ({ ...org, currentTerm: resolveAcademicCalendar(org).period })));
     } catch (error) {
       next(error);
     }
@@ -8033,7 +8133,7 @@ ${schoolName}`;
     try {
       const org = await storage.getOrganization(parseIdParam(req.params.id));
       if (!org) return res.status(404).json({ message: "Organization not found" });
-      res.json(org);
+      res.json({ ...org, currentTerm: resolveAcademicCalendar(org).period });
     } catch (error) {
       next(error);
     }
@@ -8052,6 +8152,17 @@ ${schoolName}`;
   app.put("/api/organizations/:id", requireAuth, requireRole("org_admin"), async (req, res, next) => {
     try {
       const data = { ...req.body };
+      // The active period is computed from dates on every read; never persist a manually selected term.
+      delete data.currentTerm;
+      const originalOrg = await storage.getOrganization(parseIdParam(req.params.id));
+      if (!originalOrg) return res.status(404).json({ message: "Organization not found" });
+      if (SCHOOL_CALENDAR_FIELDS.some(key => key !== "currentTerm" && Object.prototype.hasOwnProperty.call(data, key))) {
+        const proposed = { ...originalOrg, ...data };
+        const resolved = resolveAcademicCalendar(proposed);
+        if (resolved.error && ["term1StartDate", "term1EndDate", "term2StartDate", "term2EndDate", "term3StartDate", "term3EndDate"].every(key => !!proposed[key as keyof typeof proposed])) {
+          return res.status(400).json({ message: resolved.error });
+        }
+      }
       if (data.photoUploadLimitMB !== undefined) {
         const allowed = [2, 5, 10, 15, 20];
         if (!allowed.includes(data.photoUploadLimitMB)) {
@@ -8060,7 +8171,8 @@ ${schoolName}`;
       }
       const updated = await storage.updateOrganization(parseIdParam(req.params.id), data);
       if (!updated) return res.status(404).json({ message: "Organization not found" });
-      res.json(updated);
+      invalidateFeeScheduleCache();
+      res.json({ ...updated, currentTerm: resolveAcademicCalendar(updated).period });
     } catch (error) {
       next(error);
     }
@@ -8098,7 +8210,8 @@ ${schoolName}`;
       if (!school) {
         return res.status(404).json({ message: "School not found" });
       }
-      res.json(school);
+      const org = school.organizationId ? await storage.getOrganization(school.organizationId) : null;
+      res.json(applyHeadquartersCalendar(school, org));
     } catch (error) {
       next(error);
     }
@@ -8112,13 +8225,18 @@ ${schoolName}`;
       // If not (org_admin at HQ level), return all schools in their org
       if (schoolId) {
         const school = schoolsList.find(s => s.id === schoolId);
-        res.json(school ? [school] : []);
+        const org = school?.organizationId ? await storage.getOrganization(school.organizationId) : null;
+        res.json(school ? [applyHeadquartersCalendar(school, org)] : []);
       } else {
         const currentUser = req.user as User;
         const filtered = currentUser.organizationId
           ? schoolsList.filter(s => s.organizationId === currentUser.organizationId)
           : schoolsList;
-        res.json(filtered);
+        const effective = await Promise.all(filtered.map(async school => {
+          const org = school.organizationId ? await storage.getOrganization(school.organizationId) : null;
+          return applyHeadquartersCalendar(school, org);
+        }));
+        res.json(effective);
       }
     } catch (error) {
       next(error);
@@ -8129,7 +8247,8 @@ ${schoolName}`;
     try {
       const school = await storage.getSchool(parseIdParam(req.params.id));
       if (!school) return res.status(404).json({ message: "School not found" });
-      res.json(school);
+      const org = school.organizationId ? await storage.getOrganization(school.organizationId) : null;
+      res.json(applyHeadquartersCalendar(school, org));
     } catch (error) {
       next(error);
     }
@@ -8147,6 +8266,7 @@ ${schoolName}`;
         ...req.body,
         organizationId: currentUser.organizationId,
       });
+      for (const key of SCHOOL_CALENDAR_FIELDS) delete (data as Record<string, unknown>)[key];
       const newSchool = await storage.createSchool(data);
 
       const orgUsers = await db.select({ id: users.id }).from(users).where(and(eq(users.role, "org_admin"), currentUser.organizationId ? eq(users.organizationId, currentUser.organizationId) : sql`1=1`));
@@ -8198,7 +8318,10 @@ ${schoolName}`;
         }
       }
 
-      const updated = await storage.updateSchool(schoolId, req.body);
+      const schoolUpdate = { ...req.body };
+      // No campus may override the Headquarters calendar, even with a direct API request.
+      for (const key of SCHOOL_CALENDAR_FIELDS) delete schoolUpdate[key];
+      const updated = await storage.updateSchool(schoolId, schoolUpdate);
       if (!updated) return res.status(404).json({ message: "School not found" });
       if (before.enableAccessControl !== updated.enableAccessControl) {
         await syncSchoolAccessPolicies(schoolId, (req.user as User).id, updated.enableAccessControl ? "Access Control enabled for school" : "Access Control disabled: keep enrolled people locally permitted");
@@ -10837,6 +10960,13 @@ ${schoolName}`;
       } else if (body.publishDate) {
         normalizedBody.publishDate = new Date(requestText(body.publishDate));
       }
+      if (publishRequested) {
+        const publishingChannels: string[] = Array.isArray(normalizedBody.channels) ? normalizedBody.channels : existing.channels || [];
+        const publishingContent = String(normalizedBody.content ?? existing.content ?? "");
+        if (publishingChannels.includes("sms") && !newsletterSmsText(publishingContent)) {
+          return res.status(400).json({ message: "The newsletter SMS text cannot be empty." });
+        }
+      }
       let resolvedPublishGroups: NewsletterRecipientGroup[] | null = null;
       if (publishRequested) {
         resolvedPublishGroups = await resolveNewsletterRecipientGroups(currentUser, req, schoolId, target);
@@ -10865,7 +10995,10 @@ ${schoolName}`;
         const publishSchoolId = updated.schoolId!;
         const audience = updated.targetAudience || "all";
         const targetScope = updated.targetScope || "all";
-        const plainText = updated.content.replace(/<[^>]*>/g, '');
+        const plainText = newsletterSmsText(updated.content);
+        if (channels.includes("sms") && !plainText) {
+          throw new Error("Newsletter SMS text is empty after content formatting. Publishing was stopped.");
+        }
         const publishGroups = resolvedPublishGroups || await resolveNewsletterRecipientGroups(
           currentUser,
           req,
@@ -10884,7 +11017,8 @@ ${schoolName}`;
           jobType: "newsletter_publish",
           title: `Publish newsletter - ${updated.title}`,
           totalCount,
-          metadata: { newsletterId: updated.id, channels, audience, targetScope, title: updated.title },
+          metadata: { newsletterId: updated.id, channels, audience, targetScope, title: updated.title,
+            smsSegmentsPerRecipient: channels.includes("sms") ? estimateSmsSegments(plainText).segments : 0 },
         }, async (jobId) => {
           let processed = 0;
           let sent = 0;
@@ -10948,7 +11082,7 @@ ${schoolName}`;
                 try {
                   const result = await communicationService.sendBulkSms(
                     smsRecipients,
-                    plainText.length > 160 ? `${plainText.substring(0, 157)}...` : plainText,
+                    plainText,
                     {
                       schoolId: publishSchoolId,
                       recipientType: group.recipientType,

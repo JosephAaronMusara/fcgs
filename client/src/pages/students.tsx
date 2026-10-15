@@ -59,6 +59,7 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100];
 export default function StudentsPage() {
   const { toast } = useToast();
   const { currentSchoolId, hasPermission } = useAuth();
+  const canManageSage = hasPermission("fees.sage_mapping.manage");
   const [search, setSearch] = useState("");
   const [classFilter, setClassFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -603,7 +604,9 @@ export default function StudentsPage() {
       return;
     }
 
-    const data: Partial<Student> = {
+    const data: Partial<Student> & {sageMappingChangeReason?: string} = {
+      ...(canManageSage && editingStudent?.feesCustomerId ? {sageMappingChangeReason: String(formData.get("sageMappingChangeReason") || "").trim()} : {}),
+      ...(canManageSage ? { feesCustomerId: ((formData.get("feesCustomerId") as string) || "").trim() || null } : {}),
       firstName: formData.get("firstName") as string,
       lastName: formData.get("lastName") as string,
       nationalIdNumber: ((formData.get("nationalIdNumber") as string) || "").trim() || undefined,
@@ -862,6 +865,7 @@ export default function StudentsPage() {
                 isBoardingSchool={isBoardingSchool}
                 hostels={hostels || []}
                 quickAddedParent={recentQuickAddedParent}
+                canManageSage={canManageSage}
               />
             </DialogContent>
           </Dialog>
@@ -1098,6 +1102,7 @@ export default function StudentsPage() {
                                 isBoardingSchool={isBoardingSchool}
                                 hostels={hostels || []}
                                 quickAddedParent={recentQuickAddedParent}
+                                canManageSage={canManageSage}
                               />
                             </DialogContent>
                           </Dialog>
@@ -1618,6 +1623,16 @@ function StudentView({
   isBoardingSchool: boolean;
   onEdit: () => void;
 }) {
+  const {hasPermission}=useAuth();
+  const {toast}=useToast();
+  const canManageSage=hasPermission("fees.sage_mapping.manage");
+  const [sageDialog,setSageDialog]=useState(false);
+  const [sageCodeText,setSageCodeText]=useState(student.feesCustomerId||"");
+  const [sageReason,setSageReason]=useState("");
+  const sageSave=useMutation({mutationFn:async()=>{
+    const r=await schoolFetch(`/api/students/${student.id}/sage-identity`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({sageEvolutionId:sageCodeText,reason:sageReason})});
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.message||"Sage ID update failed");}return r.json();
+  },onSuccess:()=>{setSageDialog(false);queryClient.invalidateQueries({queryKey:["/api/students"]});toast({title:"Sage Evolution ID updated"});},onError:(e:Error)=>toast({title:"Sage ID not changed",description:e.message,variant:"destructive"})});
   const studentType = student.isDayScholar ? "Day Scholar" : "Boarder";
   const externalTransferEvent = student.lifecycle?.events?.find((event) => event.eventType === "transfer_out") || null;
   const restoreEvent = student.lifecycle?.events?.find((event) => event.eventType === "restored") || null;
@@ -1650,6 +1665,11 @@ function StudentView({
         <div>
           <h3 className="text-lg font-semibold">{student.firstName} {student.lastName}</h3>
           <p className="text-sm text-muted-foreground">Admission No: {student.admissionNo}</p>
+          <div className="flex flex-wrap items-center gap-2 text-sm"><span className="text-muted-foreground">Sage Evolution ID: {student.feesCustomerId||"Not linked"}</span>
+            {canManageSage&&<Button size="sm" variant="outline" onClick={()=>{setSageCodeText(student.feesCustomerId||"");setSageReason("");setSageDialog(true);}}>Manage Sage ID</Button>}
+          </div>
+          <Dialog open={sageDialog} onOpenChange={setSageDialog}><DialogContent><DialogHeader><DialogTitle>Manage Sage Evolution ID</DialogTitle><DialogDescription>Changes affect financial identity matching. Confirm the customer account against Sage before saving. This action is recorded in the audit log.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1"><Label>Sage Evolution ID</Label><Input value={sageCodeText} onChange={e=>setSageCodeText(e.target.value)} maxLength={120}/></div><div className="space-y-1"><Label>Reason / verification evidence</Label><Input value={sageReason} onChange={e=>setSageReason(e.target.value)} maxLength={500} placeholder="How was this Sage account verified?"/></div></div><DialogFooter><Button variant="outline" onClick={()=>setSageDialog(false)}>Cancel</Button><Button disabled={sageSave.isPending||!sageReason.trim()} onClick={()=>sageSave.mutate()}>{sageSave.isPending?"Saving...":"Confirm Sage Identity"}</Button></DialogFooter></DialogContent></Dialog>
+
           <p className="text-sm text-muted-foreground">Status: {student.status || "-"}</p>
         </div>
       </div>
@@ -1788,6 +1808,7 @@ function StudentForm({
   isBoardingSchool,
   hostels,
   quickAddedParent,
+  canManageSage = false,
 }: {
   onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
   classes: Class[];
@@ -1801,6 +1822,7 @@ function StudentForm({
   isBoardingSchool: boolean;
   hostels: Hostel[];
   quickAddedParent?: Parent | null;
+  canManageSage?: boolean;
 }) {
   const defaultEmbeddedParent = defaultValues?.parent && typeof defaultValues.parent === "object"
     ? defaultValues.parent
@@ -1978,18 +2000,14 @@ function StudentForm({
   const showHostelField = isBoardingSchool && studentTypeValue === "false";
   return (
     <form onSubmit={onSubmit} className="space-y-4">
-      <div className="mb-2 flex flex-col gap-4 sm:flex-row sm:items-start">
-        <div className="flex flex-col items-center gap-1.5">
+      <div className="mb-2 flex flex-col gap-3 sm:flex-row sm:items-start">
+        <div className="flex shrink-0 flex-col items-center gap-1.5">
           <div
-            className="w-20 h-20 rounded-md border border-gray-300 dark:border-gray-600 overflow-hidden flex items-center justify-center bg-gray-50 dark:bg-gray-800 cursor-pointer"
+            className="h-[274px] w-[200px] rounded-md border border-gray-300 dark:border-gray-600 overflow-hidden flex items-center justify-center bg-gray-50 dark:bg-gray-800 cursor-pointer"
             onClick={() => defaultValues?.id && galleryPhotoInputRef.current?.click()}
             data-testid="button-upload-student-photo"
           >
-            {photoPreview ? (
-              <img src={photoPreview} alt="Student" className="w-full h-full object-cover" />
-            ) : (
-              <Camera className="w-8 h-8 text-gray-400" />
-            )}
+            {photoPreview ? <img src={photoPreview} alt="Student" className="h-full w-full object-cover" /> : <Camera className="h-12 w-12 text-gray-400" />}
           </div>
           {defaultValues?.id && (
             <>
@@ -2034,50 +2052,58 @@ function StudentForm({
             </>
           )}
         </div>
-        <div className="grid flex-1 grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="space-y-2">
-          <Label htmlFor="admissionNo">Admission No</Label>
-          <Input
-            id="admissionNo"
-            value={defaultValues?.admissionNo || defaultAdmissionNo || "Assigned automatically when saved"}
-            readOnly
-            aria-readonly="true"
-            className="bg-muted font-mono"
-            data-testid="input-admission-no"
-          />
-          <p className="text-xs text-muted-foreground">
-            {defaultValues ? "Permanent identifier — it cannot be edited." : "Preview only. The server assigns the final number when you save."}
-          </p>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="status">Status</Label>
-          <Select name="status" defaultValue={defaultValues?.status || "active"}>
-            <SelectTrigger data-testid="select-status">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="inactive">Inactive</SelectItem>
-              <SelectItem value="transferred">Transferred</SelectItem>
-              <SelectItem value="internally_transferred">Internally Transferred</SelectItem>
-              <SelectItem value="graduated">Graduated</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="isDayScholar">Student Type</Label>
-          <Select name="isDayScholar" value={studentTypeValue} onValueChange={setStudentTypeValue}>
-            <SelectTrigger data-testid="select-day-scholar">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="false">Boarder</SelectItem>
-              <SelectItem value="true">Day Scholar</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <div className="flex min-w-0 flex-1 flex-col gap-3 sm:h-[274px] sm:justify-between">
+          <fieldset className="space-y-1.5" aria-label="Enrolment Category (future feature)" disabled>
+            <legend className="text-sm font-medium">Enrolment Category</legend>
+            <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+              <label className="flex items-center gap-2 text-muted-foreground"><input type="radio" name="futureEnrollmentCategory" value="internal" disabled /> Internal — Regular FCGS Learner</label>
+              <label className="flex items-center gap-2 text-muted-foreground"><input type="radio" name="futureEnrollmentCategory" value="external" disabled /> External — Vacation School Only</label>
+            </div>
+          </fieldset>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="admissionNo">Admission No</Label>
+              <Input id="admissionNo" value={defaultValues?.admissionNo || defaultAdmissionNo || "Assigned automatically when saved"} readOnly aria-readonly="true" className="bg-muted font-mono" data-testid="input-admission-no" />
+              <p className="text-[11px] leading-tight text-muted-foreground">{defaultValues ? "Permanent identifier — it cannot be edited." : "Preview only. The server assigns the final number when you save."}</p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="feesCustomerId">Sage Evolution ID</Label>
+              <Input id="feesCustomerId" name={canManageSage ? "feesCustomerId" : undefined} key={defaultValues?.id || "new"} defaultValue={defaultValues?.feesCustomerId || ""} readOnly={!canManageSage} aria-readonly={!canManageSage} autoComplete="off" maxLength={120} data-testid="input-sage-evolution-id" />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="status">Status</Label>
+              <Select name="status" defaultValue={defaultValues?.status || "active"}>
+                <SelectTrigger data-testid="select-status"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">Active</SelectItem>
+                  <SelectItem value="inactive">Inactive</SelectItem>
+                  <SelectItem value="transferred">Transferred</SelectItem>
+                  <SelectItem value="internally_transferred">Internally Transferred</SelectItem>
+                  <SelectItem value="graduated">Graduated</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="isDayScholar">Student Type</Label>
+              <Select name="isDayScholar" value={studentTypeValue} onValueChange={setStudentTypeValue}>
+                <SelectTrigger data-testid="select-day-scholar"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="false">Boarder</SelectItem>
+                  <SelectItem value="true">Day Scholar</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
         </div>
       </div>
+      {canManageSage && defaultValues?.feesCustomerId && (
+        <div className="space-y-1">
+          <Label htmlFor="sageMappingChangeReason">Reason for correcting an existing Sage Evolution ID (required only when the ID changes)</Label>
+          <Input id="sageMappingChangeReason" name="sageMappingChangeReason" maxLength={500} placeholder="Reason for Sage ID correction" />
+        </div>
+      )}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="firstName">First Name</Label>

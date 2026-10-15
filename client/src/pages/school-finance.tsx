@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import FeeBalanceImportDialog from "@/components/fee-balance-import-dialog";
+import SageReconciliationWorkspace from "@/components/sage-reconciliation-workspace";
 import FeeScheduleDialog, { type FeeSchedulePosition } from "@/components/fee-schedule-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -235,6 +236,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
   const [selectedStudent, setSelectedStudent] = useState<FeesSummaryStudent | null>(null);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [isSageMatchingOpen, setIsSageMatchingOpen] = useState(false);
   const [isFeeScheduleOpen, setIsFeeScheduleOpen] = useState(false);
 
   const { data: feePosition } = useQuery<FeeSchedulePosition>({
@@ -441,6 +443,7 @@ function StudentPaymentsTabContent({ isActive }: { isActive: boolean }) {
         <div className="flex items-center gap-2 flex-wrap">
           {canManageFeeSchedule && <FeeScheduleDialog open={isFeeScheduleOpen} onOpenChange={setIsFeeScheduleOpen} />}
           <FeeBalanceImportDialog open={isImportOpen} onOpenChange={setIsImportOpen} />
+          {(hasPermission("fees.import") || hasPermission("fees.sage_mapping.manage")) && <><Button variant="outline" onClick={() => setIsSageMatchingOpen(true)}>Sage Matching & Reconciliation</Button><SageReconciliationWorkspace open={isSageMatchingOpen} onOpenChange={setIsSageMatchingOpen} /></>}
           <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
             <DialogTrigger asChild>
               <Button data-testid="button-add-payment">
