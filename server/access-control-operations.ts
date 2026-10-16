@@ -7,10 +7,10 @@ import sharp from "sharp";
 import { and, asc, desc, eq, gte, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
+import { GATE_UTC_NOW, gateUtcDeadlineAfterMs } from "./access-control-command-clock";
 import { requireAuth, requirePermission } from "./auth";
 import { communicationService } from "./communication";
 import { resolveStudentFeePosition } from "./fees-schedule";
-import { getSchoolAcademicCalendar } from "./academic-calendar";
 import {
   accessEvents,
   accessGates,
@@ -192,14 +192,13 @@ async function isAcademicOpenDay(schoolId: number, dateText: string) {
     eq(schoolDayOverrides.overrideDate, dateText),
   )).limit(1);
   if (override) return override.isSchoolDay;
-  const calendar = await getSchoolAcademicCalendar(schoolId);
-  // The HQ dates, not legacy per-campus dates, determine whether the school is in session.
-  // If HQ has no valid calendar, preserve the existing weekly schedule behaviour until configured.
-  if (calendar.error) return true;
-  return ["term1", "term2", "term3"].some(term => {
-    const dates = calendar.ranges[term as "term1" | "term2" | "term3"];
-    return !!dates && dateText >= dates.start && dateText <= dates.end;
-  });
+  const [school] = await db.select().from(schools).where(eq(schools.id, schoolId)).limit(1);
+  if (!school) return false;
+  const inRange = (start?: string | null, end?: string | null) => !!start && !!end && dateText >= start && dateText <= end;
+  // If term dates are configured, only term dates are school days. If not configured, use weekly schedule alone.
+  const configured = !!(school.term1StartDate || school.term2StartDate || school.term3StartDate);
+  if (!configured) return true;
+  return inRange(school.term1StartDate, school.term1EndDate) || inRange(school.term2StartDate, school.term2EndDate) || inRange(school.term3StartDate, school.term3EndDate);
 }
 
 function extractTemplatePlaceholders(value: string | null | undefined) {
@@ -364,7 +363,7 @@ async function queueCommand(device: typeof gateDevices.$inferSelect, commandType
     requestReason: reason,
     payload,
     requestedAt: now,
-    expiresAt: new Date(now.getTime() + ttlMs),
+    expiresAt: gateUtcDeadlineAfterMs(ttlMs),
   }).returning();
   return command;
 }
@@ -816,12 +815,12 @@ function retryDelayMs(retryCount: number) {
 }
 
 async function processIdentityRetryQueue(now: Date) {
-  const staleProcessingBefore = new Date(now.getTime() - 20 * 60_000);
-  await db.update(gateCommands).set({ status: "uncertain", completedAt: now, errorMessage: "Execution acknowledgement lost or lease expired; verify terminal state before retrying." }).where(and(
+  await db.update(gateCommands).set({ status: "uncertain", completedAt: GATE_UTC_NOW, errorMessage: "Execution acknowledgement lost or lease expired; verify terminal state before retrying." }).where(and(
     eq(gateCommands.status, "processing"),
     // Also unblock a terminal when an urgent open, read-only verification, or
     // configuration command loses its lease. Never automatically replay an open.
-    sql`(${gateCommands.leaseExpiresAt} < ${now} OR (${gateCommands.leaseExpiresAt} IS NULL AND ${gateCommands.claimedAt} < ${staleProcessingBefore}))`,
+    // The two columns and the reference clock MUST all be UTC wall-clock values.
+    sql`(${gateCommands.leaseExpiresAt} < ${GATE_UTC_NOW} OR (${gateCommands.leaseExpiresAt} IS NULL AND ${gateCommands.claimedAt} < ${GATE_UTC_NOW} - INTERVAL '20 minutes'))`,
   ));
 
   const pending = await db.select().from(gateIdentitySync).where(eq(gateIdentitySync.syncStatus, "pending")).limit(200);
@@ -1698,12 +1697,9 @@ export function registerAccessControlOperations(app: Express) {
       if (input.expiresAt <= input.effectiveFrom) throw new Error("Override expiry must be after its effective start");
       const [student] = await db.select().from(students).where(and(eq(students.id, input.studentId), eq(students.schoolId, scope.schoolId))).limit(1);
       if (!student) throw new Error("Student not found");
-      const calendar = await getSchoolAcademicCalendar(scope.schoolId);
-      if (calendar.error || !calendar.term || !calendar.academicYear) {
-        throw new Error(calendar.error || "No current Headquarters academic term; financial overrides cannot be created outside a configured term.");
-      }
-      const academicYear = calendar.academicYear;
-      const term = calendar.term;
+      const [school] = await db.select().from(schools).where(eq(schools.id, scope.schoolId)).limit(1);
+      const academicYear = school?.currentAcademicYear || String(new Date().getFullYear());
+      const term = school?.currentTerm || "term1";
       const prior = await db.select({ id: financialAccessOverrides.id }).from(financialAccessOverrides).where(and(eq(financialAccessOverrides.studentId, student.id), eq(financialAccessOverrides.academicYear, academicYear), eq(financialAccessOverrides.term, term), sql`${financialAccessOverrides.status} IN ('active','expired','revoked','scheduled')`, sql`${financialAccessOverrides.activatedAt} IS NOT NULL OR ${financialAccessOverrides.effectiveFrom} <= now()`));
       if (prior.length >= 2) throw new Error("Maximum two activated financial access overrides are allowed per student per academic term");
       const now = new Date();

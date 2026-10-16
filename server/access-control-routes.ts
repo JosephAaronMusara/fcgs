@@ -4,6 +4,7 @@ import { createHash, randomBytes, randomUUID } from "crypto";
 import { and, asc, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
+import { GATE_UTC_NOW, gateUtcDeadlineAfterMs } from "./access-control-command-clock";
 import { configureExitScheduleForTerminal, queueIdentitySync } from "./access-control-operations";
 import { requirePermission } from "./auth";
 import {
@@ -687,7 +688,7 @@ export function registerAccessControlRoutes(app: Express) {
         const [existingCommand] = await db.select({ id: gateCommands.id }).from(gateCommands).where(and(
           eq(gateCommands.deviceId, device.id),
           inArray(gateCommands.status, ["pending", "processing"]),
-          gt(gateCommands.expiresAt, new Date()),
+          sql`${gateCommands.expiresAt} > ${GATE_UTC_NOW}`,
         )).limit(1);
         if (existingCommand) {
           skipped.push(device.id);
@@ -702,7 +703,7 @@ export function registerAccessControlRoutes(app: Express) {
           status: "pending",
           requestedByUserId: scope.userId,
           requestReason: `Test all terminals for ${gate.name}`,
-          expiresAt: new Date(Date.now() + TEST_COMMAND_TTL_MS),
+          expiresAt: gateUtcDeadlineAfterMs(TEST_COMMAND_TTL_MS),
         }).returning();
         queued.push(command.id);
       }
@@ -720,9 +721,9 @@ export function registerAccessControlRoutes(app: Express) {
       const commandId = Number(req.params.id);
       // Only pending open commands are expired during this read. This cannot
       // preempt an executing command, and the Bridge independently enforces TTL.
-      await db.update(gateCommands).set({ status: "expired", completedAt: new Date(), errorMessage: "Manual opening deadline elapsed before execution" }).where(and(
+      await db.update(gateCommands).set({ status: "expired", completedAt: GATE_UTC_NOW, errorMessage: "Manual opening deadline elapsed before execution" }).where(and(
         eq(gateCommands.id, commandId), eq(gateCommands.schoolId, scope.schoolId), eq(gateCommands.commandType, "open_gate"),
-        eq(gateCommands.status, "pending"), lt(gateCommands.expiresAt, new Date()),
+        eq(gateCommands.status, "pending"), sql`${gateCommands.expiresAt} < ${GATE_UTC_NOW}`,
       ));
       const [command] = await db.select({ id: gateCommands.id, status: gateCommands.status, errorMessage: gateCommands.errorMessage, completedAt: gateCommands.completedAt, claimedAt: gateCommands.claimedAt }).from(gateCommands).where(and(eq(gateCommands.id, commandId), eq(gateCommands.schoolId, scope.schoolId), eq(gateCommands.commandType, "open_gate"))).limit(1);
       if (!command) return res.status(404).json({ message: "Manual gate-opening request not found" });
@@ -756,7 +757,7 @@ export function registerAccessControlRoutes(app: Express) {
         status: "pending",
         requestedByUserId: scope.userId,
         requestReason: input.reason,
-        expiresAt: new Date(Date.now() + OPEN_COMMAND_TTL_MS),
+        expiresAt: gateUtcDeadlineAfterMs(OPEN_COMMAND_TTL_MS),
       }).returning();
       await logPortalAction(req, scope, "gate.command.open", `Requested manual opening of ${device.name}`, "gate_device", device.id, device.name, { commandId: command.id, reason: input.reason });
       await logGateEvent({ organizationId: scope.organizationId, schoolId: scope.schoolId, bridgeId: device.bridgeId, gateId: device.gateId, deviceId: device.id, sourceType: "portal", eventType: "terminal.manual_open_requested", severity: "security", message: `Manual open requested for ${device.name}.`, details: { commandId: command.id, reason: input.reason, requestedByUserId: scope.userId } });
@@ -783,7 +784,7 @@ export function registerAccessControlRoutes(app: Express) {
         status: "pending",
         requestedByUserId: scope.userId,
         requestReason: "Manual connection test",
-        expiresAt: new Date(Date.now() + TEST_COMMAND_TTL_MS),
+        expiresAt: gateUtcDeadlineAfterMs(TEST_COMMAND_TTL_MS),
       }).returning();
       await logPortalAction(req, scope, "gate.command.test", `Requested connection test for ${device.name}`, "gate_device", device.id, device.name, { commandId: command.id });
       await logGateEvent({ organizationId: scope.organizationId, schoolId: scope.schoolId, bridgeId: device.bridgeId, gateId: device.gateId, deviceId: device.id, sourceType: "portal", eventType: "terminal.test_requested", message: `Connection test requested for ${device.name}.`, details: { commandId: command.id } });
@@ -941,10 +942,10 @@ export function registerAccessControlRoutes(app: Express) {
     if (!bridge) return;
     try {
       const now = new Date();
-      await db.update(gateCommands).set({ status: "expired", completedAt: now }).where(and(
+      await db.update(gateCommands).set({ status: "expired", completedAt: GATE_UTC_NOW }).where(and(
         eq(gateCommands.bridgeId, bridge.id),
         eq(gateCommands.status, "pending"),
-        lt(gateCommands.expiresAt, now),
+        sql`${gateCommands.expiresAt} < ${GATE_UTC_NOW}`,
       ));
 
       if (bridge.lastSyncedRevision !== bridge.configurationRevision) {
@@ -961,25 +962,28 @@ export function registerAccessControlRoutes(app: Express) {
         const result = await db.execute(sql`
           WITH next AS (
             SELECT c.id FROM gate_commands c
-            WHERE c.bridge_id = ${bridge.id} AND c.status = 'pending' AND c.expires_at > NOW()
+            WHERE c.bridge_id = ${bridge.id} AND c.status = 'pending' AND c.expires_at > ${GATE_UTC_NOW}
               AND NOT EXISTS (SELECT 1 FROM gate_commands active WHERE active.device_id=c.device_id AND active.status='processing')
               AND NOT EXISTS (
                 SELECT 1 FROM gate_commands first
-                WHERE first.device_id=c.device_id AND first.status='pending' AND first.expires_at > NOW()
+                WHERE first.device_id=c.device_id AND first.status='pending' AND first.expires_at > ${GATE_UTC_NOW}
                   AND (first.priority < c.priority OR (first.priority = c.priority AND first.id < c.id))
               )
             ORDER BY c.priority ASC, c.requested_at ASC, c.id ASC
             LIMIT 1 FOR UPDATE OF c SKIP LOCKED
           )
-          UPDATE gate_commands c SET status='processing', claimed_at=NOW(), claim_token=${claimToken}, lease_expires_at=NOW()+INTERVAL '90 seconds'
+          UPDATE gate_commands c SET status='processing', claimed_at=${GATE_UTC_NOW}, claim_token=${claimToken}, lease_expires_at=${GATE_UTC_NOW}+INTERVAL '90 seconds'
           FROM next WHERE c.id=next.id
-          RETURNING c.id,c.device_id,c.command_type,c.payload,c.expires_at,c.claim_token
+          -- Interpret the UTC stored timestamp explicitly before node-postgres
+          -- serializes it to the Bridge; otherwise its local timezone can shift
+          -- an otherwise valid deadline by two hours.
+          RETURNING c.id,c.device_id,c.command_type,c.payload,(c.expires_at AT TIME ZONE 'UTC') AS expires_at,c.claim_token
         `);
         const row = result.rows[0] as any;
         if (!row) break;
         const [device] = await db.select({ deviceKey: gateDevices.deviceKey, name: gateDevices.name, gateId: gateDevices.gateId, lanePosition: gateDevices.lanePosition }).from(gateDevices).where(eq(gateDevices.id, row.device_id)).limit(1);
         if (!device) {
-          await db.update(gateCommands).set({ status: "failed", completedAt: new Date(), errorMessage: "Gate device no longer exists" }).where(eq(gateCommands.id, row.id));
+          await db.update(gateCommands).set({ status: "failed", completedAt: GATE_UTC_NOW, errorMessage: "Gate device no longer exists" }).where(eq(gateCommands.id, row.id));
           continue;
         }
         claimed.push({ id: row.id, commandType: row.command_type, payload: row.payload, expiresAt: row.expires_at, claimToken: row.claim_token, device: { deviceKey: device.deviceKey, name: device.name, gateId: device.gateId, lanePosition: device.lanePosition } });
@@ -995,7 +999,7 @@ export function registerAccessControlRoutes(app: Express) {
     const bridge = await requireBridge(req, res); if (!bridge) return;
     try {
       const token = z.string().uuid().parse(req.body?.claimToken);
-      const result = await db.execute(sql`UPDATE gate_commands SET lease_expires_at=NOW()+INTERVAL '90 seconds' WHERE id=${Number(req.params.id)} AND bridge_id=${bridge.id} AND status='processing' AND claim_token=${token} RETURNING id`);
+      const result = await db.execute(sql`UPDATE gate_commands SET lease_expires_at=${GATE_UTC_NOW}+INTERVAL '90 seconds' WHERE id=${Number(req.params.id)} AND bridge_id=${bridge.id} AND status='processing' AND claim_token=${token} RETURNING id`);
       if (!result.rows.length) return res.status(409).json({ message: "Command no longer owned by this Bridge execution" });
       res.json({ ok: true });
     } catch (error) { fail(res, error); }
@@ -1017,13 +1021,32 @@ export function registerAccessControlRoutes(app: Express) {
 
       const [device] = await db.select().from(gateDevices).where(eq(gateDevices.id, command.deviceId)).limit(1);
       const now = new Date();
-      await db.update(gateCommands).set({
+      // Compare-and-set prevents a completion racing the lease-expiry scheduler
+      // from overwriting `uncertain`, and prevents duplicate side effects from
+      // two concurrent acknowledgements for the same execution.
+      const completed = await db.update(gateCommands).set({
         status: input.success ? "succeeded" : "failed",
         result: input.result || null,
         errorMessage: input.success ? null : input.error || "Gate Bridge reported a command failure",
-        completedAt: now,
+        completedAt: GATE_UTC_NOW,
         leaseExpiresAt: null,
-      }).where(eq(gateCommands.id, command.id));
+      }).where(and(
+        eq(gateCommands.id, command.id),
+        eq(gateCommands.bridgeId, bridge.id),
+        eq(gateCommands.status, "processing"),
+        command.claimToken ? eq(gateCommands.claimToken, input.claimToken!) : sql`${gateCommands.claimToken} IS NULL`,
+      )).returning({ id: gateCommands.id });
+      if (!completed.length) {
+        // A concurrent successful acknowledgement is idempotent. An expired
+        // or re-owned command remains immutable and requires reconciliation.
+        const [current] = await db.select({ status: gateCommands.status, claimToken: gateCommands.claimToken })
+          .from(gateCommands).where(and(eq(gateCommands.id, command.id), eq(gateCommands.bridgeId, bridge.id))).limit(1);
+        if (current && ["succeeded", "failed"].includes(current.status) &&
+            (!current.claimToken || current.claimToken === input.claimToken)) {
+          return res.json({ ok: true, alreadyCompleted: true });
+        }
+        return res.status(409).json({ message: "Gate command is no longer processing or owned by this execution" });
+      }
 
       if (command.commandType === "get_version") {
         if (input.success) {
