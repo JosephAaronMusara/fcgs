@@ -1,4 +1,8 @@
 import type { Express, Request, Response } from "express";
+import { cents, currency, effectiveDeductions, isEarnedClass, distributeToSchoolClaims } from "./transport-hq-financials";
+import { groupHqClaims } from "./transport-hq-settlement-groups";
+import { registerOneStepHqTransportDisbursements } from "./transport-hq-one-step";
+import { DEFAULT_SETTLEMENT_POLICY, deadlineFor } from "./transport-settlement-calendar";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
@@ -12,6 +16,9 @@ import {
   transportClaims,
   transportDrivers,
   transportHqClaimItems,
+  transportHqDisbursementClaimAllocations,
+  transportClaimDeductions,
+  transportProviderAdjustments,
   transportHqClaims,
   transportHqPayouts,
   transportIncidents,
@@ -24,6 +31,7 @@ import {
   transportProviderPaymentRuns,
   transportRoutes,
   transportSubscriptionPolicies,
+  transportOrganizationSettings,
   transportVehicles,
   users,
 } from "@shared/schema";
@@ -127,7 +135,7 @@ async function buildSettlementWorkspace(organizationId: number) {
   await refreshPolicyStatuses(organizationId);
   const orgSchools = await orgSchoolRows(organizationId);
   const schoolIds = orgSchools.map((row) => row.id);
-  const [vehicles, owners, drivers, schoolClaims, hqClaims, hqItems, hqPayouts, cashups, runs, runItems, disbursements, allocations, policies, userRows] = await Promise.all([
+  const [vehicles, owners, drivers, schoolClaims, hqClaims, hqItems, hqPayouts, cashups, runs, runItems, disbursements, allocations, policies, userRows, schoolDisbursementAttributions] = await Promise.all([
     schoolIds.length ? db.select().from(transportVehicles).where(inArray(transportVehicles.schoolId, schoolIds)) : [],
     schoolIds.length ? db.select().from(transportOwners).where(inArray(transportOwners.schoolId, schoolIds)) : [],
     schoolIds.length ? db.select().from(transportDrivers).where(inArray(transportDrivers.schoolId, schoolIds)) : [],
@@ -142,6 +150,10 @@ async function buildSettlementWorkspace(organizationId: number) {
     db.select().from(transportProviderDisbursementAllocations),
     db.select().from(transportSubscriptionPolicies).where(eq(transportSubscriptionPolicies.organizationId, organizationId)).orderBy(desc(transportSubscriptionPolicies.startYear), desc(transportSubscriptionPolicies.startMonth), desc(transportSubscriptionPolicies.createdAt)),
     db.select({ id: users.id, username: users.username, firstName: users.firstName, lastName: users.lastName }).from(users),
+    schoolIds.length ? db.select({ disbursementId: transportHqDisbursementClaimAllocations.disbursementId, schoolClaimId: transportHqDisbursementClaimAllocations.schoolClaimId, amount: transportHqDisbursementClaimAllocations.amount })
+      .from(transportHqDisbursementClaimAllocations)
+      .innerJoin(transportClaims,eq(transportClaims.id,transportHqDisbursementClaimAllocations.schoolClaimId))
+      .where(inArray(transportClaims.schoolId,schoolIds)) : [],
   ]);
   const schoolMap = new Map(orgSchools.map((row) => [row.id, row]));
   const vehicleMap = new Map(vehicles.map((row) => [row.id, row]));
@@ -150,9 +162,29 @@ async function buildSettlementWorkspace(organizationId: number) {
   const itemBySchoolClaim = new Map(hqItems.map((row) => [row.schoolClaimId, row]));
   const payoutByClaim = new Map(hqPayouts.map((row) => [row.hqClaimId, row]));
   const hqClaimMap = new Map(hqClaims.map((row) => [row.id, row]));
+  const trackedByClaim = new Map<number, number>();
+  const trackedByPayout = new Map<number, number>();
+  const schoolClaimToPayout = new Map<number, number>();
+  for (const link of hqItems) {
+    const payout = payoutByClaim.get(link.hqClaimId);
+    if (payout) schoolClaimToPayout.set(link.schoolClaimId, payout.id);
+  }
+  for (const attribution of schoolDisbursementAttributions) {
+    const value = cents(attribution.amount);
+    trackedByClaim.set(attribution.schoolClaimId, (trackedByClaim.get(attribution.schoolClaimId) || 0) + value);
+    const payoutId = schoolClaimToPayout.get(attribution.schoolClaimId);
+    if (payoutId) trackedByPayout.set(payoutId, (trackedByPayout.get(payoutId) || 0) + value);
+  }
+  const numClaimsByPayout = new Map<number,number>();
+  for (const payoutId of schoolClaimToPayout.values()) numClaimsByPayout.set(payoutId,(numClaimsByPayout.get(payoutId)||0)+1);
   const enrichedSchoolClaims = schoolClaims.map((claim) => {
     const item = itemBySchoolClaim.get(claim.id); const hq = item ? hqClaimMap.get(item.hqClaimId) : null; const payout = hq ? payoutByClaim.get(hq.id) : null;
-    return { ...claim, schoolName: schoolMap.get(claim.schoolId)?.name || `School #${claim.schoolId}`, vehicleRegistration: vehicleMap.get(claim.vehicleId)?.registrationNumber || `Vehicle #${claim.vehicleId}`, ownerName: claim.ownerId ? ownerMap.get(claim.ownerId)?.name || `Owner #${claim.ownerId}` : "—", hqClaimId: hq?.id || null, hqClaimNumber: hq?.claimNumber || null, payoutId: payout?.id || null, payoutNumber: payout?.payoutNumber || null, payoutStatus: payout?.status || "not_paid", paidAmount: payout ? numberValue(payout.amountPaid) : 0 };
+    return { ...claim, schoolName: schoolMap.get(claim.schoolId)?.name || `School #${claim.schoolId}`, vehicleRegistration: vehicleMap.get(claim.vehicleId)?.registrationNumber || `Vehicle #${claim.vehicleId}`, ownerName: claim.ownerId ? ownerMap.get(claim.ownerId)?.name || `Owner #${claim.ownerId}` : "—", hqClaimId: hq?.id || null, hqClaimNumber: hq?.claimNumber || null, payoutId: payout?.id || null, payoutNumber: payout?.payoutNumber || null, payoutStatus: payout?.status || "not_paid", paidAmount: payout ? (
+      cents(payout.amountPaid) >= cents(payout.netAmount) ? numberValue(claim.netAmount) :
+      (numClaimsByPayout.get(payout.id) === 1 ? numberValue(payout.amountPaid) : Number(currency(trackedByClaim.get(claim.id)||0)))
+    ) : 0,
+    hasLegacyUnattributedPayment: Boolean(payout && numClaimsByPayout.get(payout.id)! > 1 && cents(payout.amountPaid) < cents(payout.netAmount) && cents(payout.amountPaid) > (trackedByPayout.get(payout.id)||0)),
+    paymentStage: !payout ? 'awaiting_preparation' : cents(payout.amountPaid) >= cents(payout.netAmount) ? 'paid' : cents(payout.amountPaid) > 0 ? 'partially_paid' : 'payment_pending'  };
   });
   const enrichedHqClaims = hqClaims.map((claim) => ({ ...claim, vehicleRegistration: vehicleMap.get(claim.vehicleId)?.registrationNumber || `Vehicle #${claim.vehicleId}`, ownerName: claim.ownerId ? ownerMap.get(claim.ownerId)?.name || `Owner #${claim.ownerId}` : "—", items: hqItems.filter((row) => row.hqClaimId === claim.id).map((row) => ({ ...row, schoolName: schoolMap.get(row.schoolId)?.name || `School #${row.schoolId}`, claim: schoolClaims.find((claimRow) => claimRow.id === row.schoolClaimId) })), payout: payoutByClaim.get(claim.id) || null }));
   const payableSchoolClaims = enrichedSchoolClaims.filter((claim: any) => ["submitted", "verified", "approved", "paid"].includes(String(claim.status)));
@@ -173,13 +205,124 @@ async function buildSettlementWorkspace(organizationId: number) {
     hqReceived: rounded(numberValue(row.hqReceivedCash) + numberValue(row.hqReceivedNonCash)),
   }));
   const runItemMap = new Map(runItems.map((row) => [row.id, row]));
-  const enrichedRuns = runs.map((run) => ({ ...run, ownerName: run.ownerId ? ownerMap.get(run.ownerId)?.name || `Owner #${run.ownerId}` : "—", items: runItems.filter((row) => row.runId === run.id).map((row) => ({ ...row, payout: hqPayouts.find((payout) => payout.id === row.payoutId) })), disbursements: disbursements.filter((row) => row.runId === run.id).map((row) => ({ ...row, processedByName: (() => { const u = userMap.get(row.processedByUserId); return u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.username : `User #${row.processedByUserId}`; })(), allocations: allocations.filter((a) => a.disbursementId === row.id).map((a) => ({ ...a, runItem: runItemMap.get(a.runItemId) })) })) }));
-  return { schools: orgSchools, vehicles, owners, drivers, schoolClaims: enrichedSchoolClaims, hqClaims: enrichedHqClaims, payouts: hqPayouts.map((payout) => ({ ...payout, claim: hqClaimMap.get(payout.hqClaimId), vehicleRegistration: vehicleMap.get(hqClaimMap.get(payout.hqClaimId)?.vehicleId || 0)?.registrationNumber || "—", ownerName: payout.ownerId ? ownerMap.get(payout.ownerId)?.name || `Owner #${payout.ownerId}` : "—" })), payablesBySchool, cashups: enrichedCashups, paymentRuns: enrichedRuns, subscriptionPolicies: policies };
+  const enrichedRuns = runs.map((run) => ({ ...run, ownerName: run.ownerId ? ownerMap.get(run.ownerId)?.name || `Owner #${run.ownerId}` : "—", items: runItems.filter((row) => row.runId === run.id).map((row) => ({ ...row, payout: hqPayouts.find((payout) => payout.id === row.payoutId) })), disbursements: disbursements.filter((row) => row.runId === run.id).map((row) => ({ ...row, processedByName: (() => { const u = userMap.get(row.processedByUserId); return u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.username : `User #${row.processedByUserId}`; })(), allocations: allocations.filter((a) => a.disbursementId === row.id).map((a) => ({ ...a, runItem: runItemMap.get(a.runItemId) })), schoolClaimAllocations: schoolDisbursementAttributions.filter((a)=>a.disbursementId===row.id) })) }));
+  const consolidatedGroups = groupHqClaims(enrichedSchoolClaims, hqClaims);
+  return { schools: orgSchools, vehicles, owners, drivers, consolidatedGroups, schoolClaims: enrichedSchoolClaims, hqClaims: enrichedHqClaims, payouts: hqPayouts.map((payout) => ({ ...payout, claim: hqClaimMap.get(payout.hqClaimId), vehicleRegistration: vehicleMap.get(hqClaimMap.get(payout.hqClaimId)?.vehicleId || 0)?.registrationNumber || "—", ownerName: payout.ownerId ? ownerMap.get(payout.ownerId)?.name || `Owner #${payout.ownerId}` : "—" })), payablesBySchool, cashups: enrichedCashups, paymentRuns: enrichedRuns, subscriptionPolicies: policies };
 }
 
+type IncomeFilters = {year:number;month:number;schoolId:number;providerId:number;vehicleId:number;category:'all'|'subscription'|'penalty'|'administration'|'other_income'};
+async function buildTransportIncomeReport(organizationId:number, filters:IncomeFilters) {
+  const orgSchools = await orgSchoolRows(organizationId);
+  const allowed = orgSchools.filter(x=>!filters.schoolId || x.id===filters.schoolId);
+  if (filters.schoolId && !allowed.length) throw new Error('School is outside your organisation');
+  const schoolIds = allowed.map(x=>x.id);
+  const claims = schoolIds.length ? await db.select().from(transportClaims).where(and(
+    inArray(transportClaims.schoolId,schoolIds),eq(transportClaims.serviceYear,filters.year),
+    ...(filters.month ? [eq(transportClaims.serviceMonth,filters.month)] : []),
+    inArray(transportClaims.status,['submitted','verified','approved','paid']),
+    ...(filters.providerId?[eq(transportClaims.ownerId,filters.providerId)]:[]),
+    ...(filters.vehicleId?[eq(transportClaims.vehicleId,filters.vehicleId)]:[]),
+  )) : [];
+  const claimIds=claims.map(x=>x.id);
+  const [deductions, hqItems, payoutRows, adjustments, allVehicles, allOwners, postedHqClaims] = await Promise.all([
+    claimIds.length?db.select().from(transportClaimDeductions).where(inArray(transportClaimDeductions.claimId,claimIds)):[],
+    claimIds.length?db.select().from(transportHqClaimItems).where(inArray(transportHqClaimItems.schoolClaimId,claimIds)):[],
+    db.select().from(transportHqPayouts).where(eq(transportHqPayouts.organizationId,organizationId)),
+    schoolIds.length?db.select().from(transportProviderAdjustments).where(inArray(transportProviderAdjustments.schoolId,schoolIds)):[],
+    schoolIds.length?db.select().from(transportVehicles).where(inArray(transportVehicles.schoolId,schoolIds)):[],
+    schoolIds.length?db.select().from(transportOwners).where(inArray(transportOwners.schoolId,schoolIds)):[],
+    db.select({id:transportHqClaims.id,status:transportHqClaims.status}).from(transportHqClaims).where(eq(transportHqClaims.organizationId,organizationId)),
+  ]);
+  const names = new Map(orgSchools.map(x=>[x.id,x.name]));
+  const vehicleNames = new Map(allVehicles.map(x=>[x.id,x.registrationNumber]));
+  const ownerNames = new Map(allOwners.map(x=>[x.id,x.name]));
+  const adjById=new Map(adjustments.map(x=>[x.id,x]));
+  const payoutByHq=new Map(payoutRows.map(x=>[x.hqClaimId,x]));
+  const hqStatuses=new Map(postedHqClaims.map(x=>[x.id,x.status]));
+  const hqIdBySchool=new Map(hqItems.map(x=>[x.schoolClaimId,x.hqClaimId]));
+  const rows:Array<{schoolId:number;schoolName:string;vehicleId:number;vehicleRegistration:string;providerId:number|null;providerName:string;claimId:number;claimNumber:string;serviceYear:number;serviceMonth:number;category:string;description:string;sourceId:number|null;earned:string;collected:string;outstanding:string}> = [];
+  const unclassified:Array<{claimNumber:string;type:string;amount:string}> = [];
+  for (const claim of claims) {
+    const hqId = hqIdBySchool.get(claim.id)||0;
+    const payout=payoutByHq.get(hqId);
+    // The HQ payable is built from verified/eligible parent collections and
+    // deducts FCGS fees *before* the provider's net entitlement is disbursed.
+    // The contractual offset is effective when that HQ payable is posted;
+    // pending provider cash disbursements are separate liabilities.
+    const feeOffsetPosted=Boolean(payout && ['approved','paid'].includes(hqStatuses.get(hqId)||''));
+    for(const row of effectiveDeductions(deductions.filter(x=>x.claimId===claim.id).map(x=>({
+      ...x, adjustmentType:x.deductionType==='other'?adjById.get(x.sourceId||0)?.adjustmentType:null,
+    })),claim.deductionAmount)) {
+      if (!row.effectiveCents) continue;
+      if (!isEarnedClass(row.category)) {
+        unclassified.push({claimNumber:claim.claimNumber,type:row.category,amount:currency(row.effectiveCents)});
+        continue;
+      }
+      if (filters.category!=='all' && row.category!==filters.category) continue;
+      rows.push({ schoolId:claim.schoolId, schoolName:names.get(claim.schoolId)||'—',vehicleId:claim.vehicleId,
+        vehicleRegistration:vehicleNames.get(claim.vehicleId)||'—',providerId:claim.ownerId,
+        providerName:claim.ownerId?ownerNames.get(claim.ownerId)||'—':'FCGS',claimId:claim.id,claimNumber:claim.claimNumber,
+        serviceYear:claim.serviceYear,serviceMonth:claim.serviceMonth,category:row.category,
+        description:row.description,sourceId:row.sourceId,
+        earned:currency(row.effectiveCents),collected:currency(feeOffsetPosted?row.effectiveCents:0),
+        outstanding:currency(feeOffsetPosted?0:row.effectiveCents),
+      });
+    }
+  }
+  const totals = rows.reduce((acc,r)=>({earned:acc.earned+cents(r.earned),collected:acc.collected+cents(r.collected),outstanding:acc.outstanding+cents(r.outstanding)}),{earned:0,collected:0,outstanding:0});
+  const duplicateSubscriptions: Array<{vehicleId:number; serviceYear:number; serviceMonth:number; sourceId:number; count:number}> = [];
+  const subscriptionKeys = new Map<string,{vehicleId:number;serviceYear:number;serviceMonth:number;sourceId:number;count:number}>();
+  for(const row of rows.filter(row=>row.category==='subscription' && row.sourceId)) {
+    const key=`${row.vehicleId}:${row.serviceYear}:${row.serviceMonth}:${row.sourceId}`;
+    const existing=subscriptionKeys.get(key);
+    subscriptionKeys.set(key, existing?{...existing,count:existing.count+1}:{vehicleId:row.vehicleId,serviceYear:row.serviceYear,serviceMonth:row.serviceMonth,sourceId:row.sourceId!,count:1});
+  }
+  duplicateSubscriptions.push(...[...subscriptionKeys.values()].filter(row=>row.count>1));
+  const monthly = Array.from({length:12},(_,index)=>{
+    const monthRows=rows.filter(row=>row.serviceMonth===index+1);
+    return {year:filters.year,month:index+1,earned:currency(monthRows.reduce((sum,row)=>sum+cents(row.earned),0)),collected:currency(monthRows.reduce((sum,row)=>sum+cents(row.collected),0)),outstanding:currency(monthRows.reduce((sum,row)=>sum+cents(row.outstanding),0))};
+  });
+  const categories = ['subscription','penalty','administration','other_income'].map(category=>{
+    const rr=rows.filter(r=>r.category===category);
+    return {category,earned:currency(rr.reduce((sum,r)=>sum+cents(r.earned),0)),collected:currency(rr.reduce((sum,r)=>sum+cents(r.collected),0)),outstanding:currency(rr.reduce((sum,r)=>sum+cents(r.outstanding),0))};
+  });
+  return {filters,totals:{earned:currency(totals.earned),collected:currency(totals.collected),outstanding:currency(totals.outstanding)},categories,monthly,duplicateSubscriptions,rows,excludedSummary:{count:unclassified.length,amount:currency(unclassified.reduce((sum,x)=>sum+cents(x.amount),0))},
+  collectionPolicy:'Conservative: a posted income deduction is shown as collected only after its linked provider payout is fully settled. Partial payout offsets are shown as outstanding until complete.',
+  note:'Recoveries and unclassified deductions are deliberately excluded. Period is claim service month; never treat cash held for providers as income.'};
+}
+
+// Spreadsheet formula hardening for operator-entered reference and description fields.
+function incomeCsvCell(value: unknown) {
+  const str=String(value ?? '');
+  return csvCell(/^\s*[=+@-]/.test(str) ? `'${str}` : str);
+}
 function csvCell(value: unknown) { const text = String(value ?? ""); return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; }
 
 export function registerHqOperationsRoutes(app: Express) {
+  registerOneStepHqTransportDisbursements(app);
+
+  app.get("/api/hq/transport/settlement-policy", requireAuth, requireAnyPermission("transport.organization.view", "transport.organization.manage", "transport.hq.claims.manage", "transport.hq.disbursements.manage"), async(req,res)=>{
+    try {
+      const user=requireHqUser(req);
+      const [r]=await db.select().from(transportOrganizationSettings).where(eq(transportOrganizationSettings.organizationId,user.organizationId!));
+      const policy=r?{paymentDaysBeforeEnd:r.paymentCutoffWorkingDaysBeforeEnd,claimDaysBeforeEnd:r.claimCutoffWorkingDaysBeforeEnd,paymentCutoffTime:r.paymentCutoffTime,claimCutoffTime:r.claimCutoffTime,effectiveFrom:String(r.settlementRulesEffectiveFrom)}:DEFAULT_SETTLEMENT_POLICY;
+      const year=Number(req.query.year||new Date().getFullYear()),month=Number(req.query.month||new Date().getMonth()+1);
+      if (!Number.isInteger(year)||year<2020||year>2100||!Number.isInteger(month)||month<1||month>12) return res.status(400).json({message:'Invalid period'});
+      res.json({policy,year,month,paymentDeadline:deadlineFor(year,month,policy.paymentDaysBeforeEnd,policy.paymentCutoffTime),claimDeadline:deadlineFor(year,month,policy.claimDaysBeforeEnd,policy.claimCutoffTime)});
+    } catch(e){res.status(400).json({message:e instanceof Error?e.message:'Unable to load deadlines'});}
+  });
+  app.put("/api/hq/transport/settlement-policy", requireAuth, requirePermission("transport.hq.settings.manage"), async(req,res)=>{
+    try {
+      const user=requireHqUser(req);
+      const input=z.object({paymentDaysBeforeEnd:z.coerce.number().int().min(0).max(10),claimDaysBeforeEnd:z.coerce.number().int().min(0).max(10),paymentCutoffTime:z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),claimCutoffTime:z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),effectiveFrom:z.string().regex(/^\d{4}-\d{2}-01$/)}).parse(req.body);
+      // Preserve frozen historical policy. No mid-month retroactive policy changes.
+      const now=new Date();const currentMonth=now.toISOString().slice(0,7)+'-01';
+      if(input.effectiveFrom<=currentMonth) return res.status(409).json({message:'Settlement rules must start from a future first day of the month. Existing claims retain their original policy.'});
+      const [updated]=await db.insert(transportOrganizationSettings).values({organizationId:user.organizationId!,paymentCutoffWorkingDaysBeforeEnd:input.paymentDaysBeforeEnd,claimCutoffWorkingDaysBeforeEnd:input.claimDaysBeforeEnd,paymentCutoffTime:input.paymentCutoffTime,claimCutoffTime:input.claimCutoffTime,settlementRulesEffectiveFrom:input.effectiveFrom}).onConflictDoUpdate({target:transportOrganizationSettings.organizationId,set:{paymentCutoffWorkingDaysBeforeEnd:input.paymentDaysBeforeEnd,claimCutoffWorkingDaysBeforeEnd:input.claimDaysBeforeEnd,paymentCutoffTime:input.paymentCutoffTime,claimCutoffTime:input.claimCutoffTime,settlementRulesEffectiveFrom:input.effectiveFrom,updatedAt:new Date()}}).returning();
+      res.json(updated);
+    }catch(e){res.status(400).json({message:e instanceof Error?e.message:'Unable to update settlement rules'});}
+  });
+
   app.get("/api/hq/transport/overview", requireAuth, requireAnyPermission("transport.organization.view", "transport.organization.reports", "transport.organization.manage"), async (req, res) => {
     try { const user = requireHqUser(req); res.json(await buildTransportOverview(user.organizationId!)); }
     catch (error) { res.status(403).json({ message: error instanceof Error ? error.message : "Unable to load HQ transport oversight" }); }
@@ -188,6 +331,34 @@ export function registerHqOperationsRoutes(app: Express) {
   app.get("/api/hq/transport/settlements", requireAuth, requireAnyPermission("transport.organization.view", "transport.hq.claims.manage", "transport.hq.payouts.manage", "transport.organization.manage"), async (req, res) => {
     try { const user = requireHqUser(req); res.json(await buildSettlementWorkspace(user.organizationId!)); }
     catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load HQ settlement workspace" }); }
+  });
+
+  // Read-only income reporting. Only qualifying posted deductions are income;
+  // recoveries (advance/refund) and unclassified deductions are excluded.
+  app.get("/api/hq/transport/income", requireAuth, requireAnyPermission("transport.organization.reports", "transport.organization.manage"), async (req, res) => {
+    try {
+      const user = requireHqUser(req);
+      const input = z.object({
+        year: z.coerce.number().int().min(2020).max(2100),
+        month: z.coerce.number().int().min(0).max(12).default(0),
+        schoolId: z.coerce.number().int().min(0).default(0),
+        providerId: z.coerce.number().int().min(0).default(0),
+        vehicleId: z.coerce.number().int().min(0).default(0),
+        category: z.enum(['all','subscription','penalty','administration','other_income']).default('all'),
+      }).parse(req.query);
+      const report = await buildTransportIncomeReport(user.organizationId!, input);
+      res.json(report);
+    } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : 'Unable to load transport income report' }); }
+  });
+  app.get("/api/hq/transport/income.csv", requireAuth, requirePermission("transport.organization.export"), async (req, res) => {
+    try {
+      const user = requireHqUser(req);
+      const input = z.object({ year:z.coerce.number().int().min(2020).max(2100), month:z.coerce.number().int().min(0).max(12).default(0), schoolId:z.coerce.number().int().min(0).default(0), providerId:z.coerce.number().int().min(0).default(0), vehicleId:z.coerce.number().int().min(0).default(0), category:z.enum(['all','subscription','penalty','administration','other_income']).default('all') }).parse(req.query);
+      const report = await buildTransportIncomeReport(user.organizationId!, input);
+      res.setHeader('Content-Type','text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition','attachment; filename="transport-income.csv"');
+      res.send(['School,Vehicle,Provider,Claim,Period,Category,Source,Description,Earned USD,Collected USD,Outstanding USD',...report.rows.map((row: any)=>[row.schoolName,row.vehicleRegistration,row.providerName,row.claimNumber,`${row.serviceYear}-${String(row.serviceMonth).padStart(2,'0')}`,row.category,row.sourceId||'',row.description,row.earned,row.collected,row.outstanding].map(incomeCsvCell).join(','))].join('\n'));
+    } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : 'Unable to export transport income' }); }
   });
 
   app.get("/api/hq/transport/payables", requireAuth, requireAnyPermission("transport.organization.view", "transport.organization.reports", "transport.hq.claims.manage", "transport.organization.manage"), async (req, res) => {
@@ -372,6 +543,7 @@ export function registerHqOperationsRoutes(app: Express) {
       const existingAllocations = runItems.length ? await db.select().from(transportProviderDisbursementAllocations).where(inArray(transportProviderDisbursementAllocations.runItemId, runItems.map((row) => row.id))) : [];
       const paidByItem = new Map<number, number>(); existingAllocations.forEach((row) => paidByItem.set(row.runItemId, rounded((paidByItem.get(row.runItemId) || 0) + numberValue(row.amount))));
       for (const allocation of parsed.allocations) { const item = itemMap.get(allocation.runItemId)!; const remaining = rounded(numberValue(item.amountDue) - (paidByItem.get(item.id) || 0)); if (allocation.amount > remaining + 0.001) return res.status(409).json({ message: `Allocated amount exceeds the outstanding amount for payout item ${item.id}.` }); }
+      if (parsed.allocations.some(row=>Math.abs(row.amount*100-Math.round(row.amount*100))>0.00001)) return res.status(400).json({message:'Payment allocations must use whole cents.'});
       const total = rounded(parsed.allocations.reduce((sum, row) => sum + row.amount, 0));
       if (parsed.collectorType === "owner") {
         if (!run.ownerId) return res.status(409).json({ message: "This payment run has no linked provider/owner." });
@@ -385,11 +557,34 @@ export function registerHqOperationsRoutes(app: Express) {
       }
       if (parsed.collectorType === "other" && (!parsed.collectorName || !parsed.collectorNationalId)) return res.status(400).json({ message: "Full name and National ID are required for an authorised representative." });
       if (parsed.paymentMethod === "cash" && parsed.collectorType === "other" && !parsed.collectorPhone) return res.status(400).json({ message: "A contact phone is required for an external cash collector." });
+      if (new Set(parsed.allocations.map((a)=>a.runItemId)).size !== parsed.allocations.length) return res.status(409).json({message:'Duplicate payout allocation in the same disbursement.'});
       const result = await db.transaction(async (tx) => {
+        // Serialize disbursements for one run so simultaneous clerks cannot overpay it.
+        await tx.execute(sql`SELECT id FROM transport_provider_payment_runs WHERE id = ${runId} FOR UPDATE`);
+        const [lockedRun] = await tx.select().from(transportProviderPaymentRuns).where(eq(transportProviderPaymentRuns.id, runId));
+        if (!lockedRun || lockedRun.status === 'paid') throw new Error('Provider payment run has already been settled');
+        const lockedItems = await tx.select().from(transportProviderPaymentRunItems).where(eq(transportProviderPaymentRunItems.runId, runId));
+        const prior = lockedItems.length ? await tx.select().from(transportProviderDisbursementAllocations).where(inArray(transportProviderDisbursementAllocations.runItemId, lockedItems.map(x=>x.id))) : [];
+        for (const allocation of parsed.allocations) {
+          const item = lockedItems.find(x=>x.id===allocation.runItemId);
+          if (!item) throw new Error('Payment run item missing');
+          const already = prior.filter(x=>x.runItemId===item.id).reduce((sum,x)=>sum+cents(x.amount),0);
+          if (cents(allocation.amount) > cents(item.amountDue)-already) throw new Error('Payout already paid by another transaction. Refresh and retry.');
+        }
         const [disbursement] = await tx.insert(transportProviderDisbursements).values({ runId, disbursementNumber: numberCode("DISB", user.organizationId!), amount: String(total), paymentDate: parsed.paymentDate, paymentMethod: parsed.paymentMethod, paymentReference: parsed.paymentReference || null, collectorType: parsed.collectorType, collectorOwnerId: parsed.collectorType === "owner" ? parsed.collectorOwnerId || null : null, collectorDriverId: parsed.collectorType === "driver" ? parsed.collectorDriverId || null : null, collectorName: parsed.collectorType === "other" ? parsed.collectorName || null : null, collectorNationalId: parsed.collectorNationalId || null, collectorPhone: parsed.collectorPhone || null, collectorRole: parsed.collectorRole || null, notes: parsed.notes || null, processedByUserId: user.id }).returning();
         await tx.insert(transportProviderDisbursementAllocations).values(parsed.allocations.map((row) => ({ disbursementId: disbursement.id, runItemId: row.runItemId, amount: String(row.amount) })));
         for (const allocation of parsed.allocations) {
           const item = itemMap.get(allocation.runItemId)!; const [payout] = await tx.select().from(transportHqPayouts).where(eq(transportHqPayouts.id, item.payoutId)); if (!payout) continue;
+          const claimItems = await tx.select().from(transportHqClaimItems).where(eq(transportHqClaimItems.hqClaimId,payout.hqClaimId));
+          if (!claimItems.length) throw new Error('HQ payout has no school claim items');
+          const historical = await tx.select().from(transportHqDisbursementClaimAllocations).where(inArray(transportHqDisbursementClaimAllocations.schoolClaimId,claimItems.map(x=>x.schoolClaimId)));
+          const claimAllocations = distributeToSchoolClaims(cents(allocation.amount),claimItems.map(x=>({
+            schoolClaimId:x.schoolClaimId, netCents:cents(x.netAmount),
+            recordedPaidCents:historical.filter(a=>a.schoolClaimId===x.schoolClaimId).reduce((sum,a)=>sum+cents(a.amount),0),
+          })));
+          await tx.insert(transportHqDisbursementClaimAllocations).values(claimAllocations.map(x=>({
+            disbursementId:disbursement.id, schoolClaimId:x.schoolClaimId, amount:currency(x.amountCents),
+          })));
           const newPaid = rounded(numberValue(payout.amountPaid) + allocation.amount); const payoutStatus = newPaid + 0.001 >= numberValue(payout.netAmount) ? "paid" : "partially_paid";
           await tx.update(transportHqPayouts).set({ amountPaid: String(newPaid), status: payoutStatus, updatedAt: new Date() }).where(eq(transportHqPayouts.id, payout.id));
           if (payoutStatus === "paid") {
@@ -398,7 +593,7 @@ export function registerHqOperationsRoutes(app: Express) {
             await tx.update(transportHqClaims).set({ status: "paid", updatedAt: new Date() }).where(eq(transportHqClaims.id, payout.hqClaimId));
           }
         }
-        const newRunPaid = rounded(numberValue(run.amountPaid) + total); const runStatus = newRunPaid + 0.001 >= numberValue(run.totalDue) ? "paid" : "partially_paid";
+        const newRunPaid = rounded(numberValue(lockedRun.amountPaid) + total); const runStatus = newRunPaid + 0.001 >= numberValue(lockedRun.totalDue) ? "paid" : "partially_paid";
         await tx.update(transportProviderPaymentRuns).set({ amountPaid: String(newRunPaid), status: runStatus, updatedAt: new Date() }).where(eq(transportProviderPaymentRuns.id, runId));
         return disbursement;
       });

@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict');const fs=require('fs');const ts=require('typescript');const vm=require('vm');
+const src=fs.readFileSync('server/transport-settlement-calendar.ts','utf8');const js=ts.transpileModule(src,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;const mod={exports:{}};vm.runInNewContext(js,{module:mod,exports:mod.exports,Intl,Date,Error});const c=mod.exports;
+assert.equal(c.deadlineFor(2026,10,1,'23:59'),'2026-10-29T23:59:00+02:00');
+assert.equal(c.deadlineFor(2026,10,0,'23:59'),'2026-10-30T23:59:00+02:00');
+assert.equal(c.deadlineFor(2026,11,1,'23:59'),'2026-11-27T23:59:00+02:00');
+assert.equal(c.deadlineFor(2026,11,0,'23:59'),'2026-11-30T23:59:00+02:00');
+assert.equal(c.deadlineFor(2026,12,1,'23:59'),'2026-12-30T23:59:00+02:00');
+assert.equal(c.paymentEligibleForCycle('2026-11-27',null,2026,11,2026,11,null,c.DEFAULT_SETTLEMENT_POLICY),true);
+assert.equal(c.paymentEligibleForCycle('2026-11-28',null,2026,11,2026,11,null,c.DEFAULT_SETTLEMENT_POLICY),false);
+assert.equal(c.paymentEligibleForCycle('2026-11-28',null,2026,11,2026,12,null,c.DEFAULT_SETTLEMENT_POLICY),true);
+assert.equal(c.cycleForClaim(2026,11,new Date('2026-11-30T21:58:00Z'),c.DEFAULT_SETTLEMENT_POLICY).month,11);
+assert.equal(c.cycleForClaim(2026,11,new Date('2026-11-30T22:01:00Z'),c.DEFAULT_SETTLEMENT_POLICY).month,12);
+assert.equal(c.cycleForClaim(2026,12,new Date('2027-01-01T00:00:00Z'),c.DEFAULT_SETTLEMENT_POLICY).year,2027);
+console.log('PASS settlement working-day dates, cutoffs, deferrals and December rollover');

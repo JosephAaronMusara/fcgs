@@ -749,6 +749,11 @@ export const transportOrganizationSettings = pgTable("transport_organization_set
   suspendedSeatReleaseDays: integer("suspended_seat_release_days").notNull().default(14),
   automaticArrearsReinstatement: boolean("automatic_arrears_reinstatement").notNull().default(true),
   arrearsWarningEnabled: boolean("arrears_warning_enabled").notNull().default(true),
+  paymentCutoffWorkingDaysBeforeEnd: integer("payment_cutoff_working_days_before_end").notNull().default(1),
+  claimCutoffWorkingDaysBeforeEnd: integer("claim_cutoff_working_days_before_end").notNull().default(0),
+  paymentCutoffTime: text("payment_cutoff_time").notNull().default("23:59"),
+  claimCutoffTime: text("claim_cutoff_time").notNull().default("23:59"),
+  settlementRulesEffectiveFrom: date("settlement_rules_effective_from").notNull().default("2026-11-01"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({ organizationUnique: uniqueIndex("transport_organization_settings_organization_uidx").on(table.organizationId) }));
@@ -1003,6 +1008,9 @@ export const transportPayments = pgTable("transport_payments", {
   receiptNo: text("receipt_no").notNull().unique(),
   verificationToken: text("verification_token").unique(),
   receiptSnapshot: jsonb("receipt_snapshot").notNull().default(sql`'{}'::jsonb`),
+  // Historical rows remain unclassified: the original UI did not persist payment intent.
+  allocationMode: text("allocation_mode").notNull().default("legacy_unclassified"),
+  allocationChargeIds: integer("allocation_charge_ids").array(),
   status: text("status").notNull().default("issued"),
   verificationStatus: text("verification_status").notNull().default("unverified"),
   externalReference: text("external_reference"),
@@ -1169,6 +1177,26 @@ export const transportAdvances = pgTable("transport_advances", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Advance repayments are capital recovery, never transport-earned income.
+// Verification is a distinct event: recording a proposed bank/cash receipt must not reduce debt.
+export const transportAdvanceRepayments = pgTable("transport_advance_repayments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  advanceId: integer("advance_id").references(() => transportAdvances.id).notNull(),
+  schoolId: integer("school_id").references(() => schools.id).notNull(),
+  cashupId: integer("cashup_id").references(() => transportCashups.id),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  paymentDate: date("payment_date").notNull(),
+  paymentMethod: text("payment_method").notNull(),
+  paymentReference: text("payment_reference").notNull(),
+  status: text("status").notNull().default("pending"),
+  notes: text("notes"),
+  recordedByUserId: integer("recorded_by_user_id").references(() => users.id).notNull(),
+  recordedAt: timestamp("recorded_at").defaultNow(),
+  verifiedByUserId: integer("verified_by_user_id").references(() => users.id),
+  verifiedAt: timestamp("verified_at"),
+  rejectionReason: text("rejection_reason"),
+}, (table) => ({ referenceUnique: uniqueIndex("transport_advance_repayment_reference_uidx").on(table.schoolId, table.paymentReference) }));
+
 export const transportIncidents = pgTable("transport_incidents", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   schoolId: integer("school_id").references(() => schools.id).notNull(),
@@ -1320,6 +1348,9 @@ export const transportClaims = pgTable("transport_claims", {
   notes: text("notes"),
   preparedByUserId: integer("prepared_by_user_id").references(() => users.id).notNull(),
   submittedAt: timestamp("submitted_at"),
+  settlementYear: integer("settlement_year"),
+  settlementMonth: integer("settlement_month"),
+  settlementPolicySnapshot: jsonb("settlement_policy_snapshot"),
   verifiedByUserId: integer("verified_by_user_id").references(() => users.id),
   verifiedAt: timestamp("verified_at"),
   approvedByUserId: integer("approved_by_user_id").references(() => users.id),
@@ -1450,6 +1481,26 @@ export const transportHqClaims = pgTable("transport_hq_claims", {
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({ vehiclePeriodUnique: uniqueIndex("transport_hq_claim_vehicle_period_uidx").on(table.organizationId, table.vehicleId, table.serviceYear, table.serviceMonth) }));
 
+// One-click HQ disbursement request: durable idempotency and authenticated sign-off.
+export const transportHqSettlementRequests = pgTable("transport_hq_settlement_requests", {
+  requestId: text("request_id").primaryKey(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  requestHash: text("request_hash").notNull(),
+  result: jsonb("result"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Exactly-once recovery of advance principal via HQ payables; never earned income.
+export const transportHqAdvanceRecoveries = pgTable("transport_hq_advance_recoveries", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  advanceId: integer("advance_id").references(() => transportAdvances.id).notNull(),
+  claimDeductionId: integer("claim_deduction_id").references(() => transportClaimDeductions.id).notNull().unique(),
+  hqClaimId: integer("hq_claim_id").references(() => transportHqClaims.id).notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const transportHqClaimItems = pgTable("transport_hq_claim_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   hqClaimId: integer("hq_claim_id").references(() => transportHqClaims.id).notNull(),
@@ -1526,6 +1577,19 @@ export const transportProviderDisbursementAllocations = pgTable("transport_provi
   amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => ({ disbursementItemUnique: uniqueIndex("transport_provider_disbursement_item_uidx").on(table.disbursementId, table.runItemId) }));
+
+// Per-school source attribution for each HQ provider disbursement. Earlier un-attributed
+// disbursements remain historical (do not invent where they were paid).
+export const transportHqDisbursementClaimAllocations = pgTable("transport_hq_disbursement_claim_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  disbursementId: integer("disbursement_id").references(() => transportProviderDisbursements.id).notNull(),
+  schoolClaimId: integer("school_claim_id").references(() => transportClaims.id).notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  disbursementClaimUnique: uniqueIndex("transport_hq_disbursement_claim_uidx").on(table.disbursementId, table.schoolClaimId),
+  schoolClaimIdx: index("transport_hq_disbursement_school_claim_idx").on(table.schoolClaimId),
+}));
 
 export const transportPeriodLocks = pgTable("transport_period_locks", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),

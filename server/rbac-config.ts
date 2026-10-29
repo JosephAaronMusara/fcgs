@@ -295,6 +295,8 @@ export const RBAC_PERMISSIONS_DATA = [
   { code: "transport.advances.request", name: "Request Vehicle Advances", description: "Record vehicle advance requests and proposed recovery terms", category: "Transport" },
   { code: "transport.advances.approve", name: "Approve Vehicle Advances", description: "Approve or reject fair non-negative vehicle advance recoveries", category: "Transport" },
   { code: "transport.advances.disburse", name: "Disburse Vehicle Advances", description: "Record disbursement references for approved vehicle advances", category: "Transport" },
+  { code: "transport.advances.repayments.record", name: "Record Direct Advance Repayments", description: "Record an advance principal repayment awaiting independent financial verification", category: "Transport" },
+  { code: "transport.advances.repayments.verify", name: "Verify Direct Advance Repayments", description: "Independently verify or reject an advance principal repayment", category: "Transport" },
   { code: "transport.payouts.view", name: "View Payout Slips", description: "View and print immutable vehicle payout slips", category: "Transport" },
   { code: "transport.payouts.generate", name: "Generate Payout Slips", description: "Generate gross, deduction and net payout snapshots", category: "Transport" },
   { code: "transport.payouts.pay", name: "Record Vehicle Payouts", description: "Record full or partial payment against an approved payout slip", category: "Transport" },

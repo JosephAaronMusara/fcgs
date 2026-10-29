@@ -1,5 +1,9 @@
 import type { Express, Request, Response } from "express";
 import { randomBytes, createHash } from "node:crypto";
+import { createTransportCreditPlan, creditPeriodKey, transportCents, transportMoney } from "./transport-credit-engine";
+import type { TransportCreditPlan } from "./transport-credit-engine";
+import { DEFAULT_SETTLEMENT_POLICY, deadlineFor, cycleForClaim, paymentEligibleForCycle, type SettlementPolicy } from "./transport-settlement-calendar";
+import { registerTransportAdvanceRepaymentRoutes } from "./transport-advance-repayments";
 import fs from "node:fs/promises";
 import path from "node:path";
 import bcrypt from "bcrypt";
@@ -25,6 +29,7 @@ import {
   users,
   transportAccountAdjustments,
   transportAdvances,
+  transportAdvanceRepayments,
   transportAssignments,
   transportAssignmentEvents,
   transportAuditEvents,
@@ -333,6 +338,7 @@ const cashupInput = z.object({
   cashupDate: dateString,
   paymentIds: z.array(z.coerce.number().int().positive()).optional().default([]),
   refundIds: z.array(z.coerce.number().int().positive()).optional().default([]),
+  advanceRepaymentIds: z.array(z.coerce.number().int().positive()).optional().default([]),
   // Handover totals are always calculated by the server from the selected
   // payments/refunds. Any legacy/manipulated amount fields sent by a client are ignored.
   depositReference: optionalText,
@@ -1036,39 +1042,107 @@ async function receiptSnapshot(school: SchoolRow, studentId: number, req: Reques
   };
 }
 
-async function allocationCandidates(studentId: number, schoolId: number, specificIds?: number[]) {
-  const filters = [
-    eq(transportCharges.schoolId, schoolId),
-    eq(transportCharges.studentId, studentId),
-    ne(transportCharges.status, "cancelled"),
-  ];
-  if (specificIds?.length) filters.push(inArray(transportCharges.id, specificIds));
-  const charges = await db.select().from(transportCharges)
-    .where(and(...filters))
-    .orderBy(asc(transportCharges.academicYear), asc(transportCharges.month), asc(transportCharges.dueDate), asc(transportCharges.id));
-  if (!charges.length) return [];
-  const chargeIdsSql = sql.join(charges.map((row) => sql`${row.id}`), sql`,`);
-  const paidResult = await db.execute(sql`
-    SELECT pa.charge_id AS "chargeId", COALESCE(SUM(pa.amount),0)::text AS paid
+
+// The planner is shared by invoice generation, payment recording and legacy backfill.
+const TRANSPORT_CREDIT_LOCK_NAMESPACE = 21061027;
+
+async function lockTransportCredits(executor: any, schoolId: number) {
+  // Acquired by every updated credit-writing operation, including normal payment recording.
+  await executor.execute(sql`SELECT pg_advisory_xact_lock(${TRANSPORT_CREDIT_LOCK_NAMESPACE}::integer, ${schoolId}::integer)`);
+}
+
+async function planTransportCredits(
+  executor: any, schoolId: number,
+  options: { maxPeriod?: number; includeLegacy?: boolean; studentId?: number } = {},
+): Promise<TransportCreditPlan> {
+  const studentPredicate = options.studentId ? sql`AND p.student_id=${options.studentId}` : sql``;
+  const paymentQuery = await executor.execute(sql`
+    SELECT p.id, p.student_id AS "studentId", p.amount::text,
+           p.academic_year AS "academicYear", p.month, p.allocation_mode AS "allocationMode",
+           p.allocation_charge_ids AS "allocationChargeIds", p.currency_code AS "currencyCode",
+           COALESCE(SUM(pa.amount),0)::text AS allocated
+    FROM transport_payments p
+    LEFT JOIN transport_payment_allocations pa ON pa.payment_id=p.id
+    WHERE p.school_id=${schoolId} AND p.reversed_at IS NULL AND p.status <> 'reversed' ${studentPredicate}
+    GROUP BY p.id ORDER BY p.student_id, p.payment_date, p.id
+  `);
+  const chargePredicate = options.studentId ? sql`AND c.student_id=${options.studentId}` : sql``;
+  const chargeQuery = await executor.execute(sql`
+    SELECT c.id, c.student_id AS "studentId", c.academic_year AS "academicYear", c.month,
+           c.vehicle_id AS "vehicleId", c.currency_code AS "currencyCode", c.amount::text,
+           COALESCE((SELECT SUM(pa.amount) FROM transport_payment_allocations pa
+                      JOIN transport_payments p ON p.id=pa.payment_id
+                      WHERE pa.charge_id=c.id AND p.reversed_at IS NULL),0)::text AS allocated,
+           COALESCE((SELECT SUM(CASE WHEN a.direction='debit' THEN a.amount ELSE -a.amount END)
+                     FROM transport_account_adjustments a WHERE a.charge_id=c.id AND a.status='approved'),0)::text AS adjustment
+    FROM transport_charges c
+    WHERE c.school_id=${schoolId} AND c.status NOT IN ('cancelled','void') ${chargePredicate}
+    ORDER BY c.student_id,c.academic_year,c.month,c.due_date NULLS LAST,c.id
+  `);
+  const allocationQuery = await executor.execute(sql`
+    SELECT pa.id, pa.payment_id AS "paymentId", pa.charge_id AS "chargeId", pa.amount::text,
+           EXISTS(SELECT 1 FROM transport_claim_allocations ca WHERE ca.allocation_id=pa.id) AS claimed
     FROM transport_payment_allocations pa
     JOIN transport_payments p ON p.id=pa.payment_id
-    WHERE p.reversed_at IS NULL AND pa.charge_id IN (${chargeIdsSql})
-    GROUP BY pa.charge_id
+    WHERE p.school_id=${schoolId} ${studentPredicate}
   `);
-  const adjustmentResult = await db.execute(sql`
-    SELECT charge_id AS "chargeId",
-      COALESCE(SUM(CASE WHEN direction='debit' THEN amount ELSE -amount END),0)::text AS adjustment
-    FROM transport_account_adjustments
-    WHERE status='approved' AND charge_id IN (${chargeIdsSql})
-    GROUP BY charge_id
+  const refundQuery = await executor.execute(sql`
+    SELECT r.student_id AS "studentId", SUM(r.amount)::text AS refunded
+    FROM transport_refunds r WHERE r.school_id=${schoolId}
+      AND r.status='paid' AND r.method <> 'credit'
+      ${options.studentId ? sql`AND r.student_id=${options.studentId}` : sql``}
+    GROUP BY r.student_id
   `);
-  const paidMap = new Map<number, number>((paidResult.rows as any[]).map((row) => [Number(row.chargeId), amount(row.paid)]));
-  const adjustmentMap = new Map<number, number>((adjustmentResult.rows as any[]).map((row) => [Number(row.chargeId), amount(row.adjustment)]));
-  return charges.map((charge) => ({
-    ...charge,
-    outstanding: rounded(Math.max(0, amount(charge.amount) + (adjustmentMap.get(charge.id) ?? 0) - (paidMap.get(charge.id) ?? 0))),
-  })).filter((charge) => charge.outstanding > 0);
+  const lockQuery = await executor.execute(sql`
+    SELECT year, month FROM transport_period_locks
+    WHERE school_id=${schoolId} AND period_type='monthly_settlement' AND status='locked'
+  `);
+  return createTransportCreditPlan(schoolId, paymentQuery.rows as any[], chargeQuery.rows as any[],
+    allocationQuery.rows as any[], refundQuery.rows as any[], lockQuery.rows as any[], options);
 }
+
+async function applyTransportCreditPlan(executor: any, schoolId: number, userId: number, plan: Pick<TransportCreditPlan, "operations" | "affectedStudents">, reason: string) {
+  for (const op of plan.operations) {
+    if (op.existingAllocationId) {
+      // No changes are ever made to allocations referenced by claims.
+      const changed = await executor.execute(sql`
+        UPDATE transport_payment_allocations SET amount=${transportMoney(op.existingAmountCents + op.amountCents)}
+        WHERE id=${op.existingAllocationId} AND amount=${transportMoney(op.existingAmountCents)}
+        AND NOT EXISTS(SELECT 1 FROM transport_claim_allocations WHERE allocation_id=${op.existingAllocationId})
+        RETURNING id
+      `);
+      if (changed.rows.length !== 1) throw Object.assign(new Error('Allocation changed during reconciliation; nothing was committed.'), { status: 409 });
+    } else {
+      await executor.insert(transportPaymentAllocations).values({ paymentId: op.paymentId, chargeId: op.chargeId,
+        amount: transportMoney(op.amountCents), serviceYear: op.serviceYear, serviceMonth: op.serviceMonth,
+        vehicleId: op.vehicleId });
+    }
+    await writeAudit(executor, schoolId, userId, 'payment', op.paymentId, 'allocate_existing_credit', null,
+      { chargeId: op.chargeId, amount: transportMoney(op.amountCents), serviceYear: op.serviceYear, serviceMonth: op.serviceMonth, vehicleId: op.vehicleId },
+      reason, { allocationMode: op.mode });
+  }
+  for (const studentId of plan.affectedStudents) {
+    await refreshTransportFinancialStatus(executor, schoolId, studentId);
+  }
+}
+
+async function refreshTransportFinancialStatus(executor: any, schoolId: number, studentId: number) {
+  const ledger = await executor.execute(sql`
+    SELECT
+      COALESCE((SELECT SUM(amount) FROM transport_charges WHERE school_id=${schoolId} AND student_id=${studentId} AND status NOT IN ('cancelled','void')),0)::text AS charged,
+      COALESCE((SELECT SUM(CASE WHEN direction='debit' THEN amount ELSE -amount END) FROM transport_account_adjustments WHERE school_id=${schoolId} AND student_id=${studentId} AND status='approved'),0)::text AS adjustments,
+      COALESCE((SELECT SUM(amount) FROM transport_payments WHERE school_id=${schoolId} AND student_id=${studentId} AND reversed_at IS NULL),0)::text AS received,
+      COALESCE((SELECT SUM(amount) FROM transport_refunds WHERE school_id=${schoolId} AND student_id=${studentId} AND status='paid' AND method <> 'credit'),0)::text AS refunded,
+      COALESCE((SELECT COUNT(*) FROM transport_payments WHERE school_id=${schoolId} AND student_id=${studentId} AND reversed_at IS NULL),0)::int AS receipt_count
+  `);
+  const r: any = ledger.rows[0] || {};
+  const balance = transportCents(r.charged) + transportCents(r.adjustments) + transportCents(r.refunded) - transportCents(r.received);
+  const status = balance < 0 ? 'credit' : balance === 0 ? 'paid' : Number(r.receipt_count) > 0 ? 'partially_paid' : 'overdue';
+  await executor.update(transportAssignments).set({ financialStatus: sql`CASE WHEN ${transportAssignments.financialStatus}='pending_first_payment' AND ${Number(r.receipt_count) === 0} THEN 'pending_first_payment' WHEN ${transportAssignments.serviceState}='suspended_arrears' AND ${balance} > 0 THEN 'overdue' ELSE ${status} END`, updatedAt: new Date() })
+    .where(and(eq(transportAssignments.schoolId, schoolId), eq(transportAssignments.studentId, studentId),
+      or(eq(transportAssignments.isActive, true), eq(transportAssignments.serviceState, 'suspended_arrears'))));
+}
+
 
 async function validateLearnerServicePoint(
   school: any,
@@ -1366,12 +1440,22 @@ function schoolCashupView(row: any) {
   return safe;
 }
 
-function calculateCashupHandover(payments: any[], refunds: any[]) {
+async function cashupAdvanceRepayments(schoolId: number, ids: number[], currentCashupId?: number) {
+  if (new Set(ids).size !== ids.length) throw Object.assign(new Error("Duplicate cash advance repayment selection"), {status:409});
+  if (!ids.length) return [];
+  const rows=await db.select().from(transportAdvanceRepayments).where(and(eq(transportAdvanceRepayments.schoolId,schoolId),inArray(transportAdvanceRepayments.id,ids)));
+  if(rows.length!==ids.length || rows.some(r=>r.paymentMethod!=="cash" || r.status!=="pending" || (r.cashupId && r.cashupId!==currentCashupId))) {
+    throw Object.assign(new Error("One or more direct cash advance repayments are unavailable or already linked to another cash-up"), {status:409});
+  }
+  return rows;
+}
+
+function calculateCashupHandover(payments: any[], refunds: any[], cashAdvanceRepayments: any[] = []) {
   const cashReceipts = payments.filter((row) => row.paymentMethod === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
   const nonCashReceipts = payments.filter((row) => row.paymentMethod !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
   const cashRefunds = refunds.filter((row) => row.method === "cash").reduce((sum, row) => sum + amount(row.amount), 0);
   const nonCashRefunds = refunds.filter((row) => row.method !== "cash").reduce((sum, row) => sum + amount(row.amount), 0);
-  const cash = rounded(cashReceipts - cashRefunds);
+  const cash = rounded(cashReceipts + cashAdvanceRepayments.reduce((sum, row) => sum + amount(row.amount), 0) - cashRefunds);
   const nonCash = rounded(nonCashReceipts - nonCashRefunds);
   if (cash < -0.009 || nonCash < -0.009) {
     const error: any = new Error("Selected refunds would make a cash-up handover amount negative. Adjust the selected transactions before continuing.");
@@ -1966,13 +2050,28 @@ type SchoolClaimComputation = {
   providerAdjustments: any[];
 };
 
+async function settlementPolicyForSchool(school: SchoolRow): Promise<SettlementPolicy> {
+  if (!school.organizationId) return DEFAULT_SETTLEMENT_POLICY;
+  const [row] = await db.select().from(transportOrganizationSettings).where(eq(transportOrganizationSettings.organizationId, school.organizationId));
+  if (!row) return DEFAULT_SETTLEMENT_POLICY;
+  return {
+    paymentDaysBeforeEnd: row.paymentCutoffWorkingDaysBeforeEnd,
+    claimDaysBeforeEnd: row.claimCutoffWorkingDaysBeforeEnd,
+    paymentCutoffTime: row.paymentCutoffTime,
+    claimCutoffTime: row.claimCutoffTime,
+    effectiveFrom: String(row.settlementRulesEffectiveFrom),
+  };
+}
+
 async function computeSchoolClaim(school: SchoolRow, vehicleId: number, serviceYear: number, serviceMonth: number, existingDraftId?: number | null): Promise<SchoolClaimComputation> {
   const vehicle = await assertOrganizationRecord(transportVehicles, vehicleId, school);
   if (!vehicle) throw Object.assign(new Error("Vehicle not found"), { status: 404 });
   const settings = await getOrCreateSettings(school.id);
+  const settlementPolicy = await settlementPolicyForSchool(school);
   const allocationRows = await db.execute(sql`
     SELECT pa.id, pa.amount, pa.service_year AS "serviceYear", pa.service_month AS "serviceMonth",
-      p.receipt_no AS "receiptNo", p.verification_status AS "verificationStatus", p.reversed_at AS "reversedAt",
+      p.receipt_no AS "receiptNo", p.payment_date AS "paymentDate", p.created_at AS "paymentCreatedAt",
+      p.verification_status AS "verificationStatus", p.reversed_at AS "reversedAt",
       ca.claim_id AS "claimId"
     FROM transport_payment_allocations pa
     JOIN transport_payments p ON p.id=pa.payment_id
@@ -1986,6 +2085,8 @@ async function computeSchoolClaim(school: SchoolRow, vehicleId: number, serviceY
     let reason = "";
     if (row.reversedAt) reason = "Payment reversed";
     else if (row.claimId && Number(row.claimId) !== Number(existingDraftId || 0)) reason = "Already included in another claim";
+    else if (!paymentEligibleForCycle(String(row.paymentDate), row.paymentCreatedAt ? new Date(row.paymentCreatedAt) : null,
+      Number(row.serviceYear), Number(row.serviceMonth), serviceYear, serviceMonth, null, settlementPolicy)) reason = "After current-cycle working-day payment cut-off; carried to next eligible cycle";
     else if (settings.requireCashupForClaim && row.verificationStatus !== "reconciled") reason = "Payment has not been reconciled in a verified cash-up";
     else if (!settings.requireCashupForClaim && !["verified", "reconciled"].includes(String(row.verificationStatus))) reason = "Payment has not been verified";
     if (reason) excluded.push({ allocationId: Number(row.id), receiptNo: String(row.receiptNo || "—"), amount: amount(row.amount), reason });
@@ -2084,6 +2185,7 @@ async function saveSchoolClaim(school: SchoolRow, userId: number, serviceYear: n
 }
 
 export function registerTransportRoutes(app: Express) {
+  registerTransportAdvanceRepaymentRoutes(app);
   app.use("/api/transport", async (req, res, next) => {
     try {
       const current = userOf(req);
@@ -2095,6 +2197,15 @@ export function registerTransportRoutes(app: Express) {
     } catch (error) {
       next(error);
     }
+  });
+  app.get("/api/transport/settlement-deadlines", requireAuth, requireAnyPermission("transport.claims.view", "transport.claims.generate", "transport.view"), async (req, res) => {
+    try {
+      const school=await schoolContext(req); if(!school)return res.status(400).json({message:"Select a school"});
+      const year=Number(req.query.year||new Date().getFullYear()),month=Number(req.query.month||new Date().getMonth()+1);
+      if(!Number.isInteger(year)||year<2020||year>2100||!Number.isInteger(month)||month<1||month>12)return res.status(400).json({message:"Invalid period"});
+      const policy=await settlementPolicyForSchool(school);
+      res.json({year,month,policy,paymentDeadline:deadlineFor(year,month,policy.paymentDaysBeforeEnd,policy.paymentCutoffTime),claimDeadline:deadlineFor(year,month,policy.claimDaysBeforeEnd,policy.claimCutoffTime),lateHandling:"Next eligible settlement cycle",holidaysExcluded:true});
+    }catch(e){routeError(res,e);}
   });
   app.get("/api/transport/payments", requireAuth, requirePermission("transport.view"), async (req, res) => {
     try {
@@ -2596,6 +2707,7 @@ export function registerTransportRoutes(app: Express) {
         return { ...audit, userName, recordReference, effectiveDate };
       });
 
+      const advanceRepaymentRows=await db.select().from(transportAdvanceRepayments).where(eq(transportAdvanceRepayments.schoolId,schoolId)).orderBy(desc(transportAdvanceRepayments.recordedAt));
       return res.json({
         school,
         currentUserId: userOf(req)?.id || null,
@@ -2629,6 +2741,7 @@ export function registerTransportRoutes(app: Express) {
         subscriptions,
         penalties,
         advances,
+        advanceRepayments: advanceRepaymentRows,
         incidents,
         claims: claimsWithHq,
         payouts,
@@ -4077,7 +4190,11 @@ export function registerTransportRoutes(app: Express) {
       let seatsReleasedImmediately = 0;
       const suspendedLearners: any[] = [];
       let billingRun: any = null;
+      let automaticCredits: Pick<TransportCreditPlan, "totalAllocatedCents" | "operations" | "affectedStudents"> = { totalAllocatedCents: 0, operations: [], affectedStudents: [] };
+      const billedStudents = new Set<number>();
+      const newlyBilledAssignments: any[] = [];
       await db.transaction(async (tx) => {
+        await lockTransportCredits(tx, school.id);
         for (const assignment of assignments) {
           const [existing] = await tx.select().from(transportCharges).where(and(
             eq(transportCharges.assignmentId, assignment.id),
@@ -4116,6 +4233,24 @@ export function registerTransportRoutes(app: Express) {
             description: parsed.description || `Transport service for ${period.start.slice(0, 7)}`,
             createdByUserId: user.id,
           });
+          billedStudents.add(assignment.studentId);
+          newlyBilledAssignments.push(assignment);
+          created += 1;
+          totalGenerated = rounded(totalGenerated + calculated);
+        }
+        // Existing eligible receipts may predate the charges. Do this even on an
+        // idempotent, fully-skipped billing run (there is no charge duplication).
+        automaticCredits = await planTransportCredits(tx, school.id, { maxPeriod: creditPeriodKey(parsed.academicYear, parsed.month) });
+        await applyTransportCreditPlan(tx, school.id, user.id, automaticCredits, 'Automatic allocation following monthly billing');
+        for (const studentId of billedStudents) {
+          if (!automaticCredits.affectedStudents.includes(studentId)) await refreshTransportFinancialStatus(tx, school.id, studentId);
+        }
+        for (const studentId of automaticCredits.affectedStudents) {
+          await reconcileArrearsAfterPayment(tx, school, studentId, user.id);
+        }
+        // Do not suspend a learner before applying receipts that arrived before billing.
+        // A premature suspension can release the learner's reserved seat.
+        for (const assignment of newlyBilledAssignments) {
           const arrears = await qualifyingTransportArrears(tx, school.id, assignment.studentId, period.start);
           const threshold = amount(orgPolicy.minimumArrearsSuspensionBalance);
           if (arrears.balance > threshold) {
@@ -4130,23 +4265,65 @@ export function registerTransportRoutes(app: Express) {
             newlySuspended += 1; if (releaseImmediately) seatsReleasedImmediately += 1;
             suspendedLearners.push({ studentId: assignment.studentId, assignmentId: assignment.id, arrearsBalance: arrears.balance, oldestOverdueMonth: arrears.oldestMonth, seatReservedUntil, seatReleased: releaseImmediately });
           }
-          created += 1;
-          totalGenerated = rounded(totalGenerated + calculated);
         }
         [billingRun] = await tx.insert(transportBillingRuns).values({
           schoolId: school.id,
           runNumber: numberCode("BILL", school.shortCode, Date.now().toString().slice(-6)),
           serviceYear: parsed.academicYear, serviceMonth: parsed.month, status: "completed",
           generatedCount: created, skippedCount: skipped, failedCount: 0, totalAmount: String(totalGenerated),
-          details: { assignmentIds: parsed.assignmentIds || null, dueDate: parsed.dueDate || null, description: parsed.description || null, newlySuspended, seatsReleasedImmediately, suspendedLearners },
+          details: { assignmentIds: parsed.assignmentIds || null, dueDate: parsed.dueDate || null, description: parsed.description || null, newlySuspended, seatsReleasedImmediately, suspendedLearners, creditAllocationTotal: transportMoney(automaticCredits?.totalAllocatedCents || 0), creditAllocationCount: automaticCredits?.operations.length || 0 },
           generatedByUserId: user.id,
         }).returning();
         await writeAudit(tx, school.id, user.id, "billing_run", billingRun.id, "generate", null, billingRun);
       });
-      return res.status(201).json({ created, skipped, total: totalGenerated, newlySuspended, seatsReleasedImmediately, suspendedLearners, billingRun });
+      return res.status(201).json({ created, skipped, total: totalGenerated, newlySuspended, seatsReleasedImmediately, suspendedLearners, billingRun, creditAllocationTotal: transportMoney(automaticCredits?.totalAllocatedCents || 0), creditAllocationCount: automaticCredits?.operations.length || 0 });
     } catch (error) {
       return routeError(res, error);
     }
+  });
+
+
+  // Build 2: deliberately scoped reconciliation of credits left unallocated by earlier
+  // billing runs. Preview requires no financial writes; apply re-plans inside a transaction.
+  app.get('/api/transport/credits/reconcile-preview', requireAuth, requireAnyPermission('transport.charges.generate', 'transport.payments.record', 'transport.create'), async (req, res) => {
+    try {
+      const school = await schoolContext(req);
+      if (!school) return res.status(400).json({ message: 'Select a school' });
+      const input = z.object({ year: z.coerce.number().int().min(2020), month: monthInput,
+        includeLegacy: z.enum(['true','false']).default('false').transform(v => v === 'true') }).parse(req.query);
+      const plan = await planTransportCredits(db, school.id, { maxPeriod: creditPeriodKey(input.year, input.month), includeLegacy: input.includeLegacy });
+      return res.json({ year: input.year, month: input.month, includeLegacy: input.includeLegacy, digest: plan.digest,
+        allocationCount: plan.operations.length, studentCount: plan.affectedStudents.length,
+        totalToAllocate: transportMoney(plan.totalAllocatedCents), remainingUnallocated: transportMoney(plan.remainingUnallocatedCents),
+        excluded: Object.fromEntries(Object.entries(plan.excluded).map(([k,v]) => [k, transportMoney(v)])),
+        // Reconciliation preview displays financial results, but never exposes payment tokens.
+        allocations: plan.operations.map(o => ({ paymentId: o.paymentId, chargeId: o.chargeId, studentId: o.studentId,
+          serviceYear: o.serviceYear, serviceMonth: o.serviceMonth, amount: transportMoney(o.amountCents), mode: o.mode })) });
+    } catch (error) { return routeError(res, error); }
+  });
+
+  app.post('/api/transport/credits/reconcile', requireAuth, requireAnyPermission('transport.charges.generate', 'transport.create'), async (req, res) => {
+    try {
+      const school = await schoolContext(req); const user = userOf(req);
+      if (!school || !user) return res.status(400).json({ message: 'Select a school' });
+      const input = z.object({ year: z.coerce.number().int().min(2020), month: monthInput,
+        includeLegacy: z.boolean().default(false), expectedDigest: z.string().regex(/^[a-f0-9]{64}$/) }).parse(req.body);
+      await ensureNotLocked(school.id, input.year, input.month);
+      const result = await db.transaction(async tx => {
+        await lockTransportCredits(tx, school.id);
+        const plan = await planTransportCredits(tx, school.id, { maxPeriod: creditPeriodKey(input.year, input.month), includeLegacy: input.includeLegacy });
+        if (plan.digest !== input.expectedDigest) throw Object.assign(new Error('Credit balances have changed. Refresh the preview before confirming.'), { status: 409 });
+        await applyTransportCreditPlan(tx, school.id, user.id, plan, 'Approved reconciliation of previously unallocated receipts');
+        for (const studentId of plan.affectedStudents) await reconcileArrearsAfterPayment(tx, school, studentId, user.id);
+        await writeAudit(tx, school.id, user.id, 'credit_reconciliation', null, 'apply', null,
+          { year: input.year, month: input.month, includeLegacy: input.includeLegacy, digest: plan.digest,
+            allocationCount: plan.operations.length, totalAllocated: transportMoney(plan.totalAllocatedCents), affectedStudents: plan.affectedStudents.length },
+          'Preview explicitly confirmed by an authorized Transport user');
+        return { allocated: transportMoney(plan.totalAllocatedCents), allocationCount: plan.operations.length,
+          affectedStudents: plan.affectedStudents.length, excluded: plan.excluded };
+      });
+      return res.json(result);
+    } catch (error) { return routeError(res, error); }
   });
 
   app.post("/api/transport/payments", requireAuth, requireAnyPermission("transport.payments.record", "transport.create"), async (req, res) => {
@@ -4160,6 +4337,7 @@ export function registerTransportRoutes(app: Express) {
       const settings = await getOrCreateSettings(school.id);
       const snapshot = await receiptSnapshot(school, parsed.studentId, req, parsed);
       const result = await db.transaction(async (tx) => {
+        await lockTransportCredits(tx, school.id);
         const receiptNo = await generateReceiptNumber(tx, school);
         const token = verificationToken();
         const [payment] = await tx.insert(transportPayments).values({
@@ -4175,36 +4353,27 @@ export function registerTransportRoutes(app: Express) {
           receiptNo,
           verificationToken: token,
           receiptSnapshot: { ...snapshot, receiptNo, verificationTokenHash: createHash("sha256").update(token).digest("hex") },
+          allocationMode: parsed.allocationMode,
+          allocationChargeIds: parsed.allocationMode === "specific" ? (parsed.chargeIds || []) : null,
           externalReference: parsed.externalReference,
           notes: parsed.notes,
           receivedByUserId: user.id,
         }).returning();
-        let remaining = parsed.amount;
-        if (parsed.allocationMode !== "future_credit") {
-          const candidates = await allocationCandidates(parsed.studentId, school.id, parsed.allocationMode === "specific" ? parsed.chargeIds : undefined);
-          for (const charge of candidates) {
-            if (remaining <= 0) break;
-            const allocated = rounded(Math.min(remaining, charge.outstanding));
-            await tx.insert(transportPaymentAllocations).values({
-              paymentId: payment.id,
-              chargeId: charge.id,
-              amount: String(allocated),
-              serviceMonth: charge.month,
-              serviceYear: charge.academicYear,
-              vehicleId: charge.vehicleId,
-            });
-            remaining = rounded(remaining - allocated);
-          }
-        }
-        await tx.insert(transportReceiptEvents).values({ schoolId: school.id, paymentId: payment.id, eventType: "issued", copyType: "single_receipt", createdByUserId: user.id, metadata: { receiptNo } });
+        // The same allocation planner is used for payment-first and charge-first sequences.
+        const creditPlan = await planTransportCredits(tx, school.id, { studentId: parsed.studentId });
+        await applyTransportCreditPlan(tx, school.id, user.id, creditPlan, 'Automatic allocation on receipt recording');
+        const remainingResult = await tx.execute(sql`
+          SELECT (p.amount - COALESCE((SELECT SUM(pa.amount) FROM transport_payment_allocations pa WHERE pa.payment_id=p.id),0))::text AS remaining
+          FROM transport_payments p WHERE p.id=${payment.id}
+        `);
+        const remaining = amount((remainingResult.rows[0] as any)?.remaining);
         const [activeAssignment] = await tx.select().from(transportAssignments).where(and(
           eq(transportAssignments.schoolId, school.id), eq(transportAssignments.studentId, parsed.studentId), eq(transportAssignments.isActive, true),
         )).orderBy(desc(transportAssignments.startDate)).limit(1);
-        if (activeAssignment) {
-          const financialStatus = remaining > 0 ? "credit" : "paid";
-          const serviceState = activeAssignment.serviceState === "pending_start" && activeAssignment.startDate <= isoDate(new Date()) ? "active" : activeAssignment.serviceState;
-          await tx.update(transportAssignments).set({ financialStatus, serviceState, updatedAt: new Date() }).where(eq(transportAssignments.id, activeAssignment.id));
+        if (activeAssignment && activeAssignment.serviceState === 'pending_start' && activeAssignment.startDate <= isoDate(new Date())) {
+          await tx.update(transportAssignments).set({ serviceState: 'active', updatedAt: new Date() }).where(eq(transportAssignments.id, activeAssignment.id));
         }
+        await refreshTransportFinancialStatus(tx, school.id, parsed.studentId);
         const reinstatement = await reconcileArrearsAfterPayment(tx, school, parsed.studentId, user.id);
         await writeAudit(tx, school.id, user.id, "payment", payment.id, "record", null, { ...payment, unallocatedCredit: remaining, reinstatement: reinstatement ? { assignmentId: reinstatement.id, serviceState: reinstatement.serviceState } : null });
         return { payment, unallocatedCredit: remaining, reinstatement };
@@ -4526,7 +4695,7 @@ export function registerTransportRoutes(app: Express) {
       const school = await schoolContext(req); const user = userOf(req);
       if (!school || !user) return res.status(400).json({ message: "Select a school" });
       const parsed = cashupInput.parse(req.body);
-      if (!parsed.paymentIds.length && !parsed.refundIds.length) return res.status(400).json({ message: "Select at least one receipt or paid refund for this cash-up." });
+      if (!parsed.paymentIds.length && !parsed.refundIds.length && !parsed.advanceRepaymentIds.length) return res.status(400).json({ message: "Select at least one receipt, paid refund or direct cash advance repayment for this cash-up." });
       const payments = parsed.paymentIds.length ? await db.select().from(transportPayments).where(and(eq(transportPayments.schoolId, school.id), inArray(transportPayments.id, parsed.paymentIds), isNull(transportPayments.reversedAt))) : [];
       if (payments.length !== parsed.paymentIds.length) return res.status(400).json({ message: "One or more payments are invalid or already reversed" });
       const refunds = parsed.refundIds.length ? await db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), inArray(transportRefunds.id, parsed.refundIds), eq(transportRefunds.status, "paid"), isNull(transportRefunds.accountedCashupId))) : [];
@@ -4539,7 +4708,8 @@ export function registerTransportRoutes(app: Express) {
         .where(and(inArray(transportCashupRefunds.refundId, parsed.refundIds), eq(transportCashups.status, "verified"))) : [];
       if (historicallyAccountedRefunds.length) return res.status(409).json({ message: "One or more selected refunds were already accounted for by a completed cash-up. Refresh the list and select only unaccounted refunds." });
 
-      const handover = calculateCashupHandover(payments, refunds);
+      const directRepayments=await cashupAdvanceRepayments(school.id,parsed.advanceRepaymentIds,undefined);
+      const handover = calculateCashupHandover(payments, refunds, directRepayments);
       const expectedCash = handover.cash;
       const expectedNonCash = handover.nonCash;
       const created = await db.transaction(async (tx) => {
@@ -4558,6 +4728,10 @@ export function registerTransportRoutes(app: Express) {
         }).returning();
         for (const payment of payments) await tx.insert(transportCashupPayments).values({ cashupId: cashup.id, paymentId: payment.id });
         for (const refund of refunds) await tx.insert(transportCashupRefunds).values({ cashupId: cashup.id, refundId: refund.id });
+        if (directRepayments.length) {
+          const applied=await tx.update(transportAdvanceRepayments).set({cashupId:cashup.id}).where(and(inArray(transportAdvanceRepayments.id,directRepayments.map(r=>r.id)),isNull(transportAdvanceRepayments.cashupId),eq(transportAdvanceRepayments.status,"pending"))).returning();
+          if(applied.length!==directRepayments.length)throw Object.assign(new Error("Cash advance repayment changed while preparing cash-up"),{status:409});
+        }
         await writeAudit(tx, school.id, user.id, "cashup", cashup.id, "create", null, schoolCashupView(cashup), null, { paymentIds: parsed.paymentIds, refundIds: parsed.refundIds });
         return cashup;
       });
@@ -4574,7 +4748,7 @@ export function registerTransportRoutes(app: Express) {
       if (!previous || previous.status !== "draft") return res.status(409).json({ message: "Only a draft cash-up can be edited" });
       if (previous.cashierUserId !== user.id) return res.status(403).json({ message: "Only the Receptionist/cashier who prepared this draft can edit it" });
       const parsed = cashupInput.parse(req.body);
-      if (!parsed.paymentIds.length && !parsed.refundIds.length) return res.status(400).json({ message: "Select at least one receipt or paid refund for this cash-up." });
+      if (!parsed.paymentIds.length && !parsed.refundIds.length && !parsed.advanceRepaymentIds.length) return res.status(400).json({ message: "Select at least one receipt, paid refund or direct cash advance repayment for this cash-up." });
       const payments = parsed.paymentIds.length ? await db.select().from(transportPayments).where(and(eq(transportPayments.schoolId, school.id), inArray(transportPayments.id, parsed.paymentIds), isNull(transportPayments.reversedAt))) : [];
       if (payments.length !== parsed.paymentIds.length) return res.status(409).json({ message: "One or more selected payments are no longer valid. Refresh this draft." });
       const refunds = parsed.refundIds.length ? await db.select().from(transportRefunds).where(and(eq(transportRefunds.schoolId, school.id), inArray(transportRefunds.id, parsed.refundIds), eq(transportRefunds.status, "paid"), isNull(transportRefunds.accountedCashupId))) : [];
@@ -4583,7 +4757,8 @@ export function registerTransportRoutes(app: Express) {
       if (conflictingPayments.length) return res.status(409).json({ message: "One or more selected payments were included in another cash-up while this draft was open." });
       const conflictingRefunds = parsed.refundIds.length ? await db.select({ refundId: transportCashupRefunds.refundId, cashupId: transportCashupRefunds.cashupId }).from(transportCashupRefunds).innerJoin(transportCashups, eq(transportCashups.id, transportCashupRefunds.cashupId)).where(and(inArray(transportCashupRefunds.refundId, parsed.refundIds), ne(transportCashupRefunds.cashupId, id), eq(transportCashups.status, "verified"))) : [];
       if (conflictingRefunds.length) return res.status(409).json({ message: "One or more selected refunds were already accounted for by another completed cash-up." });
-      const handover = calculateCashupHandover(payments, refunds);
+      const directRepayments=await cashupAdvanceRepayments(school.id,parsed.advanceRepaymentIds,id);
+      const handover = calculateCashupHandover(payments, refunds, directRepayments);
       const expectedCash = handover.cash;
       const expectedNonCash = handover.nonCash;
       const updated = await db.transaction(async (tx) => {
@@ -4598,6 +4773,11 @@ export function registerTransportRoutes(app: Express) {
         await tx.delete(transportCashupRefunds).where(eq(transportCashupRefunds.cashupId, id));
         for (const payment of payments) await tx.insert(transportCashupPayments).values({ cashupId: id, paymentId: payment.id });
         for (const refund of refunds) await tx.insert(transportCashupRefunds).values({ cashupId: id, refundId: refund.id });
+        await tx.update(transportAdvanceRepayments).set({cashupId:null}).where(and(eq(transportAdvanceRepayments.cashupId,id),eq(transportAdvanceRepayments.status,"pending")));
+        if(directRepayments.length){
+          const updated=await tx.update(transportAdvanceRepayments).set({cashupId:id}).where(and(inArray(transportAdvanceRepayments.id,directRepayments.map(r=>r.id)),isNull(transportAdvanceRepayments.cashupId),eq(transportAdvanceRepayments.status,"pending"))).returning();
+          if(updated.length!==directRepayments.length)throw Object.assign(new Error("Cash advance repayment changed while editing cash-up"),{status:409});
+        }
         await writeAudit(tx, school.id, user.id, "cashup", id, "edit_draft", schoolCashupView(previous), schoolCashupView(row), null, { paymentIds: parsed.paymentIds, refundIds: parsed.refundIds });
         return row;
       });
@@ -4617,6 +4797,7 @@ export function registerTransportRoutes(app: Express) {
       const discarded = await db.transaction(async (tx) => {
         await tx.delete(transportCashupPayments).where(eq(transportCashupPayments.cashupId, id));
         await tx.delete(transportCashupRefunds).where(eq(transportCashupRefunds.cashupId, id));
+        await tx.update(transportAdvanceRepayments).set({cashupId:null}).where(and(eq(transportAdvanceRepayments.cashupId,id),eq(transportAdvanceRepayments.status,"pending")));
         const [row] = await tx.update(transportCashups).set({ status: "discarded", notes: previous.notes ? `${previous.notes}\n[Discarded] ${reason}` : `[Discarded] ${reason}` }).where(eq(transportCashups.id, id)).returning();
         await writeAudit(tx, school.id, user.id, "cashup", id, "discard_draft", schoolCashupView(previous), schoolCashupView(row), reason);
         return row;
@@ -4652,7 +4833,8 @@ export function registerTransportRoutes(app: Express) {
       const signatures = await db.select().from(electronicSignatures)
         .where(and(eq(electronicSignatures.entityType, "transport_cashup"), eq(electronicSignatures.entityId, cashup.id)))
         .orderBy(asc(electronicSignatures.signedAt));
-      return res.json({ cashup: schoolCashupView(cashup), linkedPayments: linkedPayments.rows, linkedRefunds: linkedRefunds.rows, signatures });
+      const linkedAdvanceRepayments=await db.select().from(transportAdvanceRepayments).where(eq(transportAdvanceRepayments.cashupId,cashup.id));
+      return res.json({ cashup: schoolCashupView(cashup), linkedPayments: linkedPayments.rows, linkedRefunds: linkedRefunds.rows, linkedAdvanceRepayments, signatures });
     } catch (error) { return routeError(res, error); }
   });
 
@@ -4824,15 +5006,17 @@ export function registerTransportRoutes(app: Express) {
         FROM transport_cashup_payments cp JOIN transport_payments p ON p.id=cp.payment_id LEFT JOIN students s ON s.id=p.student_id
         WHERE cp.cashup_id=${cashup.id} ORDER BY p.payment_date, p.receipt_no
       `);
+      const advanceRepayments=await db.select().from(transportAdvanceRepayments).where(eq(transportAdvanceRepayments.cashupId,cashup.id));
       const signatures = await db.select().from(electronicSignatures)
         .where(and(eq(electronicSignatures.entityType, "transport_cashup"), eq(electronicSignatures.entityId, cashup.id)));
       const receptionist = signatures.find((row) => row.signatureRole === "receptionist");
       const accounts = signatures.find((row) => row.signatureRole === "accounts_clerk");
       const paymentRows = payments.rows.map((payment: any) => `<tr><td>${escapeHtml(payment.receiptNo)}</td><td>${escapeHtml(`${payment.firstName || ""} ${payment.lastName || ""}`.trim())}<div class="small">${escapeHtml(payment.admissionNo || "")}</div></td><td>${escapeHtml(payment.paymentDate)}</td><td>${escapeHtml(String(payment.paymentMethod || "").replaceAll("_", " "))}</td><td>USD ${amount(payment.amount).toFixed(2)}</td></tr>`).join("");
+      const principalRows=advanceRepayments.map((r:any)=>`<tr><td>${escapeHtml(r.paymentReference)}</td><td>Advance principal repayment #${r.advanceId} (not income)</td><td>${escapeHtml(r.paymentDate)}</td><td>Cash</td><td>USD ${amount(r.amount).toFixed(2)}</td></tr>`).join("");
       const signatureBlock = (row: any, label: string) => row
         ? `<div class="signature"><b>${escapeHtml(label)}</b><div class="signline"><img src="${row.signatureSnapshot}" alt="signature"/><div><strong>${escapeHtml(row.signerName)}</strong><br/><span>${escapeHtml(new Date(row.signedAt).toLocaleString("en-ZW", { timeZone: "Africa/Harare" }))}</span></div></div></div>`
         : `<div class="signature"><b>${escapeHtml(label)}</b><div class="unsigned">Not yet signed</div></div>`;
-      const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${escapeHtml(cashup.cashupNumber)}</title><style>@page{size:A4;margin:12mm}body{font-family:Arial,sans-serif;color:#111}h1,h2{text-align:center;margin:0 0 8px}.meta{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;border:1px solid #bbb;padding:12px;margin:16px 0}.totals{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:15px 0}.box{border:1px solid #bbb;padding:10px}.box b{display:block;font-size:11px;color:#555}.box span{font-size:17px;font-weight:bold}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #bbb;padding:7px;text-align:left}th{background:#eee}.small{font-size:9px;color:#555}.signatures{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:32px}.signature{border:1px solid #bbb;padding:10px;min-height:115px}.signline{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center;margin-top:8px}.signline img{max-width:145px;max-height:70px}.signline span,.unsigned{font-size:10px;color:#555}</style></head><body><h1>${escapeHtml(school.name)}</h1><h2>TRANSPORT DAILY CASH HANDOVER & ACKNOWLEDGEMENT</h2><div class="meta"><div><b>Cash-up:</b> ${escapeHtml(cashup.cashupNumber)}</div><div><b>Status:</b> ${escapeHtml(cashup.status)}</div><div><b>Cash-up date:</b> ${escapeHtml(cashup.cashupDate)}</div><div><b>Reference:</b> ${escapeHtml(cashup.depositReference || "—")}</div></div><div class="totals"><div class="box"><b>System-calculated handover</b><span>USD ${rounded(amount(cashup.actualCash)+amount(cashup.actualNonCash)).toFixed(2)}</span></div><div class="box"><b>Accounts verification</b><span>${cashup.verifiedAt ? `Verified · USD ${rounded(amount(cashup.actualCash)+amount(cashup.actualNonCash)).toFixed(2)}` : cashup.accountsDiscrepancyReason ? "Discrepancy flagged" : "Awaiting verification"}</span></div></div><table><thead><tr><th>Receipt</th><th>Learner</th><th>Payment date</th><th>Method</th><th>Amount</th></tr></thead><tbody>${paymentRows || '<tr><td colspan="5">No linked payments.</td></tr>'}</tbody></table><p><b>Receptionist notes:</b> ${escapeHtml(cashup.notes || "—")}</p><p><b>Accounts notes:</b> ${escapeHtml(cashup.accountsVerificationNotes || "—")}</p>${cashup.accountsDiscrepancyReason ? `<p><b>Discrepancy:</b> ${escapeHtml(cashup.accountsDiscrepancyReason)}</p>` : ""}<div class="signatures">${signatureBlock(receptionist,"Receptionist acknowledgement")}${signatureBlock(accounts,"Accounts action / signature")}</div></body></html>`;
+      const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${escapeHtml(cashup.cashupNumber)}</title><style>@page{size:A4;margin:12mm}body{font-family:Arial,sans-serif;color:#111}h1,h2{text-align:center;margin:0 0 8px}.meta{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;border:1px solid #bbb;padding:12px;margin:16px 0}.totals{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:15px 0}.box{border:1px solid #bbb;padding:10px}.box b{display:block;font-size:11px;color:#555}.box span{font-size:17px;font-weight:bold}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #bbb;padding:7px;text-align:left}th{background:#eee}.small{font-size:9px;color:#555}.signatures{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:32px}.signature{border:1px solid #bbb;padding:10px;min-height:115px}.signline{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center;margin-top:8px}.signline img{max-width:145px;max-height:70px}.signline span,.unsigned{font-size:10px;color:#555}</style></head><body><h1>${escapeHtml(school.name)}</h1><h2>TRANSPORT DAILY CASH HANDOVER & ACKNOWLEDGEMENT</h2><div class="meta"><div><b>Cash-up:</b> ${escapeHtml(cashup.cashupNumber)}</div><div><b>Status:</b> ${escapeHtml(cashup.status)}</div><div><b>Cash-up date:</b> ${escapeHtml(cashup.cashupDate)}</div><div><b>Reference:</b> ${escapeHtml(cashup.depositReference || "—")}</div></div><div class="totals"><div class="box"><b>System-calculated handover</b><span>USD ${rounded(amount(cashup.actualCash)+amount(cashup.actualNonCash)).toFixed(2)}</span></div><div class="box"><b>Accounts verification</b><span>${cashup.verifiedAt ? `Verified · USD ${rounded(amount(cashup.actualCash)+amount(cashup.actualNonCash)).toFixed(2)}` : cashup.accountsDiscrepancyReason ? "Discrepancy flagged" : "Awaiting verification"}</span></div></div><table><thead><tr><th>Receipt</th><th>Learner</th><th>Payment date</th><th>Method</th><th>Amount</th></tr></thead><tbody>${paymentRows+principalRows || '<tr><td colspan="5">No linked payments.</td></tr>'}</tbody></table><p><b>Receptionist notes:</b> ${escapeHtml(cashup.notes || "—")}</p><p><b>Accounts notes:</b> ${escapeHtml(cashup.accountsVerificationNotes || "—")}</p>${cashup.accountsDiscrepancyReason ? `<p><b>Discrepancy:</b> ${escapeHtml(cashup.accountsDiscrepancyReason)}</p>` : ""}<div class="signatures">${signatureBlock(receptionist,"Receptionist acknowledgement")}${signatureBlock(accounts,"Accounts action / signature")}</div></body></html>`;
       const pdf = await renderHtmlPdf({ html, pdfOptions: { format: "A4", printBackground: true, preferCSSPageSize: true } });
       const filename = reportPdfFilename(`Transport_Cashup_${cashup.cashupNumber}`);
       res.setHeader("Content-Type", "application/pdf");
@@ -5148,7 +5332,10 @@ export function registerTransportRoutes(app: Express) {
       const deductions = await db.select().from(transportClaimDeductions).where(eq(transportClaimDeductions.claimId, claim.id)).orderBy(asc(transportClaimDeductions.priority));
       const detailRows = (details.rows as any[]).map((row) => `<tr><td>${escapeHtml(`${row.firstName} ${row.lastName}`)}</td><td>${escapeHtml(row.admissionNo)}</td><td>${escapeHtml(row.className)}</td><td>${escapeHtml(row.routeName)}</td><td>${escapeHtml(row.stopName)}</td><td>${escapeHtml(row.serviceType)}</td><td>${escapeHtml(row.receiptNo)}</td><td>${escapeHtml(row.paymentDate)}</td><td>USD ${amount(row.amount).toFixed(2)}</td></tr>`).join("");
       const deductionRows = deductions.map((row) => `<tr><td>${escapeHtml(row.description)}</td><td>USD ${amount(row.amount).toFixed(2)}</td></tr>`).join("");
-      const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${escapeHtml(claim.claimNumber)}</title><style>@page{size:A4 landscape;margin:10mm}body{font-family:Arial;color:#111;font-size:10px}h1,h2{text-align:center;margin:4px}.meta{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;border:1px solid #222;padding:10px;margin:10px 0}.meta div{border-bottom:1px dotted #aaa;padding:3px}table{width:100%;border-collapse:collapse;margin-top:9px}td,th{border:1px solid #aaa;padding:5px;text-align:left}th{background:#eee}.summary{margin-left:auto;width:42%}.sign{display:grid;grid-template-columns:repeat(3,1fr);gap:40px;margin-top:35px}.line{border-top:1px solid #111;padding-top:4px}.small{font-size:9px}</style></head><body><h1>${escapeHtml(school.name)}</h1><h2>TRANSPORT SERVICE PROVIDER CLAIM FORM</h2><div class="meta"><div><b>Claim:</b> ${escapeHtml(claim.claimNumber)}</div><div><b>Status:</b> ${escapeHtml(claim.status)}</div><div><b>Service month:</b> ${claim.serviceYear}-${String(claim.serviceMonth).padStart(2,"0")}</div><div><b>Vehicle:</b> ${escapeHtml(vehicle?.registrationNumber)}</div><div><b>Owner:</b> ${escapeHtml(owner?.name || "—")}</div><div><b>Driver:</b> ${escapeHtml(driver ? `${driver.firstName} ${driver.lastName}` : "—")}</div><div><b>Current-period collections:</b> USD ${amount(claim.currentPeriodAmount).toFixed(2)}</div><div><b>Prior-period collections:</b> USD ${amount(claim.priorPeriodAmount).toFixed(2)}</div></div><table><thead><tr><th>Learner</th><th>Admission</th><th>Class</th><th>Route</th><th>Stop</th><th>Service</th><th>Receipt</th><th>Payment date</th><th>Eligible amount</th></tr></thead><tbody>${detailRows || '<tr><td colspan="9">No eligible allocations.</td></tr>'}</tbody></table><table class="summary"><tr><th colspan="2">Claim summary</th></tr><tr><td>Gross eligible collections</td><td>USD ${amount(claim.grossAmount).toFixed(2)}</td></tr>${deductionRows}<tr><td><b>Total deductions</b></td><td><b>USD ${amount(claim.deductionAmount).toFixed(2)}</b></td></tr><tr><td><b>NET CLAIM</b></td><td><b>USD ${amount(claim.netAmount).toFixed(2)}</b></td></tr></table><p class="small">Receipt allocations shown here are system-controlled and cannot be included in another claim. Paper receipt possession alone does not authorise payment.</p><div class="sign"><div class="line">Service provider / claimant</div><div class="line">Transport Manager verification</div><div class="line">Accounts / Finance approval</div></div></body></html>`;
+      const driverOnly=String(req.query.driverSummary||"")==="1";
+      const snap=(claim.settlementPolicySnapshot||{}) as any;
+      const deadlineBlock=`<div class="meta"><div><b>Payment cut-off:</b> ${escapeHtml(snap.paymentDeadline?new Date(snap.paymentDeadline).toLocaleString("en-ZW",{timeZone:"Africa/Harare"}):"Historical claim / policy not recorded")}</div><div><b>HQ submission deadline:</b> ${escapeHtml(snap.submissionDeadline?new Date(snap.submissionDeadline).toLocaleString("en-ZW",{timeZone:"Africa/Harare"}):"Historical claim / policy not recorded")}</div><div><b>Settlement cycle:</b> ${escapeHtml(`${claim.settlementYear||claim.serviceYear}-${String(claim.settlementMonth||claim.serviceMonth).padStart(2,"0")}`)}</div><div><b>Deferred on submission:</b> USD ${amount(snap.deferredTotalAtSubmission||0).toFixed(2)}</div></div><p class="small">Amounts deferred at claim submission: ${escapeHtml((snap.deferredAtSubmission||[]).map((x:any)=>`${x.reason}: USD ${amount(x.amount).toFixed(2)}`).join("; ")||"None recorded at submission")}. Later receipts and pending verification remain eligible for a subsequent open cycle; paid settlements are not reopened.</p>`;
+      const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${escapeHtml(claim.claimNumber)}</title><style>@page{size:A4 landscape;margin:10mm}body{font-family:Arial;color:#111;font-size:10px}h1,h2{text-align:center;margin:4px}.meta{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;border:1px solid #222;padding:10px;margin:10px 0}.meta div{border-bottom:1px dotted #aaa;padding:3px}table{width:100%;border-collapse:collapse;margin-top:9px}td,th{border:1px solid #aaa;padding:5px;text-align:left}th{background:#eee}.summary{margin-left:auto;width:42%}.sign{display:grid;grid-template-columns:repeat(3,1fr);gap:40px;margin-top:35px}.line{border-top:1px solid #111;padding-top:4px}.small{font-size:9px}</style></head><body><h1>${escapeHtml(school.name)}</h1><h2>TRANSPORT SERVICE PROVIDER CLAIM FORM</h2><div class="meta"><div><b>Claim:</b> ${escapeHtml(claim.claimNumber)}</div><div><b>Status:</b> ${escapeHtml(claim.status)}</div><div><b>Service month:</b> ${claim.serviceYear}-${String(claim.serviceMonth).padStart(2,"0")}</div><div><b>Vehicle:</b> ${escapeHtml(vehicle?.registrationNumber)}</div><div><b>Owner:</b> ${escapeHtml(owner?.name || "—")}</div><div><b>Driver:</b> ${escapeHtml(driver ? `${driver.firstName} ${driver.lastName}` : "—")}</div><div><b>Current-period collections:</b> USD ${amount(claim.currentPeriodAmount).toFixed(2)}</div><div><b>Prior-period collections:</b> USD ${amount(claim.priorPeriodAmount).toFixed(2)}</div></div>${deadlineBlock}${driverOnly?"":`<table><thead><tr><th>Learner</th><th>Admission</th><th>Class</th><th>Route</th><th>Stop</th><th>Service</th><th>Receipt</th><th>Payment date</th><th>Eligible amount</th></tr></thead><tbody>${detailRows || '<tr><td colspan="9">No eligible allocations.</td></tr>'}</tbody></table>`}<table class="summary"><tr><th colspan="2">Claim summary</th></tr><tr><td>Gross eligible collections</td><td>USD ${amount(claim.grossAmount).toFixed(2)}</td></tr>${deductionRows}<tr><td><b>Total deductions</b></td><td><b>USD ${amount(claim.deductionAmount).toFixed(2)}</b></td></tr><tr><td><b>NET CLAIM</b></td><td><b>USD ${amount(claim.netAmount).toFixed(2)}</b></td></tr></table><p class="small">Receipt allocations shown here are system-controlled and cannot be included in another claim. Paper receipt possession alone does not authorise payment.</p><div class="sign"><div class="line">Service provider / claimant</div><div class="line">Transport Manager verification</div><div class="line">Accounts / Finance approval</div></div></body></html>`;
       const pdf = await renderHtmlPdf({ html, pdfOptions: { format: "A4", landscape: true, printBackground: true, preferCSSPageSize: true } });
       const filename = reportPdfFilename(`Transport_Claim_${claim.claimNumber}`);
       res.setHeader("Content-Type", "application/pdf");
@@ -5175,7 +5362,29 @@ export function registerTransportRoutes(app: Express) {
         if (!["draft", "disputed", "submitted"].includes(String(previous.status))) return res.status(409).json({ message: `Claim cannot move from ${previous.status} to ${status}` });
       }
       const changes: any = { status };
-      if (status === "submitted") changes.submittedAt = new Date();
+      if (status === "submitted") {
+        const submittedAt = new Date();
+        const policy = await settlementPolicyForSchool(school);
+        const cycle = cycleForClaim(previous.serviceYear, previous.serviceMonth, submittedAt, policy);
+        changes.submittedAt = submittedAt;
+        changes.settlementYear = cycle.year;
+        changes.settlementMonth = cycle.month;
+        const eligibility=await computeSchoolClaim(school,previous.vehicleId,previous.serviceYear,previous.serviceMonth,previous.id);
+        const currentlyIncluded=await db.select({allocationId:transportClaimAllocations.allocationId}).from(transportClaimAllocations).where(eq(transportClaimAllocations.claimId,previous.id));
+        const includedIds=new Set(currentlyIncluded.map(x=>x.allocationId));
+        const afterPreparation=eligibility.candidates.filter(c=>!includedIds.has(Number(c.id)));
+        const deferredRows=[...eligibility.excluded.filter(x=>!x.reason.includes("Already included") && !x.reason.includes("reversed")),...afterPreparation.map((x:any)=>({allocationId:Number(x.id),receiptNo:String(x.receiptNo||"—"),amount:amount(x.amount),reason:"Received after the claim was prepared; excluded from frozen claim"}))];
+        const deferredSummary=Object.entries(deferredRows.reduce((acc:Record<string,number>,entry:any)=>{acc[entry.reason]=(acc[entry.reason]||0)+amount(entry.amount);return acc;},{}));
+        changes.settlementPolicySnapshot = {
+          deferredAtSubmission:deferredSummary.map(([reason,value])=>({reason,amount:rounded(value)})),
+          deferredTotalAtSubmission:rounded(deferredRows.reduce((sum:number,x:any)=>sum+amount(x.amount),0)),
+          eligibleClaimAmount:amount(previous.grossAmount),
+          capturedAt:submittedAt.toISOString(),
+          paymentDeadline: deadlineFor(previous.serviceYear, previous.serviceMonth, policy.paymentDaysBeforeEnd, policy.paymentCutoffTime),
+          submissionDeadline: deadlineFor(previous.serviceYear, previous.serviceMonth, policy.claimDaysBeforeEnd, policy.claimCutoffTime),
+          cycleYear: cycle.year, cycleMonth: cycle.month, policy,
+        };
+      }
       const [updated] = await db.update(transportClaims).set(changes).where(eq(transportClaims.id, id)).returning();
       await writeAudit(db, school.id, user.id, "claim", id, `status_${status}`, previous, updated, reason);
       return res.json(updated);

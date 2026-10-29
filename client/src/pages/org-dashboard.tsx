@@ -2209,7 +2209,7 @@ export default function OrgDashboard() {
         <DialogContent className="flex h-[94dvh] w-[98vw] max-w-[98vw] flex-col p-0">
           <DialogHeader className="border-b px-6 pb-4 pt-6">
             <DialogTitle className="flex items-center gap-2"><BusFront className="h-5 w-5" />Transport Oversight</DialogTitle>
-            <DialogDescription>Read-only organisation monitoring of outsourced school transport services.</DialogDescription>
+            <DialogDescription>Organisation transport operations, consolidated claims, provider payments and financial oversight.</DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-4 pb-6 pt-4 sm:px-6"><OrgTransportOversightPage /></div>
         </DialogContent>

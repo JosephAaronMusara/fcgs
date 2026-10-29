@@ -1,0 +1,6 @@
+const assert=require('node:assert/strict');const fs=require('fs'),ts=require('typescript'),vm=require('vm');const code=ts.transpileModule(fs.readFileSync('server/transport-hq-settlement-groups.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;const mod={exports:{}};vm.runInNewContext(code,{module:mod,exports:mod.exports,Map,Math,Number,Error});const {groupHqClaims}=mod.exports;
+const a=(id,sch,mo=10)=>({id,vehicleId:4,ownerId:8,serviceYear:2026,serviceMonth:mo,status:'submitted',grossAmount:100,deductionAmount:10,netAmount:90,paidAmount:0,...sch});
+let g=groupHqClaims([a(1,{}),a(2,{})],[]);assert.equal(g.length,1);assert.equal(g[0].schoolCount,2);assert.equal(g[0].outstanding,180);
+g=groupHqClaims([a(1,{hqClaimId:7,status:'paid',paidAmount:90}),a(2,{})],[{id:7,vehicleId:4,serviceYear:2026,serviceMonth:10,status:'paid'}]);assert.equal(g.length,2);assert.equal(g[0].month,11);assert.equal(g[0].outstanding,90);assert.equal(g[1].stage,'paid');
+g=groupHqClaims([a(1,{settlementYear:2026,settlementMonth:11})],[]);assert.equal(g[0].month,11);
+console.log('PASS automatic vehicle/cycle grouping, paid history, late school deferral and stage calculation');
