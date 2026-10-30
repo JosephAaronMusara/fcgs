@@ -1,0 +1,15 @@
+{
+  "shared/academic-calendar.ts": "8dcc7410e64b579e95916af2fbbbe48d93e7ee79ca7cea7935cfe972d3f7b7cf",
+  "shared/sms-segments.ts": "6645c1b5bdc831df82a88344bdb969b1aeea3b0d2dea55b06952648949d2f5ed",
+  "server/academic-calendar.ts": "602325eb1f96455412060ad5d44837229348846d4178a9ba9052ff5853abd417",
+  "server/fees-schedule.ts": "d0d0059f8fa5998d02729b228ebe72b23ade39af1baddefebb38d92042e61f6a",
+  "server/routes.ts": "21f3c84fb406f055849dffecf78a763720894e6812f931432dd3397f24e86159",
+  "server/storage.ts": "d177ebb21ce53a49abfa978e669b54ecabf99d775fdc931f922c003508e9f9f1",
+  "server/access-control-operations.ts": "c1b476f5da8198a4182f3a7da9b34b9cf2ee0c245434cd00b8cd89992dd5339c",
+  "server/attendance-reporting.ts": "ca937f6a4d3247a499327a88cf18b81929e556c852f6af62fb9cbf7c379b5720",
+  "server/communication.ts": "e269dbec61de284d1d99361a380ca1ae30ed8e5bf61eb063d9dc312898f82ea2",
+  "client/src/pages/org-dashboard.tsx": "339791081766924c3ce229d6d32265384cd708d4f04c8913bb4e3a766b218c58",
+  "client/src/pages/newsletters.tsx": "869b6973e635c36b73cc0a16dbe98047459c2fd63632f798d64a3a43f5ab3695",
+  "client/src/components/fee-schedule-dialog.tsx": "03353908342760fa3812d09eb642e25e52de5ab8b9ec2069d77843ff4c9100b7",
+  "script/test-academic-calendar-newsletters.cjs": "5bd6fcf732c626438d3af7e258749b2ee980a91099991a0079fd4eb1d5ecb866"
+}

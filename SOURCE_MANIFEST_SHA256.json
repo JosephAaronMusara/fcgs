@@ -1,0 +1,138 @@
+{
+  ".github/workflows/gate-bridge-signed-release.yml": {
+    "sha256": "41039bbf2de5b10965083ccb0f6c32c3b3d45dd303069193746367556cc152d6",
+    "size": 5861
+  },
+  ".gitignore": {
+    "sha256": "6b8cd2508e64d6e24effd497cc839875e5c35b6b2479cc74f0c066831229f9f4",
+    "size": 491
+  },
+  "client/src/components/fee-balance-import-dialog.tsx": {
+    "sha256": "4b099b821cd5d9da47ffbe2fa71806c97c407035de22018023db0cedf06e8b59",
+    "size": 19517
+  },
+  "client/src/components/gate-bridge-update-controls.tsx": {
+    "sha256": "00b8bddaf72bff434cbf2d8af203716b7433d980f0ecc54cbb5bdf86bc729390",
+    "size": 9905
+  },
+  "client/src/components/sage-reconciliation-workspace.tsx": {
+    "sha256": "f7be059f439ebf3117bb3d8c3d91b842c96eca12a3652e945ed66caf8cf5fa02",
+    "size": 13416
+  },
+  "client/src/pages/access-control.tsx": {
+    "sha256": "35222d9384871e90b5a76dfb6b6345ad18d907538f0f85cbe6f59446e9bb070a",
+    "size": 69211
+  },
+  "client/src/pages/school-finance.tsx": {
+    "sha256": "0b60bf49ff7fb71cb44230dea03b7eddb0a67ed926d8f1512bff96ea901dd65c",
+    "size": 42558
+  },
+  "client/src/pages/students.tsx": {
+    "sha256": "046620f17c6a20be59b23fedd37fac5ea01e29156dc337f053801d0ad6549aab",
+    "size": 128078
+  },
+  "gate-bridge-windows/assets/Start-GateBridge.ps1": {
+    "sha256": "45c81a32bd14bb05f82b9fdd245d64345af42922d42d108062a8a8cf39656235",
+    "size": 1909
+  },
+  "gate-bridge-windows/update-agent/Install-UpdateAgent.ps1": {
+    "sha256": "f1b32a0560ef55029ffe490f7ff8eebb2d68b0c5a50ad4b77089c0ad465f0ca2",
+    "size": 3193
+  },
+  "gate-bridge-windows/update-agent/Install-VerifiedBridge.ps1": {
+    "sha256": "0be261787f8e0e9fe736fb6522653db5ee170f6d38367751388bfe218fb2a588",
+    "size": 6359
+  },
+  "gate-bridge-windows/update-agent/Start-UpdateAgent.ps1": {
+    "sha256": "0a02b3eda3747299a6daf58ddf44185faf7604e0f48fe5f2d5ea18e3ab03a1a0",
+    "size": 1156
+  },
+  "gate-bridge-windows/update-agent/agent.cjs": {
+    "sha256": "06890a96bf23595abb7713856bfcfeed75d4a5cd244d87193ac05d419db9718e",
+    "size": 14428
+  },
+  "package.json": {
+    "sha256": "86265df193a9f8803acd225aac3a728a16a98658b3573802b05d9ecabcb60ed6",
+    "size": 10160
+  },
+  "script/apply-access-control-bridge-update.ts": {
+    "sha256": "fbc09c07600e33d0a7e0e17c4caba54fa94bff93bfb9ec69a054a4ce59af24d3",
+    "size": 542
+  },
+  "script/apply-access-control-sage-mapping.ts": {
+    "sha256": "4eba81d52a629fb0104a3e0b92f36253c08bb3da59c4f6a24ff9fc1202781e72",
+    "size": 577
+  },
+  "script/audit-access-control-sage.ts": {
+    "sha256": "17e619de7c69b0cb2fcc7608f0601054a079203aca374c970ca0f7e6b6b0b445",
+    "size": 2678
+  },
+  "script/build.ts": {
+    "sha256": "694194840ed3b1aef8db0303aa1b7353514b7189113e3171a6887197c56ebbc9",
+    "size": 1892
+  },
+  "script/gate-bridge-create-release-manifest.mjs": {
+    "sha256": "28b319aafe3fff19487edbe6c169cda0e4a0b9b43f88584d2f0426557752b29e",
+    "size": 1696
+  },
+  "script/gate-bridge.ts": {
+    "sha256": "9a0d6d496bdf940206f5d670b57905f324e47eb931777826ed0cd1ec8f86e8a9",
+    "size": 46180
+  },
+  "script/publish-signed-gate-bridge-release.ts": {
+    "sha256": "76209424639ccd3a2f08acccdffbb0b387f75c8185ef5cfe680cbc7209f77015",
+    "size": 7338
+  },
+  "script/test-access-control-build.cjs": {
+    "sha256": "504eb6f00b55cd19882892ecbf8b05143bc6369395fcd86848cd6a7bafa9a71b",
+    "size": 3994
+  },
+  "server/access-control-operations.ts": {
+    "sha256": "d24137652ce674613c462fe899c125087f7a2e0025cdd4b8d866336296bee71c",
+    "size": 129419
+  },
+  "server/access-control-routes.ts": {
+    "sha256": "55ce68c57952f38944574882ce1ecf9d1292acf631836db605c1161210c777a1",
+    "size": 59592
+  },
+  "server/fees-import-routes.ts": {
+    "sha256": "469bbe9720d1f3e6c1b2f6b2c24d79eb6aa77718b82b0e926bfffb7a8fe2b28f",
+    "size": 41146
+  },
+  "server/gate-bridge-auto-updates.ts": {
+    "sha256": "d6146b4e8fbfe869aa84287e29560beec74893fecd54da7151e78e011b623613",
+    "size": 15618
+  },
+  "server/rbac-config.ts": {
+    "sha256": "0062f2224095675e08c34f1f3a0922de59684d9d07cee714dd64f47c04735475",
+    "size": 48070
+  },
+  "server/routes.ts": {
+    "sha256": "109f1930a8def0dc4b1ccb0317a425f66b0ec93e0746378f0ae495b16ccdc4f2",
+    "size": 942994
+  },
+  "server/sage-matching.ts": {
+    "sha256": "3b88d31c9f8dd54648bf05a6db1ea8905f45f207369eef105499424e9e20e83e",
+    "size": 4240
+  },
+  "server/storage.ts": {
+    "sha256": "07bcc214175809809826d97cb168bc7fccf0ca8cea847de8c23f659a165ec81e",
+    "size": 176496
+  },
+  "shared/gate-bridge-capabilities.ts": {
+    "sha256": "1fa4f54a62061311dee4d0eb8e5cacfaaaacd555d1eee634a1db7650a41b531d",
+    "size": 508
+  },
+  "shared/schema.ts": {
+    "sha256": "e5af1f1403d8761ee8a29a014c054dfc7cc3d9c2e3f0f066d3e811c713d434be",
+    "size": 279399
+  },
+  "sql/2026_10_15_access_control_bridge_update.sql": {
+    "sha256": "00f2fc50cea218429227559b12f9bdb0c2e638626868a1fb42dfc9e9268d592b",
+    "size": 3147
+  },
+  "sql/2026_10_15_access_control_sage_mapping.sql": {
+    "sha256": "320400a28819345c8bed9f5d8be6f03d4dbc61444ccde0dcb8bc31c0943ba54c",
+    "size": 1152
+  }
+}
